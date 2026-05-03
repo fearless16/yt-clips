@@ -1,0 +1,147 @@
+"""
+utils/drive_auth.py — Consolidated Google Drive Authentication.
+
+Single source of truth for all Drive API authentication across the project.
+Used by: sync.py, bridge.py, push_code.py
+"""
+import os
+import httplib2
+import google_auth_httplib2
+from pathlib import Path
+from typing import Optional
+
+from utils.config import load_config
+from utils.logger import get_logger
+
+cfg = load_config()
+log = get_logger("drive_auth", cfg["logging"]["log_file"], cfg["logging"]["level"])
+
+
+# Sentinel value for Colab filesystem sync mode
+FILESYSTEM_MODE = "FILESYSTEM_MODE"
+
+
+def get_drive_service():
+    """
+    Authenticate and return a Google Drive API service object.
+
+    Auth cascade (tries in order):
+      0. Google Colab filesystem mount (fastest, most reliable)
+      1. Application Default Credentials (gcloud auth)
+      2. Saved OAuth token.json
+      3. Returns None if all fail
+
+    Returns:
+      - A Drive API service object, or
+      - "FILESYSTEM_MODE" string if Colab mount is detected, or
+      - None if authentication fails
+    """
+    try:
+        import google.auth
+        from googleapiclient.discovery import build
+    except ImportError:
+        log.error(
+            "Google API libraries not installed. Run:\n"
+            "  pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib"
+        )
+        return None
+
+    # ─── Method 0: Google Colab Filesystem Mount ─────────────────────────────
+    if Path("/content").exists():
+        paths_to_check = [
+            Path("/content/drive/MyDrive/yt-clips"),
+            Path("/content/drive/My Drive/yt-clips"),
+        ]
+        for colab_drive in paths_to_check:
+            if colab_drive.exists():
+                log.info(f"🚀 Colab detected ({colab_drive.name}). Prioritizing Filesystem Sync.")
+                os.environ["COLAB_SYNC_PATH"] = str(colab_drive)
+                return FILESYSTEM_MODE
+
+    credentials = None
+
+    # ─── Method 1: Application Default Credentials (gcloud auth) ─────────────
+    try:
+        import google.auth.exceptions
+        from google.auth.transport.requests import Request
+        credentials, project = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/drive.file"]
+        )
+        # Probe test: verify credentials actually work
+        if hasattr(credentials, "refresh"):
+            credentials.refresh(Request())
+        log.info("✅ Using gcloud Application Default Credentials")
+    except Exception as e:
+        log.debug(f"ADC validation failed: {e}")
+        credentials = None
+
+    # ─── Method 2: Saved OAuth token.json ────────────────────────────────────
+    if not credentials:
+        token_path = Path("token.json")
+        if token_path.exists():
+            try:
+                from google.oauth2.credentials import Credentials
+                from google.auth.transport.requests import Request
+                credentials = Credentials.from_authorized_user_file(
+                    str(token_path),
+                    scopes=["https://www.googleapis.com/auth/drive.file"],
+                )
+                if credentials and credentials.expired and credentials.refresh_token:
+                    credentials.refresh(Request())
+                log.info("✅ Using saved OAuth token")
+            except Exception as e:
+                log.warning("Token refresh failed: %s", e)
+                credentials = None
+
+    if not credentials:
+        log.error(
+            "❌ No Google credentials found.\n"
+            "   Option 1: Run 'gcloud auth application-default login'\n"
+            "   Option 2: Place a valid 'token.json' in project root\n"
+            "   Option 3: If on Colab, ensure you mounted Drive."
+        )
+        return None
+
+    # Build service with robust httplib2 transport
+    base_http = httplib2.Http(timeout=60)
+    auth_http = google_auth_httplib2.AuthorizedHttp(credentials, http=base_http)
+    return build("drive", "v3", http=auth_http)
+
+
+def find_or_create_folder(
+    service, name: str, parent_id: Optional[str] = None
+) -> str:
+    """Find a folder by name (under optional parent), or create it. Handles duplicates."""
+    query = (
+        f"name = '{name}' and "
+        f"mimeType = 'application/vnd.google-apps.folder' and "
+        f"trashed = false"
+    )
+    if parent_id:
+        query += f" and '{parent_id}' in parents"
+
+    results = service.files().list(
+        q=query, spaces="drive", fields="files(id, name, createdTime)"
+    ).execute()
+    items = results.get("files", [])
+
+    if items:
+        if len(items) > 1:
+            items.sort(key=lambda x: x.get("createdTime", ""), reverse=True)
+            log.warning(
+                f"⚠ Multiple folders named '{name}' found. Using newest (ID: {items[0]['id']})"
+            )
+        return items[0]["id"]
+
+    # Create folder
+    metadata = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.folder",
+    }
+    if parent_id:
+        metadata["parents"] = [parent_id]
+
+    folder = service.files().create(body=metadata, fields="id").execute()
+    folder_id = folder.get("id")
+    log.info("📁 Created Drive folder: %s (id=%s)", name, folder_id)
+    return folder_id

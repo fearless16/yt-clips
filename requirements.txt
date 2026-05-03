@@ -1,0 +1,22 @@
+# yt-clips — AI-Powered YouTube Shorts Automation
+# Core dependencies only — keep it lean
+
+# ── Config ────────────────────────────────────────────────────────────────────
+PyYAML>=6.0
+
+# ── Downloading ───────────────────────────────────────────────────────────────
+yt-dlp>=2024.1.0
+
+# ── Transcription ─────────────────────────────────────────────────────────────
+faster-whisper>=1.0.0
+
+# ── Google Drive Sync ─────────────────────────────────────────────────────────
+google-api-python-client>=2.100.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.1.0
+
+# ── HTTP (for tunnel bridge) ──────────────────────────────────────────────────
+requests
+
+# ── Optional: OpenCV for advanced reframing (Phase 2+ roadmap) ────────────────
+# opencv-python-headless>=4.9.0

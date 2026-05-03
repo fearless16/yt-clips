@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+logs/
+temp/
+transcripts/
+highlights/
+*.json
+*.yaml
+*.png
+*.sh
+.DS_Store
