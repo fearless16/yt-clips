@@ -12,24 +12,21 @@ paths:
 
 # ─── Download ─────────────────────────────────────────────────────────────────
 download:
-  # Download at HIGHEST available quality (up to 4K)
-  # Removed ext=mp4 restriction to allow VP9/AV1 for better quality
-  format: "bestvideo[height<=2160]+bestaudio/bestvideo+bestaudio/best"
-  output_filename: "video.mp4"          # rename after download
-
+  # Download at ABSOLUTE HIGHEST available quality
+  format: "bestvideo+bestaudio/best"
+  output_filename: "video.mp4"
 # ─── Transcription ────────────────────────────────────────────────────────────
 transcription:
   model: "base"                         # tiny | base | small | medium | large
   language: "en"                        # null = auto-detect
-  device: "cpu"                         # cpu | cuda
-  compute_type: "int8"                  # int8 | float16 | float32
-
+  device: "cuda"            # Prioritizes GPU, auto-falls back to CPU if missing
+  compute_type: "float16"    # Optimized for GPU; auto-switches to int8 on CPU fallback
 # ─── Highlight Detection ──────────────────────────────────────────────────────
 highlight:
   # Audio energy spike detection
-  audio_energy_threshold: 0.75          # 0–1 relative to score range; higher = louder spikes only
+  audio_energy_threshold: 0.3          # 0–1 relative to score range; lower = more clips
   # Minimum/maximum clip duration (seconds)
-  min_duration: 15
+  min_duration: 10
   max_duration: 29                      # User requested less than 30s
   # Merge nearby highlights that are closer than this (seconds)
   merge_gap: 8

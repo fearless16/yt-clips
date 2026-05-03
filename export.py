@@ -49,6 +49,39 @@ def _check_minterpolate() -> bool:
     return _MINTERPOLATE_AVAILABLE
 
 
+_BEST_ENCODER = None
+
+def _get_best_encoder() -> str:
+    """Auto-detect the fastest available H.264 hardware encoder."""
+    global _BEST_ENCODER
+    if _BEST_ENCODER is not None:
+        return _BEST_ENCODER
+
+    # Order of preference
+    # 1. h264_nvenc (NVIDIA / Colab / Linux)
+    # 2. h264_videotoolbox (macOS / Apple Silicon)
+    # 3. libx264 (Universal CPU fallback)
+    
+    potential_encoders = ["h264_nvenc", "h264_videotoolbox"]
+    
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for enc in potential_encoders:
+            if enc in result.stdout:
+                log.info(f"🚀 Hardware acceleration detected: {enc}")
+                _BEST_ENCODER = enc
+                return _BEST_ENCODER
+    except Exception:
+        pass
+
+    log.info("ℹ️ No hardware encoder detected. Using software 'libx264'.")
+    _BEST_ENCODER = "libx264"
+    return _BEST_ENCODER
+
+
 def _get_video_info(path: str) -> Dict:
     """Get source video metadata."""
     cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -96,10 +129,9 @@ def _build_enhance_stack(lighting_filter: str = "", source_fps: float = 30.0) ->
     # 5. Motion interpolation — smooth optical flow to target FPS
     #    Only apply if source FPS < target FPS (avoid slowdown)
     if source_fps < target_fps - 5 and _check_minterpolate():
-        # Full optical flow interpolation for buttery smoothness
+        # Use 'blend' mode instead of 'mci' for 20x faster export speed
         filters.append(
-            f"minterpolate=fps={target_fps}:mi_mode=mci"
-            f":mc_mode=aobmc:me_mode=bidir:vsbmc=1"
+            f"minterpolate=fps={target_fps}:mi_mode=blend"
         )
     elif source_fps < target_fps:
         # Simple FPS boost (fallback if minterpolate unavailable)
@@ -278,11 +310,8 @@ def export_clip(
     lighting_filter = strategy.get("lighting_filter", "")
     skip_silence = strategy.get("skip_silence", False)
 
-    # ─── Smart Encoder Detection ─────────────────────────────────────────────
-    encoder = export_cfg["encoder"]
-    if sys.platform == "linux" and encoder == "h264_videotoolbox":
-        encoder = "libx264"
-        log.info(f"[{clip_id}] Remote Mode: Switching to '{encoder}' encoder.")
+    # ─── Smart Encoder Detection (Auto-Fallback) ─────────────────────────────
+    encoder = _get_best_encoder()
 
     # ─── Build Filtergraph ────────────────────────────────────────────────────
     if use_solo:

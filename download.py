@@ -59,10 +59,9 @@ def download(url: str, output_path: Optional[str] = None) -> Path:
         # Retry and resilience
         "--retries", "5",
         "--fragment-retries", "5",
-        # Bypass restrictions
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "--extractor-args", "youtube:player-client=ios,android,web,tv",
+        # Keep yt-dlp defaults so it can auto-pick the best working YouTube client.
         "--no-check-certificate",
+        "--verbose",
         url,
     ]
 

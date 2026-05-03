@@ -22,22 +22,31 @@ def transcribe(video_path: str, output_path: str):
     t_cfg = cfg["transcription"]
     video = str(Path(video_path))
     
-    log.info(f"Loading Whisper model: {t_cfg['model']} (device={t_cfg['device']}, compute={t_cfg['compute_type']})")
+    # ─── AUTO-DEVICE SELECTION (Priority: CUDA > CPU) ─────────────────────────
+    target_device = t_cfg.get("device", "cpu")
+    compute_type = t_cfg.get("compute_type", "int8")
 
-    # ─── ROBUST MODEL INITIALIZATION ──────────────────────────────────────────
-    try:
-        model = WhisperModel(
-            t_cfg["model"],
-            device=t_cfg["device"],
-            compute_type=t_cfg["compute_type"],
-        )
-    except Exception as e:
-        log.warning(f"⚠️  {t_cfg['device'].upper()} Initialization Failed ({e}). Falling back to CPU...")
-        model = WhisperModel(
-            t_cfg["model"],
-            device="cpu",
-            compute_type="int8",
-        )
+    # If "cuda" is requested or we're on a remote worker, try CUDA first
+    devices_to_try = []
+    if target_device == "cuda" or (sys.platform == "linux" and target_device != "cpu"):
+        devices_to_try = [("cuda", "float16"), ("cpu", "int8")]
+    else:
+        devices_to_try = [(target_device, compute_type)]
+
+    model = None
+    for device, comp in devices_to_try:
+        try:
+            log.info(f"Attempting to load Whisper model: {t_cfg['model']} (device={device}, compute={comp})")
+            model = WhisperModel(t_cfg["model"], device=device, compute_type=comp)
+            log.info(f"✅ Success! Using {device.upper()} for transcription.")
+            break
+        except Exception as e:
+            log.warning(f"⚠️  {device.upper()} loading failed: {e}")
+            continue
+
+    if not model:
+        log.error("❌ Failed to initialize Whisper on any device. Falling back to base CPU/int8...")
+        model = WhisperModel(t_cfg["model"], device="cpu", compute_type="int8")
 
     language = t_cfg.get("language") or None
     log.info(f"Starting Transcription: {video} (language={language or 'auto'})")
