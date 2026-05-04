@@ -79,6 +79,7 @@ def _upload_file(service, local_path: Path, parent_folder_id: str) -> str:
 def sync_to_drive(
     folder_path: Optional[str] = None,
     sync_all: bool = False,
+    dry_run: bool = False,
 ) -> List[str]:
     """
     Sync exported Shorts to Google Drive.
@@ -86,10 +87,10 @@ def sync_to_drive(
     Args:
         folder_path: Specific folder to sync (e.g., 'shorts/2026-05-03_093000')
         sync_all:    If True, sync all folders under shorts/
-
-    Returns:
-        List of uploaded file IDs.
+        dry_run:     If True, only log what would be uploaded
     """
+    if dry_run:
+        log.info("🧪 DRY RUN: No files will be uploaded.")
     shorts_dir = Path("shorts")
 
     if folder_path:
@@ -177,6 +178,10 @@ def sync_to_drive(
 
         for file_path in export_files:
             try:
+                if dry_run:
+                    log.info("🧪 [Dry Run] Would upload: %s", file_path.name)
+                    uploaded_ids.append("DRY_RUN_ID")
+                    continue
                 file_id = _upload_file(service, file_path, date_folder_id)
                 uploaded_ids.append(file_id)
             except Exception as e:
@@ -210,9 +215,14 @@ Examples:
         default=None,
         help="Specific folder to sync (default: sync all under shorts/)",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Perform a dry run without uploading anything",
+    )
     args = parser.parse_args()
 
-    sync_to_drive(folder_path=args.folder, sync_all=args.folder is None)
+    sync_to_drive(folder_path=args.folder, sync_all=args.folder is None, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

@@ -59,6 +59,7 @@ layout:
 export:
   width: 1080
   height: 1920
+  global_speed_factor: 1.25             # User requested all videos at 1.25x speed
   fps: 60                               # Target FPS (motion interpolation fills gaps)
   video_bitrate: "25M"                  # Max bitrate (used with CRF as ceiling)
   audio_bitrate: "320k"                 # Studio-grade audio
@@ -77,11 +78,11 @@ export:
 
 # ─── YouTube Upload ──────────────────────────────────────────────────────────
 youtube:
-  privacy_status: "private"             # private | unlisted | public
+  privacy_status: "private"              # private | unlisted | public
   category_id: "17"                     # 17 = Sports
   self_declared_made_for_kids: false
-  upload_enabled: false
-  schedule_interval_hours: 2            # Automate posting every 2 hours
+  upload_enabled: true                  # 🚀 GO LIVE!
+  schedule_interval_hours: 2            # Automate posting every 2 hours (Algorithmic Sweet Spot)
   niche: "Cricket"                      # Used for SEO trend analysis
 
 # ─── Quality Intelligence ─────────────────────────────────────────────────────
@@ -103,6 +104,31 @@ quality:
   solo_preference_weight: 1.5
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
+# ── AI SEO & Automation ────────────────────────────────────────────────────────
+ai:
+  provider: "gemini"                # gemini | openai | ollama
+  api_key: ""                       # Reading AI_API_KEY from .env
+  model: "gemini-3.1-flash-lite-preview" 
+  image_model: "gemini-3.1-flash-image-preview" # Nano Banana 2 (FREE Tier)
+  system_prompt: |
+    You are a YouTube SEO expert specializing in Cricket Shorts.
+    Generate high-CTR titles, engaging descriptions, and trending tags.
+    Focus on Indian cricket audience. Use a mix of English and Hinglish.
+
+# ── Thumbnail Automation ──────────────────────────────────────────────────────
+thumbnail:
+  enabled: true
+  use_ai: true                      # Set to true to use Nano Banana 2
+  template_path: "channel_logo.png"  # Use logo as a watermark/element
+  font_path: "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" # Colab friendly
+  font_size: 120
+  text_color: "#FFFFFF"
+  stroke_color: "#000000"
+  stroke_width: 8
+  # Auto A/B testing: how many variants to generate
+  variants_count: 3
+
+# ── Logging ──────────────────────────────────────────────────────────────────
 logging:
   level: "INFO"                         # DEBUG | INFO | WARNING | ERROR
   log_file: "logs/pipeline.log"

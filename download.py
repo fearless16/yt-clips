@@ -41,6 +41,23 @@ def download(url: str, output_path: Optional[str] = None) -> Path:
     dest = Path(output_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
+    # ─── Capture Video Metadata ──────────────────────────────────────────────
+    try:
+        title_cmd = ["yt-dlp", "--get-title", "--no-warnings", url]
+        title_res = subprocess.run(title_cmd, capture_output=True, text=True, timeout=10)
+        video_title = title_res.stdout.strip() or "Cricket Highlights"
+        log.info(f"📹 Video Title: {video_title}")
+        
+        # Save title for later phases
+        meta_file = Path(paths_cfg["input"]) / "video_metadata.json"
+        meta_file.parent.mkdir(parents=True, exist_ok=True)
+        import json
+        with open(meta_file, "w", encoding="utf-8") as f:
+            json.dump({"title": video_title, "url": url}, f, indent=4)
+    except Exception as e:
+        log.warning(f"Failed to capture video title: {e}")
+        video_title = "Cricket Highlights"
+
     # yt-dlp writes to a temp name then renames; use a template so we know
     # the final filename regardless of container.
     stem = dest.stem
@@ -59,11 +76,22 @@ def download(url: str, output_path: Optional[str] = None) -> Path:
         # Retry and resilience
         "--retries", "5",
         "--fragment-retries", "5",
-        # Keep yt-dlp defaults so it can auto-pick the best working YouTube client.
+        # Bypass restrictions
+        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "--extractor-args", "youtube:player-client=ios,android,web,tv",
         "--no-check-certificate",
         "--verbose",
-        url,
     ]
+
+    # ─── Bypassing Bot Detection (Cookies) ──────────────────────────────────
+    cookies_path = Path("cookies.txt")
+    if cookies_path.exists():
+        log.info("🍪 Using cookies.txt for authentication")
+        cmd.extend(["--cookies", str(cookies_path)])
+    else:
+        log.warning("⚠️ No cookies.txt found. Bot detection might block this on Colab.")
+
+    cmd.append(url)
 
     log.info("Starting download: %s", url)
     log.info("Target path: %s", dest)

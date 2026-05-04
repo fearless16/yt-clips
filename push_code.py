@@ -72,6 +72,7 @@ def push():
             + list(root.glob("*.yaml"))
             + list(root.glob("*.sh"))
             + list(root.glob("*.txt"))           # requirements.txt, colab_url.txt
+            + list(root.glob(".env"))            # API Keys
             + list(root.glob("utils/*.py"))
             + list(root.glob("utils/*.yaml"))     # Any config in utils/
             + list(root.glob("transcripts/*.json"))

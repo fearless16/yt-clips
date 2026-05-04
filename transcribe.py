@@ -3,6 +3,7 @@ transcribe.py — Phase 2: Speech-to-Text with Progress Heartbeats.
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Optional
 

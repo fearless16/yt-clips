@@ -35,27 +35,21 @@ log = get_logger("analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"]
 def _sample_brightness_raw(video_path: str, timestamp: float) -> float:
     """
     Extract a single frame as raw grayscale pixels and compute mean brightness.
-    Most reliable method — no parsing FFmpeg text output.
+    Using pipes to avoid disk I/O for high-frequency sampling.
     """
-    temp_dir = Path(cfg["paths"]["temp"])
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    raw_path = str(temp_dir / "frame_sample.gray")
-
     cmd = [
         "ffmpeg", "-y", "-ss", str(timestamp),
         "-i", video_path,
         "-frames:v", "1",
         "-vf", "scale=160:90,format=gray",
         "-f", "rawvideo", "-pix_fmt", "gray",
-        raw_path,
+        "pipe:1",
     ]
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        raw = Path(raw_path)
-        if raw.exists() and raw.stat().st_size > 0:
-            data = raw.read_bytes()
+        result = subprocess.run(cmd, capture_output=True, timeout=10)
+        if result.returncode == 0 and result.stdout:
+            data = result.stdout
             avg = sum(data) / len(data)
-            raw.unlink(missing_ok=True)
             return avg
     except Exception as e:
         log.debug("Raw brightness sampling failed: %s", e)
@@ -103,7 +97,7 @@ def detect_black_frames(
     step = duration / (sample_count + 1)
     samples = []
 
-    for i in range(1, sample_count + 1):
+    for i in range(sample_count):
         t = start + step * i
         brightness = _sample_brightness_raw(video_path, t)
         is_black = brightness < black_threshold
@@ -367,20 +361,14 @@ def detect_layout(
 def _analyze_frame_layout(video_path: str, timestamp: float) -> Dict:
     """
     Analyze a single frame to detect multi-panel layout.
-
-    Uses horizontal and vertical strip brightness analysis to find
-    panel boundaries.
+    Uses pipes for fast raw processing.
     """
-    temp_dir = Path(cfg["paths"]["temp"])
-    temp_dir.mkdir(parents=True, exist_ok=True)
-
     # Get source dimensions
     info = _get_video_dimensions(video_path)
     sw, sh = info["width"], info["height"]
 
     # Extract a low-res frame for analysis (fast)
     analysis_w, analysis_h = 320, 180
-    raw_path = str(temp_dir / "layout_frame.gray")
 
     cmd = [
         "ffmpeg", "-y", "-ss", str(timestamp),
@@ -388,17 +376,15 @@ def _analyze_frame_layout(video_path: str, timestamp: float) -> Dict:
         "-frames:v", "1",
         "-vf", f"scale={analysis_w}:{analysis_h},format=gray",
         "-f", "rawvideo", "-pix_fmt", "gray",
-        raw_path,
+        "pipe:1",
     ]
 
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-        raw = Path(raw_path)
-        if not raw.exists() or raw.stat().st_size == 0:
+        result = subprocess.run(cmd, capture_output=True, timeout=10)
+        if result.returncode != 0 or not result.stdout:
             return _default_layout()
 
-        data = raw.read_bytes()
-        raw.unlink(missing_ok=True)
+        data = result.stdout
 
         # Analyze vertical strips (for horizontal split detection)
         left_half = []

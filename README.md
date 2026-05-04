@@ -311,6 +311,39 @@ The bridge system supports three modes:
 
 ---
 
+## 💎 Pro-Grade Features
+
+The pipeline includes advanced features for high-performance, studio-quality automated production:
+
+### 🧠 Intelligent Frame Analysis (`frame_analyzer.py`)
+- **Zero-I/O Sampling**: Uses FFmpeg pipes for high-frequency brightness and layout analysis without disk overhead.
+- **Auto-Layout Detection**: Detects split-screen or multi-panel layouts and intelligently decides between `SOLO` and `VERTICAL STACK` modes.
+- **Lighting Correction**: Detects backlit or underexposed scenes and automatically applies analysis-driven gamma and exposure fixes.
+- **Leading Black Trim**: Automatically detects and trims leading black frames (up to 1s) for professional, "instant action" starts.
+
+### 🎬 Immersive Cinema-Grade Export (`export.py`)
+- **Global 1.25x Speedup**: Integrated global speed factor for high-retention pacing across all clips.
+- **A/V Sync Lock**: Robust timestamp resampling (`aresample=async=1`) ensures audio and video stay perfectly synced at high speeds.
+- **Poor Lighting Enhancement**: Advanced filter chain with **Gamma Boosting (1.2x)**, **Saturation Lift (1.2x)**, and **Deband** filters for studio-quality output from 720p stream sources.
+- **Butter-Smooth Motion**: Auto-detects source FPS and applies motion-blending interpolation for high-quality 60fps output.
+
+### 📈 Small Channel Growth Engine (`seo.py`)
+- **Batch SEO Generation**: Processes all clips in a single AI call to optimize tokens, maintain consistency, and reduce API latency.
+- **Scorecard Context**: Automatically extracts match info from video titles to inject live match context (scorecards, teams) into metadata.
+- **Small YouTuber Strategy**: Specifically tuned prompts for channels with <500 subscribers, focusing on **Long-Tail Search** and **Curiosity-Gap hooks** instead of broad, saturated keywords.
+
+### 🖼️ Aesthetic Thumbnail Generation (`thumbnail.py`)
+- **Free-Tier Optimization**: Defaulting to **Nano Banana 2 (Gemini 3.1 Flash Image)** for high-volume, free-tier AI thumbnail generation.
+- **Contrast Optimization**: Adds semi-transparent gradient overlays and blurred drop shadows for premium, high-impact visuals.
+- **A/B Variants**: Generates multiple variants for manual or automated A/B testing.
+
+### 🚀 Production Stability
+- **Smart Sync**: Supports `--dry-run` to verify uploads before committing to Drive.
+- **Robust Config**: Type-safe nested configuration with dot-notation access.
+- **Safe Pre-flight**: Validates all source files and metadata before starting long-running API operations.
+
+---
+
 ## Troubleshooting
 
 **`h264_videotoolbox` fails** → The pipeline automatically falls back to `libx264`.  

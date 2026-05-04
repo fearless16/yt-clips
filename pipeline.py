@@ -104,15 +104,20 @@ def run(
     exported = []
     if skip_export:
         log.info("Skipping export (--skip-export). Finding existing clips...")
-        # Try to find the most recent date-stamped folder in shorts/
         shorts_base = Path(cfg["paths"]["shorts"])
         if shorts_base.exists():
+            # Get all subdirectories and sort by name (timestamp format YYYY-MM-DD_HHMMSS)
             folders = sorted([d for d in shorts_base.iterdir() if d.is_dir()], reverse=True)
             if folders:
-                exported = list(folders[0].glob("*.mp4"))
-                log.info("Found %d clips in %s", len(exported), folders[0])
-            else:
-                log.warning("No folders found in %s", shorts_base)
+                exported = sorted(list(folders[0].glob("*.mp4")))
+                if exported:
+                    log.info("🚀 Found %d clips in most recent export: %s", len(exported), folders[0])
+            
+            # Fallback: Search all .mp4 files in shorts_base recursively
+            if not exported:
+                exported = sorted(list(shorts_base.rglob("*.mp4")))
+                if exported:
+                    log.info("Found %d clips recursively in %s", len(exported), shorts_base)
         else:
             log.warning("Shorts base directory %s not found.", shorts_base)
     else:
@@ -120,6 +125,42 @@ def run(
         from export import export_all
         exported = export_all(highlights_path, video_path)
         log.info("Phase 4 complete in %.1f s — %d clips exported", time.perf_counter() - t0, len(exported))
+
+    # ── Phase 4.5: SEO & Thumbnails for existing clips (if skipped export) ───
+    if skip_export and exported:
+        _banner("PHASE 4.5 — SEO & THUMBNAILS (RE-GEN)")
+        from seo import generate_seo
+        from thumbnail import ThumbnailGenerator
+        import json
+        import yaml
+        
+        # Load highlights to get context
+        highlights = {}
+        if Path(highlights_path).exists():
+            with open(highlights_path, "r") as f:
+                highlights = yaml.safe_load(f) or {}
+
+        thumb_gen = ThumbnailGenerator()
+        for clip_path in exported:
+            clip_id = clip_path.stem
+            # Metadata could already exist, but we regenerate it if needed
+            meta_path = clip_path.with_name(f"{clip_id}_metadata.json")
+            thumb_path = clip_path.with_name(f"{clip_id}_thumb.jpg")
+
+            if not meta_path.exists():
+                info = highlights.get(clip_id, {})
+                text = info.get("text", "Cricket Highlights")
+                log.info(f"Generating SEO for: {clip_id}")
+                seo_data = generate_seo(text, clip_id)
+                with open(meta_path, 'w') as f:
+                    json.dump(seo_data, f, indent=4)
+            
+            if not thumb_path.exists():
+                log.info(f"Generating Thumbnail for: {clip_id}")
+                thumb_gen.generate_for_clip(str(clip_path), str(meta_path), str(thumb_path))
+            
+            # Heartbeat
+            log.debug(f"💓 Pipeline Heartbeat: Phase 4.5 processing {clip_id}")
 
     # ── Phase 5: Sync to Google Drive (optional) ──────────────────────────────
     if auto_sync and exported and not skip_sync:
@@ -224,7 +265,7 @@ Examples:
         skip_sync=args.skip_sync,
         auto_sync=args.sync,
         auto_upload=args.upload,
-        auto_schedule=args.schedule,
+        auto_schedule=args.schedule or args.upload, # Always schedule if uploading
     )
 
 

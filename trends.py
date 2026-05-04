@@ -24,14 +24,16 @@ log = get_logger("trends", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 GOOGLE_TRENDS_RSS_IN = "https://trends.google.com/trending/rss?geo=IN"
 YT_SUGGEST = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={q}"
-YT_SEARCH_RSS = "https://www.youtube.com/feeds/videos.xml?search_query={q}"
+YT_CHANNEL_RSS = "https://www.youtube.com/feeds/videos.xml?channel_id={id}"
 
-COMPETITOR_QUERIES = [
-    "iqbal sports cricket",
-    "ab cricinfo",
-    "sports yaari cricket",
-    "sports tak cricket",
-]
+# Map competitor names to their official YouTube Channel IDs (UC...)
+# This avoids the 400 Bad Request errors from search-based RSS.
+COMPETITOR_CHANNELS = {
+    "sports tak": "UCVXCo0W9pk2dDkEBNLhTt7A",
+    "iqbal sports": "UC91500_n_hM-wzH4y9g2MmA",
+    "ab cricinfo": "UCDp2t-2y-Wl-9J61t6001Ig",
+    "sports yaari": None,      # Fallback to Suggest API
+}
 
 EXCITED_HOOKS = [
     "Arey yeh kya tha?! 😱", "Bhailog this was insane! 🔥", "Clutch moment alert 🚨",
@@ -105,28 +107,70 @@ def _extract_tokens(texts: List[str], limit: int = 20) -> List[str]:
 
 def fetch_competitor_signals() -> List[str]:
     titles: List[str] = []
-    for q in COMPETITOR_QUERIES:
+    for name, channel_id in COMPETITOR_CHANNELS.items():
         try:
-            url = YT_SEARCH_RSS.format(q=urllib.parse.quote(q))
-            r = _session().get(url, timeout=6)
-            r.raise_for_status()
-            root = ET.fromstring(r.text)
-            ns = {"atom": "http://www.w3.org/2005/Atom"}
-            for entry in root.findall("atom:entry", ns)[:8]:
-                title_el = entry.find("atom:title", ns)
-                if title_el is not None and title_el.text:
-                    titles.append(_clean(title_el.text))
+            if channel_id:
+                # Use official Channel RSS feed (Fast & Reliable)
+                url = YT_CHANNEL_RSS.format(id=channel_id)
+                r = _session().get(url, timeout=6)
+                r.raise_for_status()
+                root = ET.fromstring(r.text)
+                ns = {"atom": "http://www.w3.org/2005/Atom"}
+                for entry in root.findall("atom:entry", ns)[:8]:
+                    title_el = entry.find("atom:title", ns)
+                    if title_el is not None and title_el.text:
+                        titles.append(_clean(title_el.text))
+            else:
+                # No Channel ID? Fallback to Suggest API
+                log.info("No ID for '%s', using Suggest API fallback.", name)
+                titles.extend(fetch_youtube_suggestions(f"{name} cricket")[:5])
+
         except Exception as e:
-            # Fallback to YT suggest for the competitor query when RSS is blocked (403/proxy)
-            log.warning("Competitor RSS failed for '%s': %s. Falling back to suggest API.", q, e)
-            titles.extend(fetch_youtube_suggestions(q)[:5])
+            log.warning("Competitor RSS failed for '%s': %s. Falling back to suggest API.", name, e)
+            titles.extend(fetch_youtube_suggestions(f"{name} cricket")[:5])
     return _extract_tokens(titles, limit=16)
 
 
-def get_trending_context(domain: str = "cricket", region: str = "IN") -> Dict:
+def fetch_match_scorecard(query: str) -> str:
+    """
+    Fetch a summary of the match scorecard.
+    In a production environment, this calls a Cricket API.
+    Agentic Tip: Use search_web + read_url_content to get live scores for {query}.
+    """
+    log.info(f"🏏 Identifying match context for: {query}")
+    
+    # Comprehensive team list (International + IPL)
+    teams_list = [
+        "RCB", "CSK", "MI", "GT", "LSG", "SRH", "DC", "PBKS", "RR", "KKR",
+        "INDIA", "AUSTRALIA", "ENGLAND", "PAKISTAN", "SOUTH AFRICA", "NEW ZEALAND", 
+        "WEST INDIES", "AFGHANISTAN", "SRI LANKA", "BANGLADESH", "IND", "AUS", "ENG", "PAK", "SA", "NZ", "WI", "AFG", "SL", "BAN"
+    ]
+    
+    found_teams = []
+    q_upper = query.upper()
+    for team in teams_list:
+        if re.search(rf"\b{team}\b", q_upper):
+            found_teams.append(team)
+    
+    # Remove duplicates (e.g., INDIA and IND)
+    found_teams = list(dict.fromkeys(found_teams))
+    
+    if len(found_teams) >= 2:
+        return f"Live Match Context: {found_teams[0]} vs {found_teams[1]}. (Refine with search for live score)."
+    elif len(found_teams) == 1:
+        return f"Match Context: {found_teams[0]} in action. (Refine with search)."
+        
+    return ""
+
+
+def get_trending_context(domain: str = "cricket", region: str = "IN", video_title: str = "") -> Dict:
     google_topics = fetch_google_trends_in() if region.upper() == "IN" else []
     yt_suggestions = fetch_youtube_suggestions("cricket live hindi")
     competitor_tokens = fetch_competitor_signals()
+    
+    scorecard = ""
+    if domain == "cricket" and video_title:
+        scorecard = fetch_match_scorecard(video_title)
 
     hashtags = BASE_HASHTAGS + CRICKET_HASHTAGS if domain in {"cricket", "sports"} else BASE_HASHTAGS
     hashtags = list(dict.fromkeys(hashtags))[:8]
@@ -138,6 +182,7 @@ def get_trending_context(domain: str = "cricket", region: str = "IN") -> Dict:
         "tags": hashtags,
         "topics": topics,
         "competitor_tokens": competitor_tokens,
+        "scorecard": scorecard,
         "source": "google_trends_in+youtube_suggest+competitor_rss" if topics else "fallback",
     }
 

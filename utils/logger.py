@@ -31,7 +31,10 @@ class PremiumFormatter(logging.Formatter):
         
         # Success message special handling
         msg = record.getMessage()
-        if "complete" in msg.lower() or "success" in msg.lower() or "done" in msg.lower():
+        is_success = any(keyword in msg.lower() for keyword in ["complete", "success", "done", "uploaded", "saved"])
+        
+        if is_success:
+            symbol = f"{GREEN}✅{RESET}"
             msg = f"{GREEN}{BOLD}{msg}{RESET}"
         
         time_str = self.formatTime(record, "%H:%M:%S")

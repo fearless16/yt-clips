@@ -101,6 +101,16 @@ def upload_video(
     Returns:
         YouTube video ID on success, None on failure
     """
+    # ─── Pre-flight Checks ───────────────────────────────────────────────────
+    v_path = Path(video_path)
+    m_path = Path(metadata_path)
+    if not v_path.exists():
+        log.error(f"Video file not found: {video_path}")
+        return None
+    if not m_path.exists():
+        log.error(f"Metadata file not found: {metadata_path}")
+        return None
+
     youtube = get_authenticated_service()
     if not youtube:
         return None
@@ -134,10 +144,14 @@ def upload_video(
     if publish_at:
         body["status"]["publishAt"] = publish_at
 
+    # Check for thumbnail
+    thumb_path = Path(video_path).with_name(f"{Path(video_path).stem}_thumb.jpg")
+    media_body = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+
     insert_request = youtube.videos().insert(
         part=",".join(body.keys()),
         body=body,
-        media_body=MediaFileUpload(video_path, chunksize=-1, resumable=True),
+        media_body=media_body,
     )
 
     response = None
@@ -148,6 +162,18 @@ def upload_video(
 
     video_id = response["id"]
     log.info(f"✅ Upload successful! Video ID: {video_id}")
+
+    # ── Upload Thumbnail ──────────────────────────────────────────────────────
+    if thumb_path.exists():
+        try:
+            log.info(f"🖼️ Uploading thumbnail: {thumb_path.name}...")
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=MediaFileUpload(str(thumb_path))
+            ).execute()
+            log.info("✅ Thumbnail uploaded!")
+        except Exception as e:
+            log.warning(f"Failed to upload thumbnail: {e}")
     log.info(f"🔗 URL: https://youtu.be/{video_id}")
     return video_id
 

@@ -1,4 +1,4 @@
-"""seo.py — Hybrid SEO generation for Indian cricket live Shorts."""
+"""seo.py — Hybrid Batch SEO generation for Indian cricket live Shorts."""
 import json
 import re
 from pathlib import Path
@@ -6,9 +6,11 @@ from typing import List, Dict
 
 from utils.config import load_config
 from utils.logger import get_logger
+from utils.ai_client import AIClient
 
 cfg = load_config()
 log = get_logger("seo", cfg["logging"]["log_file"], cfg["logging"]["level"])
+ai = AIClient()
 
 STOP_WORDS = {
     "i", "me", "my", "you", "your", "we", "our", "they", "their", "this", "that", "these", "those",
@@ -28,52 +30,86 @@ def _extract_keywords(text: str, limit: int = 14) -> List[str]:
     return [k for k, _ in sorted(freq.items(), key=lambda x: x[1], reverse=True)[:limit]]
 
 
-def _hybrid_keywords(local_keywords: List[str], trend_topics: List[str], competitor_tokens: List[str]) -> List[str]:
-    trend_tokens = []
-    for t in trend_topics:
-        trend_tokens.extend(re.findall(r"[A-Za-z0-9]{3,}", t.lower()))
+def batch_generate_seo(clips: List[Dict], domain: str = "cricket", region: str = "IN") -> List[Dict]:
+    """
+    Generate SEO for multiple clips in a single AI call to optimize tokens and consistency.
+    Optimized for Small YouTubers (140 subs) — focuses on long-tail search and high-retention hooks.
+    """
+    from trends import get_trending_context
+    
+    # 0. Load Global Video Metadata (Title)
+    video_title = ""
+    meta_file = Path(cfg["paths"]["input"]) / "video_metadata.json"
+    if meta_file.exists():
+        try:
+            with open(meta_file, "r") as f:
+                meta = json.load(f)
+                video_title = meta.get("title", "")
+        except:
+            pass
 
-    merged = list(dict.fromkeys(local_keywords + trend_tokens + competitor_tokens))
-    return merged[:20]
+    # 1. Gather Global Trend Context
+    trend = get_trending_context(domain=domain, region=region, video_title=video_title)
+    
+    clips_context = []
+    for c in clips:
+        local_kw = _extract_keywords(c['text'])
+        clips_context.append({
+            "clip_id": c['clip_id'],
+            "transcript": c['text'],
+            "local_keywords": local_kw
+        })
 
-
-def generate_seo(clip_text: str, clip_id: str, domain: str = "cricket", region: str = "IN") -> Dict:
-    from trends import get_trending_context, humanize_title
-
-    local_keywords = _extract_keywords(clip_text)
-    trend = get_trending_context(domain=domain, region=region)
-
-    hybrid_keywords = _hybrid_keywords(
-        local_keywords,
-        trend.get("topics", []),
-        trend.get("competitor_tokens", []),
+    system_instr = (
+        "You are a YouTube Growth Expert for Small Channels (140 subscribers). "
+        "Your mission is to help this creator go viral by using Curiosity-Gap titles "
+        "and Long-Tail keywords that larger channels ignore. "
+        "Focus on 'Specific match moments' and 'Funny reactions' rather than broad terms."
     )
+    
+    prompt = f"""
+    Overall Match: {video_title}
+    Scorecard: {trend.get('scorecard', '')}
+    Trending Topics: {', '.join(trend.get('topics', []))}
+    
+    Generate high-impact YouTube Shorts metadata for the following {len(clips)} highlights:
+    {json.dumps(clips_context, indent=2)}
+    
+    Requirements for EACH clip:
+    1. Title: Curiosity-gap, high-CTR, includes emojis (max 100 chars).
+    2. Description: Start with a 2-line hook. Include the match scorecard context.
+    3. Tags: 15-20 specific tags (e.g. 'Kohli 50 vs CSK 2024' instead of 'Cricket').
+    
+    Return a JSON object with a 'clips_seo' key containing a list of objects (clip_id, title, description, tags).
+    """
+    
+    log.info("🚀 Sending Batch SEO request to AI...")
+    response_text = ai.generate_text(prompt, system_instruction=system_instr)
+    
+    results = []
+    try:
+        json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            results = data.get("clips_seo", [])
+    except Exception as e:
+        log.error(f"Batch SEO parsing failed: {e}")
 
-    title = humanize_title(hybrid_keywords, trend_topics=trend.get("topics", []), vibe="excited_funny")
-
-    hashtags = trend["tags"]
-    tags = list(dict.fromkeys(hybrid_keywords[:20] + [h.replace("#", "") for h in hashtags]))[:30]
-
-    description = (
-        f"{title}\n\n"
-        f"{trend['hook']}\n"
-        f"Hybrid SEO: transcript + India Google trends + YouTube suggestions + competitor patterns.\n"
-        f"Trending context: {', '.join(trend.get('topics', [])[:5])}\n\n"
-        f"{' '.join(hashtags)}"
-    )
-
-    return {
-        "clip_id": clip_id,
-        "title": title[:100],
-        "description": description[:5000],
-        "tags": tags,
-        "hashtags": hashtags,
-        "trend_source": trend.get("source", "fallback"),
-        "trend_topics": trend.get("topics", []),
-        "competitor_tokens": trend.get("competitor_tokens", []),
-        "keywords_local": local_keywords,
-        "keywords_hybrid": hybrid_keywords,
-    }
+    # 3. Finalize & Merge with trends
+    hashtags = trend.get("tags", ["#Shorts", "#Cricket"])
+    final_results = []
+    for c in clips:
+        # Find matching SEO in results or use fallback
+        seo = next((item for item in results if item["clip_id"] == c["clip_id"]), {})
+        final_results.append({
+            "clip_id": c["clip_id"],
+            "title": seo.get("title", f"Cricket Highlights {c['clip_id']}")[:100],
+            "description": seo.get("description", "")[:5000],
+            "tags": seo.get("tags", [])[:30],
+            "hashtags": hashtags,
+            "trend_topics": trend.get("topics", []),
+        })
+    return final_results
 
 
 def process_all_seo(highlights_path: str, output_dir: str):
@@ -84,20 +120,28 @@ def process_all_seo(highlights_path: str, output_dir: str):
 
     with open(h_path, "r", encoding="utf-8") as f:
         import yaml
-        highlights = yaml.safe_load(f)
+        highlights = yaml.safe_load(f) or {}
 
-    log.info("Generating SEO for %d clips...", len(highlights))
+    log.info("Generating BATCH AI SEO for %d clips...", len(highlights))
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
+    clips_to_process = []
     for clip_id, info in highlights.items():
-        text = info.get("text", "Cricket Live Highlights")
-        seo_data = generate_seo(text, clip_id, domain="cricket", region="IN")
+        clips_to_process.append({
+            "clip_id": clip_id,
+            "text": info.get("text", "Cricket Live Highlights")
+        })
 
+    # Batch process all clips in ONE API call
+    all_seo = batch_generate_seo(clips_to_process, domain="cricket", region="IN")
+
+    for seo_data in all_seo:
+        clip_id = seo_data["clip_id"]
         seo_file = Path(output_dir) / f"{clip_id}_metadata.json"
         with open(seo_file, "w", encoding="utf-8") as f:
             json.dump(seo_data, f, indent=2, ensure_ascii=False)
 
-    log.info("✅ SEO Metadata generated in %s", output_dir)
+    log.info("✅ Batch AI SEO Metadata generated in %s", output_dir)
 
 
 if __name__ == "__main__":

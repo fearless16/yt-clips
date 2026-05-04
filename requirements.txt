@@ -20,3 +20,9 @@ requests
 
 # ── Optional: OpenCV for advanced reframing (Phase 2+ roadmap) ────────────────
 # opencv-python-headless>=4.9.0
+
+# ── SEO & Thumbnails (New Automation) ─────────────────────────────────────────
+openai>=1.0.0
+google-generativeai>=0.4.0
+Pillow>=10.0.0
+python-dotenv>=1.0.0

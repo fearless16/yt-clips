@@ -60,9 +60,11 @@ def _get_best_encoder() -> str:
     # Order of preference
     # 1. h264_nvenc (NVIDIA / Colab / Linux)
     # 2. h264_videotoolbox (macOS / Apple Silicon)
-    # 3. libx264 (Universal CPU fallback)
+    # 3. h264_qsv (Intel QuickSync)
+    # 4. h264_vaapi (Linux / VA-API)
+    # 5. libx264 (Universal CPU fallback)
     
-    potential_encoders = ["h264_nvenc", "h264_videotoolbox"]
+    potential_encoders = ["h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_vaapi"]
     
     try:
         result = subprocess.run(
@@ -119,14 +121,17 @@ def _build_enhance_stack(lighting_filter: str = "", source_fps: float = 30.0) ->
     #    rs/gs/bs = shadow color shifts, rh/gh/bh = highlight shifts
     filters.append("colorbalance=rs=0.04:gs=0.01:bs=-0.02:rh=-0.02:gh=0.0:bh=0.03")
 
-    # 4. Contrast & saturation — subtle lift, NOT the overbaked 1.1/1.2
+    # 4. Contrast & saturation — subtle lift, higher gamma for poor lighting
     if lighting_filter:
-        # Use the analysis-driven lighting correction instead
         filters.append(lighting_filter)
     else:
-        filters.append("eq=contrast=1.05:saturation=1.1:brightness=0.02")
+        # Boost gamma (1.2) to see details in shadows of poor lighting
+        filters.append("eq=contrast=1.1:saturation=1.2:brightness=0.03:gamma=1.2")
 
-    # 5. Motion interpolation — smooth optical flow to target FPS
+    # 5. Deband — Fix color banding in dark/noisy areas of 720p footage
+    filters.append("deband=1:blur=1")
+
+    # 6. Motion interpolation — smooth optical flow to target FPS
     #    Only apply if source FPS < target FPS (avoid slowdown)
     if source_fps < target_fps - 5 and _check_minterpolate():
         # Use 'blend' mode instead of 'mci' for 20x faster export speed
@@ -252,6 +257,9 @@ def _build_audio_filter(
 
     # Audio normalization — YouTube LUFS standard
     filters.append("loudnorm=I=-14:TP=-1:LRA=11")
+    
+    # Ensure sync by resampling and handling timestamps
+    filters.append("aresample=async=1")
 
     if speed_factor != 1.0:
         # atempo only supports 0.5-2.0, chain for larger ranges
@@ -293,10 +301,27 @@ def export_clip(
     smart decisions for layout, speed, lighting, and silence handling.
     Otherwise, falls back to config-based defaults.
     """
+    # ─── Detect Leading Black Frames (Avoid "Blank Start") ────────────────────
+    effective_start = start
+    effective_duration = end - start
+    
+    if analysis and analysis.get("black_frames", {}).get("samples"):
+        # If the first sample is black, find the first non-black sample
+        samples = analysis["black_frames"]["samples"]
+        if samples[0]["is_black"]:
+            for s in samples:
+                if not s["is_black"]:
+                    # Found the light! Trim to here (capped at 1s to avoid losing context)
+                    trim_amt = min(1.0, s["time"] - start)
+                    effective_start += trim_amt
+                    effective_duration -= trim_amt
+                    log.info(f"[{clip_id}] 🌑 Trimming {trim_amt:.2f}s of leading black frames.")
+                    break
+
     info = _get_video_info(video_path)
     layout_cfg = cfg["layout"]
     export_cfg = cfg["export"]
-    duration = end - start
+    duration = effective_duration
 
     # ─── Extract Strategy from Analysis ───────────────────────────────────────
     strategy = {}
@@ -305,14 +330,17 @@ def export_clip(
 
     use_solo = strategy.get("use_solo_frame", not layout_cfg.get("has_facecam", True))
     active_crop = strategy.get("active_crop")
-    speed_factor = strategy.get("speed_factor", 1.0)
     apply_lighting = strategy.get("apply_lighting_fix", False)
     lighting_filter = strategy.get("lighting_filter", "")
     skip_silence = strategy.get("skip_silence", False)
 
+    # ─── Global Speed Factor ──────────────────────────────────────────────────
+    global_speed = export_cfg.get("global_speed_factor", 1.25)
+    speed_factor = strategy.get("speed_factor", 1.0) * global_speed
+
     # ─── Smart Encoder Detection (Auto-Fallback) ─────────────────────────────
     encoder = _get_best_encoder()
-
+    
     # ─── Build Filtergraph ────────────────────────────────────────────────────
     if use_solo:
         log.info(f"[{clip_id}] 🎬 SOLO frame mode (full-screen single panel)")
@@ -340,7 +368,7 @@ def export_clip(
     # ─── Build FFmpeg Command ─────────────────────────────────────────────────
     cmd = [
         "ffmpeg", "-y",
-        "-ss", str(start), "-t", str(duration),
+        "-ss", str(effective_start), "-t", str(duration),
         "-i", video_path,
         "-filter_complex", fg,
         "-map", "[out]", "-map", "0:a",
@@ -424,6 +452,10 @@ def export_all(highlights_path: str, video_path: str) -> List[Path]:
     # Save analysis report
     analysis_report = {}
 
+    # Instantiate generators once
+    from thumbnail import ThumbnailGenerator
+    thumb_gen = ThumbnailGenerator()
+
     exported_paths = []
     for clip_id, info in highlights.items():
         log.info(f"─── Processing {clip_id} ───")
@@ -463,8 +495,16 @@ def export_all(highlights_path: str, video_path: str) -> List[Path]:
 
             # Generate SEO Metadata
             seo_data = generate_seo(info.get("text", "Cricket Highlights"), clip_id)
-            with open(output_dir / f"{clip_id}_metadata.json", 'w') as f:
+            meta_path = output_dir / f"{clip_id}_metadata.json"
+            with open(meta_path, 'w') as f:
                 json.dump(seo_data, f, indent=4)
+
+            # Generate High-Impact Thumbnail
+            try:
+                thumb_path = output_dir / f"{clip_id}_thumb.jpg"
+                thumb_gen.generate_for_clip(str(p), str(meta_path), str(thumb_path))
+            except Exception as e:
+                log.error(f"Thumbnail generation failed for {clip_id}: {e}")
         except Exception as e:
             log.error(f"Failed {clip_id}: {e}")
 
