@@ -67,7 +67,7 @@ class AIClient:
         for attempt in range(max_retries):
             try:
                 client = genai.Client(api_key=self.api_key)
-                model_name = self.config.get("image_model", "gemini-3.1-flash-image-preview")
+                model_name = self.config.get("image_model", "gemini-2.5-flash-image")
                 
                 # Base sleep with jitter to respect free tier limits (RPM)
                 # Gemini free tier is usually very strict

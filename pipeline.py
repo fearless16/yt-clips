@@ -126,41 +126,24 @@ def run(
         exported = export_all(highlights_path, video_path)
         log.info("Phase 4 complete in %.1f s — %d clips exported", time.perf_counter() - t0, len(exported))
 
-    # ── Phase 4.5: SEO & Thumbnails for existing clips (if skipped export) ───
-    if skip_export and exported:
-        _banner("PHASE 4.5 — SEO & THUMBNAILS (RE-GEN)")
-        from seo import generate_seo
-        from thumbnail import ThumbnailGenerator
-        import json
-        import yaml
+    # ── Phase 4.5: SEO & Thumbnails ──────────────────────────────────────────
+    if exported:
+        _banner("PHASE 4.5 — SEO & THUMBNAILS")
+        t0 = time.perf_counter()
+        from seo import process_all_seo
+        from thumbnail import process_all_thumbnails
         
-        # Load highlights to get context
-        highlights = {}
-        if Path(highlights_path).exists():
-            with open(highlights_path, "r") as f:
-                highlights = yaml.safe_load(f) or {}
-
-        thumb_gen = ThumbnailGenerator()
-        for clip_path in exported:
-            clip_id = clip_path.stem
-            # Metadata could already exist, but we regenerate it if needed
-            meta_path = clip_path.with_name(f"{clip_id}_metadata.json")
-            thumb_path = clip_path.with_name(f"{clip_id}_thumb.jpg")
-
-            if not meta_path.exists():
-                info = highlights.get(clip_id, {})
-                text = info.get("text", "Cricket Highlights")
-                log.info(f"Generating SEO for: {clip_id}")
-                seo_data = generate_seo(text, clip_id)
-                with open(meta_path, 'w') as f:
-                    json.dump(seo_data, f, indent=4)
-            
-            if not thumb_path.exists():
-                log.info(f"Generating Thumbnail for: {clip_id}")
-                thumb_gen.generate_for_clip(str(clip_path), str(meta_path), str(thumb_path))
-            
-            # Heartbeat
-            log.debug(f"💓 Pipeline Heartbeat: Phase 4.5 processing {clip_id}")
+        export_dir = str(exported[0].parent)
+        
+        # 1. Generate Metadata (Batch AI SEO)
+        # This writes {clip_id}_metadata.json for each highlight in the directory
+        process_all_seo(highlights_path, export_dir)
+        
+        # 2. Generate Thumbnails (Frame extraction or AI)
+        # This searches for mp4s and matching metadata in the folder
+        process_all_thumbnails(export_dir)
+        
+        log.info("Phase 4.5 complete in %.1f s", time.perf_counter() - t0)
 
     # ── Phase 5: Sync to Google Drive (optional) ──────────────────────────────
     if auto_sync and exported and not skip_sync:

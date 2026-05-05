@@ -114,7 +114,7 @@ ai:
   provider: "gemini"                # gemini | openai | ollama
   api_key: ""                       # Reading AI_API_KEY from .env
   model: "gemini-3.1-flash-lite-preview" 
-  image_model: "gemini-3.1-flash-image-preview" # Nano Banana 2 (FREE Tier)
+  image_model: "gemini-2.5-flash-image" # Nano Banana 2 (FREE Tier)
   system_prompt: |
     You are a YouTube SEO expert specializing in Cricket Shorts.
     Generate high-CTR titles, engaging descriptions, and trending tags.
