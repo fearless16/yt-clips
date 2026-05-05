@@ -29,8 +29,14 @@ Go to [colab.research.google.com](https://colab.research.google.com) and create 
 # 1. Install system dependencies
 !apt-get install -y ffmpeg
 
-# 2. Install Python packages
-!pip install yt-dlp faster-whisper PyYAML google-api-python-client google-auth-httplib2 google-auth-oauthlib requests
+# 2. Install JS Runtime (Deno) — Fixes "Sign in to confirm you're not a bot"
+!curl -fsSL https://deno.land/x/install/install.sh | sh
+import os
+os.environ["PATH"] += ":/root/.deno/bin"
+
+# 3. Install Python packages
+!pip install -U yt-dlp
+!pip install faster-whisper PyYAML google-api-python-client google-auth-httplib2 google-auth-oauthlib requests
 
 # 3. Create the directory structure
 import os

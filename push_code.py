@@ -48,7 +48,7 @@ def _get_mime_type(file_path: Path) -> str:
     return MIME_MAP.get(file_path.suffix.lower(), "application/octet-stream")
 
 
-def push():
+def push(include_data: bool = False):
     """Sync local code files to Google Drive with smart change detection."""
     try:
         from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
@@ -78,6 +78,11 @@ def push():
             + list(root.glob("transcripts/*.json"))
             + list(root.glob("highlights/*.yaml"))
         )
+        
+        if include_data:
+            log.info("📦 Including input data (video) in sync...")
+            files_to_sync += list(root.glob("input/*.mp4"))
+            files_to_sync += list(root.glob("input/*.json"))
 
         # Add specific files that may exist
         for special_file in ["channel_logo.png", "client_secrets.json", "yt_token.json"]:
@@ -104,24 +109,35 @@ def push():
                 target_folder_id = find_or_create_folder(service, subfolder_name, folder_id)
 
             name = file_path.name
-            local_md5 = get_md5(file_path)
+            
+            # For very large files, skip MD5 check and just check existence or size
+            if file_path.stat().st_size > 50 * 1024 * 1024: # > 50MB
+                log.info(f"  (Processing large file: {name}...)")
+                local_md5 = None
+            else:
+                local_md5 = get_md5(file_path)
 
             # Check if file exists in the target folder on Drive
             results = service.files().list(
                 q=f"name = '{name}' and '{target_folder_id}' in parents and trashed = false",
-                fields="files(id, md5Checksum)",
+                fields="files(id, md5Checksum, size)",
             ).execute()
             existing = results.get("files", [])
 
             mimetype = _get_mime_type(file_path)
-            media = MediaFileUpload(str(file_path), mimetype=mimetype)
+            media = MediaFileUpload(str(file_path), mimetype=mimetype, resumable=True)
 
             if existing:
                 drive_md5 = existing[0].get("md5Checksum")
+                drive_size = int(existing[0].get("size", 0))
                 file_id = existing[0]["id"]
 
-                if local_md5 == drive_md5:
-                    log.debug(f"  (Skipped: {name} is up to date)")
+                if local_md5 and local_md5 == drive_md5:
+                    skipped_count += 1
+                    continue
+                
+                # For large files without MD5, compare size
+                if not local_md5 and drive_size == file_path.stat().st_size:
                     skipped_count += 1
                     continue
 
@@ -144,4 +160,8 @@ def push():
 
 
 if __name__ == "__main__":
-    push()
+    import argparse
+    parser = argparse.ArgumentParser(description="Sync local code files to Google Drive.")
+    parser.add_argument("--include-data", action="store_true", help="Include input/ video files")
+    args = parser.parse_args()
+    push(include_data=args.include_data)

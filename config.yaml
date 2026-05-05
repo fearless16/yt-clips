@@ -15,6 +15,11 @@ download:
   # Download at ABSOLUTE HIGHEST available quality
   format: "bestvideo+bestaudio/best"
   output_filename: "video.mp4"
+  # Proof of Origin (PO) Token — for bypassing bot detection
+  # Get this from your browser using a PO Token Generator script
+  po_token: "" 
+  # Optional: Proxy for bypassing Colab IP blocks (e.g. http://user:pass@host:port)
+  proxy: ""
 # ─── Transcription ────────────────────────────────────────────────────────────
 transcription:
   model: "base"                         # tiny | base | small | medium | large

@@ -1,6 +1,6 @@
 import os
 from typing import Optional, Dict
-import google.generativeai as genai
+# Deprecated: import google.generativeai as genai
 from openai import OpenAI
 
 from utils.config import load_config
@@ -59,23 +59,25 @@ class AIClient:
             log.warning("Image generation currently only supported via Gemini (Nano Banana).")
             return False
 
+        from google import genai
         import time
         import random
-        max_retries = 3
+        max_retries = 5 # Increased retries
         
         for attempt in range(max_retries):
             try:
-                genai.configure(api_key=self.api_key)
+                client = genai.Client(api_key=self.api_key)
                 model_name = self.config.get("image_model", "gemini-3.1-flash-image-preview")
-                model = genai.GenerativeModel(model_name=model_name)
                 
-                # Mandatory sleep with jitter to stay under free tier RPM
-                sleep_time = 2 + random.uniform(0.5, 1.5)
+                # Base sleep with jitter to respect free tier limits (RPM)
+                # Gemini free tier is usually very strict
+                sleep_time = 3 + random.uniform(1.0, 3.0)
                 time.sleep(sleep_time) 
                 
-                log.info(f"🎨 Generating thumbnail (Attempt {attempt+1}) with {model_name}...")
-                response = model.generate_content(
-                    f"Professional YouTube Shorts thumbnail: {prompt}. 9:16 aspect ratio."
+                log.info(f"🎨 Generating thumbnail (Attempt {attempt+1}/{max_retries}) with {model_name}...")
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=f"Professional YouTube Shorts thumbnail: {prompt}. 9:16 aspect ratio."
                 )
                 
                 if not response.candidates:
@@ -83,21 +85,26 @@ class AIClient:
                     continue
 
                 for part in response.candidates[0].content.parts:
-                    if hasattr(part, "inline_data"):
+                    if hasattr(part, "inline_data") and part.inline_data:
                         with open(output_path, "wb") as f:
                             f.write(part.inline_data.data)
                         return True
+                    if hasattr(part, 'data') and part.data:
+                        with open(output_path, "wb") as f:
+                            f.write(part.data)
+                        return True
                 
-                log.warning(f"Attempt {attempt+1}: No inline_data found in response.")
+                log.warning(f"Attempt {attempt+1}: No image data found in response.")
 
             except Exception as e:
-                if "429" in str(e):
-                    wait_time = (attempt + 1) * 15 + random.uniform(1, 5)
-                    log.warning(f"⏳ Quota hit (429). Waiting {wait_time:.1f}s before retry...")
+                err_str = str(e)
+                if "429" in err_str or "Quota" in err_str:
+                    # Exponential backoff: 20s, 40s, 80s, 160s...
+                    wait_time = (2 ** (attempt + 2)) * 5 + random.uniform(5, 10)
+                    log.warning(f"⏳ Quota hit (429/403). Waiting {wait_time:.1f}s before retry...")
                     time.sleep(wait_time)
                 else:
                     log.error(f"Image generation failed on attempt {attempt+1}: {e}")
-                    # Don't retry on other errors
                     return False
         return False
 
@@ -121,16 +128,35 @@ class AIClient:
         return response.json().get("response", "").strip()
 
     def _generate_gemini(self, prompt: str, system_instruction: Optional[str] = None) -> str:
-        genai.configure(api_key=self.api_key)
-        model_name = self.config.get("model", "gemini-1.5-flash")
+        from google import genai
+        from google.genai import types
+        import time
+        import random
         
-        # System instructions are handled differently in Gemini 1.5
-        model = genai.GenerativeModel(
-            model_name=model_name,
-            system_instruction=system_instruction
-        )
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                client = genai.Client(api_key=self.api_key)
+                model_name = self.config.get("model", "gemini-1.5-flash")
+                
+                config = None
+                if system_instruction:
+                    config = types.GenerateContentConfig(system_instruction=system_instruction)
+                    
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=config
+                )
+                return response.text.strip()
+            except Exception as e:
+                if "429" in str(e) and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 10 + random.uniform(1, 5)
+                    log.warning(f"⏳ Gemini Text Quota hit (429). Retrying in {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                else:
+                    raise e
+        return ""
 
     def _generate_openai(self, prompt: str, system_instruction: Optional[str] = None) -> str:
         client = OpenAI(api_key=self.api_key)

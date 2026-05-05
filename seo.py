@@ -112,6 +112,13 @@ def batch_generate_seo(clips: List[Dict], domain: str = "cricket", region: str =
     return final_results
 
 
+def generate_seo(clip_text: str, clip_id: str) -> Dict:
+    """Legacy wrapper for single-clip SEO generation. Uses batch logic internally."""
+    clips = [{"clip_id": clip_id, "text": clip_text}]
+    results = batch_generate_seo(clips)
+    return results[0] if results else {}
+
+
 def process_all_seo(highlights_path: str, output_dir: str):
     h_path = Path(highlights_path)
     if not h_path.exists():

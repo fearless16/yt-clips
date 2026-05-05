@@ -63,46 +63,69 @@ def download(url: str, output_path: Optional[str] = None) -> Path:
     stem = dest.stem
     template = str(dest.parent / f"{stem}.%(ext)s")
 
-    cmd = [
-        "yt-dlp",
-        "--format", dl_cfg["format"],
-        "--merge-output-format", "mp4",
-        # Prefer higher resolution, then higher bitrate
-        "--format-sort", "res:2160,vbr,abr",
-        "--output", template,
-        "--no-playlist",
-        "--progress",
-        "--no-warnings",
-        # Retry and resilience
-        "--retries", "5",
-        "--fragment-retries", "5",
-        # Bypass restrictions
-        "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "--extractor-args", "youtube:player-client=ios,android,web,tv",
-        "--no-check-certificate",
-        "--verbose",
+    # ─── Autonomous Client Rotation Loop ──────────────────────────────────────
+    # We try multiple player clients to find one that isn't bot-blocked.
+    # ios and android are generally less restricted than web.
+    # Feb 2025: web_creator and android_embedded are strong fallbacks.
+    player_clients = [
+        ("ios", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"),
+        ("android", "com.google.android.youtube/19.25.39 (Linux; U; Android 14; en_US) gzip"),
+        ("web_creator", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"),
+        ("mweb", "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"),
+        ("tv", "Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.105 Safari/537.36 SmartTV/10.0.0"),
     ]
-
-    # ─── Bypassing Bot Detection (Cookies) ──────────────────────────────────
+    
+    proxy = dl_cfg.get("proxy")
+    po_token = dl_cfg.get("po_token")
     cookies_path = Path("cookies.txt")
-    if cookies_path.exists():
-        log.info("🍪 Using cookies.txt for authentication")
-        cmd.extend(["--cookies", str(cookies_path)])
-    else:
-        log.warning("⚠️ No cookies.txt found. Bot detection might block this on Colab.")
 
-    cmd.append(url)
+    success = False
+    import time
+    for client, ua in player_clients:
+        log.info(f"🚀 Attempting download with client: {client}...")
+        
+        current_cmd = [
+            "yt-dlp",
+            "--format", dl_cfg["format"],
+            "--merge-output-format", "mp4",
+            "--format-sort", "res:2160,vbr,abr",
+            "--output", template,
+            "--no-playlist",
+            "--progress",
+            "--no-warnings",
+            "--retries", "2",
+            "--user-agent", ua,
+            "--extractor-args", f"youtube:player-client={client}",
+            "--js-runtimes", "deno",  # Modern JS challenge bypass
+            "--no-check-certificate",
+        ]
 
-    log.info("Starting download: %s", url)
-    log.info("Target path: %s", dest)
-    log.info("Format: %s", dl_cfg["format"])
-    log.debug("yt-dlp command: %s", " ".join(cmd))
+        if proxy:
+            current_cmd.extend(["--proxy", proxy])
+        
+        if cookies_path.exists():
+            current_cmd.extend(["--cookies", str(cookies_path)])
+            
+        if po_token:
+            # PO Token works best with 'web' context but can be applied to others
+            current_cmd[current_cmd.index("--extractor-args") + 1] += f";po_token=web+{po_token}"
 
-    result = subprocess.run(cmd, check=False)
+        current_cmd.append(url)
+        
+        result = subprocess.run(current_cmd, check=False)
+        
+        if result.returncode == 0:
+            success = True
+            log.info(f"✅ Success with client: {client}")
+            break
+        else:
+            log.warning(f"⚠️ Client {client} failed. Rotating...")
+            time.sleep(2) # Grace period
 
-    if result.returncode != 0:
-        log.error("yt-dlp exited with code %d", result.returncode)
-        sys.exit(result.returncode)
+    if not success:
+        log.error("❌ ALL clients failed. Bot detection is blocking this IP.")
+        log.error("💡 ZERO INTERVENTION TIP: Use a Proxy in config.yaml OR download the video LOCALLY first.")
+        sys.exit(1)
 
     # yt-dlp may produce video.mp4 or video.webm → normalise to dest
     produced = dest.parent / f"{stem}.mp4"
