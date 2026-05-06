@@ -18,7 +18,7 @@ log = get_logger("export", cfg["logging"]["log_file"], cfg["logging"]["level"])
 # Cache for best encoder to avoid re-testing
 _BEST_ENCODER = None
 _BEST_ENCODER_LOCK = Lock()
-MIN_OUTPUT_BYTES = 100_000
+MIN_OUTPUT_BYTES = 5_000
 SAFE_LIGHTING_FILTERS = ("eq=", "curves=", "hue=", "unsharp=", "hqdn3d=")
 
 def _compact_text(text: str, max_lines: int = 20) -> str:
@@ -551,6 +551,7 @@ def export_clip(
     output_path: str,
     clip_id: str = "clip",
     transcript_segments: Optional[List[Dict]] = None,
+    analysis: Optional[Dict] = None,
 ) -> Optional[str]:
     """
     Exports a single clip using Hybrid CPU/GPU pipeline.
@@ -569,14 +570,16 @@ def export_clip(
         log.error("[%s] Invalid clip range: start=%.3f end=%.3f", clip_id, start, end)
         return None
     
-    # 1. Run Intelligence Analysis
-    analysis = analyze_clip(
-        video_path,
-        start,
-        end,
-        transcript_segments=transcript_segments,
-        clip_id=clip_id,
-    )
+    # 1. Run/Use Intelligence Analysis
+    if analysis is None:
+        analysis = analyze_clip(
+            video_path,
+            start,
+            end,
+            transcript_segments=transcript_segments,
+            clip_id=clip_id,
+        )
+    
     if not isinstance(analysis, dict) or not isinstance(analysis.get("export_strategy"), dict):
         log.error("[%s] Invalid analysis result; skipping export.", clip_id)
         return None
@@ -809,6 +812,7 @@ def export_all(highlights, video_path: str, transcript_path: Optional[str] = Non
                 
     log.info(f"✨ Export Phase Complete: {len(exported_clips)} clips ready in {out_dir}")
     return exported_clips
+
 if __name__ == "__main__":
     # Test stub
     pass

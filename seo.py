@@ -61,24 +61,32 @@ def batch_generate_seo(clips: List[Dict], domain: str = "cricket", region: str =
         })
 
     system_instr = (
-        "You are a YouTube Growth Expert for Small Channels (140 subscribers). "
-        "Your mission is to help this creator go viral by using Curiosity-Gap titles "
-        "and Long-Tail keywords that larger channels ignore. "
-        "Focus on 'Specific match moments' and 'Funny reactions' rather than broad terms."
+        "You are a senior cricket analyst and YouTube SEO expert for small channels (140 subscribers). "
+        "You have deep knowledge of every IPL/International team, player stats, rivalries, and match situations. "
+        "Your job: write metadata that proves deep cricket understanding while creating curiosity gaps that force viewers to click. "
+        "Every title must feel like an insider insight, not a generic recap. "
+        "Every description must show you know exactly what happened, why it mattered, and what the player/crowd felt. "
+        "Use natural, passionate language with strategic emojis."
     )
     
     prompt = f"""
     Overall Match: {video_title}
-    Scorecard: {trend.get('scorecard', '')}
+    Scorecard snapshot: {trend.get('scorecard', '')}
     Trending Topics: {', '.join(trend.get('topics', []))}
     
     Generate high-impact YouTube Shorts metadata for the following {len(clips)} highlights:
     {json.dumps(clips_context, indent=2)}
     
     Requirements for EACH clip:
-    1. Title: Curiosity-gap, high-CTR, includes emojis (max 100 chars).
-    2. Description: Start with a 2-line hook. Include the match scorecard context.
-    3. Tags: 15-20 specific tags (e.g. 'Kohli 50 vs CSK 2024' instead of 'Cricket').
+    1. **Title**: Curiosity-gap, high-CTR, max 100 characters. Must include specific player name(s) and a hint of drama or skill. Example: "Kohli's Six Over Cover to Win It 💥 No One Believed!"
+    2. **Description**: Write a rich, 3-5 line description (80-120 words) that:
+       - Opens with a short hook line (sensory/emotional) and an emoji.
+       - Explains the exact moment: what happened, who was bowling, the delivery, the shot, the context (chasing target, powerplay, etc.).
+       - Adds a deeper insight: why this moment was special (stats, rivalry, pressure situation, player form).
+       - End with a call-to-action that builds community (subscribe, comment on the next match, etc.) using a friendly tone.
+       - Integrate the match scorecard context naturally (e.g., "Chasing 200, RCB were 45/3 in the powerplay when…").
+       - Use 1-2 relevant hashtags at the end.
+    3. **Tags**: 15-20 long-tail, ultra-specific tags. Format them as lowercase comma-separated keywords. Examples: "kohli six vs csk 2024, rcb run chase thriller, kohli cover drive, indian cricket shorts, dhoni reaction, ipl 2024 highlights". NEVER use generic tags like "cricket" or "shorts".
     
     Return a JSON object with a 'clips_seo' key containing a list of objects (clip_id, title, description, tags).
     """
@@ -99,7 +107,6 @@ def batch_generate_seo(clips: List[Dict], domain: str = "cricket", region: str =
     hashtags = trend.get("tags", ["#Shorts", "#Cricket"])
     final_results = []
     for c in clips:
-        # Find matching SEO in results or use fallback
         seo = next((item for item in results if item["clip_id"] == c["clip_id"]), {})
         final_results.append({
             "clip_id": c["clip_id"],
@@ -139,7 +146,6 @@ def process_all_seo(highlights_path: str, output_dir: str):
             "text": info.get("text", "Cricket Live Highlights")
         })
 
-    # Batch process all clips in ONE API call
     all_seo = batch_generate_seo(clips_to_process, domain="cricket", region="IN")
 
     for seo_data in all_seo:

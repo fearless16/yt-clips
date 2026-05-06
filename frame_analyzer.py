@@ -22,6 +22,19 @@ def _run_cmd(cmd, timeout=15):
     return None
 
 
+def save_preview_snapshot(video_path: str, timestamp: float, output_path: str) -> bool:
+    """Save a preview snapshot (JPEG) at the given timestamp."""
+    cmd = [
+        "ffmpeg", "-y", "-ss", f"{timestamp:.3f}",
+        "-i", video_path,
+        "-frames:v", "1",
+        "-q:v", "2",
+        output_path
+    ]
+    res = _run_cmd(cmd, timeout=10)
+    return res is not None and res.returncode == 0
+
+
 # ─── Brightness Sampling (Improved) ─────────────────────────────────────────
 
 def _frame_stats(frame: bytes) -> Dict:
@@ -190,14 +203,20 @@ def detect_dead_air(video_path: str, start: float, end: float) -> Dict:
     if not res:
         return {"has_dead_air": False}
 
-    silence_count = res.stderr.count("silence_start")
+    silence_count = res.stderr.decode(errors="replace").count("silence_start")
     return {"has_dead_air": silence_count > 0}
 
 
 # ─── Main Analyzer ──────────────────────────────────────────────────────────
 
-def analyze_clip(video_path: str, start: float, end: float) -> Dict:
-    log.info("Analyzing clip...")
+def analyze_clip(
+    video_path: str,
+    start: float,
+    end: float,
+    transcript_segments: Optional[List[Dict]] = None,
+    clip_id: str = "clip"
+) -> Dict:
+    log.info("[%s] Analyzing clip...", clip_id)
 
     samples = _sample_brightness_series(video_path, start, end)
 
@@ -206,9 +225,21 @@ def analyze_clip(video_path: str, start: float, end: float) -> Dict:
     layout = detect_layout(video_path, start, end)
     silence = detect_dead_air(video_path, start, end)
 
+    # Basic Tempo Analysis if transcript available
+    is_fast_paced = False
+    if transcript_segments:
+        # Filter segments within our range
+        clip_segments = [s for s in transcript_segments if s["start"] < end and s["end"] > start]
+        total_text = " ".join([s["text"] for s in clip_segments])
+        words = len(total_text.split())
+        duration = end - start
+        wpm = (words / (duration / 60)) if duration > 0 else 0
+        is_fast_paced = wpm > 150 # Simple heuristic
+        log.debug("[%s] Tempo: %.1f WPM (fast=%s)", clip_id, wpm, is_fast_paced)
+
     strategy = {
         "use_solo_frame": layout["prefer_solo"] or black["black_ratio"] > 0.3,
-        "speed_factor": 1.25 if silence["has_dead_air"] else 1.0,
+        "speed_factor": 1.25 if (silence["has_dead_air"] and not is_fast_paced) else 1.0,
         "apply_lighting_fix": lighting["needs_correction"],
         "lighting_filter": lighting.get("lighting_filter", ""),
         "skip_silence": silence["has_dead_air"],

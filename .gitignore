@@ -34,3 +34,4 @@ remote_job_result.json
 .gemini/
 graphify-out/
 scratch/
+tests/

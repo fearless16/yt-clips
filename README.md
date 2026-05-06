@@ -351,6 +351,28 @@ The pipeline includes advanced features for high-performance, studio-quality aut
 
 ---
 
+## 🧪 Testing & Quality Assurance
+
+The pipeline includes a robust test suite to ensure export quality and stability.
+
+### Running Tests
+
+```bash
+# Run all tests using pytest
+./.venv/bin/python -m pytest tests/
+
+# Run a specific test file
+./.venv/bin/python -m pytest tests/test_export.py
+```
+
+### What's Tested?
+- **Export Logic**: Encoder detection, hardware smoke tests, fallback to `libx264`, and 9:16 reframing.
+- **Frame Analysis**: Black frame detection, lighting analysis, and layout voting.
+- **Tempo Intelligence**: Analysis-driven speed adjustments based on transcript WPM.
+- **Edge Cases**: Handling of videos with no audio, invalid timestamps, and missing assets.
+
+---
+
 ## Troubleshooting
 
 **`h264_videotoolbox` fails** → The pipeline automatically falls back to `libx264`.  
