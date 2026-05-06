@@ -48,7 +48,7 @@ def _get_mime_type(file_path: Path) -> str:
     return MIME_MAP.get(file_path.suffix.lower(), "application/octet-stream")
 
 
-def push(include_data: bool = False):
+def push(include_data: bool = False) -> bool:
     """Sync local code files to Google Drive with smart change detection."""
     try:
         from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
@@ -56,11 +56,11 @@ def push(include_data: bool = False):
         service = get_drive_service()
         if not service:
             log.error("Authentication failed — cannot push code.")
-            return
+            return False
 
         if service == FILESYSTEM_MODE:
             log.info("🚀 Colab filesystem mode — use direct file copy instead of push_code.")
-            return
+            return False
 
         # 1. Get or Create the 'yt-clips' folder
         folder_id = find_or_create_folder(service, "yt-clips")
@@ -154,9 +154,11 @@ def push(include_data: bool = False):
             f"🏁 Sync complete! "
             f"({created_count} created, {updated_count} updated, {skipped_count} unchanged)"
         )
+        return True
 
     except Exception as e:
         log.error(f"Error during push: {e}")
+        return False
 
 
 if __name__ == "__main__":
@@ -164,4 +166,4 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sync local code files to Google Drive.")
     parser.add_argument("--include-data", action="store_true", help="Include input/ video files")
     args = parser.parse_args()
-    push(include_data=args.include_data)
+    sys.exit(0 if push(include_data=args.include_data) else 1)

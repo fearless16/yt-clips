@@ -26,13 +26,11 @@ GOOGLE_TRENDS_RSS_IN = "https://trends.google.com/trending/rss?geo=IN"
 YT_SUGGEST = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={q}"
 YT_CHANNEL_RSS = "https://www.youtube.com/feeds/videos.xml?channel_id={id}"
 
-# Map competitor names to their official YouTube Channel IDs (UC...)
-# This avoids the 400 Bad Request errors from search-based RSS.
 COMPETITOR_CHANNELS = {
     "sports tak": "UCVXCo0W9pk2dDkEBNLhTt7A",
     "iqbal sports": "UC91500_n_hM-wzH4y9g2MmA",
     "ab cricinfo": "UCDp2t-2y-Wl-9J61t6001Ig",
-    "sports yaari": None,      # Fallback to Suggest API
+    "sports yaari": "UCjFw-0Vdfy2KW78NClGECXw"
 }
 
 EXCITED_HOOKS = [

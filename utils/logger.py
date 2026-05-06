@@ -46,10 +46,11 @@ def get_logger(name: str, log_file: str = "logs/pipeline.log", level: str = "INF
     logger = logging.getLogger(name)
     
     # Avoid duplicate handlers
-    if logger.hasHandlers():
+    if logger.handlers:
         return logger
 
     logger.setLevel(getattr(logging, level.upper()))
+    logger.propagate = False
 
     # Console Handler
     c_handler = logging.StreamHandler(sys.stdout)

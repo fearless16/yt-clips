@@ -109,7 +109,7 @@ if [ "$mode" == "3" ]; then
     exit 0
 fi
 
-# ─── Remote Mode (Colab Bridge — Hybrid Zero-Intervention) ───────────────────
+# ─── Remote Mode (Colab Bridge) ──────────────────────────────────────────────
 if [ "$mode" == "2" ]; then
     if [ $# -eq 0 ]; then
         echo "Error: No YouTube URL provided."
@@ -119,19 +119,14 @@ if [ "$mode" == "2" ]; then
     
     source .venv/bin/activate
     echo ""
-    echo "─── Step 1: Local Download (Zero-Intervention Bypass) ───"
-    # Download locally where IP reputation is good
-    python download.py "$@"
+    echo "─── Step 1: Syncing Code to Google Drive ─────────────"
+    # Push code first so the Colab worker runs the latest downloader/pipeline.
+    python push_code.py
     
     echo ""
-    echo "─── Step 2: Syncing Code & Video to Google Drive ──────"
-    # Sync code AND the large video file
-    python push_code.py --include-data
-    
-    echo ""
-    echo "─── Step 3: Beaming job to Cloud Bridge ───────────────"
-    # Skip download on Colab as we already uploaded it
-    python bridge.py "$@" --skip-download --sync --upload --schedule
+    echo "─── Step 2: Beaming job to Cloud Bridge ───────────────"
+    # Do not skip download: Colab should download the source video itself.
+    python bridge.py "$@" --sync --upload --schedule
     exit 0
 fi
 

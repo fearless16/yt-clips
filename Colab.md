@@ -55,7 +55,11 @@ paths:
   logs:        logs/
 
 download:
-  format: "bestvideo[height<=2160]+bestaudio/bestvideo+bestaudio/best"
+  format: "bv*[height<=1440]+ba/b[height<=1440]/bv*+ba/b"
+  concurrent_fragments: 8
+  sleep_requests: 0
+  progress_interval_seconds: 10
+  progress_percent_step: 5
   output_filename: "video.mp4"
 
 transcription:
@@ -83,17 +87,11 @@ export:
   width: 1080
   height: 1920
   fps: 60
-  video_bitrate: "25M"
-  audio_bitrate: "320k"
-  crf: 18
+  video_bitrate: "15M"
+  audio_bitrate: "192k"
+  crf: 23
   encoder: "libx264"
-  encoder_preset: "medium"
-  crop_smooth_factor: 0.2
-  transitions:
-    fade_in_duration: 0.5
-    fade_out_duration: 0.5
-    audio_fade_in: 0.3
-    audio_fade_out: 0.4
+  encoder_preset: "veryfast"
 
 youtube:
   privacy_status: "private"
@@ -102,6 +100,18 @@ youtube:
   upload_enabled: false
   schedule_interval_hours: 2
   niche: "Cricket"
+
+ai:
+  provider: "gemini"
+  model: "gemini-1.5-flash"
+  image_model: "gemini-2.5-flash-image"
+
+thumbnail:
+  use_ai: true
+  font_size: 120
+  text_color: "#FFFFFF"
+  stroke_color: "#000000"
+  stroke_width: 8
 
 quality:
   black_threshold: 20

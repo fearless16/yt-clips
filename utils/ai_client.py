@@ -1,11 +1,12 @@
 import os
 from typing import Optional, Dict
-# Deprecated: import google.generativeai as genai
 from openai import OpenAI
-
 from utils.config import load_config
 from utils.logger import get_logger
-
+from google import genai
+from google.genai import types
+import time
+import random
 from dotenv import load_dotenv
 
 # Load .env file at module level
@@ -54,58 +55,11 @@ class AIClient:
             return ""
 
     def generate_image(self, prompt: str, output_path: str) -> bool:
-        """Generates a high-quality image using Nano Banana (Gemini 3 Flash Image)."""
-        if self.provider != "gemini" or not self.api_key:
-            log.warning("Image generation currently only supported via Gemini (Nano Banana).")
-            return False
-
-        from google import genai
-        import time
-        import random
-        max_retries = 5 # Increased retries
-        
-        for attempt in range(max_retries):
-            try:
-                client = genai.Client(api_key=self.api_key)
-                model_name = self.config.get("image_model", "gemini-2.5-flash-image")
-                
-                # Base sleep with jitter to respect free tier limits (RPM)
-                # Gemini free tier is usually very strict
-                sleep_time = 3 + random.uniform(1.0, 3.0)
-                time.sleep(sleep_time) 
-                
-                log.info(f"🎨 Generating thumbnail (Attempt {attempt+1}/{max_retries}) with {model_name}...")
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=f"Professional YouTube Shorts thumbnail: {prompt}. 9:16 aspect ratio."
-                )
-                
-                if not response.candidates:
-                    log.warning(f"Attempt {attempt+1}: No image candidates returned.")
-                    continue
-
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, "inline_data") and part.inline_data:
-                        with open(output_path, "wb") as f:
-                            f.write(part.inline_data.data)
-                        return True
-                    if hasattr(part, 'data') and part.data:
-                        with open(output_path, "wb") as f:
-                            f.write(part.data)
-                        return True
-                
-                log.warning(f"Attempt {attempt+1}: No image data found in response.")
-
-            except Exception as e:
-                err_str = str(e)
-                if "429" in err_str or "Quota" in err_str:
-                    # Exponential backoff: 20s, 40s, 80s, 160s...
-                    wait_time = (2 ** (attempt + 2)) * 5 + random.uniform(5, 10)
-                    log.warning(f"⏳ Quota hit (429/403). Waiting {wait_time:.1f}s before retry...")
-                    time.sleep(wait_time)
-                else:
-                    log.error(f"Image generation failed on attempt {attempt+1}: {e}")
-                    return False
+        """
+        Bypasses AI image generation to avoid 429 Quota errors.
+        Since YouTube Shorts do not support custom API thumbnails, this safely skips it.
+        """
+        log.info(f"⏭️ Skipping AI image generation for {output_path} (Quota protection)")
         return False
 
     def _generate_ollama(self, prompt: str, system_instruction: Optional[str] = None) -> str:
@@ -162,7 +116,7 @@ class AIClient:
         client = OpenAI(api_key=self.api_key)
         model_name = self.config.get("model", "gpt-4o-mini")
         
-        messages = []
+        messages =[]
         if system_instruction:
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": prompt})

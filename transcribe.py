@@ -4,6 +4,7 @@ transcribe.py — Phase 2: Speech-to-Text with Progress Heartbeats.
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -59,11 +60,18 @@ def transcribe(video_path: str, output_path: str):
     log.info("--- Processing Segments ---")
 
     results = []
-    processed_seconds = 0
+    last_progress_log = time.monotonic()
+    last_progress_pct = -10.0
+    progress_interval = float(t_cfg.get("progress_interval_seconds", 15))
+    progress_percent_step = float(t_cfg.get("progress_percent_step", 10))
     
     for segment in segments:
-        # Progress Heartbeat
-        log.info(f"  [{(segment.end / info.duration * 100):4.1f}%] {segment.start:6.1f}s -> {segment.end:6.1f}s | {segment.text.strip()}")
+        progress_pct = (segment.end / info.duration * 100) if info.duration else 0.0
+        now = time.monotonic()
+        if progress_pct >= last_progress_pct + progress_percent_step or now - last_progress_log >= progress_interval:
+            log.info("Transcription progress: %.1f%% (%.1fs / %.1fs)", progress_pct, segment.end, info.duration)
+            last_progress_pct = progress_pct
+            last_progress_log = now
         
         results.append({
             "start": segment.start,

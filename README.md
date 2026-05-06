@@ -69,6 +69,7 @@ shorts/
 | 2 — Transcribe | `transcribe.py` | Speech-to-text via faster-whisper |
 | 3 — Highlights | `highlight.py` | Detect highlight moments (audio + heuristics) |
 | 4 — Export | `export.py` | 9:16 vertical reframing + pro enhancements |
+| 4.5 — SEO/Thumbnails | `seo.py` / `thumbnail.py` | AI-driven titles and aesthetic thumbnails |
 | 5 — Sync | `sync.py` | Upload Shorts to Google Drive (optional) |
 | 6 — Upload | `upload.py` | Upload to YouTube with auto-scheduling (optional) |
 
@@ -150,8 +151,14 @@ All values live in `config.yaml`. Important ones to customise:
 
 ```yaml
 download:
-  # Downloads at highest available quality (up to 4K/2160p)
-  format: "bestvideo[height<=2160]+bestaudio/bestvideo+bestaudio/best"
+  # Shorts-friendly cap: much faster than 4K, still enough for 1080x1920 output
+  format: "bv*[height<=1440]+ba/b[height<=1440]/bv*+ba/b"
+  concurrent_fragments: 8
+  sleep_requests: 0
+  progress_interval_seconds: 10
+  progress_percent_step: 5
+  po_token: "YOUR_TOKEN"   # For bypassing bot detection
+  proxy: ""               # Optional proxy
 ```
 
 ### Hardware Encoder
@@ -333,7 +340,7 @@ The pipeline includes advanced features for high-performance, studio-quality aut
 - **Small YouTuber Strategy**: Specifically tuned prompts for channels with <500 subscribers, focusing on **Long-Tail Search** and **Curiosity-Gap hooks** instead of broad, saturated keywords.
 
 ### 🖼️ Aesthetic Thumbnail Generation (`thumbnail.py`)
-- **Free-Tier Optimization**: Defaulting to **Nano Banana 2 (Gemini 3.1 Flash Image)** for high-volume, free-tier AI thumbnail generation.
+- **Free-Tier Optimization**: Defaulting to **Nano Banana 2 (Gemini 2.5 Flash Image)** for high-volume, free-tier AI thumbnail generation.
 - **Contrast Optimization**: Adds semi-transparent gradient overlays and blurred drop shadows for premium, high-impact visuals.
 - **A/B Variants**: Generates multiple variants for manual or automated A/B testing.
 

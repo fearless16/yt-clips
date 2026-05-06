@@ -12,8 +12,12 @@ paths:
 
 # ─── Download ─────────────────────────────────────────────────────────────────
 download:
-  # Download at ABSOLUTE HIGHEST available quality
-  format: "bestvideo+bestaudio/best"
+  # Shorts-friendly source cap. 1440p is much faster than 4K and still leaves room for 1080x1920 crops.
+  format: "bv*[height<=1440]+ba/b[height<=1440]/bv*+ba/b"
+  concurrent_fragments: 8
+  sleep_requests: 0
+  progress_interval_seconds: 10
+  progress_percent_step: 5
   output_filename: "video.mp4"
   # Proof of Origin (PO) Token — for bypassing bot detection
   # Get this from your browser using a PO Token Generator script
@@ -69,6 +73,8 @@ export:
   video_bitrate: "25M"                  # Max bitrate (used with CRF as ceiling)
   audio_bitrate: "320k"                 # Studio-grade audio
   crf: 18                               # CRF quality (lower = higher quality, 15-23 recommended)
+  ffmpeg_timeout_seconds: 900           # Prevent hung FFmpeg exports
+  min_output_bytes: 100000              # Reject tiny/corrupt exports
   # Hardware encoder — h264_videotoolbox is best for Mac
   encoder: "h264_videotoolbox"          # h264_videotoolbox | h264_nvenc | libx264
   encoder_preset: "medium"              # Only used by libx264; videotoolbox ignores this

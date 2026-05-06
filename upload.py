@@ -10,6 +10,7 @@ separate from the Drive auth in utils/drive_auth.py.
 import os
 import json
 import sys
+import time
 import httplib2
 import google_auth_httplib2
 from pathlib import Path
@@ -155,10 +156,17 @@ def upload_video(
     )
 
     response = None
+    last_progress = -10
+    last_progress_time = time.monotonic()
     while response is None:
         status, response = insert_request.next_chunk()
         if status:
-            log.info(f"   Upload Progress: {int(status.progress() * 100)}%")
+            progress = int(status.progress() * 100)
+            now = time.monotonic()
+            if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
+                log.info(f"   Upload Progress: {progress}%")
+                last_progress = progress
+                last_progress_time = now
 
     video_id = response["id"]
     log.info(f"✅ Upload successful! Video ID: {video_id}")

@@ -123,7 +123,7 @@ def run(
     else:
         t0 = time.perf_counter()
         from export import export_all
-        exported = export_all(highlights_path, video_path)
+        exported = export_all(highlights_path, video_path, transcript_path=transcript_path)
         log.info("Phase 4 complete in %.1f s — %d clips exported", time.perf_counter() - t0, len(exported))
 
     # ── Phase 4.5: SEO & Thumbnails ──────────────────────────────────────────
