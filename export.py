@@ -482,24 +482,28 @@ def _build_enhance_stack(
     target_w = int(cfg["export"]["width"])   # 1080
     target_h = int(cfg["export"]["height"])  # 1920
     
-    # 1. Base Layer Construction
+    # 1. Base Layer Construction with Enhancement Stack
+    # Apply quality enhancements BEFORE cropping/scaling for best results
+    enhancement_chain = "hqdn3d=4:3:6:4.5,deband=range=16:threshold=48:grain=4,unsharp=5:5:1.0:5:5:0.0"
+    
     if has_black_panel:
         # CRITICAL: Guest camera is OFF - crop to active panel only
         log.debug("BLACK PANEL detected - cropping to active panel only")
         
         if black_panel_side == "right":
             # Right panel is black, crop to LEFT half (your camera)
-            # For 16:9 source: crop left 50%, then scale to 9:16
             filter_base = (
-                f"crop=iw/2:ih:0:0,"  # Crop left half only (x=0, y=0, width=50%, height=100%)
-                f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                f"{enhancement_chain},"
+                f"crop=iw/2:ih:0:0,"
+                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
                 f"crop={target_w}:{target_h}"
             )
         else:
             # Left panel is black (rare), crop to RIGHT half
             filter_base = (
-                f"crop=iw/2:ih:iw/2:0,"  # Crop right half only (x=50%, y=0, width=50%, height=100%)
-                f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                f"{enhancement_chain},"
+                f"crop=iw/2:ih:iw/2:0,"
+                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
                 f"crop={target_w}:{target_h}"
             )
     elif use_solo:
@@ -511,30 +515,33 @@ def _build_enhance_stack(
                 crop_w = max(2, int(active_crop.get("width", target_w)))
                 crop_h = max(2, int(active_crop.get("height", target_h)))
                 filter_base = (
+                    f"{enhancement_chain},"
                     f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y},"
-                    f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
                     f"crop={target_w}:{target_h}"
                 )
             except (TypeError, ValueError):
                 filter_base = (
+                    f"{enhancement_chain},"
                     f"crop=ih*9/16:ih,"
-                    f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
                     f"crop={target_w}:{target_h}"
                 )
         else:
-            # Solo Mode: Take the center 9:16 slice and scale it to fill
+            # Solo Mode: Take the center 9:16 slice with Lanczos scaling
             filter_base = (
+                f"{enhancement_chain},"
                 f"crop=ih*9/16:ih,"
-                f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
                 f"crop={target_w}:{target_h}"
             )
     else:
         log.debug("STACK mode (blurred background + sharp center)")
-        # Stack Mode: Blur background (split layer 1) + Sharp center (split layer 2)
+        # Stack Mode with enhancements on foreground layer
         filter_base = (
-            f"split=2[bg][fg];"
-            f"[bg]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},boxblur=20:10[bg_fin];"
-            f"[fg]scale={target_w}:-1,crop={target_w}:min(ih\\,{target_h})[fg_scaled];"
+            f"{enhancement_chain},split=2[bg][fg];"
+            f"[bg]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,crop={target_w}:{target_h},boxblur=20:10[bg_fin];"
+            f"[fg]scale={target_w}:-1:flags=lanczos,crop={target_w}:min(ih\\,{target_h})[fg_scaled];"
             f"[bg_fin][fg_scaled]overlay=(W-w)/2:(H-h)/2"
         )
 
