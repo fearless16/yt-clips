@@ -119,3 +119,31 @@
 2026-05-07 07:16:42,753 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
 2026-05-07 07:16:42,854 - seo - INFO - 🚀 Sending Batch SEO request to AI...
 2026-05-07 07:16:42,855 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 13:29:56,465 - drive_auth - INFO - ✅ Using gcloud Application Default Credentials
+2026-05-07 13:29:57,530 - push_code - INFO - 🔄 Checking 33 files for changes...
+2026-05-07 13:30:08,080 - push_code - INFO - ✅ Updated: client_secrets.json
+2026-05-07 13:30:20,100 - push_code - INFO - ✅ Updated: export.py
+2026-05-07 13:30:30,327 - push_code - INFO - ✅ Updated: frame_analyzer.py
+2026-05-07 13:30:35,231 - push_code - INFO - ✅ Updated: highlight.py
+2026-05-07 13:30:55,873 - push_code - INFO - ✅ Updated: seo.py
+2026-05-07 13:31:00,268 - push_code - INFO - ✅ Updated: thumbnail.py
+2026-05-07 13:31:05,962 - push_code - INFO - ✅ Updated: trends.py
+2026-05-07 13:31:18,485 - push_code - INFO - ✅ Updated: yt_token.json
+2026-05-07 13:31:18,486 - push_code - INFO - 🏁 Sync complete! (0 created, 8 updated, 25 unchanged)
+2026-05-07 13:33:32,929 - drive_auth - INFO - ✅ Using gcloud Application Default Credentials
+2026-05-07 13:33:33,927 - push_code - INFO - 🔄 Checking 33 files for changes...
+2026-05-07 13:34:07,082 - push_code - INFO - 🏁 Sync complete! (0 created, 0 updated, 33 unchanged)
+2026-05-07 13:36:15,010 - drive_auth - INFO - ✅ Using gcloud Application Default Credentials
+2026-05-07 13:36:16,718 - push_code - INFO - 🔄 Checking 33 files for changes...
+2026-05-07 13:36:55,862 - push_code - INFO - 🏁 Sync complete! (0 created, 0 updated, 33 unchanged)
+2026-05-07 13:36:56,070 - bridge - INFO - 📡 Attempting Direct Drive API upload...
+2026-05-07 13:36:56,790 - drive_auth - INFO - ✅ Using gcloud Application Default Credentials
+2026-05-07 13:37:02,170 - bridge - INFO - ✨ New job file created on Drive!
+2026-05-07 13:37:02,170 - bridge - INFO - 🚀 Job beamed to Drive. (Note: Colab mount may take 30-60s to sync)
+2026-05-07 13:38:49,660 - drive_auth - INFO - ✅ Using gcloud Application Default Credentials
+2026-05-07 13:38:51,105 - push_code - INFO - 🔄 Checking 33 files for changes...
+2026-05-07 13:39:20,205 - push_code - INFO - 🏁 Sync complete! (0 created, 0 updated, 33 unchanged)
+2026-05-07 13:39:20,448 - bridge - INFO - 📡 Attempting Direct Drive API upload...
+2026-05-07 13:39:21,207 - drive_auth - INFO - ✅ Using gcloud Application Default Credentials
+2026-05-07 13:39:25,216 - bridge - INFO - ✅ Existing job file updated on Drive!
+2026-05-07 13:39:25,217 - bridge - INFO - 🚀 Job beamed to Drive. (Note: Colab mount may take 30-60s to sync)
