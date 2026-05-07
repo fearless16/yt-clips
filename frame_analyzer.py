@@ -2,12 +2,56 @@ import json
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
+import cv2
+import numpy as np
 
 from utils.config import load_config
 from utils.logger import get_logger
 
 cfg = load_config()
 log = get_logger("analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"])
+
+
+# ─── Face Detection Cascade (OpenCV) ────────────────────────────────────────
+FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int) -> Optional[Dict]:
+    """
+    Detects face and returns crop coordinates to keep eyes at 30% from top.
+    Returns None if no face detected.
+    """
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+    
+    if len(faces) == 0:
+        return None
+    
+    # Get largest face (closest to camera)
+    x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+    
+    # Calculate target crop: 9:16 aspect ratio, centered on face
+    # Position eyes at ~30% from top of final frame
+    target_w = frame_width
+    target_h = int(frame_width * 16 / 9)
+    
+    # Center X on face
+    crop_x = max(0, x + w//2 - target_w//2)
+    crop_x = min(crop_x, frame_width - target_w)
+    
+    # Position Y so eyes are at 30% from top
+    # Assume eyes are at 40% down from top of face box
+    eye_y = y + int(h * 0.4)
+    desired_eye_y = int(target_h * 0.3)
+    crop_y = eye_y - desired_eye_y
+    crop_y = max(0, min(crop_y, frame_height - target_h))
+    
+    return {
+        "x": int(crop_x),
+        "y": int(crop_y),
+        "width": int(target_w),
+        "height": int(target_h),
+        "confidence": 0.9  # High confidence face detected
+    }
 
 
 # ─── Safe subprocess wrapper ────────────────────────────────────────────────
