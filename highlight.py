@@ -350,7 +350,25 @@ def detect_highlights(
 
     # Sort by score and take top N
     merged.sort(key=lambda w: w["score"], reverse=True)
-    top = merged[: h_cfg["max_clips"]]
+    
+    # CRITICAL FIX: Ensure intro coverage (first 30 seconds)
+    # If there's a high-scoring segment in the intro, force-include it
+    intro_threshold = max_score * 0.7  # 70% of max score
+    intro_segments = [w for w in merged if w["start"] < 30 and w["score"] >= intro_threshold]
+    
+    top = []
+    # Add best intro segment if exists
+    if intro_segments:
+        best_intro = max(intro_segments, key=lambda w: w["score"])
+        top.append(best_intro)
+        log.info("🎬 FORCED INTRO: Including highlight from start (%.2f score)", best_intro["score"])
+    
+    # Fill remaining slots with highest scoring segments (excluding already selected)
+    remaining = [w for w in merged if w not in top]
+    remaining_slots = h_cfg["max_clips"] - len(top)
+    top.extend(remaining[:remaining_slots])
+    
+    log.info("Selected %d clips (%d intro + %d others)", len(top), 1 if intro_segments else 0, len(top) - (1 if intro_segments else 0))
 
     # Re-sort by time for output
     top.sort(key=lambda w: w["start"])

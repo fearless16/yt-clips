@@ -177,3 +177,87 @@ if __name__ == "__main__":
         process_all_thumbnails(sys.argv[1])
     else:
         log.error("Usage: python thumbnail.py <shorts_directory>")
+
+
+def generate_thumbnail_variants(video_path: str, metadata: dict, count: int = 3) -> List[str]:
+    """
+    Generate multiple thumbnail variants for A/B testing.
+    
+    Args:
+        video_path: Path to the video file
+        metadata: Metadata dict with title, clip_id, etc.
+        count: Number of variants to generate (default: 3)
+        
+    Returns:
+        List of paths to generated thumbnail variants
+    """
+    import shutil
+    generator = ThumbnailGenerator()
+    video_file = Path(video_path)
+    output_dir = video_file.parent
+    
+    variants = []
+    
+    # First generate base thumbnail if it doesn't exist
+    base_thumb = output_dir / "thumbnail.jpg"
+    if not base_thumb.exists():
+        meta_path = output_dir / "metadata.json"
+        if meta_path.exists():
+            generator.generate_for_clip(str(video_file), str(meta_path), str(base_thumb))
+    
+    # Create variants by copying and modifying
+    base_title = metadata.get("title", "Cricket Highlights")
+    
+    for i in range(count):
+        variant_output = output_dir / f"thumbnail_v{i+1}.jpg"
+        
+        try:
+            # Copy base thumbnail
+            if base_thumb.exists():
+                shutil.copy(base_thumb, variant_output)
+                
+                # Modify with variant text
+                from PIL import Image, ImageDraw, ImageFont
+                
+                img = Image.open(variant_output)
+                draw = ImageDraw.Draw(img)
+                w, h = img.size
+                
+                # Variant titles
+                if i == 0:
+                    text = base_title[:45]
+                elif i == 1:
+                    text = f"{base_title[:40]} 🔥"
+                else:
+                    text = f"🏏 {base_title[:40]}"
+                
+                font_size = int(h * 0.07)
+                try:
+                    font = ImageFont.truetype(generator.font_path, font_size)
+                except:
+                    font = ImageFont.load_default()
+                
+                bbox = draw.textbbox((0, 0), text, font=font)
+                text_w = bbox[2] - bbox[0]
+                text_h = bbox[3] - bbox[1]
+                
+                x = (w - text_w) // 2
+                y = h - text_h - 100
+                
+                # Clear area and redraw
+                draw.rectangle([x-5, y-5, x+text_w+5, y+text_h+30], fill="#00000080")
+                draw.text((x+2, y+2), text, font=font, fill="#000000")
+                draw.text((x, y), text, font=font, fill="#FFFFFF")
+                
+                img.save(variant_output, quality=95)
+                variants.append(str(variant_output))
+            else:
+                # Fallback: create placeholder
+                variants.append(str(base_thumb) if base_thumb.exists() else str(video_file.with_suffix(".txt")))
+                
+        except Exception as e:
+            log.error(f"Failed to generate variant {i+1}: {e}")
+            if base_thumb.exists():
+                variants.append(str(base_thumb))
+    
+    return variants

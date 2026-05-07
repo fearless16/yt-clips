@@ -86,12 +86,15 @@ def _sample_brightness_series(video_path: str, start: float, end: float, sample_
 
 def detect_black_frames(samples: List[Dict]) -> Dict:
     threshold = cfg.get("quality", {}).get("black_threshold", 20)
-
+    
+    # CRITICAL FIX: Require BOTH low brightness AND low variance for true black detection
+    # This prevents false positives from dark scenes that still have content
     black = [s for s in samples if s["avg"] < threshold and s["var"] < 50]
-
+    
     return {
         "has_black_frames": len(black) > 0,
         "black_ratio": len(black) / len(samples) if samples else 0,
+        "is_mostly_black": len(black) / len(samples) > 0.6 if samples else False,  # For segment skipping
     }
 
 
@@ -120,11 +123,17 @@ def analyze_lighting(samples: List[Dict]) -> Dict:
 # ─── Layout Detection (Multi-frame voting) ──────────────────────────────────
 
 def detect_layout(video_path: str, start: float, end: float) -> Dict:
+    """
+    Detects if video has split-screen layout (e.g., host + guest side-by-side).
+    Also detects if one panel is black (guest camera off).
+    """
     timestamps = [
-        start + (end - start) * x for x in [0.25, 0.5, 0.75]
+        start + (end - start) * x for x in [0.2, 0.4, 0.5, 0.6, 0.8]
     ]
 
     votes = []
+    black_panel_votes = []
+    black_panel_side_votes = []
 
     for t in timestamps:
         cmd = [
@@ -142,16 +151,57 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
 
         data = res.stdout
         mid = 160
-
-        left = sum(data[i] for i in range(0, len(data), 320))
-        right = sum(data[i] for i in range(mid, len(data), 320))
-
-        if abs(left - right) > 50000:
+        
+        # Calculate left and right panel brightness
+        left_pixels = [data[i] for i in range(0, len(data), 320)]
+        right_pixels = [data[i] for i in range(mid, len(data), 320)]
+        
+        left = sum(left_pixels)
+        right = sum(right_pixels)
+        
+        # Check for split-screen: significant difference OR both panels active
+        # For split-screen, left and right should have similar variance
+        left_var = sum((x - left/len(left_pixels))**2 for x in left_pixels) / len(left_pixels)
+        right_var = sum((x - right/len(right_pixels))**2 for x in right_pixels) / len(right_pixels)
+        
+        # Split-screen detection: both panels have content (variance > threshold)
+        # If BOTH panels are active, we should DROP this segment (user preference)
+        is_split = left_var > 1000 and right_var > 1000
+        
+        # Check if right panel is black (guest camera off)
+        # Right panel average brightness < 25 AND low variance
+        right_avg = right / len(right_pixels) if right_pixels else 0
+        right_is_black = right_avg < 25 and right_var < 100
+        
+        # Check if LEFT panel is black (rare case)
+        left_avg = left / len(left_pixels) if left_pixels else 0
+        left_is_black = left_avg < 25 and left_var < 100
+        
+        if is_split:
             votes.append("split")
+        if right_is_black:
+            black_panel_votes.append(True)
+            black_panel_side_votes.append("right")
+        if left_is_black:
+            black_panel_votes.append(True)
+            black_panel_side_votes.append("left")
 
+    is_split_screen = votes.count("split") >= 2
+    has_black_panel = len(black_panel_votes) >= 2
+    
+    # Determine which side is black (majority vote)
+    black_panel_side = None
+    if has_black_panel:
+        right_count = black_panel_side_votes.count("right")
+        left_count = black_panel_side_votes.count("left")
+        black_panel_side = "right" if right_count >= left_count else "left"
+    
     return {
-        "layout_type": "split" if votes.count("split") >= 2 else "solo",
-        "prefer_solo": votes.count("split") < 2
+        "layout_type": "split" if is_split_screen else "solo",
+        "prefer_solo": not is_split_screen,
+        "has_black_panel": has_black_panel,
+        "black_panel_side": black_panel_side,
+        "is_multi_active_frame": is_split_screen and not has_black_panel  # NEW: Both panels active
     }
 
 
@@ -237,8 +287,24 @@ def analyze_clip(
         is_fast_paced = wpm > 150 # Simple heuristic
         log.debug("[%s] Tempo: %.1f WPM (fast=%s)", clip_id, wpm, is_fast_paced)
 
+    # CRITICAL FIX: Only use solo frame if there's NO split screen OR if one panel is black
+    # If split screen with both panels active, DROP this segment (user preference)
+    # If split screen with black panel, use solo mode to show only the active panel
+    should_use_solo = (
+        layout["prefer_solo"] or  # No split screen detected
+        layout.get("has_black_panel", False) or  # One panel is black (guest camera off)
+        black["black_ratio"] > 0.6  # >60% black frames (was 30%, too aggressive)
+    )
+    
+    # NEW: Mark segments with multiple active frames for DROPPING
+    should_drop = layout.get("is_multi_active_frame", False)
+    
     strategy = {
-        "use_solo_frame": layout["prefer_solo"] or black["black_ratio"] > 0.3,
+        "use_solo_frame": should_use_solo,
+        "has_black_panel": layout.get("has_black_panel", False),
+        "black_panel_side": layout.get("black_panel_side"),
+        "is_multi_active_frame": layout.get("is_multi_active_frame", False),
+        "should_drop": should_drop,  # NEW: Drop if both panels active
         "speed_factor": 1.25 if (silence["has_dead_air"] and not is_fast_paced) else 1.0,
         "apply_lighting_fix": lighting["needs_correction"],
         "lighting_filter": lighting.get("lighting_filter", ""),
