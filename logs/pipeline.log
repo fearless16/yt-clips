@@ -1,0 +1,121 @@
+2026-05-07 06:27:01,092 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 06:27:54,880 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:28:03,412 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:28:48,774 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:28:57,154 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:28:58,126 - trends - WARNING - Competitor RSS failed for 'sports tak': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCVXCo0W9pk2dDkEBNLhTt7A. Falling back to suggest API.
+2026-05-07 06:28:58,445 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 06:28:58,799 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 06:28:58,920 - trends - WARNING - Competitor RSS failed for 'sports yaari': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCjFw-0Vdfy2KW78NClGECXw. Falling back to suggest API.
+2026-05-07 06:28:58,982 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:28:58,983 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:29:06,635 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:29:12,152 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 06:29:14,906 - trends - WARNING - Competitor RSS failed for 'sports tak': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCVXCo0W9pk2dDkEBNLhTt7A. Falling back to suggest API.
+2026-05-07 06:29:15,004 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 06:29:15,357 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 06:29:15,480 - trends - WARNING - Competitor RSS failed for 'sports yaari': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCjFw-0Vdfy2KW78NClGECXw. Falling back to suggest API.
+2026-05-07 06:29:15,507 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:29:15,509 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:30:30,541 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:30:31,439 - trends - WARNING - Competitor RSS failed for 'sports tak': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCVXCo0W9pk2dDkEBNLhTt7A. Falling back to suggest API.
+2026-05-07 06:30:31,780 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 06:30:31,887 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 06:30:32,207 - trends - WARNING - Competitor RSS failed for 'sports yaari': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCjFw-0Vdfy2KW78NClGECXw. Falling back to suggest API.
+2026-05-07 06:30:32,265 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:30:32,267 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:30:41,975 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:30:47,415 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 06:30:50,185 - trends - WARNING - Competitor RSS failed for 'sports tak': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCVXCo0W9pk2dDkEBNLhTt7A. Falling back to suggest API.
+2026-05-07 06:30:50,556 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 06:30:50,861 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 06:30:50,960 - trends - WARNING - Competitor RSS failed for 'sports yaari': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCjFw-0Vdfy2KW78NClGECXw. Falling back to suggest API.
+2026-05-07 06:30:50,993 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:30:50,994 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:31:48,441 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:40:32,332 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:40:33,362 - trends - WARNING - Competitor RSS failed for 'sports tak': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCVXCo0W9pk2dDkEBNLhTt7A. Falling back to suggest API.
+2026-05-07 06:40:33,488 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 06:40:33,797 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 06:40:34,149 - trends - WARNING - Competitor RSS failed for 'sports yaari': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCjFw-0Vdfy2KW78NClGECXw. Falling back to suggest API.
+2026-05-07 06:40:34,211 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:40:34,213 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:40:44,418 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:40:56,082 - trends - WARNING - Competitor RSS failed for 'sports tak': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCVXCo0W9pk2dDkEBNLhTt7A. Falling back to suggest API.
+2026-05-07 06:40:56,388 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 06:40:56,764 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 06:40:57,097 - trends - WARNING - Competitor RSS failed for 'sports yaari': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCjFw-0Vdfy2KW78NClGECXw. Falling back to suggest API.
+2026-05-07 06:40:57,961 - trends - WARNING - Competitor RSS failed for 'sports tak': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCVXCo0W9pk2dDkEBNLhTt7A. Falling back to suggest API.
+2026-05-07 06:40:58,321 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 06:40:58,427 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 06:40:58,755 - trends - WARNING - Competitor RSS failed for 'sports yaari': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCjFw-0Vdfy2KW78NClGECXw. Falling back to suggest API.
+2026-05-07 06:40:58,808 - trends - INFO - 🏏 Identifying match context for: RCB vs CSK IPL 2024
+2026-05-07 06:44:35,574 - trends - INFO - 🏏 Fetching scorecard from: https://www.cricbuzz.com/cricket-match/live-scores
+2026-05-07 06:44:38,401 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:44:38,496 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:44:38,521 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:44:38,555 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:44:38,581 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:44:38,615 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:44:38,716 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:44:38,755 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:44:38,782 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:44:53,216 - trends - INFO - 🏏 Fetching scorecard from: https://www.cricbuzz.com/cricket-match/live-scores
+2026-05-07 06:45:06,920 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:45:28,358 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:45:37,275 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:45:38,156 - trends - WARNING - Competitor RSS failed for 'sports tak': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCVXCo0W9pk2dDkEBNLhTt7A. Falling back to suggest API.
+2026-05-07 06:45:38,476 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 06:45:38,786 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 06:45:39,137 - trends - WARNING - Competitor RSS failed for 'sports yaari': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCjFw-0Vdfy2KW78NClGECXw. Falling back to suggest API.
+2026-05-07 06:45:39,180 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:45:39,182 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:45:44,393 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 06:51:54,318 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:51:54,734 - trends - INFO - 🏏 Fetching scorecard from: https://www.cricbuzz.com/cricket-match/live-scores
+2026-05-07 06:52:00,218 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 06:52:02,940 - trends - WARNING - Competitor RSS failed for 'sports tak': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCVXCo0W9pk2dDkEBNLhTt7A. Falling back to suggest API.
+2026-05-07 06:52:03,262 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 06:52:03,378 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 06:52:03,705 - trends - WARNING - Competitor RSS failed for 'sports yaari': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCjFw-0Vdfy2KW78NClGECXw. Falling back to suggest API.
+2026-05-07 06:52:03,751 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:52:03,752 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 06:53:35,575 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:54:09,576 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:54:18,055 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 06:54:35,179 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 07:08:37,656 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 07:08:38,066 - trends - INFO - 🏏 Fetching scorecard from: https://www.cricbuzz.com/cricket-match/live-scores
+2026-05-07 07:08:43,880 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 07:08:47,261 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 07:08:47,388 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 07:08:47,855 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 07:08:47,856 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 07:09:00,819 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 07:09:06,472 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 07:09:09,575 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 07:09:09,675 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 07:09:10,158 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 07:09:10,160 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 07:12:14,002 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 07:12:14,503 - trends - INFO - 🏏 Fetching scorecard from: https://www.cricbuzz.com/cricket-match/live-scores
+2026-05-07 07:12:20,437 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 07:12:23,526 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 07:12:23,847 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 07:12:24,248 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 07:12:24,250 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 07:14:32,514 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 07:14:42,132 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 07:14:42,619 - trends - INFO - 🏏 Fetching scorecard from: https://www.cricbuzz.com/cricket-match/live-scores
+2026-05-07 07:14:48,255 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 07:14:51,950 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 07:14:52,313 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 07:14:52,735 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 07:14:52,736 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 07:16:33,077 - ai_client - WARNING - No API key found for AI provider: gemini
+2026-05-07 07:16:33,532 - trends - INFO - 🏏 Fetching scorecard from: https://www.cricbuzz.com/cricket-match/live-scores
+2026-05-07 07:16:39,197 - analyzer - INFO - [test] Analyzing clip...
+2026-05-07 07:16:42,423 - trends - WARNING - Competitor RSS failed for 'iqbal sports': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UC91500_n_hM-wzH4y9g2MmA. Falling back to suggest API.
+2026-05-07 07:16:42,753 - trends - WARNING - Competitor RSS failed for 'ab cricinfo': 404 Client Error: Not Found for url: https://www.youtube.com/feeds/videos.xml?channel_id=UCDp2t-2y-Wl-9J61t6001Ig. Falling back to suggest API.
+2026-05-07 07:16:42,854 - seo - INFO - 🚀 Sending Batch SEO request to AI...
+2026-05-07 07:16:42,855 - seo - INFO - 🚀 Sending Batch SEO request to AI...

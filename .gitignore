@@ -1,37 +1,15 @@
-# yt-clips Git Ignore
-
+```
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
-.venv/
-env/
-venv/
-.env
+*.pyc
+*.pyo
+*.pyd
 
-# Project Folders (Data/Output)
-input/
-temp/
-shorts/
+# Logs
+*.log
 logs/
-transcripts/
-highlights/
 
-# Configuration & Secrets (CRITICAL: DO NOT PUSH THESE)
-yt_token.json
-client_secrets.json
-token.json
-scheduler_state.json
-processed_videos.txt
-colab_url.txt
-remote_job.json
-remote_job_result.json
-
-# IDE / System
-.DS_Store
-.idea/
-.vscode/
-.gemini/
-graphify-out/
-scratch/
-tests/
+# Tests
+.tests/
+.pytest_cache/
+```
