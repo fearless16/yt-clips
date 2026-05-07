@@ -69,6 +69,8 @@ def _sanitize_strategy(raw_strategy) -> Dict:
 
     return {
         "use_solo_frame": bool(raw_strategy.get("use_solo_frame", False)),
+        "has_black_panel": bool(raw_strategy.get("has_black_panel", False)),
+        "black_panel_side": raw_strategy.get("black_panel_side"),
         "active_crop": active_crop,
         "speed_factor": _normalize_speed(raw_strategy.get("speed_factor", 1.0)),
         "apply_lighting_fix": bool(raw_strategy.get("apply_lighting_fix", False)),
@@ -464,18 +466,43 @@ def _build_enhance_stack(
 ) -> str:
     """
     Builds the filtergraph based on Frame Analysis decisions.
-    Supports SOLO mode (full-screen) and VERTICAL STACK (blurred background).
+    Supports SOLO mode (full-screen single panel), SPLIT mode (both panels), and BLACK PANEL handling.
+    
+    CRITICAL FIX FOR GUEST CAMERA OFF:
+    - If right panel is black (guest camera off), crop to LEFT half only, then scale to 9:16
+    - This prevents awkward center crop that cuts both panels in half
     """
     strategy = analysis.get("export_strategy", {}) if isinstance(analysis, dict) else {}
     strategy = _sanitize_strategy(strategy)
     use_solo = strategy.get("use_solo_frame", False)
+    has_black_panel = strategy.get("has_black_panel", False)
+    black_panel_side = strategy.get("black_panel_side")
     active_crop = strategy.get("active_crop")
     
     target_w = int(cfg["export"]["width"])   # 1080
     target_h = int(cfg["export"]["height"])  # 1920
     
     # 1. Base Layer Construction
-    if use_solo:
+    if has_black_panel:
+        # CRITICAL: Guest camera is OFF - crop to active panel only
+        log.debug("BLACK PANEL detected - cropping to active panel only")
+        
+        if black_panel_side == "right":
+            # Right panel is black, crop to LEFT half (your camera)
+            # For 16:9 source: crop left 50%, then scale to 9:16
+            filter_base = (
+                f"crop=iw/2:ih:0:0,"  # Crop left half only (x=0, y=0, width=50%, height=100%)
+                f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h}"
+            )
+        else:
+            # Left panel is black (rare), crop to RIGHT half
+            filter_base = (
+                f"crop=iw/2:ih:iw/2:0,"  # Crop right half only (x=50%, y=0, width=50%, height=100%)
+                f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h}"
+            )
+    elif use_solo:
         log.debug("SOLO frame mode (full-screen single panel)")
         if active_crop:
             try:
@@ -586,6 +613,11 @@ def export_clip(
 
     strategy = _sanitize_strategy(analysis["export_strategy"])
     analysis["export_strategy"] = strategy
+    
+    # CRITICAL: Drop segments with multiple active frames (both host + guest cameras on)
+    if strategy.get("should_drop", False):
+        log.info("[%s] DROPPING segment - multiple active frames detected (host + guest)", clip_id)
+        return None
     
     # 2. Get hardware info
     info = _get_video_info(video_path)
