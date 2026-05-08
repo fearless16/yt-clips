@@ -85,11 +85,8 @@ def _frame_stats(frame: bytes) -> Dict:
     """Compute avg + variance (better than avg only)."""
     if not frame:
         return {"avg": 128.0, "var": 0.0}
-
-    n = len(frame)
-    avg = sum(frame) / n
-    var = sum((x - avg) ** 2 for x in frame) / n
-    return {"avg": avg, "var": var}
+    arr = np.frombuffer(frame, dtype=np.uint8).astype(np.float32)
+    return {"avg": float(arr.mean()), "var": float(arr.var())}
 
 
 def _sample_brightness_series(video_path: str, start: float, end: float, sample_count: int = 5) -> List[Dict]:
@@ -104,7 +101,7 @@ def _sample_brightness_series(video_path: str, start: float, end: float, sample_
         "-ss", f"{start:.3f}",
         "-t", f"{duration:.3f}",
         "-i", video_path,
-        "-vf", f"fps={fps:.2f},scale=160:90,format=gray",
+        "-vf", f"fps={sample_count}/{duration:.3f},scale=160:90,format=gray",
         "-frames:v", str(sample_count),
         "-f", "rawvideo", "-pix_fmt", "gray",
         "pipe:1",
@@ -171,64 +168,50 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
     Detects if video has split-screen layout (e.g., host + guest side-by-side).
     Also detects if one panel is black (guest camera off).
     """
-    timestamps = [
-        start + (end - start) * x for x in [0.2, 0.4, 0.5, 0.6, 0.8]
+    duration = max(0.01, end - start)
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
+        "-i", video_path,
+        "-vf", f"fps=5/{duration:.3f},scale=320:180,format=gray",
+        "-frames:v", "5",
+        "-f", "rawvideo", "-pix_fmt", "gray",
+        "pipe:1"
     ]
 
     votes = []
     black_panel_votes = []
     black_panel_side_votes = []
 
-    for t in timestamps:
-        cmd = [
-            "ffmpeg", "-y", "-ss", str(t),
-            "-i", video_path,
-            "-frames:v", "1",
-            "-vf", "scale=320:180,format=gray",
-            "-f", "rawvideo", "-pix_fmt", "gray",
-            "pipe:1",
-        ]
-
-        res = _run_cmd(cmd)
-        if not res or not res.stdout:
-            continue
-
+    res = _run_cmd(cmd)
+    if res and res.stdout:
         data = res.stdout
-        mid = 160
+        frame_size = 320 * 180
+        frames = len(data) // frame_size
         
-        # Calculate left and right panel brightness
-        left_pixels = [data[i] for i in range(0, len(data), 320)]
-        right_pixels = [data[i] for i in range(mid, len(data), 320)]
-        
-        left = sum(left_pixels)
-        right = sum(right_pixels)
-        
-        # Check for split-screen: significant difference OR both panels active
-        # For split-screen, left and right should have similar variance
-        left_var = sum((x - left/len(left_pixels))**2 for x in left_pixels) / len(left_pixels)
-        right_var = sum((x - right/len(right_pixels))**2 for x in right_pixels) / len(right_pixels)
-        
-        # Split-screen detection: both panels have content (variance > threshold)
-        # If BOTH panels are active, we should DROP this segment (user preference)
-        is_split = left_var > 1000 and right_var > 1000
-        
-        # Check if right panel is black (guest camera off)
-        # Right panel average brightness < 25 AND low variance
-        right_avg = right / len(right_pixels) if right_pixels else 0
-        right_is_black = right_avg < 25 and right_var < 100
-        
-        # Check if LEFT panel is black (rare case)
-        left_avg = left / len(left_pixels) if left_pixels else 0
-        left_is_black = left_avg < 25 and left_var < 100
-        
-        if is_split:
-            votes.append("split")
-        if right_is_black:
-            black_panel_votes.append(True)
-            black_panel_side_votes.append("right")
-        if left_is_black:
-            black_panel_votes.append(True)
-            black_panel_side_votes.append("left")
+        for i in range(frames):
+            frame_data = data[i * frame_size : (i + 1) * frame_size]
+            frame_array = np.frombuffer(frame_data, dtype=np.uint8).reshape(180, 320)
+            left_half  = frame_array[:, :160]
+            right_half = frame_array[:, 160:]
+            
+            left_avg  = float(left_half.mean())
+            right_avg = float(right_half.mean())
+            left_var  = float(left_half.var())
+            right_var = float(right_half.var())
+            
+            is_split = left_var > 1000 and right_var > 1000
+            right_is_black = right_avg < 25 and right_var < 100
+            left_is_black = left_avg < 25 and left_var < 100
+            
+            if is_split:
+                votes.append("split")
+            if right_is_black:
+                black_panel_votes.append(True)
+                black_panel_side_votes.append("right")
+            if left_is_black:
+                black_panel_votes.append(True)
+                black_panel_side_votes.append("left")
 
     is_split_screen = votes.count("split") >= 2
     has_black_panel = len(black_panel_votes) >= 2
@@ -319,6 +302,25 @@ def analyze_clip(
     layout = detect_layout(video_path, start, end)
     silence = detect_dead_air(video_path, start, end)
 
+    # Sample a representative frame for face detection
+    mid_time = (start + end) / 2.0
+    face_crop = None
+    info = _get_video_dimensions(video_path)
+    
+    cmd = [
+        "ffmpeg", "-y", "-ss", f"{mid_time:.3f}",
+        "-i", video_path, "-frames:v", "1",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-vf", f"scale={info['width']}:{info['height']}",
+        "pipe:1"
+    ]
+    res = _run_cmd(cmd, timeout=10)
+    if res and res.stdout:
+        frame = np.frombuffer(res.stdout, dtype=np.uint8)
+        if frame.size == info["width"] * info["height"] * 3:
+            frame_bgr = frame.reshape((info["height"], info["width"], 3))
+            face_crop = detect_face_crop(frame_bgr, info["width"], info["height"])
+
     # Basic Tempo Analysis if transcript available
     is_fast_paced = False
     if transcript_segments:
@@ -340,8 +342,8 @@ def analyze_clip(
         black["black_ratio"] > 0.6  # >60% black frames (was 30%, too aggressive)
     )
     
-    # NEW: Mark segments with multiple active frames for DROPPING
-    should_drop = layout.get("is_multi_active_frame", False)
+    # NEW: Mark segments with multiple active frames OR mostly black frames for DROPPING
+    should_drop = layout.get("is_multi_active_frame", False) or black.get("is_mostly_black", False)
     
     strategy = {
         "use_solo_frame": should_use_solo,
@@ -349,6 +351,7 @@ def analyze_clip(
         "black_panel_side": layout.get("black_panel_side"),
         "is_multi_active_frame": layout.get("is_multi_active_frame", False),
         "should_drop": should_drop,  # NEW: Drop if both panels active
+        "active_crop": face_crop,
         "speed_factor": 1.25 if (silence["has_dead_air"] and not is_fast_paced) else 1.0,
         "apply_lighting_fix": lighting["needs_correction"],
         "lighting_filter": lighting.get("lighting_filter", ""),

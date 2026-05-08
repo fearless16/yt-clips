@@ -337,6 +337,10 @@ def batch_generate_seo(clips: List[Dict], domain: str = "cricket", region: str =
     except Exception as e:
         log.error(f"Batch SEO parsing failed: {e}")
 
+    if not results:
+        log.error("Batch SEO returned no results (AI failure or quota). Failing because SEO is required.")
+        raise ValueError("SEO Generation Failed: No point in uploading video without proper SEO.")
+
     # 3. Finalize & Merge with trends - CRITICAL FIX: Validate tags and inject trends
     hashtags = trend.get("tags", ["#Shorts", "#Cricket"])
     trend_topics_list = trend.get("topics", [])

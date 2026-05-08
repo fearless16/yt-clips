@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from utils.config import load_config
 from utils.logger import get_logger
 from frame_analyzer import analyze_clip
+from utils.subtitles import generate_ass_subtitles
 
 cfg = load_config()
 log = get_logger("export", cfg["logging"]["log_file"], cfg["logging"]["level"])
@@ -77,6 +78,8 @@ def _sanitize_strategy(raw_strategy) -> Dict:
         "lighting_filter": _sanitize_lighting_filter(raw_strategy.get("lighting_filter", "")),
         "skip_silence": bool(raw_strategy.get("skip_silence", False)),
         "active_segments": raw_strategy.get("active_segments", []) if isinstance(raw_strategy.get("active_segments"), list) else [],
+        "should_drop": bool(raw_strategy.get("should_drop", False)),
+        "is_multi_active_frame": bool(raw_strategy.get("is_multi_active_frame", False)),
     }
 
 def _parse_fps(rate: str) -> float:
@@ -252,12 +255,12 @@ def _build_audio_filter(
     filters.append("aresample=44100")
 
     tempo = speed
+    while tempo < 0.5:
+        filters.append("atempo=0.500000")
+        tempo *= 2.0
     while tempo > 2.0:
         filters.append("atempo=2.000000")
         tempo /= 2.0
-    while tempo < 0.5:
-        filters.append("atempo=0.500000")
-        tempo /= 0.5
 
     filters.append(f"atempo={tempo:.6f}")
     filters.append("loudnorm=I=-16:TP=-1.5:LRA=11")
@@ -463,6 +466,7 @@ def _build_enhance_stack(
     source_fps: float = 30.0,
     use_logo: Optional[bool] = None,
     output_duration: Optional[float] = None,
+    subtitles_path: Optional[str] = None,
 ) -> str:
     """
     Builds the filtergraph based on Frame Analysis decisions.
@@ -484,7 +488,7 @@ def _build_enhance_stack(
     
     # 1. Base Layer Construction with Enhancement Stack
     # Apply quality enhancements BEFORE cropping/scaling for best results
-    enhancement_chain = "hqdn3d=4:3:6:4.5,deband=1thr=0.02:2thr=0.02:range=16:blur=1,cropdetect=24:16:0,unsharp=5:5:1.0:5:5:0.0"
+    enhancement_chain = "hqdn3d=4:3:6:4.5,deband=1thr=0.02:2thr=0.02:range=16:blur=1,unsharp=5:5:1.0:5:5:0.0"
     
     if has_black_panel:
         # CRITICAL: Guest camera is OFF - crop to active panel only
@@ -571,12 +575,26 @@ def _build_enhance_stack(
     # 4. Add Branding / Logo overlay
     logo_path = cfg["thumbnail"].get("template_path", "channel_logo.png")
     logo_enabled = Path(logo_path).exists() if use_logo is None else use_logo
+    
+    is_graph = ";" in filter_base
+    scale_format = "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"
+    if subtitles_path:
+        # Escape colons and backslashes for FFmpeg filter syntax
+        safe_path = str(subtitles_path).replace("\\", "/").replace(":", "\\:")
+        scale_format += f",subtitles='{safe_path}'"
+
     if logo_enabled:
         # Position top-right with margin
-        filter_base = f"[v_src]{filter_base}[v_final];[1:v]scale=120:-1[logo];[v_final][logo]overlay=W-w-40:40,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[v_out]"
-        return filter_base
-    
-    return f"[v_src]{filter_base},scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p[v_out]"
+        return (
+            f"[v_src]{filter_base}[v_tmp];"
+            f"[1:v]scale=120:-1[logo];"
+            f"[v_tmp][logo]overlay=W-w-40:40,{scale_format}[v_out]"
+        )
+    else:
+        if is_graph:
+            return f"[v_src]{filter_base}[v_tmp];[v_tmp]{scale_format}[v_out]"
+        else:
+            return f"[v_src]{filter_base},{scale_format}[v_out]"
 
 def export_clip(
     video_path: str,
@@ -667,12 +685,25 @@ def export_clip(
         if has_audio else None
     )
 
+    # 3.5 Generate Subtitles (ASS)
+    output_file = Path(output_path)
+    ass_path = str(output_file.with_suffix('.ass'))
+    if transcript_segments:
+        log.info("[%s] Generating dynamic subtitles...", clip_id)
+        if generate_ass_subtitles(transcript_segments, ass_path, start, end):
+            pass
+        else:
+            ass_path = None
+    else:
+        ass_path = None
+
     # 4. Build filter chain
     v_filter = _build_enhance_stack(
         analysis,
         source_fps=info["fps"],
         use_logo=use_logo,
         output_duration=output_duration,
+        subtitles_path=ass_path,
     )
     video_filter_complex = (
         f"[0:v]trim=start={trim_start:.6f}:duration={clip_duration:.6f},"
@@ -732,7 +763,7 @@ def export_clip(
     cmd.extend(["-movflags", "+faststart"])
     cmd.append(output_path)
     
-    log.info(f"[{clip_id}] 🎬 Exporting {end-start:.1f}s segment (speed={speed}x, encoder={encoder}) ...")
+    log.info("[%s] 🎬 Exporting %.1fs segment (speed=%.2fx, encoder=%s) ...", clip_id, end-start, speed, encoder)
     
     try:
         success, error = _run_ffmpeg_with_retry(cmd, output_path, clip_id)
@@ -745,6 +776,7 @@ def export_clip(
                     source_fps=info["fps"],
                     use_logo=False,
                     output_duration=output_duration,
+                    subtitles_path=ass_path,
                 )
                 no_logo_complex = (
                     f"[0:v]trim=start={trim_start:.6f}:duration={clip_duration:.6f},"
@@ -754,7 +786,7 @@ def export_clip(
                 success, error = _run_ffmpeg_with_retry(fallback_source_cmd, output_path, clip_id, attempts=1)
                 if success:
                     dur = max(time.perf_counter() - t_start, 0.001)
-                    log.info(f"✅ [{clip_id}] Export complete in {dur:.1f}s ({output_duration/dur:.1f}x real-time, logo skipped)")
+                    log.info("✅ [%s] Export complete in %.1fs (%.1fx real-time, logo skipped)", clip_id, dur, output_duration/dur)
                     return output_path
 
             if encoder == "h264_nvenc":
@@ -763,18 +795,17 @@ def export_clip(
                 success, error = _run_ffmpeg_with_retry(fallback_cmd, output_path, clip_id, attempts=1)
                 if success:
                     dur = max(time.perf_counter() - t_start, 0.001)
-                    log.info(f"✅ [{clip_id}] Export complete in {dur:.1f}s ({output_duration/dur:.1f}x real-time, encoder=libx264 fallback)")
+                    log.info("✅ [%s] Export complete in %.1fs (%.1fx real-time, encoder=libx264 fallback)", clip_id, dur, output_duration/dur)
                     return output_path
-            log.error(f"FFmpeg failed for {clip_id}: {error}")
+            log.error("[%s] FFmpeg failed: %s", clip_id, error)
             return None
         
         dur = max(time.perf_counter() - t_start, 0.001)
-        output_duration = (end - start) / speed
-        log.info(f"✅ [{clip_id}] Export complete in {dur:.1f}s ({output_duration/dur:.1f}x real-time)")
+        log.info("✅ [%s] Export complete in %.1fs (%.1fx real-time)", clip_id, dur, output_duration/dur)
         return output_path
         
     except Exception as e:
-        log.error(f"Export crash for {clip_id}: {e}")
+        log.error("[%s] Export crash: %s", clip_id, e)
         return None
 
 def _parse_time_to_seconds(time_val) -> float:
