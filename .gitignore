@@ -36,3 +36,4 @@ remote_job_result.json
 graphify-out/
 scratch/
 tests/
+*pipeline.log

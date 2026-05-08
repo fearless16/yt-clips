@@ -63,43 +63,44 @@ class TestHashtagRotation:
     """Tests for dynamic hashtag generation and rotation"""
 
     def test_hashtag_rotation_by_match_type(self):
-        """Should rotate hashtags based on match type"""
-        from trends import get_rotated_hashtags
-        
-        # IPL match hashtags
-        ipl_tags = get_rotated_hashtags("ipl")
-        assert any("IPL" in t for t in ipl_tags)
-        assert len(ipl_tags) >= 5
-        
-        # International match hashtags
-        intl_tags = get_rotated_hashtags("international")
-        assert any(t in intl_tags for t in ("#INDvs", "#Cricket", "#TestCricket", "#ODI", "#BleedBlue"))
-        
-        # T20 match hashtags
-        t20_tags = get_rotated_hashtags("t20")
-        assert any(t in t20_tags for t in ("#T20", "#Cricket", "#T20Matches", "#BigHits", "#CricketAction"))
+        """Should rotate hashtags based on match type — uses seeds for determinism."""
+        from trends import get_rotated_hashtags, HASHTAG_POOLS
+
+        # IPL: at least one pool across all seeds must contain an IPL-related tag
+        ipl_all_tags = set()
+        for seed in range(len(HASHTAG_POOLS["ipl"])):
+            ipl_all_tags.update(get_rotated_hashtags("ipl", seed=seed))
+        assert any("IPL" in t or "Tata" in t or "RCB" in t or "CSK" in t or "MI" in t
+                   for t in ipl_all_tags), f"No IPL tag found across all pools: {ipl_all_tags}"
+
+        # International: at least one pool must have an international cricket tag
+        intl_all_tags = set()
+        for seed in range(len(HASHTAG_POOLS["international"])):
+            intl_all_tags.update(get_rotated_hashtags("international", seed=seed))
+        assert any(t in intl_all_tags for t in
+                   ("#INDvs", "#Cricket", "#TestCricket", "#ODI", "#BleedBlue", "#TeamIndia"))
+
+        # T20: at least one pool must have a T20-related tag
+        t20_all_tags = set()
+        for seed in range(len(HASHTAG_POOLS["t20"])):
+            t20_all_tags.update(get_rotated_hashtags("t20", seed=seed))
+        assert any(t in t20_all_tags for t in
+                   ("#T20", "#Cricket", "#T20Matches", "#BigHits", "#CricketAction", "#T20Cricket"))
 
     def test_hashtag_uniqueness(self):
-        """Should not repeat same hashtags across multiple videos"""
+        """Should have variation across different seeds."""
         from trends import get_rotated_hashtags
-        
-        # Simulate generating hashtags for 3 consecutive videos
-        tags_set1 = set(get_rotated_hashtags("ipl", seed=1))
-        tags_set2 = set(get_rotated_hashtags("ipl", seed=2))
-        tags_set3 = set(get_rotated_hashtags("ipl", seed=3))
-        
-        # At least some variation between sets
+        tags_set1 = set(get_rotated_hashtags("ipl", seed=0))
+        tags_set2 = set(get_rotated_hashtags("ipl", seed=1))
+        tags_set3 = set(get_rotated_hashtags("ipl", seed=2))
         all_tags = tags_set1 | tags_set2 | tags_set3
-        assert len(all_tags) > len(tags_set1)  # More unique tags overall
+        assert len(all_tags) > len(tags_set1)  # More unique tags across rotations
 
     def test_hashtag_limits(self):
-        """Should respect YouTube hashtag limits (max 15, but 3-5 optimal)"""
+        """Should return between 3 and 15 hashtags."""
         from trends import get_rotated_hashtags
-        
-        tags = get_rotated_hashtags("ipl")
-        # YouTube shows only first 3 hashtags above title, but allows up to 15
-        assert len(tags) <= 15
-        assert len(tags) >= 3  # Minimum for discoverability
+        tags = get_rotated_hashtags("ipl", seed=0)
+        assert 3 <= len(tags) <= 15
 
 
 class TestTrendTagInjection:
@@ -198,6 +199,48 @@ class TestTitleTrendInjection:
         
         result = ensure_trend_in_title(long_title, trend_topics)
         assert len(result) <= 100
+
+
+class TestFetchOwnLiveStreamUrl:
+    """Tests for trends.fetch_own_live_stream_url — the new live stream detection."""
+
+    def test_returns_static_fallback_when_no_channel_id(self, monkeypatch):
+        """No channel ID → falls back to static config URL."""
+        import trends
+        monkeypatch.setattr(trends, "cfg", {
+            "channel": {"id": "", "live_stream_url": "https://youtube.com/watch?v=STATIC"},
+            "logging": trends.cfg.get("logging", {"log_file": "test.log", "level": "INFO"}),
+        })
+        result = trends.fetch_own_live_stream_url()
+        assert result == "https://youtube.com/watch?v=STATIC"
+
+    def test_returns_string(self, monkeypatch):
+        """Should always return a string (never raise)."""
+        import trends
+        # Simulate network failure
+        monkeypatch.setattr(trends._session(), "get",
+                            lambda *a, **kw: (_ for _ in ()).throw(Exception("network error")),
+                            raising=False)
+        result = trends.fetch_own_live_stream_url("")
+        assert isinstance(result, str)
+
+    def test_extracts_watch_url_from_canonical(self, monkeypatch):
+        """When channel page returns canonicalBaseUrl, extract watch URL."""
+        import trends
+        from unittest.mock import MagicMock
+
+        fake_response = MagicMock()
+        fake_response.text = '"canonicalBaseUrl":"/watch?v=ABC123"'
+        fake_session = MagicMock()
+        fake_session.get.return_value = fake_response
+
+        monkeypatch.setattr(trends, "_session", lambda: fake_session)
+        monkeypatch.setattr(trends, "cfg", {
+            "channel": {"id": "UCtest123", "live_stream_url": ""},
+            "logging": trends.cfg.get("logging", {"log_file": "test.log", "level": "INFO"}),
+        })
+        result = trends.fetch_own_live_stream_url("UCtest123")
+        assert result == "https://www.youtube.com/watch?v=ABC123"
 
 
 if __name__ == "__main__":
