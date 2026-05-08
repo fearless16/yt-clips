@@ -49,7 +49,7 @@ class ThumbnailGenerator:
         from utils.ai_client import AIClient
         ai = AIClient()
         
-        if self.config.get("use_ai", True):
+        if self.config.get("use_ai", False):
             prompt = f"Cricket action shot: {title}. High contrast, 4K, professional YouTube Short style."
             success = ai.generate_image(prompt, output_path)
             if success:

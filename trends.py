@@ -34,8 +34,8 @@ CRICBUZZ_SEARCH = "https://www.cricbuzz.com/cricket-match/live-scores"
 
 COMPETITOR_CHANNELS = {
     "sports tak": "UCVXCo0W9pk2dDkEBNLhTt7A",
-    "iqbal sports": "UC91500_n_hM-wzH4y9g2MmA",
-    "ab cricinfo": "UCDp2t-2y-Wl-9J61t6001Ig",
+    "iqbal sports": "",  # Using Suggest API fallback
+    "ab cricinfo": "",   # Using Suggest API fallback
     "sports yaari": "UCjFw-0Vdfy2KW78NClGECXw"
 }
 
@@ -208,8 +208,8 @@ def parse_cricbuzz_scorecard(html: str) -> str:
     try:
         soup = BeautifulSoup(html, 'lxml')
         
-        # Find score sections
-        score_divs = soup.find_all('div', class_='team-score')
+        # Find score sections using robust selectors
+        score_divs = soup.select('.cb-hm-scg-bat-txt, .cb-hm-scg-bwl-txt, .team-score, .ui-score, .cb-font-16')
         scores = []
         
         for div in score_divs[:2]:  # Max 2 teams
@@ -264,7 +264,7 @@ def fetch_cricbuzz_live_score(query: str, match_type: str = "ipl") -> Dict:
         }
         
         session = _session()
-        response = session.get(search_url, headers=headers, timeout=10)
+        response = session.get(search_url, headers=headers, timeout=5)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'lxml')
@@ -303,7 +303,7 @@ def fetch_cricbuzz_live_score(query: str, match_type: str = "ipl") -> Dict:
         match_url = f"{CRICBUZZ_BASE}{match_link}" if match_link.startswith('/') else match_link
         log.info(f"🏏 Fetching scorecard from: {match_url}")
         
-        match_response = session.get(match_url, headers=headers, timeout=10)
+        match_response = session.get(match_url, headers=headers, timeout=5)
         match_response.raise_for_status()
         
         scorecard = parse_cricbuzz_scorecard(match_response.text)
@@ -387,6 +387,21 @@ def fetch_competitor_signals() -> List[str]:
     return _extract_tokens(titles, limit=16)
 
 
+def fetch_smart_search_summary(query: str) -> str:
+    """Fallback smart search to act like AI overview without quota"""
+    try:
+        url = f"https://www.bing.com/search?q={urllib.parse.quote(query + ' cricket match scorecard')}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        r = _session().get(url, headers=headers, timeout=5)
+        soup = BeautifulSoup(r.text, 'html.parser')
+        snippets = [s.get_text(strip=True) for s in soup.select(".b_algo p, .b_ans, .b_algo .b_vlist2col")]
+        if snippets:
+            return " ".join(snippets[:2])
+    except Exception as e:
+        log.warning(f"Smart search fallback failed: {e}")
+    return ""
+
+
 def fetch_match_scorecard(query: str) -> str:
     """
     Fetch a summary of the match scorecard from Cricbuzz.
@@ -418,9 +433,15 @@ def fetch_match_scorecard(query: str) -> str:
             log.info(f"✅ Live scorecard fetched: {full_context[:80]}...")
             return full_context
         else:
-            log.warning("Cricbuzz fetch returned no scorecard, using basic context")
+            log.warning("Cricbuzz fetch returned no scorecard, trying smart search fallback")
+            smart_summary = fetch_smart_search_summary(query)
+            if smart_summary:
+                return f"{base_context}: {smart_summary[:200]}"
     except Exception as e:
         log.warning(f"Cricbuzz integration failed: {e}")
+        smart_summary = fetch_smart_search_summary(query)
+        if smart_summary:
+            return f"{base_context}: {smart_summary[:200]}"
     
     # Fallback to basic context
     return f"Match Context: {base_context}"

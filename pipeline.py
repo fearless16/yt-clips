@@ -41,6 +41,7 @@ def run(
     auto_schedule: bool = False,
 ) -> None:
     start_total = time.perf_counter()
+    failures = []
 
     paths   = cfg["paths"]
     dl_cfg  = cfg["download"]
@@ -156,6 +157,7 @@ def run(
             log.info("Phase 5 complete in %.1f s", time.perf_counter() - t0)
         except Exception as e:
             log.error("Sync failed: %s", e)
+            failures.append({"phase": "Drive Sync", "error": str(e)})
     elif skip_sync:
         log.info("Skipping Drive sync (--skip-sync)")
 
@@ -187,6 +189,7 @@ def run(
                     uploaded_count += 1
                 except Exception as e:
                     log.error("Upload failed for %s: %s", clip_path.name, e)
+                    failures.append({"phase": "YouTube Upload", "clip_id": clip_path.name, "error": str(e)})
             else:
                 log.warning("No metadata found for %s — skipping upload.", clip_path.name)
 
@@ -195,6 +198,24 @@ def run(
 
     # ── Summary ────────────────────────────────────────────────────────────────
     total = time.perf_counter() - start_total
+    
+    try:
+        from utils.reports import generate_run_report
+        export_dir_path = str(exported[0].parent) if exported else str(Path(cfg["paths"]["shorts"]))
+        if not Path(export_dir_path).exists():
+            Path(export_dir_path).mkdir(parents=True, exist_ok=True)
+            
+        report_file = generate_run_report(
+            export_dir=export_dir_path,
+            pipeline_duration_sec=total,
+            exported_clips=exported,
+            uploaded_clips=uploaded_count,
+            failures=failures
+        )
+        log.info("📄 Pipeline Report generated: %s", report_file)
+    except Exception as e:
+        log.error("Failed to generate run report: %s", e)
+
     log.info("─" * 60)
     log.info("  PIPELINE COMPLETE")
     log.info("  Total time : %.1f s (%.1f min)", total, total / 60)
@@ -229,14 +250,14 @@ Examples:
 """,
     )
     parser.add_argument("url", help="YouTube URL (VOD or stream)")
-    parser.add_argument("--skip-download",   action="store_true", help="Skip Phase 1 (use existing input/video.mp4)")
-    parser.add_argument("--skip-transcribe", action="store_true", help="Skip Phase 2 (use existing transcript)")
-    parser.add_argument("--skip-highlight",  action="store_true", help="Skip Phase 3 (use existing highlights)")
-    parser.add_argument("--skip-export",     action="store_true", help="Skip Phase 4 (use existing clips in shorts/)")
-    parser.add_argument("--skip-sync",       action="store_true", help="Skip Phase 5 (Drive Sync)")
-    parser.add_argument("--sync",            action="store_true", help="Auto-sync exported Shorts to Google Drive")
-    parser.add_argument("--upload",          action="store_true", help="Auto-upload exported Shorts to YouTube")
-    parser.add_argument("--schedule",        action="store_true", help="Auto-schedule uploads (2-hour intervals)")
+    parser.add_argument("-skip-download", "--skip-download",   action="store_true", help="Skip Phase 1 (use existing input/video.mp4)")
+    parser.add_argument("-skip-transcribe", "--skip-transcribe", action="store_true", help="Skip Phase 2 (use existing transcript)")
+    parser.add_argument("-skip-highlight", "--skip-highlight",  action="store_true", help="Skip Phase 3 (use existing highlights)")
+    parser.add_argument("-skip-export", "--skip-export",     action="store_true", help="Skip Phase 4 (use existing clips in shorts/)")
+    parser.add_argument("-skip-sync", "--skip-sync",       action="store_true", help="Skip Phase 5 (Drive Sync)")
+    parser.add_argument("-sync", "--sync",            action="store_true", help="Auto-sync exported Shorts to Google Drive")
+    parser.add_argument("-upload", "--upload",          action="store_true", help="Auto-upload exported Shorts to YouTube")
+    parser.add_argument("-schedule", "--schedule",        action="store_true", help="Auto-schedule uploads (2-hour intervals)")
     args = parser.parse_args()
 
     run(

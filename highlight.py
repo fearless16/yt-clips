@@ -1,16 +1,3 @@
-"""
-highlight.py — Phase 3: Detect highlight moments using simple heuristics.
-
-Heuristics used (no LLMs, no emotion AI):
-  1. Audio energy spike  — segments where RMS energy is significantly above average
-  2. Fast speech         — segments whose WPM exceeds config threshold
-  3. Silence density     — penalise segments with long internal silences
-
-Usage:
-    python highlight.py [--transcript transcripts/video.json] [--video input/video.mp4]
-                        [--output highlights/highlights.yaml]
-"""
-
 import argparse
 import json
 import math
@@ -21,7 +8,9 @@ import tempfile
 import wave
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
+import re
 
+import numpy as np
 import yaml  # type: ignore
 
 from utils.config import load_config
@@ -83,11 +72,9 @@ def _extract_audio_rms(video_path: str, chunk_seconds: float = 1.0) -> List[Tupl
                 if n_samples == 0:
                     break
 
-                samples = struct.unpack(f"<{n_samples}h", raw)
-
                 # Compute RMS
-                sum_sq = sum(s * s for s in samples)
-                rms = math.sqrt(sum_sq / n_samples) / 32768.0  # Normalize to 0-1
+                arr = np.frombuffer(raw, dtype=np.int16).astype(np.float32)
+                rms = float(np.sqrt(np.mean(arr**2))) / 32768.0
 
                 rms_values.append((timestamp, rms))
                 timestamp += chunk_seconds
@@ -202,7 +189,7 @@ def _score_segment(
         "wicket", "six", "four", "boundary", "out", "catch",
         "shot", "brilliant", "superb", "excellent", "fantastic",
     }
-    words_lower = set(text.lower().split())
+    words_lower = set(re.findall(r'\b\w+\b', text.lower()))
     hits = len(words_lower & reaction_words)
     score += hits * 0.4
 
@@ -284,8 +271,7 @@ def detect_highlights(
         avg_rms = sum(all_rms) / len(all_rms)
         max_rms = max(all_rms)
         # Standard deviation for better threshold
-        variance = sum((v - avg_rms) ** 2 for v in all_rms) / len(all_rms)
-        std_rms = math.sqrt(variance)
+        std_rms = float(np.std(all_rms))
     else:
         avg_rms = 1.0
         max_rms = 1.0
@@ -346,6 +332,8 @@ def detect_highlights(
     # Enforce max duration after merge
     for w in merged:
         if w["end"] - w["start"] > max_dur:
+            center = (w["start"] + w["end"]) / 2.0
+            w["start"] = max(0.0, center - max_dur / 2.0)
             w["end"] = w["start"] + max_dur
 
     # Sort by score and take top N
@@ -357,14 +345,15 @@ def detect_highlights(
     intro_segments = [w for w in merged if w["start"] < 30 and w["score"] >= intro_threshold]
     
     top = []
+    remaining = list(merged)
     # Add best intro segment if exists
     if intro_segments:
         best_intro = max(intro_segments, key=lambda w: w["score"])
         top.append(best_intro)
+        remaining.remove(best_intro)
         log.info("🎬 FORCED INTRO: Including highlight from start (%.2f score)", best_intro["score"])
     
     # Fill remaining slots with highest scoring segments (excluding already selected)
-    remaining = [w for w in merged if w not in top]
     remaining_slots = h_cfg["max_clips"] - len(top)
     top.extend(remaining[:remaining_slots])
     

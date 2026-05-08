@@ -5,11 +5,7 @@ Test suite for clipping quality improvements:
 3. Dynamic layout stacking vs drop decision
 """
 import pytest
-import sys
-import os
 from pathlib import Path
-
-sys.path.insert(0, '/workspace')
 
 from frame_analyzer import detect_layout, detect_black_frames, analyze_clip
 from highlight import _score_segment, detect_highlights
