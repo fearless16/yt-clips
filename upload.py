@@ -122,7 +122,8 @@ def upload_video(
 
     title = meta.get("title", "Cricket Highlights #Shorts")
     description = meta.get("description", "")
-    tags = meta.get("tags", [])
+    # search_terms are the discoverability tags for YouTube (separate from hashtags)
+    search_terms = meta.get("search_terms", meta.get("tags", []))
 
     log.info(f"🚀 Uploading to YouTube: {title}...")
     if publish_at:
@@ -133,7 +134,7 @@ def upload_video(
         "snippet": {
             "title": title[:100],  # YouTube title limit
             "description": description[:5000],  # YouTube description limit
-            "tags": tags[:500],  # YouTube tags limit
+            "tags": search_terms[:500],  # YouTube tags limit
             "categoryId": cfg["youtube"]["category_id"],
         },
         "status": {

@@ -1,11 +1,16 @@
 """seo.py — Hybrid Batch SEO generation for Indian cricket live Shorts.
 
-Key upgrades:
-- 3 title variants per clip (A/B/C) using proven high-CTR formulas
-- thumbnail_text field: bold 3-4 word overlay copy for each clip
-- Live stream CTA injected into every description
-- Smarter trend injection (curiosity-gap first, trend second)
-- Tag validation: semantic specificity, not just word count
+SEO Output Format:
+  1. title (+ title_variants A/B/C)
+  2. description — human-sounding, emotional, no AI phrasing
+  3. search_terms — highly searchable phrases for YouTube tags
+  4. hashtags — 3-5 match/team/tournament specific
+
+Rules:
+  - search_terms and hashtags are SEPARATE. Never reuse hashtags as search_terms.
+  - search_terms drive discoverability (teams, players, moments, intent).
+  - hashtags drive category/trending (match, tournament, Shorts).
+  - Description: emotional hook, core moment early, natural CTA.
 """
 import json
 import re
@@ -119,12 +124,13 @@ def validate_emoji_usage(text: str) -> bool:
     return len(emoji_pattern.findall(text)) <= 5
 
 
-def _validate_tags(tags: List[str], min_words: int = 2) -> List[str]:
-    if not tags:
+def _validate_search_terms(terms: List[str], min_words: int = 2) -> List[str]:
+    """Validate search terms: must be 2+ words, not generic spam."""
+    if not terms:
         return []
     valid = []
-    for tag in tags:
-        tl = tag.lower().strip()
+    for term in terms:
+        tl = term.lower().strip()
         if not tl:
             continue
         if len(tl.split()) < min_words:
@@ -133,7 +139,7 @@ def _validate_tags(tags: List[str], min_words: int = 2) -> List[str]:
             continue
         if set(tl.split()).issubset(GENERIC_TAGS):
             continue
-        valid.append(tag)
+        valid.append(term)
     return valid
 
 
@@ -226,26 +232,44 @@ For EACH clip return:
    - Variant C MUST reference the live stream
    - Use Hinglish in at least one variant
    - NO generic openers like "Amazing shot" or "Incredible moment"
-   - Trend topic inclusion: only if it fits naturally (don't force it)
 
 2. **thumbnail_text** (3-4 words, ALL CAPS, punchy — for text overlay on thumbnail):
    Examples: "KOHLI NE KAR DIYA", "IMPOSSIBLE CATCH 😱", "YEH KYA THA YAAR"
 
 3. **description** (80-120 words):
+   Rules:
+   - Human sounding ONLY. No robotic AI phrasing.
+   - No repetitive questions. No keyword stuffing.
+   - Keep emotional energy high.
    - Line 1: Hindi/Hinglish emotional hook (e.g., "Kya shot tha yaar! 🔥")
-   - Lines 2-3: Exact moment — who bowled, what delivery, what shot, match context (use scorecard)
+   - Lines 2-3: Exact moment — who bowled, what delivery, what shot, match context
    - Line 4: Why it mattered (stats, pressure, rivalry)
-   - Line 5 (CTA): "{live_cta}" — then ask them to subscribe for live updates
-   - End with 1-2 hashtags only
+   - Line 5 (CTA): "{live_cta}" — natural, not forced
+   - End with 1-2 hashtags max (from the hashtags field)
 
-4. **tags** (15-20 long-tail, lowercase, comma-separated):
-   - MUST be 2+ words each
-   - Include: player names, team combo, match situation, format, year
-   - Include Hindi variants: "kohli six ipl hindi", "rcb vs csk 2026 highlights hindi"
-   - NEVER use: "cricket", "shorts", "viral", "trending", "highlights" alone
+4. **search_terms** (15-20 highly searchable phrases, lowercase, comma-separated):
+   Purpose: These go into YouTube tags for discoverability.
+   Mix of:
+   - Short-tail keywords: "kohli six", "ipl live"
+   - Long-tail keywords: "virat kohli cover drive ipl 2026", "rcb vs csk last over"
+   - Trending match queries: "ipl 2026 live", "rcb vs csk highlights"
+   - Cricket audience intent: "cricket shorts", "ipl clutch moments", "last over thriller"
+   Must cover: teams, players, tournaments, match moments, viral reactions, commentary phrases.
+   Rules:
+   - Each term MUST be 2+ words
+   - NEVER use single generic words: "cricket", "shorts", "viral", "trending"
+   - Optimized SEPARATELY from hashtags — do NOT reuse hashtags as search terms
+
+5. **hashtags** (exactly 3-5, with # prefix):
+   Prioritize: match name, teams, tournament, #Shorts
+   Examples: ["#RCBvsCSK", "#IPL2026", "#CricketShorts", "#Kohli"]
+   Rules:
+   - Only 3-5. No more.
+   - No generic spam hashtags like #viral #trending
+   - Must be specific to this match/moment
 
 Return a JSON object:
-{{"clips_seo": [{{"clip_id": "...", "title_variants": ["A","B","C"], "thumbnail_text": "...", "description": "...", "tags": [...]}}]}}
+{{"clips_seo": [{{"clip_id": "...", "title_variants": ["A","B","C"], "thumbnail_text": "...", "description": "...", "search_terms": [...], "hashtags": [...]}}]}}
 """
 
     log.info("🚀 Sending Batch SEO request to AI (%d clips)...", len(clips))
@@ -264,23 +288,32 @@ Return a JSON object:
         log.error("Batch SEO returned no results. Raising — SEO is required.")
         raise ValueError("SEO Generation Failed: No results from AI.")
 
-    hashtags = trend.get("tags", ["#Shorts", "#Cricket"])
+    hashtags_from_trend = trend.get("tags", ["#Shorts", "#Cricket"])
     trend_topics_list = trend.get("topics", [])
 
     final_results = []
     for c in clips:
         seo = next((item for item in results if item["clip_id"] == c["clip_id"]), {})
 
-        raw_tags = seo.get("tags", [])
-        validated_tags = _validate_tags(raw_tags, min_words=2)
+        # Search terms: validated, trend-injected
+        raw_terms = seo.get("search_terms", seo.get("tags", []))  # fallback to tags if AI used old key
+        validated_terms = _validate_search_terms(raw_terms, min_words=2)
 
-        # Extract player name from first title variant for combo tags
+        # Extract player name for combo search terms
         variants = seo.get("title_variants", [])
         primary_title = variants[0] if variants else seo.get("title", f"Cricket Highlights {c['clip_id']}")
         names = re.findall(r'\b[A-Z][a-z]+\b', primary_title)
         player_name = names[0].lower() if names else ""
 
-        combined_tags = inject_trend_topics_into_tags(validated_tags, trend_topics_list, player_name)
+        combined_terms = inject_trend_topics_into_tags(validated_terms, trend_topics_list, player_name)
+
+        # Hashtags: from AI (3-5) with fallback to trend hashtags
+        ai_hashtags = seo.get("hashtags", [])
+        if isinstance(ai_hashtags, list) and len(ai_hashtags) >= 3:
+            # Ensure # prefix, cap at 5
+            hashtags = [h if h.startswith("#") else f"#{h}" for h in ai_hashtags][:5]
+        else:
+            hashtags = hashtags_from_trend[:5]
 
         # Ensure trend in primary title (non-destructive)
         title_a = ensure_trend_in_title(primary_title, trend_topics_list)
@@ -289,12 +322,11 @@ Return a JSON object:
 
         final_results.append({
             "clip_id": c["clip_id"],
-            # Upload with title_a by default; swap to B or C based on CTR after 48h
             "title": title_a,
             "title_variants": [title_a, title_b, title_c],
             "thumbnail_text": seo.get("thumbnail_text", "WATCH THIS NOW"),
             "description": seo.get("description", "")[:5000],
-            "tags": combined_tags[:30],
+            "search_terms": combined_terms[:30],
             "hashtags": hashtags,
             "trend_topics": trend_topics_list,
             "live_stream_url": live_stream_url,
