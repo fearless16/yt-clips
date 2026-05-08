@@ -163,10 +163,74 @@ def analyze_lighting(samples: List[Dict]) -> Dict:
 
 # ─── Layout Detection (Multi-frame voting) ──────────────────────────────────
 
+def _has_vertical_divider(frame_array: np.ndarray, width: int) -> bool:
+    """
+    Check for a clear vertical divider line near the center of the frame.
+    A true split-screen (OBS/Zoom) has a sharp brightness discontinuity at the center.
+    Background posters or screen shares do NOT have this.
+    """
+    center = width // 2
+    # Sample a narrow band (±3 pixels) around the center
+    band_width = 3
+    left_band = frame_array[:, max(0, center - band_width - 5):max(0, center - band_width)]
+    right_band = frame_array[:, center + band_width:center + band_width + 5]
+    center_band = frame_array[:, center - band_width:center + band_width]
+
+    if left_band.size == 0 or right_band.size == 0 or center_band.size == 0:
+        return False
+
+    # Divider = center band is significantly darker/different from both sides
+    center_avg = float(center_band.mean())
+    left_avg = float(left_band.mean())
+    right_avg = float(right_band.mean())
+
+    # The center strip should be notably darker (black divider line)
+    # OR there should be a sharp gradient across the center
+    has_dark_divider = center_avg < min(left_avg, right_avg) - 30
+    has_sharp_edge = abs(left_avg - right_avg) > 40
+
+    return has_dark_divider or has_sharp_edge
+
+
+def _detect_faces_per_half(frame_array: np.ndarray, width: int) -> dict:
+    """
+    Detect faces in left and right halves separately.
+    Returns count of faces on each side.
+    """
+    left_half = frame_array[:, :width // 2]
+    right_half = frame_array[:, width // 2:]
+
+    left_faces = FACE_CASCADE.detectMultiScale(left_half, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+    right_faces = FACE_CASCADE.detectMultiScale(right_half, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+
+    return {
+        "left": len(left_faces),
+        "right": len(right_faces),
+    }
+
+
+def _is_screen_share_frame(frame_array: np.ndarray) -> bool:
+    """
+    Heuristic: screen share frames tend to have high edge density
+    (text, UI elements) and relatively uniform brightness bands.
+    """
+    # High variance overall = lots of content
+    overall_var = float(frame_array.var())
+    # Compute horizontal gradient (edges)
+    grad = np.abs(np.diff(frame_array.astype(np.int16), axis=1))
+    edge_density = float(grad.mean())
+
+    # Screen shares: moderate-high variance + high edge density + no strong center divider
+    return overall_var > 800 and edge_density > 8
+
+
 def detect_layout(video_path: str, start: float, end: float) -> Dict:
     """
     Detects if video has split-screen layout (e.g., host + guest side-by-side).
-    Also detects if one panel is black (guest camera off).
+    Also detects if one panel is black (guest camera off) or screen sharing.
+
+    CRITICAL: Requires BOTH a vertical divider AND faces on both halves to
+    flag as multi-active. Background posters / screen shares do NOT count.
     """
     duration = max(0.01, end - start)
     cmd = [
@@ -179,33 +243,32 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
         "pipe:1"
     ]
 
-    votes = []
+    divider_votes = []
+    dual_face_votes = []
     black_panel_votes = []
     black_panel_side_votes = []
+    screen_share_votes = []
 
     res = _run_cmd(cmd)
     if res and res.stdout:
         data = res.stdout
         frame_size = 320 * 180
         frames = len(data) // frame_size
-        
+
         for i in range(frames):
             frame_data = data[i * frame_size : (i + 1) * frame_size]
             frame_array = np.frombuffer(frame_data, dtype=np.uint8).reshape(180, 320)
             left_half  = frame_array[:, :160]
             right_half = frame_array[:, 160:]
-            
+
             left_avg  = float(left_half.mean())
             right_avg = float(right_half.mean())
             left_var  = float(left_half.var())
             right_var = float(right_half.var())
-            
-            is_split = left_var > 1000 and right_var > 1000
+
             right_is_black = right_avg < 25 and right_var < 100
             left_is_black = left_avg < 25 and left_var < 100
-            
-            if is_split:
-                votes.append("split")
+
             if right_is_black:
                 black_panel_votes.append(True)
                 black_panel_side_votes.append("right")
@@ -213,22 +276,57 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
                 black_panel_votes.append(True)
                 black_panel_side_votes.append("left")
 
-    is_split_screen = votes.count("split") >= 2
+            # Check for vertical divider (true split-screen signature)
+            if _has_vertical_divider(frame_array, 320):
+                divider_votes.append(True)
+
+            # Check for faces on both sides (requires real people, not posters)
+            face_counts = _detect_faces_per_half(frame_array, 320)
+            if face_counts["left"] > 0 and face_counts["right"] > 0:
+                dual_face_votes.append(True)
+
+            # Check for screen share
+            if _is_screen_share_frame(frame_array):
+                screen_share_votes.append(True)
+
     has_black_panel = len(black_panel_votes) >= 2
-    
+
+    # TRUE split-screen requires BOTH: vertical divider AND faces on both halves
+    # This prevents false positives from background posters or screen sharing
+    has_divider = len(divider_votes) >= 2
+    has_dual_faces = len(dual_face_votes) >= 2
+    is_split_screen = has_divider and has_dual_faces
+
+    is_screen_share = len(screen_share_votes) >= 3 and not is_split_screen
+
     # Determine which side is black (majority vote)
     black_panel_side = None
     if has_black_panel:
         right_count = black_panel_side_votes.count("right")
         left_count = black_panel_side_votes.count("left")
         black_panel_side = "right" if right_count >= left_count else "left"
-    
+
+    # Determine layout type
+    if is_screen_share:
+        layout_type = "screen_share"
+    elif is_split_screen:
+        layout_type = "split"
+    else:
+        layout_type = "solo"
+
+    log.debug(
+        "Layout: type=%s divider=%d/%d dual_face=%d/%d screen_share=%d/%d black_panel=%s",
+        layout_type, len(divider_votes), 5, len(dual_face_votes), 5,
+        len(screen_share_votes), 5, black_panel_side,
+    )
+
     return {
-        "layout_type": "split" if is_split_screen else "solo",
-        "prefer_solo": not is_split_screen,
+        "layout_type": layout_type,
+        "prefer_solo": layout_type != "split",
         "has_black_panel": has_black_panel,
         "black_panel_side": black_panel_side,
-        "is_multi_active_frame": is_split_screen and not has_black_panel  # NEW: Both panels active
+        "is_multi_active_frame": is_split_screen and not has_black_panel,
+        "is_screen_share": is_screen_share,
     }
 
 
@@ -333,24 +431,37 @@ def analyze_clip(
         is_fast_paced = wpm > 150 # Simple heuristic
         log.debug("[%s] Tempo: %.1f WPM (fast=%s)", clip_id, wpm, is_fast_paced)
 
-    # CRITICAL FIX: Only use solo frame if there's NO split screen OR if one panel is black
-    # If split screen with both panels active, DROP this segment (user preference)
-    # If split screen with black panel, use solo mode to show only the active panel
+    # Layout decision matrix:
+    # - solo / screen_share → use_solo_frame (center crop or vertical stack)
+    # - split + black panel → crop to active panel
+    # - split + both active (true dual-cam) → DROP
+    # Screen share segments are ALWAYS kept (vertical stack mode)
+    is_screen_share = layout.get("is_screen_share", False)
+    
     should_use_solo = (
-        layout["prefer_solo"] or  # No split screen detected
-        layout.get("has_black_panel", False) or  # One panel is black (guest camera off)
-        black["black_ratio"] > 0.6  # >60% black frames (was 30%, too aggressive)
+        layout["prefer_solo"] or
+        layout.get("has_black_panel", False) or
+        black["black_ratio"] > 0.6
     )
     
-    # NEW: Mark segments with multiple active frames OR mostly black frames for DROPPING
-    should_drop = layout.get("is_multi_active_frame", False) or black.get("is_mostly_black", False)
+    # Only drop if CONFIRMED multi-active (divider + dual faces) or mostly black
+    # NEVER drop screen share segments
+    should_drop = (
+        (layout.get("is_multi_active_frame", False) and not is_screen_share)
+        or black.get("is_mostly_black", False)
+    )
+    
+    # Screen share → force vertical stack (blurred bg + sharp center)
+    use_vertical_stack = is_screen_share
     
     strategy = {
-        "use_solo_frame": should_use_solo,
+        "use_solo_frame": should_use_solo and not use_vertical_stack,
+        "use_vertical_stack": use_vertical_stack,
         "has_black_panel": layout.get("has_black_panel", False),
         "black_panel_side": layout.get("black_panel_side"),
         "is_multi_active_frame": layout.get("is_multi_active_frame", False),
-        "should_drop": should_drop,  # NEW: Drop if both panels active
+        "is_screen_share": is_screen_share,
+        "should_drop": should_drop,
         "active_crop": face_crop,
         "speed_factor": 1.25 if (silence["has_dead_air"] and not is_fast_paced) else 1.0,
         "apply_lighting_fix": lighting["needs_correction"],

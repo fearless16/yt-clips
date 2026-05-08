@@ -70,6 +70,7 @@ def _sanitize_strategy(raw_strategy) -> Dict:
 
     return {
         "use_solo_frame": bool(raw_strategy.get("use_solo_frame", False)),
+        "use_vertical_stack": bool(raw_strategy.get("use_vertical_stack", False)),
         "has_black_panel": bool(raw_strategy.get("has_black_panel", False)),
         "black_panel_side": raw_strategy.get("black_panel_side"),
         "active_crop": active_crop,
@@ -80,6 +81,7 @@ def _sanitize_strategy(raw_strategy) -> Dict:
         "active_segments": raw_strategy.get("active_segments", []) if isinstance(raw_strategy.get("active_segments"), list) else [],
         "should_drop": bool(raw_strategy.get("should_drop", False)),
         "is_multi_active_frame": bool(raw_strategy.get("is_multi_active_frame", False)),
+        "is_screen_share": bool(raw_strategy.get("is_screen_share", False)),
     }
 
 def _parse_fps(rate: str) -> float:
@@ -466,7 +468,6 @@ def _build_enhance_stack(
     source_fps: float = 30.0,
     use_logo: Optional[bool] = None,
     output_duration: Optional[float] = None,
-    subtitles_path: Optional[str] = None,
 ) -> str:
     """
     Builds the filtergraph based on Frame Analysis decisions.
@@ -479,6 +480,7 @@ def _build_enhance_stack(
     strategy = analysis.get("export_strategy", {}) if isinstance(analysis, dict) else {}
     strategy = _sanitize_strategy(strategy)
     use_solo = strategy.get("use_solo_frame", False)
+    use_vertical_stack = strategy.get("use_vertical_stack", False)
     has_black_panel = strategy.get("has_black_panel", False)
     black_panel_side = strategy.get("black_panel_side")
     active_crop = strategy.get("active_crop")
@@ -510,6 +512,16 @@ def _build_enhance_stack(
                 f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
                 f"crop={target_w}:{target_h}"
             )
+    elif use_vertical_stack:
+        # Screen share or explicit vertical stack mode
+        # Blurred background + sharp center content — best for screen shares
+        log.debug("VERTICAL STACK mode (screen share / wide content)")
+        filter_base = (
+            f"{enhancement_chain},split=2[bg][fg];"
+            f"[bg]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,crop={target_w}:{target_h},boxblur=20:10[bg_fin];"
+            f"[fg]scale={target_w}:-1:flags=lanczos,crop={target_w}:min(ih\\,{target_h})[fg_scaled];"
+            f"[bg_fin][fg_scaled]overlay=(W-w)/2:(H-h)/2"
+        )
     elif use_solo:
         log.debug("SOLO frame mode (full-screen single panel)")
         if active_crop:
@@ -578,10 +590,6 @@ def _build_enhance_stack(
     
     is_graph = ";" in filter_base
     scale_format = "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"
-    if subtitles_path:
-        # Escape colons and backslashes for FFmpeg filter syntax
-        safe_path = str(subtitles_path).replace("\\", "/").replace(":", "\\:")
-        scale_format += f",subtitles='{safe_path}'"
 
     if logo_enabled:
         # Position top-right with margin
@@ -685,17 +693,11 @@ def export_clip(
         if has_audio else None
     )
 
-    # 3.5 Generate Subtitles (ASS)
+    # 3.5 Generate Subtitles (ASS) — for processing/SEO only, NOT burned into video
     output_file = Path(output_path)
     ass_path = str(output_file.with_suffix('.ass'))
     if transcript_segments:
-        log.info("[%s] Generating dynamic subtitles...", clip_id)
-        if generate_ass_subtitles(transcript_segments, ass_path, start, end):
-            pass
-        else:
-            ass_path = None
-    else:
-        ass_path = None
+        generate_ass_subtitles(transcript_segments, ass_path, start, end)
 
     # 4. Build filter chain
     v_filter = _build_enhance_stack(
@@ -703,7 +705,6 @@ def export_clip(
         source_fps=info["fps"],
         use_logo=use_logo,
         output_duration=output_duration,
-        subtitles_path=ass_path,
     )
     video_filter_complex = (
         f"[0:v]trim=start={trim_start:.6f}:duration={clip_duration:.6f},"
@@ -776,7 +777,6 @@ def export_clip(
                     source_fps=info["fps"],
                     use_logo=False,
                     output_duration=output_duration,
-                    subtitles_path=ass_path,
                 )
                 no_logo_complex = (
                     f"[0:v]trim=start={trim_start:.6f}:duration={clip_duration:.6f},"
@@ -865,8 +865,25 @@ def export_all(highlights, video_path: str, transcript_path: Optional[str] = Non
 
     items.sort(key=lambda x: x[1])
     
-    # FFmpeg already uses all available threads; running clips serially avoids CPU oversubscription.
+    # PRE-FILTER: Run frame analysis upfront to reject bad clips before expensive FFmpeg work.
+    # This prevents wasting GPU time on clips that would be dropped inside export_clip.
+    filtered_items = []
     for clip_id, start, end in items:
+        analysis = analyze_clip(video_path, start, end, transcript_segments=transcript_segments, clip_id=clip_id)
+        strategy = analysis.get("export_strategy", {})
+        
+        if strategy.get("should_drop", False):
+            layout_type = analysis.get("layout", {}).get("layout_type", "unknown")
+            log.info("[%s] PRE-FILTERED: dropping segment (layout=%s, multi_active=%s)",
+                     clip_id, layout_type, strategy.get("is_multi_active_frame", False))
+            continue
+        
+        filtered_items.append((clip_id, start, end, analysis))
+    
+    log.info("Pre-filter: %d/%d clips passed analysis", len(filtered_items), len(items))
+    
+    # FFmpeg already uses all available threads; running clips serially avoids CPU oversubscription.
+    for clip_id, start, end, analysis in filtered_items:
         out_file = out_dir / f"{clip_id}.mp4"
 
         path = export_clip(
@@ -876,6 +893,7 @@ def export_all(highlights, video_path: str, transcript_path: Optional[str] = Non
             str(out_file),
             clip_id,
             transcript_segments=transcript_segments,
+            analysis=analysis,  # Pass pre-computed analysis to avoid re-analyzing
         )
         if path:
             exported_clips.append(Path(path))
