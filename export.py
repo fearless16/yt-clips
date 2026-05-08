@@ -484,7 +484,7 @@ def _build_enhance_stack(
     
     # 1. Base Layer Construction with Enhancement Stack
     # Apply quality enhancements BEFORE cropping/scaling for best results
-    enhancement_chain = "hqdn3d=4:3:6:4.5,deband=range=16:threshold=48:grain=4,unsharp=5:5:1.0:5:5:0.0"
+    enhancement_chain = "hqdn3d=4:3:6:4.5,deband=1thr=0.02:2thr=0.02:range=16:blur=1,cropdetect=24:16:0,unsharp=5:5:1.0:5:5:0.0"
     
     if has_black_panel:
         # CRITICAL: Guest camera is OFF - crop to active panel only
@@ -523,7 +523,7 @@ def _build_enhance_stack(
             except (TypeError, ValueError):
                 filter_base = (
                     f"{enhancement_chain},"
-                    f"crop=ih*9/16:ih,"
+                    f"crop='trunc(ih*9/16)':ih,"
                     f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
                     f"crop={target_w}:{target_h}"
                 )
@@ -531,7 +531,7 @@ def _build_enhance_stack(
             # Solo Mode: Take the center 9:16 slice with Lanczos scaling
             filter_base = (
                 f"{enhancement_chain},"
-                f"crop=ih*9/16:ih,"
+                f"crop='trunc(ih*9/16)':ih,"
                 f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
                 f"crop={target_w}:{target_h}"
             )
