@@ -11,11 +11,15 @@ from utils.logger import get_logger
 cfg = load_config()
 log = get_logger("analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
-
-# ─── Face Detection Cascade (OpenCV) ────────────────────────────────────────
 FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-_PREV_CROP_X = None
+# Per-clip crop smoothing state — reset via reset_crop_state() at start of each clip
+_PREV_CROP_X: Optional[int] = None
+
+def reset_crop_state() -> None:
+    """Call once at the start of each new clip to prevent crop history bleeding across clips."""
+    global _PREV_CROP_X
+    _PREV_CROP_X = None
 
 def _smooth_int(prev: Optional[int], current: int, alpha: float = 0.25) -> int:
     if prev is None:
@@ -34,33 +38,22 @@ def _detect_face_at_timestamp(video_path: str, timestamp: float, frame_w: int, f
     res = _run_cmd(cmd, timeout=10)
     if not res or not res.stdout:
         return None
-
     frame = np.frombuffer(res.stdout, dtype=np.uint8)
     if frame.size != frame_w * frame_h * 3:
         return None
-
     frame_bgr = frame.reshape((frame_h, frame_w, 3))
     return detect_face_crop(frame_bgr, frame_w, frame_h)
 
 def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int) -> Optional[Dict]:
-    """
-    Detect face and return crop coordinates for 9:16 framing.
-    Reject background posters and random wall faces.
-    """
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     faces = FACE_CASCADE.detectMultiScale(
-        gray,
-        scaleFactor=1.03,
-        minNeighbors=3,
-        minSize=(30, 30),
+        gray, scaleFactor=1.03, minNeighbors=3, minSize=(30, 30),
     )
-
     if len(faces) == 0:
         return None
 
     best_face = None
     best_score = -1.0
-
     for (x, y, w, h) in faces:
         area = float(w * h)
         center_x = x + w / 2.0
@@ -68,28 +61,17 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         norm_x = center_x / float(frame_width)
         norm_y = center_y / float(frame_height)
         size_ratio = h / float(frame_height)
-
         score = area
-
-        # Reject giant poster-like faces.
         if size_ratio > 0.28:
             score *= 0.001
-
-        # Reject top-center wall/poster faces that are not real stream facecams.
         if norm_y < 0.55 and 0.25 < norm_x < 0.75 and h < frame_height * 0.5:
             continue
-
-        # Prefer webcam-sized faces.
         if 0.05 < size_ratio < 0.22:
             score *= 8.0
-
-        # Prefer bottom-side facecam placement.
         if norm_y > 0.55:
             score *= 3.0
-
         if norm_x < 0.35 or norm_x > 0.65:
             score *= 3.0
-
         if score > best_score:
             best_score = score
             best_face = (x, y, w, h)
@@ -98,27 +80,20 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         return None
 
     x, y, w, h = best_face
-
     target_h = frame_height
     target_w = int(target_h * 9 / 16)
-
     crop_x = x + w // 2 - target_w // 2
     crop_x = max(0, min(crop_x, frame_width - target_w))
-    crop_x = _smooth_int(globals().get("_PREV_CROP_X"), crop_x, alpha=0.25)
-    globals()["_PREV_CROP_X"] = crop_x
+    global _PREV_CROP_X
+    crop_x = _smooth_int(_PREV_CROP_X, crop_x, alpha=0.25)
+    _PREV_CROP_X = crop_x
 
     return {
-        "x": int(crop_x),
-        "y": 0,
-        "width": int(target_w),
-        "height": int(target_h),
-        "face_w": int(w),
-        "face_h": int(h),
+        "x": int(crop_x), "y": 0,
+        "width": int(target_w), "height": int(target_h),
+        "face_w": int(w), "face_h": int(h),
         "confidence": min(1.0, best_score / 5000.0),
     }
-
-
-# ─── Safe subprocess wrapper ────────────────────────────────────────────────
 
 def _run_cmd(cmd, timeout=15):
     try:
@@ -129,176 +104,98 @@ def _run_cmd(cmd, timeout=15):
         log.warning("Command failed: %s", e)
     return None
 
-
 def save_preview_snapshot(video_path: str, timestamp: float, output_path: str) -> bool:
-    """Save a preview snapshot (JPEG) at the given timestamp."""
     cmd = [
         "ffmpeg", "-y", "-ss", f"{timestamp:.3f}",
-        "-i", video_path,
-        "-frames:v", "1",
-        "-q:v", "2",
-        output_path
+        "-i", video_path, "-frames:v", "1", "-q:v", "2", output_path
     ]
     res = _run_cmd(cmd, timeout=10)
     return res is not None and res.returncode == 0
 
-
-# ─── Brightness Sampling (Improved) ─────────────────────────────────────────
-
 def _frame_stats(frame: bytes) -> Dict:
-    """Compute avg + variance (better than avg only)."""
     if not frame:
         return {"avg": 128.0, "var": 0.0}
     arr = np.frombuffer(frame, dtype=np.uint8).astype(np.float32)
     return {"avg": float(arr.mean()), "var": float(arr.var())}
 
-
 def _sample_brightness_series(video_path: str, start: float, end: float, sample_count: int = 5) -> List[Dict]:
     duration = max(0.01, end - start)
-    sample_count = max(1, min(sample_count, 10))  # limit to avoid RAM issues
-
+    sample_count = max(1, min(sample_count, 10))
     frame_size = 160 * 90
-    fps = sample_count / duration
 
     cmd = [
         "ffmpeg", "-y",
-        "-ss", f"{start:.3f}",
-        "-t", f"{duration:.3f}",
+        "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
         "-i", video_path,
         "-vf", f"fps={sample_count}/{duration:.3f},scale=160:90,format=gray",
         "-frames:v", str(sample_count),
-        "-f", "rawvideo", "-pix_fmt", "gray",
-        "pipe:1",
+        "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1",
     ]
-
     res = _run_cmd(cmd, timeout=20)
     if not res or res.returncode != 0 or not res.stdout:
         return []
 
     data = res.stdout
     frames = min(sample_count, len(data) // frame_size)
-
-    samples = []
-    for i in range(frames):
-        frame = data[i * frame_size:(i + 1) * frame_size]
-        stats = _frame_stats(frame)
-        samples.append(stats)
-
-    return samples
-
-
-# ─── Black Frame Detection (Improved) ───────────────────────────────────────
+    return [_frame_stats(data[i * frame_size:(i + 1) * frame_size]) for i in range(frames)]
 
 def detect_black_frames(samples: List[Dict]) -> Dict:
     threshold = cfg.get("quality", {}).get("black_threshold", 20)
-    
-    # CRITICAL FIX: Require BOTH low brightness AND low variance for true black detection
-    # This prevents false positives from dark scenes that still have content
     black = [s for s in samples if s["avg"] < threshold and s["var"] < 50]
-    
     return {
         "has_black_frames": len(black) > 0,
         "black_ratio": len(black) / len(samples) if samples else 0,
-        "is_mostly_black": len(black) / len(samples) > 0.6 if samples else False,  # For segment skipping
+        "is_mostly_black": len(black) / len(samples) > 0.6 if samples else False,
     }
-
-
-# ─── Lighting Analysis (Improved) ───────────────────────────────────────────
 
 def analyze_lighting(samples: List[Dict]) -> Dict:
     if not samples:
         return {"needs_correction": False}
-
     avg = sum(s["avg"] for s in samples) / len(samples)
-
     if avg < 70:
-        return {
-            "needs_correction": True,
-            "lighting_filter": f"eq=gamma=1.3:contrast=1.1"
-        }
+        return {"needs_correction": True, "lighting_filter": "eq=gamma=1.3:contrast=1.1"}
     elif avg > 200:
-        return {
-            "needs_correction": True,
-            "lighting_filter": f"eq=gamma=0.8:contrast=0.9"
-        }
-
+        return {"needs_correction": True, "lighting_filter": "eq=gamma=0.8:contrast=0.9"}
     return {"needs_correction": False}
 
-
-# ─── Layout Detection (Multi-frame voting) ──────────────────────────────────
-
 def _has_vertical_divider(frame_array: np.ndarray, width: int) -> bool:
-    """
-    Check for a clear vertical divider line near the center of the frame.
-    A true split-screen (OBS/Zoom) has a sharp brightness discontinuity at the center.
-    Background posters or screen shares do NOT have this.
-    """
     center = width // 2
-    # Sample a narrow band (±3 pixels) around the center
     band_width = 3
     left_band = frame_array[:, max(0, center - band_width - 5):max(0, center - band_width)]
     right_band = frame_array[:, center + band_width:center + band_width + 5]
     center_band = frame_array[:, center - band_width:center + band_width]
-
     if left_band.size == 0 or right_band.size == 0 or center_band.size == 0:
         return False
-
-    # Divider = center band is significantly darker/different from both sides
     center_avg = float(center_band.mean())
     left_avg = float(left_band.mean())
     right_avg = float(right_band.mean())
-
-    # The center strip should be notably darker (black divider line)
-    # OR there should be a sharp gradient across the center
     has_dark_divider = center_avg < min(left_avg, right_avg) - 30
     has_sharp_edge = abs(left_avg - right_avg) > 40
-
     return has_dark_divider or has_sharp_edge
 
-
 def _detect_faces_per_half(frame_array: np.ndarray, width: int) -> dict:
-    """
-    Detect faces in left and right halves separately.
-    Returns count of faces on each side.
-    """
     left_half = frame_array[:, :width // 2]
     right_half = frame_array[:, width // 2:]
-
     left_faces = FACE_CASCADE.detectMultiScale(left_half, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
     right_faces = FACE_CASCADE.detectMultiScale(right_half, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
-
-    return {
-        "left": len(left_faces),
-        "right": len(right_faces),
-    }
-
+    return {"left": len(left_faces), "right": len(right_faces)}
 
 def _is_screen_share_frame(frame_array: np.ndarray) -> bool:
     overall_var = float(frame_array.var())
-
     grad = np.abs(np.diff(frame_array.astype(np.int16), axis=1))
     edge_density = float(grad.mean())
-
-    # Text/UI detection
     bright_pixels = np.sum(frame_array > 210)
     dark_pixels = np.sum(frame_array < 40)
-
     contrast_ratio = (bright_pixels + dark_pixels) / frame_array.size
-
-    return bool(
-        overall_var > 500
-        and edge_density > 6
-        and contrast_ratio > 0.18
-    )
-
+    return bool(overall_var > 500 and edge_density > 6 and contrast_ratio > 0.18)
 
 def detect_layout(video_path: str, start: float, end: float) -> Dict:
     """
-    Detects if video has split-screen layout (e.g., host + guest side-by-side).
-    Also detects if one panel is black (guest camera off) or screen sharing.
-
-    CRITICAL: Requires BOTH a vertical divider AND faces on both halves to
-    flag as multi-active. Background posters / screen shares do NOT count.
+    Layout decision table:
+      solo                → crop + scale to 9:16 (you solo in frame)
+      split + both cams   → vertical stack (guest has video)
+      split + one black   → crop to active half only (guest cam off → DROP)
+      screen share        → vertical stack (blurred bg + sharp content)
     """
     duration = max(0.01, end - start)
     cmd = [
@@ -307,8 +204,7 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
         "-i", video_path,
         "-vf", f"fps=12/{duration:.3f},scale=320:180,format=gray",
         "-frames:v", "12",
-        "-f", "rawvideo", "-pix_fmt", "gray",
-        "pipe:1"
+        "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"
     ]
 
     divider_votes = []
@@ -324,14 +220,13 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
         frames = len(data) // frame_size
 
         for i in range(frames):
-            frame_data = data[i * frame_size : (i + 1) * frame_size]
+            frame_data = data[i * frame_size:(i + 1) * frame_size]
             frame_array = np.frombuffer(frame_data, dtype=np.uint8).reshape(180, 320)
-            left_half  = frame_array[:, :160]
+            left_half = frame_array[:, :160]
             right_half = frame_array[:, 160:]
-
-            left_avg  = float(left_half.mean())
+            left_avg = float(left_half.mean())
             right_avg = float(right_half.mean())
-            left_var  = float(left_half.var())
+            left_var = float(left_half.var())
             right_var = float(right_half.var())
 
             right_is_black = right_avg < 25 and right_var < 100
@@ -344,113 +239,96 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
                 black_panel_votes.append(True)
                 black_panel_side_votes.append("left")
 
-            # Check for vertical divider (true split-screen signature)
             if _has_vertical_divider(frame_array, 320):
                 divider_votes.append(True)
 
-            # Check for faces on both sides (requires real people, not posters)
             face_counts = _detect_faces_per_half(frame_array, 320)
             if face_counts["left"] > 0 and face_counts["right"] > 0:
                 dual_face_votes.append(True)
 
-            # Check for screen share
             if _is_screen_share_frame(frame_array):
                 screen_share_votes.append(True)
 
     has_black_panel = len(black_panel_votes) >= 2
-
-    # TRUE split-screen requires BOTH: vertical divider AND faces on both halves
-    # This prevents false positives from background posters or screen sharing
     has_divider = len(divider_votes) >= 2
     has_dual_faces = len(dual_face_votes) >= 2
+
+    # True split-screen: divider present AND faces on both halves
     is_split_screen = has_divider and has_dual_faces
 
+    # Screen share: high edge density but no split-screen
     is_screen_share = len(screen_share_votes) >= 3 and not is_split_screen
 
-    # Determine which side is black (majority vote)
     black_panel_side = None
     if has_black_panel:
         right_count = black_panel_side_votes.count("right")
         left_count = black_panel_side_votes.count("left")
         black_panel_side = "right" if right_count >= left_count else "left"
 
-    # Determine layout type
+    # ── Layout classification ─────────────────────────────────────────────────
+    # split + both active  → guest has video  → vertical stack (KEEP)
+    # split + black panel  → guest cam off    → crop active side only (DROP)
+    # screen share         → presentation     → vertical stack (KEEP)
+    # solo                 → just you         → center crop 9:16 (KEEP)
     if is_screen_share:
         layout_type = "screen_share"
-    elif is_split_screen:
-        layout_type = "split"
+    elif is_split_screen and not has_black_panel:
+        layout_type = "split_both_active"   # guest has video → vertical stack
+    elif is_split_screen and has_black_panel:
+        layout_type = "split_guest_off"     # guest cam off   → drop
     else:
         layout_type = "solo"
 
     log.debug(
-        "Layout: type=%s divider=%d/%d dual_face=%d/%d screen_share=%d/%d black_panel=%s",
-        layout_type, len(divider_votes), 5, len(dual_face_votes), 5,
-        len(screen_share_votes), 5, black_panel_side,
+        "Layout: %s | divider=%d dual_face=%d screen_share=%d black_panel=%s",
+        layout_type, len(divider_votes), len(dual_face_votes),
+        len(screen_share_votes), black_panel_side,
     )
 
     return {
         "layout_type": layout_type,
-        "prefer_solo": layout_type != "split",
+        "prefer_solo": layout_type == "solo",
         "has_black_panel": has_black_panel,
         "black_panel_side": black_panel_side,
-        "is_multi_active_frame": is_split_screen and not has_black_panel,
+        # True only when guest cam is OFF (split detected but one side black)
+        "guest_cam_off": layout_type == "split_guest_off",
+        # True only when guest has live video
+        "guest_cam_on": layout_type == "split_both_active",
         "is_screen_share": is_screen_share,
     }
 
-
-# ─── Safe ffprobe ───────────────────────────────────────────────────────────
-
 def _get_video_dimensions(video_path: str) -> Dict:
     cmd = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=width,height",
-        "-of", "json",
-        video_path,
+        "-of", "json", video_path,
     ]
-
     res = _run_cmd(cmd)
     if not res or not res.stdout:
         return {"width": 1920, "height": 1080}
-
     try:
         data = json.loads(res.stdout)
         streams = data.get("streams", [])
         if not streams:
             return {"width": 1920, "height": 1080}
-
         s = streams[0]
-        return {
-            "width": int(s.get("width", 1920)),
-            "height": int(s.get("height", 1080))
-        }
+        return {"width": int(s.get("width", 1920)), "height": int(s.get("height", 1080))}
     except Exception:
         return {"width": 1920, "height": 1080}
 
-
-# ─── Silence Detection (safer) ──────────────────────────────────────────────
-
 def detect_dead_air(video_path: str, start: float, end: float) -> Dict:
     duration = max(0.01, end - start)
-
     cmd = [
-        "ffmpeg", "-y",
-        "-ss", str(start),
-        "-t", str(duration),
+        "ffmpeg", "-y", "-ss", str(start), "-t", str(duration),
         "-i", video_path,
         "-af", "silencedetect=noise=-35dB:d=1",
         "-f", "null", "-"
     ]
-
     res = _run_cmd(cmd, timeout=30)
     if not res:
         return {"has_dead_air": False}
-
     silence_count = res.stderr.decode(errors="replace").count("silence_start")
     return {"has_dead_air": silence_count > 0}
-
-
-# ─── Main Analyzer ──────────────────────────────────────────────────────────
 
 def analyze_clip(
     video_path: str,
@@ -461,21 +339,19 @@ def analyze_clip(
 ) -> Dict:
     log.info("[%s] Analyzing clip...", clip_id)
 
-    samples = _sample_brightness_series(video_path, start, end)
+    # Reset temporal crop smoothing — prevents history bleeding from previous clips
+    reset_crop_state()
 
+    samples = _sample_brightness_series(video_path, start, end)
     black = detect_black_frames(samples)
     lighting = analyze_lighting(samples)
     layout = detect_layout(video_path, start, end)
     silence = detect_dead_air(video_path, start, end)
 
-    # Sample multiple timestamps instead of one mid-frame
     info = _get_video_dimensions(video_path)
-    sample_times = np.linspace(
-        max(start + 0.25, start),
-        max(start + 0.25, end),
-        num=5
-    )
-
+    # Trim 10% from each end to avoid scene transitions and black lead-in frames
+    margin = min(0.5, (end - start) * 0.1)
+    sample_times = np.linspace(start + margin, end - margin, num=5)
     face_candidates = []
     for t in sample_times:
         face = _detect_face_at_timestamp(video_path, float(t), info["width"], info["height"])
@@ -489,61 +365,78 @@ def analyze_clip(
             key=lambda f: (f.get("face_w", 0) * f.get("face_h", 0)) * f.get("confidence", 0.0)
         )
 
-    # Basic Tempo Analysis if transcript available
     is_fast_paced = False
     if transcript_segments:
-        # Filter segments within our range
         clip_segments = [s for s in transcript_segments if s["start"] < end and s["end"] > start]
         total_text = " ".join([s["text"] for s in clip_segments])
         words = len(total_text.split())
         duration = end - start
         wpm = (words / (duration / 60)) if duration > 0 else 0
-        is_fast_paced = wpm > 150 # Simple heuristic
+        is_fast_paced = wpm > 150
         log.debug("[%s] Tempo: %.1f WPM (fast=%s)", clip_id, wpm, is_fast_paced)
 
-    # Layout decision matrix:
-    # - solo / screen_share → use_solo_frame (center crop or vertical stack)
-    # - split + black panel → crop to active panel
-    # - split + both active (true dual-cam) → DROP
-    # Screen share segments are ALWAYS kept (vertical stack mode)
+    layout_type = layout.get("layout_type", "solo")
     is_screen_share = layout.get("is_screen_share", False)
+    guest_cam_on = layout.get("guest_cam_on", False)
+    guest_cam_off = layout.get("guest_cam_off", False)
 
-    # If a prominent face exists, do NOT treat it as screen-share.
-    if face_crop and face_crop.get("face_h", 0) > info["height"] * 0.1:
-        layout["prefer_solo"] = True
-
-    export_aspect_ratio = "16:9" if is_screen_share else "9:16"
+    # ── Screen-share priority rule ────────────────────────────────────────────
+    # Screen-share detection takes priority OVER face detection.
+    # Only override screen-share back to solo if the face is dominant (>35% of
+    # frame height) — meaning it's clearly a facecam-only shot misclassified as
+    # screen-share, NOT a genuine presentation with a small facecam overlay.
+    if is_screen_share and face_crop:
+        face_dominance = face_crop.get("face_h", 0) / max(info["height"], 1)
+        if face_dominance > 0.35:
+            # Face is so large it occupies >35% height — definitely not screen-share
+            log.debug("[%s] Screen-share overridden: face dominance=%.2f", clip_id, face_dominance)
+            is_screen_share = False
+            layout_type = "solo"
+            layout["prefer_solo"] = True
+        else:
+            # Keep screen-share classification regardless of face presence
+            log.debug("[%s] Screen-share kept (face dominance=%.2f < 0.35)", clip_id, face_dominance)
 
     should_drop = False
     use_vertical_stack = False
     use_solo_frame = False
 
-    if is_screen_share:
-        should_drop = False
-        use_vertical_stack = False
-        use_solo_frame = False
-    elif layout.get("is_multi_active_frame", False):
+    if guest_cam_on:
+        # Guest has live video → vertical stack (side-by-side → stacked 9:16)
         use_vertical_stack = True
         should_drop = False
+        log.info("[%s] Guest cam ON → vertical stack", clip_id)
+
+    elif guest_cam_off:
+        # Guest cam off (black panel) → drop this clip entirely
+        should_drop = True
+        log.info("[%s] Guest cam OFF (black panel) → DROP", clip_id)
+
+    elif is_screen_share:
+        # Screen share → export 16:9 untouched, no reframing
+        # Vertical stack kills readability for charts/browsers/scorecards
+        use_vertical_stack = False
+        use_solo_frame = False
+        should_drop = False
+        log.info("[%s] Screen share → 16:9 passthrough", clip_id)
+
     else:
-        should_use_solo = (
-            layout["prefer_solo"]
-            or layout.get("has_black_panel", False)
-            or black["black_ratio"] > 0.6
-        )
-        use_solo_frame = should_use_solo and face_crop is not None
+        # Solo frame (just you)
+        use_solo_frame = face_crop is not None
         should_drop = (
-            (layout.get("is_multi_active_frame", False) and not is_screen_share and face_crop is None)
-            or black.get("is_mostly_black", False)
+            black.get("is_mostly_black", False)
             or face_crop is None
         )
-    
+        if should_drop:
+            log.info("[%s] Solo but no face detected → DROP", clip_id)
+
     strategy = {
         "use_solo_frame": use_solo_frame,
         "use_vertical_stack": use_vertical_stack,
         "has_black_panel": layout.get("has_black_panel", False),
         "black_panel_side": layout.get("black_panel_side"),
-        "is_multi_active_frame": layout.get("is_multi_active_frame", False),
+        "guest_cam_on": guest_cam_on,
+        "guest_cam_off": guest_cam_off,
         "is_screen_share": is_screen_share,
         "should_drop": should_drop,
         "active_crop": face_crop,
@@ -551,7 +444,7 @@ def analyze_clip(
         "apply_lighting_fix": lighting["needs_correction"],
         "lighting_filter": lighting.get("lighting_filter", ""),
         "skip_silence": silence["has_dead_air"],
-        "export_aspect_ratio": export_aspect_ratio,
+        "export_aspect_ratio": "16:9" if is_screen_share else "9:16",
     }
 
     return {
@@ -559,5 +452,5 @@ def analyze_clip(
         "lighting": lighting,
         "layout": layout,
         "dead_air": silence,
-        "export_strategy": strategy
+        "export_strategy": strategy,
     }
