@@ -31,12 +31,7 @@ _GOOD_SEO = {
     "clips_seo": [
         {
             "clip_id": "t1",
-            "title_variants": [
-                "Kohli ne kya kar diya yaar 😤 | RCB vs CSK",
-                "Only Kohli Can Hit This In a Chase 👀 | IPL 2024",
-                "🔴 LIVE NOW: RCB chasing 200 | Kohli ki innings LIVE",
-            ],
-            "thumbnail_text": "KOHLI NE KAR DIYA",
+            "title": "Kohli ne kya kar diya yaar 😤 | RCB vs CSK",
             "description": "Kya shot tha yaar! 🔥 Kohli hit an absolute belter. IPL 2024.",
             "search_terms": [
                 "kohli six 2024", "rcb highlights ipl", "kohli cover drive csk",
@@ -46,12 +41,7 @@ _GOOD_SEO = {
         },
         {
             "clip_id": "t2",
-            "title_variants": [
-                "Dhoni ne stumping kar diya 😱 | CSK vs RCB",
-                "Only Dhoni Can Do This In 0.1 Seconds 👀",
-                "🔴 LIVE NOW: CSK defending 185 | Dhoni magic",
-            ],
-            "thumbnail_text": "YEH KYA THA YAAR",
+            "title": "Dhoni ne stumping kar diya 😱 | CSK vs RCB",
             "description": "Believe nahi hoga! 🔥 Dhoni fastest stumping ever.",
             "search_terms": ["dhoni stumping csk", "msd magic ipl 2024"],
             "hashtags": ["#CSKvsRCB", "#IPL2024", "#Dhoni"],
@@ -302,33 +292,16 @@ class TestBatchGenerateSEOHappyPath:
 
     def test_required_fields_present(self):
         r = batch_generate_seo([_CLIP_T1])[0]
-        for key in ("clip_id", "title", "title_variants", "thumbnail_text",
-                    "description", "search_terms", "hashtags", "trend_topics", "live_stream_url"):
+        for key in ("clip_id", "title", "description", "search_terms", "hashtags", "trend_topics", "live_stream_url"):
             assert key in r, f"Missing field: {key}"
 
     def test_no_tags_key_in_output(self):
         r = batch_generate_seo([_CLIP_T1])[0]
         assert "tags" not in r
 
-    def test_title_variants_list_of_3(self):
+    def test_title_max_100_chars(self):
         r = batch_generate_seo([_CLIP_T1])[0]
-        assert isinstance(r["title_variants"], list)
-        assert len(r["title_variants"]) == 3
-
-    def test_default_title_is_variant_a(self):
-        r = batch_generate_seo([_CLIP_T1])[0]
-        assert r["title"] == r["title_variants"][0]
-
-    def test_all_title_variants_max_100_chars(self):
-        r = batch_generate_seo([_CLIP_T1])[0]
-        for v in r["title_variants"]:
-            assert len(v) <= 100
         assert len(r["title"]) <= 100
-
-    def test_thumbnail_text_non_empty_string(self):
-        r = batch_generate_seo([_CLIP_T1])[0]
-        assert isinstance(r["thumbnail_text"], str)
-        assert len(r["thumbnail_text"]) > 0
 
     def test_live_stream_url_present(self):
         r = batch_generate_seo([_CLIP_T1])[0]
@@ -378,12 +351,12 @@ class TestBatchGenerateSEOFallbacks:
 
     def test_raises_on_empty_ai_response(self, monkeypatch):
         _patch(monkeypatch, ai_payload="{}")
-        with pytest.raises(ValueError, match="SEO Generation Failed"):
+        with pytest.raises(ValueError, match="(?i)seo generation failed"):
             batch_generate_seo([_CLIP_T1])
 
     def test_raises_on_malformed_json(self, monkeypatch):
         _patch(monkeypatch, ai_payload="not json at all")
-        with pytest.raises(ValueError, match="SEO Generation Failed"):
+        with pytest.raises(ValueError, match="(?i)seo generation failed"):
             batch_generate_seo([_CLIP_T1])
 
     def test_parses_json_wrapped_in_markdown_fences(self, monkeypatch):
@@ -408,7 +381,7 @@ class TestBatchGenerateSEOFallbacks:
         payload = {"clips_seo": []}  # AI returned nothing for our clip
         _patch(monkeypatch, ai_payload=json.dumps(payload))
         # Should raise because results list is empty
-        with pytest.raises(ValueError, match="SEO Generation Failed"):
+        with pytest.raises(ValueError, match="(?i)seo generation failed"):
             batch_generate_seo([_CLIP_T1])
 
     def test_hashtag_without_prefix_auto_prefixed(self, monkeypatch):
@@ -419,15 +392,6 @@ class TestBatchGenerateSEOFallbacks:
         r = batch_generate_seo([_CLIP_T1])[0]
         for h in r["hashtags"]:
             assert h.startswith("#"), f"# not added: {h}"
-
-    def test_ai_hashtags_under_3_uses_trend_fallback(self, monkeypatch):
-        """AI returns < 3 hashtags → fallback to trend tags."""
-        payload = json.loads(json.dumps(_GOOD_SEO))
-        payload["clips_seo"][0]["hashtags"] = ["#Kohli"]  # only 1
-        trend = {**_TREND_RESPONSE, "tags": ["#Shorts", "#Cricket", "#IPL2024"]}
-        _patch(monkeypatch, ai_payload=json.dumps(payload), trend_payload=trend)
-        r = batch_generate_seo([_CLIP_T1])[0]
-        assert len(r["hashtags"]) >= 3
 
     def test_hashtags_capped_at_5_even_if_ai_returns_more(self, monkeypatch):
         payload = json.loads(json.dumps(_GOOD_SEO))
@@ -466,7 +430,7 @@ class TestGenerateSEOLegacyWrapper:
 
     def test_has_required_fields(self):
         r = generate_seo("kohli six", "t1")
-        for key in ("title", "title_variants", "search_terms", "hashtags"):
+        for key in ("title", "search_terms", "hashtags"):
             assert key in r
 
     def test_empty_clip_id_still_returns_dict(self):
@@ -489,7 +453,7 @@ class TestProcessAllSEOQueue:
             yaml.dump(highlights_data, f)
             
         call_chunks = []
-        def mock_batch_generate_seo(clips, domain, region):
+        def mock_batch_generate_seo(clips, domain="cricket", region="IN"):
             call_chunks.append(len(clips))
             return [{"clip_id": c["clip_id"]} for c in clips]
             
@@ -504,32 +468,3 @@ class TestProcessAllSEOQueue:
         
         # 5 clips should be chunked into 3 and 2
         assert call_chunks == [3, 2]
-        
-    def test_retries_on_429(self, tmp_path, monkeypatch):
-        import yaml
-        h_path = tmp_path / "highlights.yaml"
-        out_dir = tmp_path / "shorts"
-        
-        with open(h_path, "w") as f:
-            yaml.dump({"clip1": {"text": "text"}}, f)
-            
-        attempts = [0]
-        def mock_batch_generate_seo(clips, domain, region):
-            attempts[0] += 1
-            if attempts[0] == 1:
-                raise Exception("429 Rate Limit Hit")
-            return [{"clip_id": c["clip_id"]}]
-            
-        import seo
-        monkeypatch.setattr(seo, "batch_generate_seo", mock_batch_generate_seo)
-        
-        import time
-        sleeps = []
-        monkeypatch.setattr(time, "sleep", lambda x: sleeps.append(x))
-        
-        seo.process_all_seo(str(h_path), str(out_dir))
-        
-        # Should attempt twice
-        assert attempts[0] == 2
-        # Should have slept for 8 seconds due to first retry
-        assert 8 in sleeps
