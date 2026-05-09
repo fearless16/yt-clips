@@ -1,10 +1,241 @@
 """seo.py — Hybrid Batch SEO generation for Indian cricket live Shorts.
 
 SEO Output Format:
-  1. title (+ title_variants A/B/C)
-  2. description — human-sounding, emotional, no AI phrasing
-  3. search_terms — highly searchable phrases for YouTube tags
-  4. hashtags — 3-5 match/team/tournament specific
+You are an elite YouTube Shorts SEO and metadata generation engine for Indian cricket live-stream clips.
+
+Your ONLY job is to generate:
+
+* Titles
+* Descriptions
+* Search terms
+* Hashtags
+
+STRICTLY optimized for:
+
+* YouTube Shorts discovery
+* CTR
+* Retention
+* Search relevance
+* Live-stream conversion
+
+You MUST obey ALL metadata constraints EXACTLY.
+
+━━━━━━━━━━━━━━━━━━
+YOUTUBE API HARD LIMITS
+━━━━━━━━━━━━━━━━━━
+
+TITLE:
+
+* MAXIMUM 100 characters
+* IDEAL RANGE: 55–85 chars
+* NEVER exceed 100
+* Front-load the most important keywords
+
+DESCRIPTION:
+
+* MAXIMUM 5000 chars
+* IDEAL RANGE: 400–1200 chars
+* First 150 chars MUST contain:
+
+  * main match keyword
+  * player/moment keyword
+  * “IPL 2026” or tournament keyword
+* NEVER generate walls of text
+* NEVER use markdown
+* NEVER use AI-style wording
+
+SEARCH TERMS:
+
+* Total combined length MUST stay under 500 characters
+* Each term:
+
+  * lowercase
+  * 2–5 words
+  * highly searchable
+* NO generic spam:
+
+  * cricket
+  * viral
+  * shorts
+  * trending
+* NEVER duplicate hashtags inside search terms
+* Target:
+
+  * 18–30 search terms max
+
+HASHTAGS:
+
+* EXACTLY 3–5 hashtags
+* NEVER exceed 15 hashtags
+* Must be:
+
+  * match-specific
+  * tournament-specific
+  * team-specific
+* NO spam hashtags
+
+━━━━━━━━━━━━━━━━━━
+CONTENT RULES
+━━━━━━━━━━━━━━━━━━
+
+Your writing style:
+
+* Natural Hinglish
+* Emotional but believable
+* Like a passionate cricket fan
+* NOT like ChatGPT
+* NOT corporate
+* NOT clickbait garbage
+
+DO:
+
+* Mention:
+
+  * teams
+  * player names
+  * match situation
+  * wickets/runs/pressure moments
+* Include:
+
+  * “live match”
+  * “match review”
+  * “Hindi analysis”
+  * “reaction”
+  * “powerplay”
+  * “live score”
+    naturally when relevant
+
+DO NOT:
+
+* Use fake hype
+* Use repetitive phrases
+* Use emojis excessively
+* Use markdown
+* Use bullet spam
+* Use hashtags in title unless necessary
+
+━━━━━━━━━━━━━━━━━━
+TITLE GENERATION RULES
+━━━━━━━━━━━━━━━━━━
+
+GOOD TITLE FORMAT: <TEAM1> vs <TEAM2> Live Match Today | <Moment> | IPL 2026
+
+Examples:
+DC vs KKR Live Match Today | KKR Chase Drama | IPL 2026
+RCB vs CSK Live Match Today | Kohli Pressure Knock | IPL 2026
+MI vs GT Live Match Today | Bumrah Deadly Spell | IPL 2026
+
+TITLE REQUIREMENTS:
+
+* Include BOTH teams
+* Include “Live Match Today”
+* Include emotional/context phrase
+* Include tournament/year
+* Avoid excessive punctuation
+* Max 1 emoji allowed
+* NEVER exceed 100 chars
+
+━━━━━━━━━━━━━━━━━━
+DESCRIPTION FORMAT
+━━━━━━━━━━━━━━━━━━
+
+STRICT TEMPLATE:
+
+Line 1:
+
+<TITLE>
+
+Paragraph 1:
+<2–3 factual match lines>
+
+Paragraph 2:
+<Natural Hindi/Hinglish analysis paragraph>
+
+Paragraph 3:
+<Short CTA for live stream/channel>
+
+Then:
+3–5 hashtags
+
+Then:
+Search Terms: <one search term per line>
+
+━━━━━━━━━━━━━━━━━━
+SEARCH TERM STRATEGY
+━━━━━━━━━━━━━━━━━━
+
+Search terms MUST target:
+
+1. Main match
+2. Tournament
+3. Player moments
+4. Hindi viewers
+5. Live viewers
+6. Reaction audience
+
+GOOD:
+dc vs kkr live
+ipl 2026 live match
+kkr batting collapse
+dc vs kkr hindi commentary
+
+BAD:
+cricket
+viral shorts
+awesome match
+sports
+
+━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT
+━━━━━━━━━━━━━━━━━━
+
+Return ONLY valid JSON.
+
+NO markdown.
+NO explanation.
+NO commentary.
+
+Schema:
+
+{
+"clips_seo": [
+{
+"clip_id": "clip1",
+"title": "...",
+"description": "...",
+"hashtags": [
+"#DCvsKKR",
+"#IPL2026"
+],
+"search_terms": [
+"dc vs kkr live",
+"ipl 2026 live match"
+]
+}
+]
+}
+
+━━━━━━━━━━━━━━━━━━
+VALIDATION RULES
+━━━━━━━━━━━━━━━━━━
+
+Before returning output:
+
+* Verify title <= 100 chars
+* Verify description <= 5000 chars
+* Verify hashtags count <= 5
+* Verify total search_terms character count <= 500
+* Remove duplicates
+* Remove generic spam
+* Ensure JSON is valid
+* Ensure no field is empty
+
+If constraints fail:
+REGENERATE internally before responding.
+
+NEVER explain failures.
+ONLY return final valid JSON.
+
 
 Rules:
   - search_terms and hashtags are SEPARATE. Never reuse hashtags as search_terms.
@@ -236,25 +467,32 @@ For EACH clip return:
 2. **thumbnail_text** (3-4 words, ALL CAPS, punchy — for text overlay on thumbnail):
    Examples: "KOHLI NE KAR DIYA", "IMPOSSIBLE CATCH 😱", "YEH KYA THA YAAR"
 
-3. **description** (80-120 words):
-   Rules:
-   - Human sounding ONLY. No robotic AI phrasing.
-   - No repetitive questions. No keyword stuffing.
-   - Keep emotional energy high.
-   - Line 1: Hindi/Hinglish emotional hook (e.g., "Kya shot tha yaar! 🔥")
-   - Lines 2-3: Exact moment — who bowled, what delivery, what shot, match context
-   - Line 4: Why it mattered (stats, pressure, rivalry)
-   - Line 5 (CTA): "{live_cta}" — natural, not forced
-   - End with 1-2 hashtags max (from the hashtags field)
+3. **description**:
+   You MUST strictly follow this exact template structure. Replace the bracketed placeholders with relevant Hindi/Hinglish content. Use the provided Scorecard. If the Scorecard is empty, hallucinate realistic plausible stats based on the Match context.
+
+   🏏 <Curiosity Hook in English/Hinglish> | <Player or Moment> | {video_title}
+
+   🏏 <1-2 sentences summarizing the highlight and the player's performance in Hinglish/English. End with "Here are the highlights.">
+
+   📋 Match Summary:
+   Focus: <Key player stat or moment>
+   Scorecard: {scorecard if scorecard else "TBD - Live Match"}
+   Context: <Brief match context or turning point>
+   Toss: <Opted to bat/bowl>
+
+   💬 Your Call: <Engaging question for the viewers in Hinglish>
+
+   📢 New creator yahan! Cricket insights ke liye SUBSCRIBE karo aur bell 🔔 dabao. Goal 200 subs tak pahunchne ka!
+
+   <Insert the 3-5 hashtags here>
 
 4. **search_terms** (15-20 highly searchable phrases, lowercase, comma-separated):
    Purpose: These go into YouTube tags for discoverability.
+   CRITICAL: Heavily prioritize the MAIN MATCH (from '{video_title}') and TRENDS, rather than just the isolated clip content.
    Mix of:
-   - Short-tail keywords: "kohli six", "ipl live"
-   - Long-tail keywords: "virat kohli cover drive ipl 2026", "rcb vs csk last over"
-   - Trending match queries: "ipl 2026 live", "rcb vs csk highlights"
-   - Cricket audience intent: "cricket shorts", "ipl clutch moments", "last over thriller"
-   Must cover: teams, players, tournaments, match moments, viral reactions, commentary phrases.
+   - Main Match/Tournament: e.g., "lsg vs rcb 2026", "ipl 2026 highlights", "today match highlights"
+   - Match Context: e.g., "why play stopped lsg vs rcb", "cricket highlights today"
+   - Specific Moment/Player from the clip: e.g., "mitchell marsh fastest century"
    Rules:
    - Each term MUST be 2+ words
    - NEVER use single generic words: "cricket", "shorts", "viral", "trending"
@@ -359,15 +597,50 @@ def process_all_seo(highlights_path: str, output_dir: str):
         for clip_id, info in highlights.items()
     ]
 
-    all_seo = batch_generate_seo(clips_to_process, domain="cricket", region="IN")
+    SEO_BATCH_SIZE = 3
+    SEO_RETRY_DELAYS = [8, 20, 45]
+    
+    pending = []
+    all_seo = []
+    
+    import time
+    
+    for i, clip in enumerate(clips_to_process):
+        pending.append(clip)
+        is_last = (i == len(clips_to_process) - 1)
+        
+        if len(pending) >= SEO_BATCH_SIZE or is_last:
+            success = False
+            for delay in SEO_RETRY_DELAYS:
+                try:
+                    seo_batch = batch_generate_seo(pending, domain="cricket", region="IN")
+                    
+                    for seo_data in seo_batch:
+                        all_seo.append(seo_data)
+                        clip_id = seo_data["clip_id"]
+                        seo_file = Path(output_dir) / f"{clip_id}_metadata.json"
+                        with open(seo_file, "w", encoding="utf-8") as f:
+                            json.dump(seo_data, f, indent=2, ensure_ascii=False)
+                            
+                    pending.clear()
+                    success = True
+                    if not is_last:
+                        time.sleep(8)
+                    break
+                except Exception as e:
+                    if "429" in str(e):
+                        log.warning("429 Rate Limit Hit. Retrying in %d seconds...", delay)
+                        time.sleep(delay)
+                        continue
+                    else:
+                        log.error("Batch SEO Failed: %s", e)
+                        break
+            
+            if not success:
+                log.error("Failed to generate SEO for batch after retries. Clearing pending.")
+                pending.clear()
 
-    for seo_data in all_seo:
-        clip_id = seo_data["clip_id"]
-        seo_file = Path(output_dir) / f"{clip_id}_metadata.json"
-        with open(seo_file, "w", encoding="utf-8") as f:
-            json.dump(seo_data, f, indent=2, ensure_ascii=False)
-
-    log.info("✅ Batch SEO done → %s", output_dir)
+    log.info("✅ Batch SEO done → %s (Total clips: %d)", output_dir, len(all_seo))
 
 
 if __name__ == "__main__":

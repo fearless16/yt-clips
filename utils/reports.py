@@ -67,9 +67,10 @@ def generate_run_report(
         for name, meta in seo_data:
             lines.append(f"### {name}")
             lines.append(f"- **Title:** {meta.get('title', 'N/A')}")
-            lines.append(f"- **Hook:** {meta.get('hook', 'N/A')}")
-            tags = meta.get('tags', [])
-            lines.append(f"- **Tags:** {', '.join(tags) if tags else 'N/A'}")
+            lines.append(f"- **Description:** {meta.get('description', 'N/A')[:180]}...")
+            lines.append(f"- **Hashtags:** {', '.join(meta.get('hashtags', [])) or 'N/A'}")
+            lines.append(f"- **Search Terms:** {', '.join(meta.get('search_terms', [])) or 'N/A'}")
+            lines.append(f"- **Trend Topics:** {', '.join(meta.get('trend_topics', [])) or 'N/A'}")
             lines.append("")
 
     if failures:
