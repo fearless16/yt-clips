@@ -131,14 +131,9 @@ def run(
     if exported:
         _banner("PHASE 4.5 — SEO & THUMBNAILS")
         t0 = time.perf_counter()
-        from seo import process_all_seo
         from thumbnail import process_all_thumbnails
         
         export_dir = str(exported[0].parent)
-        
-        # 1. Generate Metadata (Batch AI SEO)
-        # This writes {clip_id}_metadata.json for each highlight in the directory
-        process_all_seo(highlights_path, export_dir)
         
         # 2. Generate Thumbnails (Frame extraction or AI)
         # This searches for mp4s and matching metadata in the folder

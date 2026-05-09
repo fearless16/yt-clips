@@ -235,7 +235,7 @@ def generate_seo_for_exported_clip(
         live_stream_url=live_stream_url,
     )
 
-    out_path = Path(output_dir) / f"{clip_id}_seo.json"
+    out_path = Path(output_dir) / f"{clip_id}_metadata.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
@@ -301,7 +301,7 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
         all_results.append(result)
 
         # Save individual file immediately (safe even if later clips fail)
-        per_clip_path = Path(output_dir) / f"{clip_id}_seo.json"
+        per_clip_path = Path(output_dir) / f"{clip_id}_metadata.json"
         with open(per_clip_path, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
 

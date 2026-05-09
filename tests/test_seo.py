@@ -155,7 +155,7 @@ def test_generate_seo_for_exported_clip(tmp_path, monkeypatch):
     result = generate_seo_for_exported_clip("t1", "transcript", str(out_dir))
     
     assert result["clip_id"] == "t1"
-    expected_file = out_dir / "t1_seo.json"
+    expected_file = out_dir / "t1_metadata.json"
     assert expected_file.exists()
     with open(expected_file, "r") as f:
         saved = json.load(f)
@@ -181,8 +181,8 @@ def test_process_all_seo(tmp_path, monkeypatch):
     res_path = process_all_seo(str(h_path), str(out_dir))
     
     assert Path(res_path).exists()
-    assert (out_dir / "clip1_seo.json").exists()
-    assert (out_dir / "clip2_seo.json").exists()
+    assert (out_dir / "clip1_metadata.json").exists()
+    assert (out_dir / "clip2_metadata.json").exists()
     
     with open(res_path, "r") as f:
         results = json.load(f)
