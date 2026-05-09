@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List
 import time
 
 def generate_run_report(
@@ -10,23 +10,15 @@ def generate_run_report(
     uploaded_clips: int = 0,
     failures: List[Dict[str, str]] = None
 ) -> str:
-    """
-    Generate a comprehensive human-readable Markdown report covering:
-    - Export Report
-    - SEO Report
-    - Performance Snapshot
-    - Failure Summary
-    """
     if failures is None:
         failures = []
-        
+
     export_dir_path = Path(export_dir)
     report_path = export_dir_path / "run_report.md"
-    
-    # Analyze metadata to build SEO and Export reports
+
     total_clips = len(exported_clips)
     total_size_mb = sum(p.stat().st_size for p in exported_clips) / 1_048_576 if exported_clips else 0
-    
+
     seo_data = []
     for clip_path in exported_clips:
         meta_path = clip_path.with_name(f"{clip_path.stem}_metadata.json")
@@ -37,7 +29,6 @@ def generate_run_report(
             except Exception:
                 pass
 
-    # Build Markdown Report
     lines = [
         "# YouTube Automation Run Report",
         f"**Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -50,15 +41,15 @@ def generate_run_report(
         f"- **Processing Speed:** {(pipeline_duration_sec / max(1, total_clips)):.1f} sec / clip (avg)",
         f"- **YouTube Uploads:** {uploaded_clips} / {total_clips}",
         "---",
-        "## 🎬 Export Report"
+        "## 🎬 Export Report",
     ]
-    
+
     if not exported_clips:
         lines.append("*No clips were successfully exported in this run.*")
     else:
         for p in exported_clips:
             lines.append(f"- `{p.name}` ({p.stat().st_size / 1_048_576:.1f} MB)")
-            
+
     lines.append("---")
     lines.append("## 🔍 SEO & Metadata Report")
     if not seo_data:
@@ -67,21 +58,23 @@ def generate_run_report(
         for name, meta in seo_data:
             lines.append(f"### {name}")
             lines.append(f"- **Title:** {meta.get('title', 'N/A')}")
-            lines.append(f"- **Description:** {meta.get('description', 'N/A')[:180]}...")
-            lines.append(f"- **Hashtags:** {', '.join(meta.get('hashtags', [])) or 'N/A'}")
-            lines.append(f"- **Search Terms:** {', '.join(meta.get('search_terms', [])) or 'N/A'}")
-            lines.append(f"- **Trend Topics:** {', '.join(meta.get('trend_topics', [])) or 'N/A'}")
+            lines.append(f"- **Description:** {(meta.get('description', 'N/A') or 'N/A')[:180]}...")
+            lines.append(f"- **Hashtags:** {', '.join(meta.get('hashtags', [])) if meta.get('hashtags') else 'N/A'}")
+            lines.append(f"- **Search Terms:** {', '.join(meta.get('search_terms', [])) if meta.get('search_terms') else 'N/A'}")
+            lines.append(f"- **Trend Topics:** {', '.join(meta.get('trend_topics', [])) if meta.get('trend_topics') else 'N/A'}")
             lines.append("")
 
     if failures:
         lines.append("---")
         lines.append("## ❌ Failure Summary")
         for f in failures:
-            lines.append(f"- **{f.get('phase', 'Unknown')}:** {f.get('error', 'Unknown Error')} (Clip: {f.get('clip_id', 'N/A')})")
+            lines.append(
+                f"- **{f.get('phase', 'Unknown')}:** {f.get('error', 'Unknown Error')} "
+                f"(Clip: {f.get('clip_id', 'N/A')})"
+            )
 
     report_content = "\n".join(lines)
-    
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report_content)
-        
+
     return str(report_path)

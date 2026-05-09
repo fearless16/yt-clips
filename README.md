@@ -323,7 +323,9 @@ The bridge system supports three modes:
 The pipeline includes advanced features for high-performance, studio-quality automated production:
 
 ### 🧠 Intelligent Frame Analysis (`frame_analyzer.py`)
-- **Zero-I/O Sampling**: Uses FFmpeg pipes for high-frequency brightness and layout analysis without disk overhead.
+- **Multi-Timestamp Sampling**: Upgraded from single-frame analysis to 5-timestamp `np.linspace` sampling per segment, selecting the most prominent face candidate.
+- **Poster Rejection Heuristics**: Implemented "Poster Nuke" logic to reject static background posters in gaming/cricket setups using area-to-height ratios.
+- **Temporal Crop Smoothing**: Uses weighted alpha smoothing for `crop_x` transitions to prevent jarring, jittery camera movements between cuts.
 - **Auto-Layout Detection**: Detects split-screen or multi-panel layouts and intelligently decides between `SOLO` and `VERTICAL STACK` modes.
 - **Lighting Correction**: Detects backlit or underexposed scenes and automatically applies analysis-driven gamma and exposure fixes.
 - **Leading Black Trim**: Automatically detects and trims leading black frames (up to 1s) for professional, "instant action" starts.
@@ -334,10 +336,11 @@ The pipeline includes advanced features for high-performance, studio-quality aut
 - **Poor Lighting Enhancement**: Advanced filter chain with **Gamma Boosting (1.2x)**, **Saturation Lift (1.2x)**, and **Deband** filters for studio-quality output from 720p stream sources.
 - **Butter-Smooth Motion**: Auto-detects source FPS and applies motion-blending interpolation for high-quality 60fps output.
 
-### 📈 Small Channel Growth Engine (`seo.py`)
-- **Batch SEO Generation**: Processes all clips in a single AI call to optimize tokens, maintain consistency, and reduce API latency.
-- **Scorecard Context**: Automatically extracts match info from video titles to inject live match context (scorecards, teams) into metadata.
-- **Small YouTuber Strategy**: Specifically tuned prompts for channels with <500 subscribers, focusing on **Long-Tail Search** and **Curiosity-Gap hooks** instead of broad, saturated keywords.
+### 📈 Hardened SEO Engine (`seo.py`)
+- **Rate-Limited Batching**: Implemented a 3-clip batch queue with 8s mandatory pauses and exponential backoff to eliminate `429 Too Many Requests` errors.
+- **Phonetic Hallucination Correction**: System instructions forced to identify and correct phonetic transcription errors (e.g., "Chakris Gale" → "Chris Gayle").
+- **Strict Limit Enforcement**: Guarantees compliance with YouTube's character limits (Title: 100, Desc: 5000) before processing, preventing metadata rejection.
+- **Premium Run Reporting**: Generates a detailed `run_report.md` with performance snapshots, failure summaries, and formatted SEO previews for every run.
 
 ### 🖼️ Aesthetic Thumbnail Generation (`thumbnail.py`)
 - **Free-Tier Optimization**: Defaulting to **Nano Banana 2 (Gemini 2.5 Flash Image)** for high-volume, free-tier AI thumbnail generation.

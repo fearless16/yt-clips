@@ -15,72 +15,106 @@ log = get_logger("analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"]
 # ─── Face Detection Cascade (OpenCV) ────────────────────────────────────────
 FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
+_PREV_CROP_X = None
+
+def _smooth_int(prev: Optional[int], current: int, alpha: float = 0.25) -> int:
+    if prev is None:
+        return current
+    return int(prev * (1.0 - alpha) + current * alpha)
+
+def _detect_face_at_timestamp(video_path: str, timestamp: float, frame_w: int, frame_h: int) -> Optional[Dict]:
+    cmd = [
+        "ffmpeg", "-y", "-ss", f"{timestamp:.3f}",
+        "-i", video_path,
+        "-frames:v", "1",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-vf", f"scale={frame_w}:{frame_h}",
+        "pipe:1"
+    ]
+    res = _run_cmd(cmd, timeout=10)
+    if not res or not res.stdout:
+        return None
+
+    frame = np.frombuffer(res.stdout, dtype=np.uint8)
+    if frame.size != frame_w * frame_h * 3:
+        return None
+
+    frame_bgr = frame.reshape((frame_h, frame_w, 3))
+    return detect_face_crop(frame_bgr, frame_w, frame_h)
+
 def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int) -> Optional[Dict]:
     """
-    Detects face and returns crop coordinates for a 9:16 aspect ratio,
-    centered horizontally on the face and utilizing the full frame height.
+    Detect face and return crop coordinates for 9:16 framing.
+    Reject background posters and random wall faces.
     """
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    # Lower minSize and scaleFactor to detect smaller streamer cam faces
-    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=4, minSize=(40, 40))
-    
+    faces = FACE_CASCADE.detectMultiScale(
+        gray,
+        scaleFactor=1.03,
+        minNeighbors=3,
+        minSize=(30, 30),
+    )
+
     if len(faces) == 0:
         return None
-    
+
     best_face = None
-    best_score = -1
-    
+    best_score = -1.0
+
     for (x, y, w, h) in faces:
-        area = w * h
-        center_y = y + h / 2
-        norm_y = center_y / frame_height
-        
-        score = float(area)
-        
-        # Reject giant background faces/posters
-        if h > frame_height * 0.28:
+        area = float(w * h)
+        center_x = x + w / 2.0
+        center_y = y + h / 2.0
+        norm_x = center_x / float(frame_width)
+        norm_y = center_y / float(frame_height)
+        size_ratio = h / float(frame_height)
+
+        score = area
+
+        # Reject giant poster-like faces.
+        if size_ratio > 0.28:
             score *= 0.001
 
-        # Prefer webcam-sized faces
-        if 0.05 < (h / frame_height) < 0.22:
-            score *= 8
+        # Reject top-center wall/poster faces that are not real stream facecams.
+        if norm_y < 0.55 and 0.25 < norm_x < 0.75 and h < frame_height * 0.5:
+            continue
 
-        # Bottom corner preference
-        center_x = x + w/2
-        norm_x = center_x / frame_width
+        # Prefer webcam-sized faces.
+        if 0.05 < size_ratio < 0.22:
+            score *= 8.0
 
+        # Prefer bottom-side facecam placement.
         if norm_y > 0.55:
-            score *= 2.5
+            score *= 3.0
 
         if norm_x < 0.35 or norm_x > 0.65:
-            score *= 2.0
-            
+            score *= 3.0
+
         if score > best_score:
             best_score = score
             best_face = (x, y, w, h)
-            
+
+    if best_face is None or best_score < 10:
+        return None
+
     x, y, w, h = best_face
-    
-    # Target 9:16 aspect ratio crop, utilizing full height to maximize resolution
+
     target_h = frame_height
     target_w = int(target_h * 9 / 16)
-    
-    # Center X on face
-    crop_x = x + w//2 - target_w//2
-    # Ensure crop_x is within bounds
+
+    crop_x = x + w // 2 - target_w // 2
     crop_x = max(0, min(crop_x, frame_width - target_w))
-    
-    # Full height means y is always 0
-    crop_y = 0
-    
+    crop_x = _smooth_int(globals().get("_PREV_CROP_X"), crop_x, alpha=0.25)
+    globals()["_PREV_CROP_X"] = crop_x
+
     return {
         "x": int(crop_x),
-        "y": int(crop_y),
+        "y": 0,
         "width": int(target_w),
         "height": int(target_h),
         "face_w": int(w),
         "face_h": int(h),
-        "confidence": 0.9  # High confidence face detected
+        "confidence": min(1.0, best_score / 5000.0),
     }
 
 
@@ -434,24 +468,26 @@ def analyze_clip(
     layout = detect_layout(video_path, start, end)
     silence = detect_dead_air(video_path, start, end)
 
-    # Sample a representative frame for face detection
-    mid_time = (start + end) / 2.0
-    face_crop = None
+    # Sample multiple timestamps instead of one mid-frame
     info = _get_video_dimensions(video_path)
-    
-    cmd = [
-        "ffmpeg", "-y", "-ss", f"{mid_time:.3f}",
-        "-i", video_path, "-frames:v", "1",
-        "-f", "rawvideo", "-pix_fmt", "bgr24",
-        "-vf", f"scale={info['width']}:{info['height']}",
-        "pipe:1"
-    ]
-    res = _run_cmd(cmd, timeout=10)
-    if res and res.stdout:
-        frame = np.frombuffer(res.stdout, dtype=np.uint8)
-        if frame.size == info["width"] * info["height"] * 3:
-            frame_bgr = frame.reshape((info["height"], info["width"], 3))
-            face_crop = detect_face_crop(frame_bgr, info["width"], info["height"])
+    sample_times = np.linspace(
+        max(start + 0.25, start),
+        max(start + 0.25, end),
+        num=5
+    )
+
+    face_candidates = []
+    for t in sample_times:
+        face = _detect_face_at_timestamp(video_path, float(t), info["width"], info["height"])
+        if face:
+            face_candidates.append(face)
+
+    face_crop = None
+    if face_candidates:
+        face_crop = max(
+            face_candidates,
+            key=lambda f: (f.get("face_w", 0) * f.get("face_h", 0)) * f.get("confidence", 0.0)
+        )
 
     # Basic Tempo Analysis if transcript available
     is_fast_paced = False
@@ -471,21 +507,17 @@ def analyze_clip(
     # - split + both active (true dual-cam) → DROP
     # Screen share segments are ALWAYS kept (vertical stack mode)
     is_screen_share = layout.get("is_screen_share", False)
-    
-    # CRITICAL FIX: If a prominent face is found, prioritize face cropping over screen share letterboxing
+
+    # If a prominent face exists, do NOT treat it as screen-share.
     if face_crop and face_crop.get("face_h", 0) > info["height"] * 0.1:
-        log.info("[%s] Prominent face detected. Overriding to SOLO frame mode.", clip_id)
-        is_screen_share = False
         layout["prefer_solo"] = True
-    
-    # Export aspect ratio
+
     export_aspect_ratio = "16:9" if is_screen_share else "9:16"
 
     should_drop = False
     use_vertical_stack = False
     use_solo_frame = False
 
-    # Priority: screen_share > dual_guest > solo > drop
     if is_screen_share:
         should_drop = False
         use_vertical_stack = False
@@ -495,14 +527,15 @@ def analyze_clip(
         should_drop = False
     else:
         should_use_solo = (
-            layout["prefer_solo"] or
-            layout.get("has_black_panel", False) or
-            black["black_ratio"] > 0.6
+            layout["prefer_solo"]
+            or layout.get("has_black_panel", False)
+            or black["black_ratio"] > 0.6
         )
-        use_solo_frame = should_use_solo
+        use_solo_frame = should_use_solo and face_crop is not None
         should_drop = (
             (layout.get("is_multi_active_frame", False) and not is_screen_share and face_crop is None)
             or black.get("is_mostly_black", False)
+            or face_crop is None
         )
     
     strategy = {
@@ -518,7 +551,7 @@ def analyze_clip(
         "apply_lighting_fix": lighting["needs_correction"],
         "lighting_filter": lighting.get("lighting_filter", ""),
         "skip_silence": silence["has_dead_air"],
-        "export_aspect_ratio": export_aspect_ratio
+        "export_aspect_ratio": export_aspect_ratio,
     }
 
     return {

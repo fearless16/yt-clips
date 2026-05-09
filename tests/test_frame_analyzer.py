@@ -197,6 +197,25 @@ class TestFaceCrop:
         assert result["face_h"] == 150
         assert result["face_w"] == 150
 
+    def test_top_center_poster_only_returns_none(self, monkeypatch):
+        """If the only face detected is top-center, it should be heavily penalized and rejected."""
+        import numpy as np
+        frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        
+        class MockCascade:
+            def detectMultiScale(self, *args, **kwargs):
+                return np.array([
+                    [800, 100, 200, 200],  # Top-center face (norm_y ~0.18, norm_x ~0.47)
+                ])
+            
+        import frame_analyzer
+        monkeypatch.setattr(frame_analyzer, "FACE_CASCADE", MockCascade())
+        
+        result = frame_analyzer.detect_face_crop(frame, 1920, 1080)
+        
+        # Should be rejected because its penalized score < 10
+        assert result is None
+
 
 # ─── _has_vertical_divider ────────────────────────────────────────────────────
 
@@ -345,8 +364,10 @@ class TestAnalyzeClipIntegration:
         for key in self.REQUIRED_STRATEGY_KEYS:
             assert key in strat, f"Missing strategy key: {key}"
 
-    def test_solo_video_not_dropped(self, solo_video):
-        """Solo cam video should NEVER be dropped."""
+    def test_solo_video_not_dropped(self, solo_video, monkeypatch):
+        """Solo cam video should NEVER be dropped if it has a face."""
+        import frame_analyzer
+        monkeypatch.setattr(frame_analyzer, "detect_face_crop", lambda *a, **kw: {"face_w": 100, "face_h": 100, "confidence": 0.9})
         r = analyze_clip(solo_video, 0.0, 1.0)
         assert r["export_strategy"]["should_drop"] is False
 
