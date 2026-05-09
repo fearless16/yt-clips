@@ -743,8 +743,6 @@ def export_all(
     log.info("🚀 Export phase starting...")
     out_dir = Path(cfg["paths"]["shorts"]) / time.strftime("%Y-%m-%d_%H%M%S")
     out_dir.mkdir(parents=True, exist_ok=True)
-    seo_dir = out_dir / "seo"
-    seo_dir.mkdir(parents=True, exist_ok=True)
 
     # Prepare SEO context once (trend fetch is expensive)
     seo_context = {}
@@ -834,7 +832,7 @@ def export_all(
                 generate_seo_for_exported_clip(
                     clip_id=item["clip_id"],
                     transcript=item["transcript"],
-                    output_dir=str(seo_dir),
+                    output_dir=str(out_dir),
                     video_title=seo_context.get("video_title", ""),
                     scorecard=seo_context.get("scorecard", ""),
                     trend_topics=seo_context.get("trend_topics", []),
