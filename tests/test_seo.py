@@ -473,3 +473,63 @@ class TestGenerateSEOLegacyWrapper:
         """Should not crash on minimal input."""
         r = generate_seo("", "t1")
         assert isinstance(r, dict)
+
+# ── process_all_seo (batching queue) ──────────────────────────────────────────
+
+class TestProcessAllSEOQueue:
+    def test_batches_in_chunks_of_3(self, tmp_path, monkeypatch):
+        import yaml
+        h_path = tmp_path / "highlights.yaml"
+        out_dir = tmp_path / "shorts"
+        
+        highlights_data = {
+            f"clip{i}": {"text": f"text {i}"} for i in range(5)
+        }
+        with open(h_path, "w") as f:
+            yaml.dump(highlights_data, f)
+            
+        call_chunks = []
+        def mock_batch_generate_seo(clips, domain, region):
+            call_chunks.append(len(clips))
+            return [{"clip_id": c["clip_id"]} for c in clips]
+            
+        import seo
+        monkeypatch.setattr(seo, "batch_generate_seo", mock_batch_generate_seo)
+        
+        # Mock time.sleep to run fast
+        import time
+        monkeypatch.setattr(time, "sleep", lambda x: None)
+        
+        seo.process_all_seo(str(h_path), str(out_dir))
+        
+        # 5 clips should be chunked into 3 and 2
+        assert call_chunks == [3, 2]
+        
+    def test_retries_on_429(self, tmp_path, monkeypatch):
+        import yaml
+        h_path = tmp_path / "highlights.yaml"
+        out_dir = tmp_path / "shorts"
+        
+        with open(h_path, "w") as f:
+            yaml.dump({"clip1": {"text": "text"}}, f)
+            
+        attempts = [0]
+        def mock_batch_generate_seo(clips, domain, region):
+            attempts[0] += 1
+            if attempts[0] == 1:
+                raise Exception("429 Rate Limit Hit")
+            return [{"clip_id": c["clip_id"]}]
+            
+        import seo
+        monkeypatch.setattr(seo, "batch_generate_seo", mock_batch_generate_seo)
+        
+        import time
+        sleeps = []
+        monkeypatch.setattr(time, "sleep", lambda x: sleeps.append(x))
+        
+        seo.process_all_seo(str(h_path), str(out_dir))
+        
+        # Should attempt twice
+        assert attempts[0] == 2
+        # Should have slept for 8 seconds due to first retry
+        assert 8 in sleeps

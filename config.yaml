@@ -44,7 +44,7 @@ highlight:
   # How many highlights to extract at most
   max_clips: 5
   # Words-per-minute threshold for "fast speech" detection
-  fast_speech_wpm: 160
+  fast_speech_wpm: 140
   # Silence threshold (seconds of silence to penalise a segment)
   silence_penalty_seconds: 1.5
 

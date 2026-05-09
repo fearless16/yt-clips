@@ -230,7 +230,7 @@ def fetch_cricbuzz_live_score(query: str, match_type: str = "ipl") -> Dict:
 
         teams_in_query, _ = extract_match_teams(query)
         match_link = None
-        for card in soup.find_all("a", href=re.compile(r"/cricket-match/"))[:10]:
+        for card in soup.find_all("a", href=re.compile(r"/live-cricket-scores/"))[:10]:
             card_text = card.get_text().lower()
             for team in teams_in_query:
                 if any(alias in card_text for alias in TEAM_MAPPINGS.get(team, [team.lower()])):
@@ -240,7 +240,7 @@ def fetch_cricbuzz_live_score(query: str, match_type: str = "ipl") -> Dict:
                 break
 
         if not match_link:
-            for card in soup.find_all("a", href=re.compile(r"/cricket-match/"))[:5]:
+            for card in soup.find_all("a", href=re.compile(r"/live-cricket-scores/"))[:5]:
                 if "live" in card.get_text().lower():
                     match_link = card.get("href")
                     break
@@ -327,17 +327,34 @@ def fetch_competitor_signals() -> List[str]:
 
 
 def fetch_smart_search_summary(query: str) -> str:
-    try:
-        url = f"https://www.bing.com/search?q={urllib.parse.quote(query + ' cricket match scorecard')}"
-        r = _session().get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
-        soup = BeautifulSoup(r.text, "html.parser")
-        snippets = [
-            s.get_text(strip=True)
-            for s in soup.select(".b_algo p, .b_ans, .b_algo .b_vlist2col")
-        ]
-        return " ".join(snippets[:2]) if snippets else ""
-    except Exception as e:
-        log.warning("Smart search fallback failed: %s", e)
+    # Try alternative providers via Bing to bypass bot protection blocks on sites like Crex
+    search_strategies = [
+        f"site:crex.live {query} live score cricket",
+        f"site:sportskeeda.com {query} live cricket score",
+        f"{query} cricket match scorecard"
+    ]
+    
+    session = _session()
+    
+    for search_query in search_strategies:
+        try:
+            url = f"https://www.bing.com/search?q={urllib.parse.quote(search_query)}"
+            r = session.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}, timeout=5)
+            soup = BeautifulSoup(r.text, "html.parser")
+            snippets = [
+                s.get_text(strip=True)
+                for s in soup.select(".b_algo p, .b_ans, .b_algo .b_vlist2col")
+            ]
+            if snippets:
+                combined = " ".join(snippets[:2])
+                # Only return if it looks like it actually found something relevant
+                if len(combined) > 20:
+                    log.info("✅ Alternative scorecard found via %s", search_query.split()[0])
+                    return combined
+        except Exception as e:
+            log.debug("Smart search strategy '%s' failed: %s", search_query, e)
+            continue
+            
     return ""
 
 

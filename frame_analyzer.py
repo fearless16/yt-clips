@@ -17,39 +17,69 @@ FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fronta
 
 def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int) -> Optional[Dict]:
     """
-    Detects face and returns crop coordinates to keep eyes at 30% from top.
-    Returns None if no face detected.
+    Detects face and returns crop coordinates for a 9:16 aspect ratio,
+    centered horizontally on the face and utilizing the full frame height.
     """
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+    # Lower minSize and scaleFactor to detect smaller streamer cam faces
+    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=4, minSize=(40, 40))
     
     if len(faces) == 0:
         return None
     
-    # Get largest face (closest to camera)
-    x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+    best_face = None
+    best_score = -1
     
-    # Calculate target crop: 9:16 aspect ratio, centered on face
-    # Position eyes at ~30% from top of final frame
-    target_w = frame_width
-    target_h = int(frame_width * 16 / 9)
+    for (x, y, w, h) in faces:
+        area = w * h
+        center_y = y + h / 2
+        norm_y = center_y / frame_height
+        
+        score = float(area)
+        
+        # Reject giant background faces/posters
+        if h > frame_height * 0.28:
+            score *= 0.001
+
+        # Prefer webcam-sized faces
+        if 0.05 < (h / frame_height) < 0.22:
+            score *= 8
+
+        # Bottom corner preference
+        center_x = x + w/2
+        norm_x = center_x / frame_width
+
+        if norm_y > 0.55:
+            score *= 2.5
+
+        if norm_x < 0.35 or norm_x > 0.65:
+            score *= 2.0
+            
+        if score > best_score:
+            best_score = score
+            best_face = (x, y, w, h)
+            
+    x, y, w, h = best_face
+    
+    # Target 9:16 aspect ratio crop, utilizing full height to maximize resolution
+    target_h = frame_height
+    target_w = int(target_h * 9 / 16)
     
     # Center X on face
-    crop_x = max(0, x + w//2 - target_w//2)
-    crop_x = min(crop_x, frame_width - target_w)
+    crop_x = x + w//2 - target_w//2
+    # Ensure crop_x is within bounds
+    crop_x = max(0, min(crop_x, frame_width - target_w))
     
-    # Position Y so eyes are at 30% from top
-    # Assume eyes are at 40% down from top of face box
-    eye_y = y + int(h * 0.4)
-    desired_eye_y = int(target_h * 0.3)
-    crop_y = eye_y - desired_eye_y
-    crop_y = max(0, min(crop_y, frame_height - target_h))
+    # Full height means y is always 0
+    crop_y = 0
     
     return {
         "x": int(crop_x),
         "y": int(crop_y),
         "width": int(target_w),
         "height": int(target_h),
+        "face_w": int(w),
+        "face_h": int(h),
         "confidence": 0.9  # High confidence face detected
     }
 
@@ -210,18 +240,22 @@ def _detect_faces_per_half(frame_array: np.ndarray, width: int) -> dict:
 
 
 def _is_screen_share_frame(frame_array: np.ndarray) -> bool:
-    """
-    Heuristic: screen share frames tend to have high edge density
-    (text, UI elements) and relatively uniform brightness bands.
-    """
-    # High variance overall = lots of content
     overall_var = float(frame_array.var())
-    # Compute horizontal gradient (edges)
+
     grad = np.abs(np.diff(frame_array.astype(np.int16), axis=1))
     edge_density = float(grad.mean())
 
-    # Screen shares: moderate-high variance + high edge density + no strong center divider
-    return overall_var > 800 and edge_density > 8
+    # Text/UI detection
+    bright_pixels = np.sum(frame_array > 210)
+    dark_pixels = np.sum(frame_array < 40)
+
+    contrast_ratio = (bright_pixels + dark_pixels) / frame_array.size
+
+    return bool(
+        overall_var > 500
+        and edge_density > 6
+        and contrast_ratio > 0.18
+    )
 
 
 def detect_layout(video_path: str, start: float, end: float) -> Dict:
@@ -237,8 +271,8 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
         "ffmpeg", "-y",
         "-ss", f"{start:.3f}", "-t", f"{duration:.3f}",
         "-i", video_path,
-        "-vf", f"fps=5/{duration:.3f},scale=320:180,format=gray",
-        "-frames:v", "5",
+        "-vf", f"fps=12/{duration:.3f},scale=320:180,format=gray",
+        "-frames:v", "12",
         "-f", "rawvideo", "-pix_fmt", "gray",
         "pipe:1"
     ]
@@ -438,24 +472,41 @@ def analyze_clip(
     # Screen share segments are ALWAYS kept (vertical stack mode)
     is_screen_share = layout.get("is_screen_share", False)
     
-    should_use_solo = (
-        layout["prefer_solo"] or
-        layout.get("has_black_panel", False) or
-        black["black_ratio"] > 0.6
-    )
+    # CRITICAL FIX: If a prominent face is found, prioritize face cropping over screen share letterboxing
+    if face_crop and face_crop.get("face_h", 0) > info["height"] * 0.1:
+        log.info("[%s] Prominent face detected. Overriding to SOLO frame mode.", clip_id)
+        is_screen_share = False
+        layout["prefer_solo"] = True
     
-    # Only drop if CONFIRMED multi-active (divider + dual faces) or mostly black
-    # NEVER drop screen share segments
-    should_drop = (
-        (layout.get("is_multi_active_frame", False) and not is_screen_share)
-        or black.get("is_mostly_black", False)
-    )
-    
-    # Screen share → force vertical stack (blurred bg + sharp center)
-    use_vertical_stack = is_screen_share
+    # Export aspect ratio
+    export_aspect_ratio = "16:9" if is_screen_share else "9:16"
+
+    should_drop = False
+    use_vertical_stack = False
+    use_solo_frame = False
+
+    # Priority: screen_share > dual_guest > solo > drop
+    if is_screen_share:
+        should_drop = False
+        use_vertical_stack = False
+        use_solo_frame = False
+    elif layout.get("is_multi_active_frame", False):
+        use_vertical_stack = True
+        should_drop = False
+    else:
+        should_use_solo = (
+            layout["prefer_solo"] or
+            layout.get("has_black_panel", False) or
+            black["black_ratio"] > 0.6
+        )
+        use_solo_frame = should_use_solo
+        should_drop = (
+            (layout.get("is_multi_active_frame", False) and not is_screen_share and face_crop is None)
+            or black.get("is_mostly_black", False)
+        )
     
     strategy = {
-        "use_solo_frame": should_use_solo and not use_vertical_stack,
+        "use_solo_frame": use_solo_frame,
         "use_vertical_stack": use_vertical_stack,
         "has_black_panel": layout.get("has_black_panel", False),
         "black_panel_side": layout.get("black_panel_side"),
@@ -467,6 +518,7 @@ def analyze_clip(
         "apply_lighting_fix": lighting["needs_correction"],
         "lighting_filter": lighting.get("lighting_filter", ""),
         "skip_silence": silence["has_dead_air"],
+        "export_aspect_ratio": export_aspect_ratio
     }
 
     return {

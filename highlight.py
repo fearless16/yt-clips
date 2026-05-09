@@ -1,15 +1,11 @@
 import argparse
 import json
-import math
-import struct
 import subprocess
 import sys
-import tempfile
 import wave
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 import re
-
 import numpy as np
 import yaml  # type: ignore
 
@@ -180,7 +176,7 @@ def _score_segment(
     if word_count < 5:
         score -= 1.5  # Penalise very low speech content
 
-    # 4. Keyword bonus — reaction words (expanded list for Hindi/gaming streams)
+    # 4. Keyword bonus — reaction words (expanded for Hindi/Hinglish gaming streams)
     reaction_words = {
         "oh", "wow", "wait", "what", "no", "yes", "let's", "go",
         "insane", "crazy", "bro", "dude", "actually", "holy", "damn",
@@ -188,10 +184,15 @@ def _score_segment(
         "perfect", "beautiful", "massive", "destroyed", "killed",
         "wicket", "six", "four", "boundary", "out", "catch",
         "shot", "brilliant", "superb", "excellent", "fantastic",
+        # Hindi / Hinglish additions:
+        "arre", "kya", "bhai", "yaar", "baap", "pagal", "gajab",
+        "khatarnak", "chhakka", "chauka", "maar", "maro", "gaya",
+        "jeet", "shandar", "dhamaakedaar", "zabardast", "sixer",
+        "catch", "dekho", "khatam", "bawaal", "machaa"
     }
     words_lower = set(re.findall(r'\b\w+\b', text.lower()))
     hits = len(words_lower & reaction_words)
-    score += hits * 0.4
+    score += hits * 0.5  # slightly increased weight for keywords
 
     # 5. Exclamation/question mark density bonus
     exclaim_count = text.count("!") + text.count("?")
@@ -341,7 +342,7 @@ def detect_highlights(
     
     # CRITICAL FIX: Ensure intro coverage (first 30 seconds)
     # If there's a high-scoring segment in the intro, force-include it
-    intro_threshold = max_score * 0.7  # 70% of max score
+    intro_threshold = max_score * 0.45  # 45% of max score
     intro_segments = [w for w in merged if w["start"] < 30 and w["score"] >= intro_threshold]
     
     top = []
