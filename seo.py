@@ -51,14 +51,15 @@ Local keywords extracted from transcript: {local_kw}
 Generate YouTube Shorts metadata for this ONE clip. Rules:
 
 TITLE (≤100 chars):
-  - Format: <TEAM1> vs <TEAM2> Live | <Moment> | IPL 2026
-  - Include both teams, "Live", emotional moment, tournament + year
+  - Format: cricket live: <Unique, Specific Moment> | IPL 2026
+  - MUST start EXACTLY with "cricket live:" or "IPL:" (these are high-volume keywords).
+  - Every clip MUST have a UNIQUE, highly specific title. DO NOT repeat generic titles like "Unbelievable Cricket Moments! Kya Yeh Catch/Six Tha?".
   - Max 1 emoji. NEVER exceed 100 chars.
 
 DESCRIPTION (≤5000 chars, ideal 400-1200):
   - First 150 chars must have: match keyword + player/moment + "IPL 2026"
   - Natural Hinglish, NOT ChatGPT tone
-  - Paragraphs: (1) 2-3 factual match lines, (2) Hinglish analysis, (3) short CTA
+  - Paragraphs: (1) 2-3 factual match lines, (2) Hinglish analysis/scenario prediction, (3) short CTA
   - Then 3-5 hashtags. Then search terms one per line.
   - NO markdown, NO bullets, NO excessive emojis
 
