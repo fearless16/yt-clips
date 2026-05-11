@@ -413,12 +413,13 @@ def analyze_clip(
         log.info("[%s] Guest cam OFF (black panel) → DROP", clip_id)
 
     elif is_screen_share:
-        # Screen share → export 16:9 untouched, no reframing
-        # Vertical stack kills readability for charts/browsers/scorecards
+        # Screen share → preserve the content inside a vertical Shorts canvas.
+        # Export keeps is_screen_share=true so export.py can use the readable
+        # blurred-background layout instead of a tight center crop.
         use_vertical_stack = False
         use_solo_frame = False
         should_drop = False
-        log.info("[%s] Screen share → 16:9 passthrough", clip_id)
+        log.info("[%s] Screen share → 9:16 shorts canvas", clip_id)
 
     else:
         # Solo frame (just you)
@@ -444,7 +445,7 @@ def analyze_clip(
         "apply_lighting_fix": lighting["needs_correction"],
         "lighting_filter": lighting.get("lighting_filter", ""),
         "skip_silence": silence["has_dead_air"],
-        "export_aspect_ratio": "16:9" if is_screen_share else "9:16",
+        "export_aspect_ratio": "9:16",
     }
 
     return {

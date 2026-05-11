@@ -391,7 +391,7 @@ def _build_enhance_stack(
     Layout routing:
       solo              → center 9:16 crop (just you in frame)
       guest_cam_on      → vertical stack, both panels stacked 9:16
-      screen_share      → vertical stack (blurred bg + sharp content)
+      screen_share      → 9:16 canvas with blurred bg + sharp readable content
       guest_cam_off     → should have been dropped; crop active half as fallback
     """
     strategy = analysis.get("export_strategy", {}) if isinstance(analysis, dict) else {}
@@ -406,14 +406,10 @@ def _build_enhance_stack(
     active_crop = strategy.get("active_crop")
     is_screen_share = strategy.get("is_screen_share", False)
 
-    # Screen-share exports at 16:9 (1920x1080) — readability over reframing
-    # All other layouts export at 9:16 (1080x1920)
-    if is_screen_share:
-        target_w = 1920
-        target_h = 1080
-    else:
-        target_w = int(cfg["export"]["width"])    # 1080
-        target_h = int(cfg["export"]["height"])   # 1920
+    # YouTube classifies Shorts by shape/duration, so every export must remain
+    # on the configured vertical canvas.
+    target_w = int(cfg["export"]["width"])    # 1080
+    target_h = int(cfg["export"]["height"])   # 1920
     enhance = "hqdn3d=4:3:6:4.5,deband=1thr=0.02:2thr=0.02:range=16:blur=1,unsharp=5:5:1.0:5:5:0.0"
 
     # ── Filter selection ──────────────────────────────────────────────────────
@@ -431,13 +427,16 @@ def _build_enhance_stack(
         )
 
     elif is_screen_share:
-        # Screen share → preserve 16:9, scale to fit, letterbox if needed
-        # No blurred stack — charts/browsers/scorecards must stay readable
-        log.debug("SCREEN SHARE → 16:9 passthrough (scale+pad)")
+        # Screen share → keep the full 16:9 source visible inside a 9:16 Short.
+        # A blurred cover-fill background avoids black bars while preserving the
+        # foreground content instead of cropping off scorecards/charts.
+        log.debug("SCREEN SHARE → 9:16 shorts canvas (blurred bg + fit foreground)")
         filter_base = (
-            f"{enhance},"
-            f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease,"
-            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2"
+            f"{enhance},split=2[bg_raw][fg_raw];"
+            f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=-0.08:saturation=0.9[bg];"
+            f"[fg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
+            f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
         )
 
     elif guest_cam_off or (has_black_panel and not use_vertical_stack):
