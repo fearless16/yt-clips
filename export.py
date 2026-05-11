@@ -576,6 +576,10 @@ def export_clip(
     if use_logo and not _is_readable_media_input(logo_file):
         log.warning("[%s] Logo not readable; skipping logo.", clip_id)
         use_logo = False
+        
+    cta_file = Path("cta.mp3")
+    use_cta = cta_file.exists()
+    
     has_audio = _has_audio_stream(video_path)
     if not has_audio:
         log.warning("[%s] No audio stream; exporting silent video.", clip_id)
@@ -626,6 +630,18 @@ def export_clip(
 
     if use_logo:
         cmd.extend(["-i", str(logo_file)])
+        
+    if use_cta:
+        cmd.extend(["-i", str(cta_file)])
+        
+    cta_idx = 2 if use_logo else 1
+
+    a_map = "0:a:0?"
+    if has_audio:
+        if use_cta:
+            video_filter_complex += f";[0:a:0?]{a_filter}[main_a];[main_a][{cta_idx}:a]amix=inputs=2:duration=first:dropout_transition=2:weights=0.8 1.5[a_out]"
+            a_map = "[a_out]"
+            a_filter = None
 
     cmd.extend([
         "-filter_complex", video_filter_complex,
@@ -637,9 +653,10 @@ def export_clip(
     ])
 
     if has_audio:
+        cmd.extend(["-map", a_map])
+        if a_filter:
+            cmd.extend(["-af", a_filter])
         cmd.extend([
-            "-af", a_filter,
-            "-map", "0:a:0?",
             "-c:a", "aac",
             "-b:a", str(cfg["export"].get("audio_bitrate", "192k")),
             "-shortest",

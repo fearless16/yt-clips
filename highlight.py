@@ -176,8 +176,9 @@ def _score_segment(
     if word_count < 5:
         score -= 1.5  # Penalise very low speech content
 
-    # 4. Keyword bonus — reaction words (expanded for Hindi/Hinglish gaming streams)
+    # 4. Keyword bonus — reaction and analysis words (expanded for scenario/analytics)
     reaction_words = {
+        # Original reaction words
         "oh", "wow", "wait", "what", "no", "yes", "let's", "go",
         "insane", "crazy", "bro", "dude", "actually", "holy", "damn",
         "unbelievable", "incredible", "amazing", "clutch", "huge",
@@ -188,7 +189,12 @@ def _score_segment(
         "arre", "kya", "bhai", "yaar", "baap", "pagal", "gajab",
         "khatarnak", "chhakka", "chauka", "maar", "maro", "gaya",
         "jeet", "shandar", "dhamaakedaar", "zabardast", "sixer",
-        "catch", "dekho", "khatam", "bawaal", "machaa"
+        "catch", "dekho", "khatam", "bawaal", "machaa",
+        # Analytics / Scenario Shorts additions (from audit):
+        "analytics", "scenario", "playoff", "playoffs", "points", "table", 
+        "qualification", "stats", "record", "chances", "probability", "equation",
+        "prediction", "predict", "calculate", "math", "net run rate", "nrr",
+        "standings", "qualify", "eliminate", "knockout"
     }
     words_lower = set(re.findall(r'\b\w+\b', text.lower()))
     hits = len(words_lower & reaction_words)
