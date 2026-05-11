@@ -172,6 +172,7 @@ def sync_to_drive(
             list(folder.glob("*.mp4"))
             + list(folder.glob("*.json"))
             + list(folder.glob("*.yaml"))
+            + list(folder.glob("*.md"))
         )
         if not export_files:
             log.warning("No exportable files in %s", folder)
