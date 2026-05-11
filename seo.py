@@ -53,6 +53,7 @@ Generate YouTube Shorts metadata for this ONE clip. Rules:
 TITLE (≤100 chars):
   - Format: cricket live: <Unique, Specific Moment> | IPL 2026
   - MUST start EXACTLY with "cricket live:" or "IPL:" (these are high-volume keywords).
+  - CRITICAL: You MUST inject at least one EXACT PHRASE from the "Trending topics" list directly into the title to capture real-time search spikes.
   - Every clip MUST have a UNIQUE, highly specific title. DO NOT repeat generic titles like "Unbelievable Cricket Moments! Kya Yeh Catch/Six Tha?".
   - Max 1 emoji. NEVER exceed 100 chars.
 
@@ -67,6 +68,7 @@ HASHTAGS (exactly 3-5, match/tournament/team specific, NO spam):
 
 SEARCH TERMS (18-30 terms, lowercase, 2-5 words each, total ≤500 chars):
   - Target: match, tournament, players, Hindi viewers, live viewers
+  - CRITICAL: You MUST include ALL exact phrases listed in "Trending topics" as search terms.
   - NO generic: cricket, viral, shorts, trending
   - NO duplicates of hashtags
 
@@ -157,7 +159,18 @@ def generate_clip_seo(
     Retries up to 3 times with exponential backoff on 429/593.
     """
     trend_topics = trend_topics or []
-    local_kw = ", ".join(_extract_keywords(transcript))
+    local_kw_list = _extract_keywords(transcript)
+    local_kw = ", ".join(local_kw_list)
+    
+    # [NEW] Intercept exact players/events to ping YouTube Suggest API
+    try:
+        from trends import fetch_clip_specific_suggestions
+        clip_suggestions = fetch_clip_specific_suggestions(local_kw_list)
+        if clip_suggestions:
+            trend_topics = list(trend_topics) + clip_suggestions
+    except Exception as e:
+        log.warning("Could not fetch clip-specific suggestions: %s", e)
+
     trend_str = ", ".join(trend_topics) or "IPL 2026, cricket live"
     live_cta = (
         f"Watch LIVE: {live_stream_url}" if live_stream_url
