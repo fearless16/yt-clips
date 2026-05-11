@@ -295,6 +295,39 @@ def fetch_youtube_suggestions(seed_query: str = "cricket live") -> List[str]:
     return []
 
 
+def fetch_clip_specific_suggestions(local_keywords: List[str]) -> List[str]:
+    """
+    Ping YouTube Suggest API using specific entities found in the clip's transcript.
+    Example: if keywords have 'kohli' and 'umpire', query 'kohli umpire' to find real-time 
+    search spikes like 'kohli angry on umpire'.
+    """
+    if not local_keywords:
+        return []
+        
+    # Take top 2-3 significant keywords (e.g. players, events) to form a focused query
+    focused_query = " ".join(local_keywords[:3])
+    
+    # Also try adding "cricket" context if it's too short
+    if len(local_keywords) < 2:
+        focused_query += " cricket"
+        
+    log.info("🔍 Pinging YouTube Suggest API for clip-specific keywords: '%s'", focused_query)
+    
+    try:
+        url = YT_SUGGEST.format(q=urllib.parse.quote(focused_query))
+        r = _session().get(url, timeout=4)
+        r.raise_for_status()
+        data = r.json()
+        if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
+            suggestions = [_clean(x) for x in data[1][:5] if _clean(x)]
+            log.info("🎯 Found specific search intents: %s", suggestions)
+            return suggestions
+    except Exception as e:
+        log.warning("Clip-specific YouTube suggestion fetch failed for '%s': %s", focused_query, e)
+        
+    return []
+
+
 def _extract_tokens(texts: List[str], limit: int = 20) -> List[str]:
     words: Dict[str, int] = {}
     stop = {"live", "vs", "and", "the", "for", "with", "from", "today", "match", "cricket"}
