@@ -94,6 +94,8 @@ youtube:
   privacy_status: "private"              # private | unlisted | public
   category_id: "17"                     # 17 = Sports
   self_declared_made_for_kids: false
+  enforce_shorts_eligibility: true      # Refuse landscape/too-long files before upload
+  shorts_max_seconds: 180               # Current YouTube Shorts maximum duration
   upload_enabled: true                  # 🚀 GO LIVE!
   schedule_interval_hours: 2            # Automate posting every 2 hours (Algorithmic Sweet Spot)
   niche: "Cricket"                      # Used for SEO trend analysis

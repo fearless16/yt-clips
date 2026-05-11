@@ -100,7 +100,15 @@ def _enforce_limits(item: Dict) -> Dict:
 
     hashtags = item.get("hashtags") or []
     hashtags = [h if h.startswith("#") else f"#{h}" for h in hashtags]
+    if not any(h.lower() == "#shorts" for h in hashtags):
+        hashtags.append("#Shorts")
     hashtags = list(dict.fromkeys(hashtags))[:5]
+    if not any(h.lower() == "#shorts" for h in hashtags):
+        hashtags[-1:] = ["#Shorts"]
+
+    if "#shorts" not in title.lower() and "#shorts" not in description.lower():
+        marker = "\n\n#Shorts"
+        description = (description[:5000 - len(marker)] + marker) if description else "#Shorts"
 
     search_terms = item.get("search_terms") or []
     cleaned, total = [], 0

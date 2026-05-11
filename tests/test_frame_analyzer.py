@@ -198,7 +198,7 @@ class TestAnalyzeClipIntegration:
         
         r = analyze_clip(solo_video, 0.0, 1.0)
         assert r["export_strategy"]["is_screen_share"] is True
-        assert r["export_strategy"]["export_aspect_ratio"] == "16:9"
+        assert r["export_strategy"]["export_aspect_ratio"] == "9:16"
 
     def test_screen_share_overridden_by_large_face(self, solo_video, monkeypatch):
         import frame_analyzer

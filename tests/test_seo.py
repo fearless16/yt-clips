@@ -83,7 +83,7 @@ class TestEnforceLimits:
     def test_hashtags_prefixed_and_capped(self):
         item = {"hashtags": ["A", "#B", "C", "D", "E", "F"]}
         result = _enforce_limits(item)
-        assert result["hashtags"] == ["#A", "#B", "#C", "#D", "#E"]
+        assert result["hashtags"] == ["#A", "#B", "#C", "#D", "#Shorts"]
 
     def test_search_terms_validation(self):
         item = {
@@ -188,3 +188,43 @@ def test_process_all_seo(tmp_path, monkeypatch):
         results = json.load(f)
         assert len(results) == 2
         assert results[0]["clip_id"] == "clip1"
+
+
+def test_upload_metadata_adds_shorts_marker():
+    from upload import _ensure_shorts_metadata
+
+    title, description, tags = _ensure_shorts_metadata(
+        "RCB vs CSK Live | Big wicket",
+        "Kohli wicket moment in IPL 2026.",
+        ["kohli wicket", "rcb csk highlights"],
+    )
+
+    assert title == "RCB vs CSK Live | Big wicket"
+    assert "#Shorts" in description
+    assert "shorts" in tags
+
+
+def test_upload_guard_rejects_landscape(monkeypatch):
+    import upload
+    from upload import _validate_shorts_video
+
+    monkeypatch.setattr(upload, "_probe_video", lambda path: {
+        "width": 1920,
+        "height": 1080,
+        "duration": 29.0,
+    })
+
+    assert _validate_shorts_video(Path("clip.mp4")) is False
+
+
+def test_upload_guard_accepts_vertical(monkeypatch):
+    import upload
+    from upload import _validate_shorts_video
+
+    monkeypatch.setattr(upload, "_probe_video", lambda path: {
+        "width": 1080,
+        "height": 1920,
+        "duration": 29.0,
+    })
+
+    assert _validate_shorts_video(Path("clip.mp4")) is True

@@ -11,10 +11,11 @@ import os
 import json
 import sys
 import time
+import subprocess
 import httplib2
 import google_auth_httplib2
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from utils.config import load_config
 from utils.logger import get_logger
@@ -38,6 +39,101 @@ except ImportError:
 
 # YouTube API scopes (intentionally different from Drive scope)
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SHORTS_MAX_SECONDS = 180.0
+
+
+def _probe_video(video_path: Path) -> Optional[Dict[str, float]]:
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height:format=duration",
+        "-of", "json", str(video_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0:
+            log.error("ffprobe failed for %s: %s", video_path, result.stderr[-300:])
+            return None
+        data = json.loads(result.stdout or "{}")
+        stream = (data.get("streams") or [{}])[0]
+        return {
+            "width": int(stream.get("width") or 0),
+            "height": int(stream.get("height") or 0),
+            "duration": float(data.get("format", {}).get("duration") or 0),
+        }
+    except Exception as e:
+        log.error("Could not inspect video %s: %s", video_path, e)
+        return None
+
+
+def _validate_shorts_video(video_path: Path) -> bool:
+    """
+    YouTube Data API uploads Shorts through the normal videos.insert endpoint.
+    YouTube classifies them as Shorts when the file is square/vertical and short.
+    """
+    if not cfg["youtube"].get("enforce_shorts_eligibility", True):
+        return True
+
+    info = _probe_video(video_path)
+    if not info:
+        return False
+
+    width = int(info["width"])
+    height = int(info["height"])
+    duration = float(info["duration"])
+    max_seconds = float(cfg["youtube"].get("shorts_max_seconds", SHORTS_MAX_SECONDS))
+
+    if width <= 0 or height <= 0 or duration <= 0:
+        log.error("Invalid video metadata for Shorts upload: %s", info)
+        return False
+    if width > height:
+        log.error(
+            "Refusing to upload %s as a Short: landscape video %dx%d. Expected 9:16/square.",
+            video_path.name, width, height,
+        )
+        return False
+    if duration > max_seconds:
+        log.error(
+            "Refusing to upload %s as a Short: duration %.1fs exceeds %.1fs.",
+            video_path.name, duration, max_seconds,
+        )
+        return False
+
+    log.info("Shorts validation passed: %dx%d, %.1fs", width, height, duration)
+    return True
+
+
+def _has_shorts_marker(text: str) -> bool:
+    return "#shorts" in (text or "").lower()
+
+
+def _limit_youtube_tags(tags: List[str], max_chars: int = 500) -> List[str]:
+    limited: List[str] = []
+    total = 0
+    for tag in tags:
+        cleaned = str(tag).strip()
+        if not cleaned:
+            continue
+        extra = len(cleaned) + (1 if limited else 0)
+        if total + extra > max_chars:
+            break
+        limited.append(cleaned)
+        total += extra
+    return limited
+
+
+def _ensure_shorts_metadata(title: str, description: str, tags: List[str]) -> Tuple[str, str, List[str]]:
+    title = (title or "Cricket Highlights #Shorts")[:100]
+    description = description or ""
+    tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
+
+    if not any(t.lower().lstrip("#") == "shorts" for t in tags):
+        tags.insert(0, "shorts")
+
+    if not (_has_shorts_marker(title) or _has_shorts_marker(description)):
+        marker = "\n\n#Shorts"
+        description = (description[:5000 - len(marker)] + marker) if description else "#Shorts"
+
+    return title[:100], description[:5000], _limit_youtube_tags(tags)
 
 
 def get_authenticated_service():
@@ -111,6 +207,8 @@ def upload_video(
     if not m_path.exists():
         log.error(f"Metadata file not found: {metadata_path}")
         return None
+    if not _validate_shorts_video(v_path):
+        return None
 
     youtube = get_authenticated_service()
     if not youtube:
@@ -124,6 +222,7 @@ def upload_video(
     description = meta.get("description", "")
     # search_terms are the discoverability tags for YouTube (separate from hashtags)
     search_terms = meta.get("search_terms", meta.get("tags", []))
+    title, description, search_terms = _ensure_shorts_metadata(title, description, search_terms)
 
     log.info(f"🚀 Uploading to YouTube: {title}...")
     if publish_at:
@@ -134,7 +233,7 @@ def upload_video(
         "snippet": {
             "title": title[:100],  # YouTube title limit
             "description": description[:5000],  # YouTube description limit
-            "tags": search_terms[:500],  # YouTube tags limit
+            "tags": search_terms,  # YouTube tags limit is enforced above
             "categoryId": cfg["youtube"]["category_id"],
         },
         "status": {
