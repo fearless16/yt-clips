@@ -130,13 +130,57 @@ Return ONLY JSON:
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+CRICKET_KEYWORDS = {
+    "kohli", "dhoni", "rohit", "gill", "raina", "sky", "pandya", "bumrah", "shami",
+    "siraj", "jaddu", "jadeja", "ashwin", "chahal", "russell", "narine", "moeen",
+    "maxwell", "faf", "rashid", "warner", "rahul", "pooran", "stoinis", "iyer",
+    "shankar", "sundar", "kishan", "suryakumar", "sharma", "gaikwad", "dube",
+    "rahane", "miller", "klassen", "chahar", "umesh", "deepak", "boult", "gayle",
+    "abd", "devilliers", "virat", "sachin", "yuvi", "yuvraj", "zampa", "hazlewood",
+    "starc", "cummins", "patel", "axar", "shardul", "thakur", "krunal", "ityer",
+    "mayank", "deepakhooda", "manish", "pandey", "samson", "jaiswal", "tripathi",
+    "mavi", "nagarkoti", "nitish", "rana", "rishabh", "pant", "dinesh", "karthik",
+    "sky", "surya", "ishant", "sharma", "vijay", "murali", "vijay", "ambati",
+    "rayudu", "harbhajan", "singh", "pathan", "irfan", "yusuf", "malik", "jordan",
+    "morris", "pietersen", "watson", "mccullum", "hales", "bairstow", "roy",
+    "buttler", "morgan", "stokes", "woakes", "curran", "sam", "tom", "livingstone",
+    "salt", "phil", "rehan", "arora", "nattu", "sandeep", "thampi", "prasidh",
+    "aaron", "saini", "sheldon", "cottrell", "holden", "dawid", "alan", "joe",
+    "root", "brown", "alfie", "livi", "biggs", "manny", "ellis", "behrendorff",
+    "agar", "taylor", "southee", "henry", "lockie", "ferguson", "sodhi", "santner",
+    "tomlinton", "conway", "young", "ravindra", "phillips", "markram", "shai",
+    "hope", "pooran", "hetmyer", "brooks", "shepherd", "ronak", "wiese", "geldenhuys",
+    "six", "four", "wicket", "catch", "runout", "stump", "bowled", "lbw", "century",
+    "half", "over", "yorker", "bouncer", "fulltoss", "drive", "pull", "hook",
+    "sweep", "reverse", "slog", "mis", "timing", "powerful", "classy", "elegan",
+    "brutal", "massive", "huge", "giant", "big", "long", "deep", "boundary", "clear",
+    "ipl", "t20", "test", "odi", "cricket", "super", "over", "playoff", "final",
+    "qualifier", "eliminator", "trophy", "cup", "champions", "league", "tournament",
+    "match", "run", "score", "target", "chase", "win", "loss", "close", "thrill",
+    "upset", "comeback", "drama", "tension", "pressure", "intense", "exiting",
+    "crazy", "unbelievable", "incredible", "amazing", "fantastic", "stunning",
+    "what", "shot", "bowling", "batting", "fielding", "captain", "coach", "umpire",
+    "review", "dr", "decision", "controversy", "argument", "fight", "agre",
+    "angle", "replay", "slowmo", "slow", "motion", "dismissal", "partnership",
+}
+
 def _extract_keywords(text: str, limit: int = 14) -> List[str]:
     words = re.findall(r"[A-Za-z0-9']+", (text or "").lower())
     kw = [w for w in words if w not in STOP_WORDS and len(w) > 2]
     freq: Dict[str, int] = {}
     for w in kw:
         freq[w] = freq.get(w, 0) + 1
-    return [k for k, _ in sorted(freq.items(), key=lambda x: x[1], reverse=True)[:limit]]
+    top = [k for k, _ in sorted(freq.items(), key=lambda x: x[1], reverse=True)[:limit]]
+    # Prefer cricket-relevant keywords, fall back to top non-noise keywords
+    cricket_kw = [k for k in top if k in CRICKET_KEYWORDS]
+    if cricket_kw:
+        return cricket_kw[:limit]
+    # If no cricket keywords, return top words that aren't obvious transcription noise
+    noise = {"oh", "ah", "ha", "he", "she", "it", "do", "go", "so", "yeah", "hey",
+             "come", "get", "got", "let", "put", "say", "see", "use", "way", "like",
+             "know", "take", "tell", "make", "think", "give", "will", "would", "could",
+             "should", "can", "may", "might", "shall", "now", "then", "just", "also"}
+    return [k for k in top if k not in noise][:5]
 
 
 def _inject_viral_elements(title: str, description: str, hashtags: List[str]) -> Dict:
@@ -198,13 +242,17 @@ def _generate_template_seo(
                 break
     teams_found = list(set(teams_found))[:2]
 
-    # Build title from template
+    # Build title from template — NO garbage transcript keywords
     team_str = " vs ".join(teams_found) if teams_found else "Cricket Live"
+    score_str = scorecard.replace("Live: ", "").strip() if scorecard else ""
 
     title_variants = [
-        f"cricket live: {local_kw[0].title() if local_kw else 'Match'} moment! | IPL 2026",
-        f"IPL 2026: {team_str} - {local_kw[0].title() if local_kw else 'Highlight'}",
-        f"cricket live: Full {local_kw[0] if local_kw else 'Match'} 🔥 | IPL 2026",
+        f"{team_str} - Unbelievable Finish! 🔥 | IPL 2026",
+        f"{team_str} - Match Ka Turning Point! | IPL 2026",
+        f"Arey Yeh Kya Ho Gaya?! {team_str} | IPL 2026 🏏",
+        f"{score_str} - {team_str} Full Drama! | IPL 2026" if score_str else f"{team_str} Full Drama! | IPL 2026",
+        f"Last Over Ka Dhamaal! {team_str} | IPL 2026 🔥",
+        f"{team_str} - Brutal Sixes & Wickets! | IPL 2026 🏏",
     ]
     title = random.choice(title_variants)[:100]
 

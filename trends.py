@@ -317,6 +317,26 @@ def _fetch_yt_suggest_internal(seed_query: str) -> List[str]:
     return []
 
 
+CRICKET_KEYWORDS = {
+    "kohli", "dhoni", "rohit", "gill", "raina", "sky", "pandya", "bumrah", "shami",
+    "siraj", "jaddu", "jadeja", "ashwin", "chahal", "russell", "narine", "moeen",
+    "maxwell", "faf", "rashid", "warner", "rahul", "pooran", "stoinis", "iyer",
+    "shankar", "sundar", "kishan", "suryakumar", "sharma", "gaikwad", "dube",
+    "rahane", "miller", "klassen", "chahar", "umesh", "deepak", "boult", "gayle",
+    "abd", "virat", "sachin", "yuvi", "yuvraj", "starc", "cummins", "patel",
+    "axar", "thakur", "krunal", "mayank", "pandey", "samson", "jaiswal", "tripathi",
+    "rishabh", "pant", "dinesh", "karthik", "ishant", "rayudu", "harbhajan",
+    "singh", "pathan", "irfan", "yusuf", "malik", "jordan", "watson", "buttler",
+    "morgan", "stokes", "curran", "livingstone", "root", "six", "four", "wicket",
+    "catch", "runout", "stump", "bowled", "lbw", "century", "half", "yorker",
+    "bouncer", "fulltoss", "drive", "pull", "hook", "sweep", "reverse", "slog",
+    "ipl", "t20", "cricket", "super", "final", "trophy", "cup", "match", "run",
+    "score", "target", "chase", "win", "drama", "tension", "intense",
+    "crazy", "unbelievable", "incredible", "amazing", "fantastic", "stunning",
+    "shot", "bowling", "batting", "fielding", "captain", "umpire",
+    "review", "decision", "controversy", "argument", "dismissal", "partnership",
+}
+
 def fetch_clip_specific_suggestions(local_keywords: List[str]) -> List[str]:
     """
     Ping YouTube Suggest API using specific entities found in the clip's transcript.
@@ -325,13 +345,20 @@ def fetch_clip_specific_suggestions(local_keywords: List[str]) -> List[str]:
     """
     if not local_keywords:
         return []
+    
+    # Only use cricket-relevant keywords, filter Whisper noise
+    noise_words = {"oh", "ah", "ha", "he", "she", "it", "do", "go", "so", "yeah", "hey",
+                   "come", "get", "got", "let", "put", "say", "see", "use", "way", "like",
+                   "know", "take", "tell", "make", "think", "give", "will", "would", "could",
+                   "should", "can", "may", "might", "shall", "now", "then", "just", "also",
+                   "dumbing", "think", "him", "will", "video", "like", "chicken"}
+    cricket_keywords = [k for k in local_keywords if k in CRICKET_KEYWORDS and k not in noise_words]
+    if not cricket_keywords:
+        log.info("No cricket-specific keywords found in clip — skipping YouTube Suggest ping")
+        return []
         
     # Take top 2-3 significant keywords (e.g. players, events) to form a focused query
-    focused_query = " ".join(local_keywords[:3])
-    
-    # Also try adding "cricket" context if it's too short
-    if len(local_keywords) < 2:
-        focused_query += " cricket"
+    focused_query = " ".join(cricket_keywords[:3])
         
     log.info("🔍 Pinging YouTube Suggest API for clip-specific keywords: '%s'", focused_query)
     
