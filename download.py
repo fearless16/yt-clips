@@ -132,15 +132,35 @@ def _base_yt_dlp_cmd(dl_cfg: dict, template: str) -> list[str]:
 
     # aria2c downloader (2-3x faster on Colab gigabit)
     if dl_cfg.get("use_aria2c", False):
-        try:
-            subprocess.run(["aria2c", "--version"], capture_output=True, check=True)
-            cmd.extend([
-                "--downloader", "aria2c",
-                "--downloader-args", "aria2c:-x 16 -s 16 -k 1M",
-            ])
-            log.info("aria2c downloader enabled — 16 connections")
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            log.warning("aria2c not found — falling back to default downloader")
+        aria2c_path = shutil.which("aria2c")
+        if aria2c_path:
+            try:
+                subprocess.run([aria2c_path, "--version"], capture_output=True, check=True)
+                cmd.extend([
+                    "--downloader", "aria2c",
+                    "--downloader-args", "aria2c:-x 16 -s 16 -k 1M",
+                ])
+                log.info("aria2c downloader enabled — 16 connections (%s)", aria2c_path)
+            except subprocess.CalledProcessError:
+                log.warning("aria2c found but failed version check — falling back to default downloader")
+        else:
+            log.warning("aria2c not found — install with: apt-get install aria2 (or brew install aria2)")
+            if _is_colab():
+                log.info("Attempting to install aria2c on Colab...")
+                try:
+                    subprocess.run(["apt-get", "install", "-y", "-qq", "aria2"],
+                                   capture_output=True, check=True, timeout=60)
+                    aria2c_path = shutil.which("aria2c")
+                    if aria2c_path:
+                        cmd.extend([
+                            "--downloader", "aria2c",
+                            "--downloader-args", "aria2c:-x 16 -s 16 -k 1M",
+                        ])
+                        log.info("aria2c installed and enabled — 16 connections")
+                    else:
+                        log.warning("aria2c install completed but binary not found")
+                except Exception as e:
+                    log.warning("Failed to install aria2c: %s", e)
 
     proxy = dl_cfg.get("proxy")
     if proxy:
@@ -216,7 +236,7 @@ def _run_yt_dlp(cmd: list[str], url: str, label: str) -> subprocess.CompletedPro
     )
 
     tail = deque(maxlen=400)
-    progress_state = {"last_time": 0.0, "last_percent": None}
+    progress_state = {"last_time": 0.0, "last_percent": None, "stall_time": None}
     if process.stdout:
         for raw_line in process.stdout:
             line = raw_line.strip()
@@ -228,6 +248,20 @@ def _run_yt_dlp(cmd: list[str], url: str, label: str) -> subprocess.CompletedPro
                     log.info("📥 %s", line.replace("[download]", "", 1).strip())
                 else:
                     log.info("%s", line)
+            perc = _extract_percent(line)
+            if perc is not None and perc >= 99.9:
+                if progress_state["stall_time"] is None:
+                    progress_state["stall_time"] = time.monotonic()
+                elif time.monotonic() - progress_state["stall_time"] > 90:
+                    log.warning("Download stalled at 99.9%% for 90s — terminating")
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    break
+            else:
+                progress_state["stall_time"] = None
 
     returncode = process.wait()
     output_tail = "\n".join(tail)
