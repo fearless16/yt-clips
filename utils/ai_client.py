@@ -13,7 +13,7 @@ load_dotenv()
 
 class AIClient:
     def __init__(self):
-        self.google_api_key = os.getenv("GOOGLE_API_KEY")
+        self.google_api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("AI_API_KEY")
 
         self.nvidia_api_key = os.getenv("NVIDIA_API_KEY")
         self.nvidia_base_url = os.getenv(
