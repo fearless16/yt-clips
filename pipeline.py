@@ -11,22 +11,41 @@ Usage:
 """
 
 import argparse
+import subprocess
 import sys
 import time
 from pathlib import Path
 
 from utils.config import load_config
-from utils.logger import get_logger
+from utils.logger import get_logger, phase_tracker
 
 cfg = load_config()
 log = get_logger("pipeline", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 
+def _run_tests(skip: bool = False) -> None:
+    """Run pytest guard before any expensive generation. Aborts on failure."""
+    if skip:
+        log.warning("Skipping pre-generation test guard (--skip-tests)")
+        return
+    phase_tracker.begin("GUARD — Pre-Generation Tests")
+    t0 = time.perf_counter()
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/", "-x", "--timeout=120", "-q"],
+        capture_output=True, text=True,
+    )
+    elapsed = time.perf_counter() - t0
+    if result.returncode != 0:
+        log.error("Pre-generation tests FAILED (%d failures, %.1fs)\n%s",
+                  result.returncode, elapsed, result.stdout.strip() or result.stderr[:1000])
+        phase_tracker.end("failed")
+        sys.exit(1)
+    log.info("Pre-generation tests PASSED (%.1fs)", elapsed)
+    phase_tracker.end("done")
+
+
 def _banner(phase: str) -> None:
-    bar = "─" * 60
-    log.info(bar)
-    log.info("  %s", phase)
-    log.info(bar)
+    phase_tracker.begin(phase)
 
 
 def run(
@@ -39,7 +58,9 @@ def run(
     auto_sync: bool = False,
     auto_upload: bool = False,
     auto_schedule: bool = False,
+    skip_tests: bool = False,
 ) -> None:
+    _run_tests(skip_tests)
     start_total = time.perf_counter()
     failures = []
 
@@ -211,13 +232,17 @@ def run(
     except Exception as e:
         log.error("Failed to generate run report: %s", e)
 
+    from rich import print as rprint
+    rprint(phase_tracker.summary_table())
+
     log.info("─" * 60)
     log.info("  PIPELINE COMPLETE")
     log.info("  Total time : %.1f s (%.1f min)", total, total / 60)
-    log.info("  Shorts ready:")
-    for p in exported:
-        size_mb = p.stat().st_size / 1_048_576
-        log.info("    → %s  (%.1f MB)", p, size_mb)
+    if exported:
+        log.info("  Shorts ready:")
+        for p in exported:
+            size_mb = p.stat().st_size / 1_048_576
+            log.info("    → %s  (%.1f MB)", p, size_mb)
     if not auto_sync:
         log.info("  To sync to Drive: python sync.py")
     log.info("─" * 60)
@@ -253,6 +278,7 @@ Examples:
     parser.add_argument("-sync", "--sync",            action="store_true", help="Auto-sync exported Shorts to Google Drive")
     parser.add_argument("-upload", "--upload",          action="store_true", help="Auto-upload exported Shorts to YouTube")
     parser.add_argument("-schedule", "--schedule",        action="store_true", help="Auto-schedule uploads (2-hour intervals)")
+    parser.add_argument("-skip-tests", "--skip-tests",    action="store_true", help="Skip pre-generation pytest guard")
     args = parser.parse_args()
 
     run(
@@ -264,7 +290,8 @@ Examples:
         skip_sync=args.skip_sync,
         auto_sync=args.sync,
         auto_upload=args.upload,
-        auto_schedule=args.schedule or args.upload, # Always schedule if uploading
+        auto_schedule=args.schedule or args.upload,
+        skip_tests=args.skip_tests,
     )
 
 

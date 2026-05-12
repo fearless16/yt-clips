@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "yt-clips"
+version = "2.0.0"
+description = "AI-Powered YouTube Shorts Automation — Premium Pipeline"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 120
+markers = [
+    "gpu: marks GPU-dependent tests (skip when no CUDA available)",
+    "slow: marks slow integration tests (deselect with '-m not slow')",
+    "premium: marks premium feature tests (YOLO, FILM, GFPGAN)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning:torch.*:",
+]
+log_cli = true
+log_cli_level = "INFO"
+log_cli_format = "%(message)s"
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", ".venv/*", "graphify-out/*"]
+
+[tool.coverage.report]
+fail_under = 0
+show_missing = true

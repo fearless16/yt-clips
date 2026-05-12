@@ -4,17 +4,31 @@ import os
 import shlex
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
 from utils.config import load_config
 from utils.logger import get_logger
-from frame_analyzer import analyze_clip
+from frame_analyzer import analyze_clip as cheap_analyze_clip
 from utils.subtitles import generate_ass_subtitles
 
 cfg = load_config()
 log = get_logger("export", cfg["logging"]["log_file"], cfg["logging"]["level"])
+premium_enabled = cfg.get("premium", {}).get("enabled", False)
+
+if premium_enabled:
+    try:
+        from premium_analyzer import PremiumAnalyzer
+        _premium_analyzer = PremiumAnalyzer()
+        analyze_clip = _premium_analyzer.analyze_clip
+        log.info("Premium analyzer ACTIVE — YOLOv8-face + ByteTrack")
+    except Exception as e:
+        analyze_clip = cheap_analyze_clip
+        log.warning("Premium import failed (%s) — using cheap analyzer", e)
+else:
+    analyze_clip = cheap_analyze_clip
 
 _BEST_ENCODER = None
 _BEST_ENCODER_LOCK = Lock()
@@ -439,7 +453,7 @@ def _build_enhance_stack(
             f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
         )
 
-    elif guest_cam_off or (has_black_panel and not use_vertical_stack):
+    elif guest_cam_off:
         # Guest cam off: crop to the active (non-black) side only
         # This path should rarely be reached (should be dropped upstream),
         # but acts as a safety fallback.
@@ -484,12 +498,38 @@ def _build_enhance_stack(
     else:
         # Default solo: center 9:16 crop (you only in frame)
         log.debug("SOLO center crop → 9:16")
-        filter_base = (
-            f"{enhance},"
-            f"crop='trunc(ih*9/16)':ih,"
-            f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-            f"crop={target_w}:{target_h}"
-        )
+        # ── Chat exclusion: shift crop to exclude chat overlay ─────────────────
+        chat_exclusion = strategy.get("chat_exclusion")
+        if chat_exclusion and chat_exclusion.get("exclude_chat"):
+            chat_side = chat_exclusion.get("chat_side", "right")
+            chat_w = chat_exclusion.get("chat_exclude_width", 0)
+
+            if chat_side == "right":
+                # Crop from left, excluding right chat area
+                # Calculate: crop from x=0, width = full_width - chat_width
+                filter_base = (
+                    f"{enhance},"
+                    f"crop=iw-{chat_w}:ih:0:0,"
+                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{target_h}"
+                )
+                log.debug("Chat exclusion: cropped left side to exclude right chat (%dpx)", chat_w)
+            else:
+                # Crop from right, excluding left chat area
+                filter_base = (
+                    f"{enhance},"
+                    f"crop=iw-{chat_w}:ih:{chat_w}:0,"
+                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{target_h}"
+                )
+                log.debug("Chat exclusion: cropped right side to exclude left chat (%dpx)", chat_w)
+        else:
+            filter_base = (
+                f"{enhance},"
+                f"crop='trunc(ih*9/16)':ih,"
+                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h}"
+            )
 
     # ── Lighting fix ──────────────────────────────────────────────────────────
     if strategy.get("apply_lighting_fix"):
@@ -584,9 +624,37 @@ def export_clip(
     if not has_audio:
         log.warning("[%s] No audio stream; exporting silent video.", clip_id)
 
+    # ── Premium Render Path ──────────────────────────────────────────────────
+    if premium_enabled:
+        try:
+            from premium_render import PremiumRender
+            pr = PremiumRender()
+            result = pr.render_clip(
+                video_path, start, end, output_path,
+                clip_id=clip_id,
+                face_enhance=cfg.get("premium", {}).get("face_enhancement", True),
+                two_pass=True,
+            )
+            if result:
+                dur = max(time.perf_counter() - t_start, 0.001)
+                log.info("✅ [%s] Premium render done in %.1fs", clip_id, dur)
+                return output_path
+            log.error("[%s] Premium render failed", clip_id)
+            return None
+        except Exception as e:
+            log.error("[%s] Premium render error: %s — falling back to standard", clip_id, e)
+
+    enable_var_speed = cfg["export"].get("enable_variable_speed", True)
     global_speed = _normalize_speed(cfg["export"].get("global_speed_factor", 1.0))
     analysis_speed = _normalize_speed(strategy.get("speed_factor", 1.0))
-    speed = _normalize_speed(global_speed * analysis_speed)
+
+    # Apply variable speed if enabled, otherwise use global config
+    if enable_var_speed:
+        speed = _normalize_speed(analysis_speed)
+        log.info("[%s] Using variable speed: %.2fx", clip_id, speed)
+    else:
+        speed = _normalize_speed(global_speed * analysis_speed)
+        log.info("[%s] Using global + analysis speed: %.2fx", clip_id, speed)
 
     try:
         pre_seek = float(cfg["export"].get("pre_seek", 4.0))
@@ -815,25 +883,49 @@ def export_all(
 
     log.info("Pre-filter: %d/%d clips passed", len(filtered_items), len(items))
 
+    if not filtered_items:
+        log.warning("No clips passed pre-filter — nothing to export")
+        return []
+
+    # ── Parallel Export ─────────────────────────────────────────────────────────
+    # Use thread pool for I/O-bound FFmpeg processes
+    max_workers = max(1, min(4, len(filtered_items)))  # Max 4 parallel exports, min 1
+    log.info(f"🚀 Starting parallel export with {max_workers} workers...")
+
     exported_clips = []
     seo_queue: List[Dict] = []   # queued after all encoding is done
 
-    for idx, (clip_id, start, end, info, analysis) in enumerate(filtered_items, start=1):
+    def _export_one(args):
+        """Worker function for parallel export."""
+        idx, total, clip_id, start, end, info, analysis = args
         out_file = out_dir / f"{clip_id}.mp4"
         path = export_clip(video_path, start, end, str(out_file),
                            clip_id, transcript_segments=transcript_segments, analysis=analysis)
+        return (idx, total, clip_id, path, info)
 
-        if path:
-            exported_clips.append(Path(path))
-            log.info("[%d/%d] Exported: %s", idx, len(filtered_items), clip_id)
-            # Queue for SEO — don't block encoding with API calls
-            if generate_seo and seo_context:
-                seo_queue.append({
-                    "clip_id": clip_id,
-                    "transcript": info.get("text", "Cricket Live"),
-                })
-        else:
-            log.warning("[%d/%d] Export failed or dropped: %s", idx, len(filtered_items), clip_id)
+    # Run exports in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_export_one, (idx, len(filtered_items), clip_id, start, end, info, analysis))
+            for idx, (clip_id, start, end, info, analysis) in enumerate(filtered_items, start=1)
+        ]
+
+        for future in as_completed(futures):
+            try:
+                idx, total, clip_id, path, info = future.result()
+                if path:
+                    exported_clips.append(Path(path))
+                    log.info("[%d/%d] Exported: %s", idx, total, clip_id)
+                    # Queue for SEO — don't block encoding with API calls
+                    if generate_seo and seo_context:
+                        seo_queue.append({
+                            "clip_id": clip_id,
+                            "transcript": info.get("text", "Cricket Live"),
+                        })
+                else:
+                    log.warning("[%d/%d] Export failed or dropped: %s", idx, total, clip_id)
+            except Exception as e:
+                log.error(f"Parallel export error: {e}")
 
     # ── SEO phase: runs after all encoding is done ───────────────────────────
     # One AI call per clip, 8s wait between calls to avoid 429.

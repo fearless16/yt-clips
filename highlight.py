@@ -11,9 +11,11 @@ import yaml  # type: ignore
 
 from utils.config import load_config
 from utils.logger import get_logger
+from utils.ai_client import AIClient
 
 cfg = load_config()
 log = get_logger("highlight", cfg["logging"]["log_file"], cfg["logging"]["level"])
+ai = AIClient()
 
 
 # ─── Audio energy extraction (reliable method) ───────────────────────────────
@@ -117,6 +119,8 @@ def _words_per_minute(text: str, duration_sec: float) -> float:
 
 def _silence_seconds(text: str, duration_sec: float) -> float:
     """Rough estimate: silence ≈ duration − (words × avg_word_duration)."""
+    if not text:
+        return max(0.0, duration_sec)
     words = len(text.split())
     estimated_speech = words * 0.35          # ~0.35 s per word on average
     silence = max(0.0, duration_sec - estimated_speech)
@@ -176,33 +180,56 @@ def _score_segment(
     if word_count < 5:
         score -= 1.5  # Penalise very low speech content
 
-    # 4. Keyword bonus — reaction and analysis words (expanded for scenario/analytics)
+    # 4. Reaction keyword bonus — single words
     reaction_words = {
-        # Original reaction words
-        "oh", "wow", "wait", "what", "no", "yes", "let's", "go",
-        "insane", "crazy", "bro", "dude", "actually", "holy", "damn",
+        "oh", "wow", "wait", "what", "no", "yes", "whoa",
+        "insane", "crazy", "bro", "dude", "holy", "damn",
         "unbelievable", "incredible", "amazing", "clutch", "huge",
         "perfect", "beautiful", "massive", "destroyed", "killed",
         "wicket", "six", "four", "boundary", "out", "catch",
-        "shot", "brilliant", "superb", "excellent", "fantastic",
-        # Hindi / Hinglish additions:
+        "shot", "brilliant", "superb", "fantastic",
         "arre", "kya", "bhai", "yaar", "baap", "pagal", "gajab",
         "khatarnak", "chhakka", "chauka", "maar", "maro", "gaya",
         "jeet", "shandar", "dhamaakedaar", "zabardast", "sixer",
-        "catch", "dekho", "khatam", "bawaal", "machaa",
-        # Analytics / Scenario Shorts additions (from audit):
-        "analytics", "scenario", "playoff", "playoffs", "points", "table", 
-        "qualification", "stats", "record", "chances", "probability", "equation",
-        "prediction", "predict", "calculate", "math", "net run rate", "nrr",
-        "standings", "qualify", "eliminate", "knockout"
+        "dekho", "khatam", "bawaal", "machaa", "haan", "nahi",
+        "oho", "accha", "abe", "teri", "baap", "re", "arey",
+        "chhod", "dekh", "jaa", "nikal", "aagaya", "gaya re",
     }
     words_lower = set(re.findall(r'\b\w+\b', text.lower()))
     hits = len(words_lower & reaction_words)
-    score += hits * 0.5  # slightly increased weight for keywords
+    score += hits * 0.6  # Reaction word weight up from 0.5
+
+    # 4b. Multi-word reaction phrase bonus (ngrams)
+    text_lower = text.lower()
+    reaction_phrases = [
+        "kya baat", "oh ho", "are yaar", "kya shot", "maine kya",
+        "haan haan", "arre arre", "are bhai", "kya hua", "yeh kya",
+        "oh my god", "oh god", "what a", "kya cheez", "baap re",
+        "nahi yaar", "haan bhai", "oho ho", "gajab ka", "chhakka maar",
+        "dhamaakedaar shot", "what a shot", "what a six", "what a catch",
+    ]
+    phrase_hits = sum(2 for p in reaction_phrases if p in text_lower)
+    score += phrase_hits
+
+    # 4c. Repetition bonus — excited repetition like "haan haan haan" or "kya kya kya"
+    words_list = re.findall(r'\b\w+\b', text_lower)
+    for w in set(words_list):
+        count = words_list.count(w)
+        if count >= 3 and len(w) > 1:
+            score += 1.5
+            break
+
+    # 4d. Audio spike bonus — sudden loudness (crowd cheer, clap, shout)
+    # Uses RMS peaks above 80% of max as excitement markers
+    if max_rms > 0:
+        segment_peaks = [rms_map.get(int(t), 0.0) for t in range(int(start), int(end) + 1)]
+        spike_count = sum(1 for v in segment_peaks if v > max_rms * 0.85)
+        if spike_count >= 2:
+            score += spike_count * 0.8
 
     # 5. Exclamation/question mark density bonus
     exclaim_count = text.count("!") + text.count("?")
-    score += exclaim_count * 0.2
+    score += exclaim_count * 0.3
 
     return score
 
@@ -230,6 +257,89 @@ def _format_ts(seconds: float) -> str:
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _refine_highlights_with_ai(
+    segments: List[Dict],
+    candidates: List[Dict],
+    video_title: str = ""
+) -> List[Dict]:
+    """
+    Use LLM to analyze transcript and refine highlight selection.
+    Scores segments based on 'virality potential' (excitement, hooks, key moments).
+    """
+    if not candidates or len(candidates) <= 1:
+        return candidates  # No need to refine if 0 or 1 clip
+
+    # Build context for AI
+    transcript_snippets = []
+    for seg in segments[:50]:  # Limit to first 50 segments for prompt size
+        transcript_snippets.append(f"[{_format_ts(seg['start'])}] {seg.get('text', '')}")
+
+    transcript_text = "\n".join(transcript_snippets)
+
+    candidate_list = []
+    for i, c in enumerate(candidates, 1):
+        # Find overlapping text for this candidate
+        overlap_text = " ".join([
+            s.get("text", "") for s in segments
+            if s["end"] > c["start"] and s["start"] < c["end"]
+        ][:100])  # Limit text
+        candidate_list.append(
+            f"{i}. {c['start_ts']}-{c['end_ts']}: {overlap_text[:150]}..."
+        )
+
+    candidates_str = "\n".join(candidate_list)
+
+    prompt = f"""
+You are a viral highlight detection expert for cricket shorts.
+Analyze the transcript and select the BEST highlights that would go viral.
+
+Video Title: {video_title}
+
+Transcript (first 50 segments):
+{transcript_text}
+
+Candidate Highlights:
+{candidates_str}
+
+Select the TOP 3 most viral-worthy candidates based on:
+1. Excitement/Reaction moments
+2. Key match moments (wickets, sixes, fours, close calls)
+3. Humor or dramatic tension
+4. Audience hook potential
+
+Return ONLY a JSON list of indices (1-based) of the best candidates:
+[1, 2, 3]
+"""
+
+    try:
+        log.info("🤖 Sending %d candidates to AI for refinement...", len(candidates))
+        response = ai.generate_text(prompt, system_instruction="You are a viral highlight expert. Return ONLY JSON.")
+        import re
+        import json as json_mod
+        # Extract JSON array from response
+        match = re.search(r'\[.*\]', response, re.DOTALL)
+        if match:
+            selected_indices = json_mod.loads(match.group(0))
+            # Re-order candidates based on AI selection
+            refined = []
+            for idx in selected_indices:
+                if 0 < idx <= len(candidates):
+                    refined.append(candidates[idx - 1])
+
+            # Add any remaining candidates not selected
+            selected_set = set(selected_indices)
+            for i, c in enumerate(candidates, 1):
+                if i not in selected_set and len(refined) < 5:
+                    refined.append(c)
+
+            log.info("✅ AI refined highlights: selected %d top clips", len(refined))
+            return refined
+    except Exception as e:
+        log.warning("AI refinement failed: %s, using heuristic ranking", e)
+
+    return candidates  # Fallback to original ranking
 
 
 # ─── Main detection logic ─────────────────────────────────────────────────────
@@ -345,7 +455,36 @@ def detect_highlights(
 
     # Sort by score and take top N
     merged.sort(key=lambda w: w["score"], reverse=True)
-    
+
+    # ── AI Refinement: Use LLM to select best viral clips ─────────────────────
+    use_ai_refinement = cfg.get("highlight", {}).get("use_ai_refinement", True)
+    video_title = ""
+    meta_file = Path(cfg["paths"]["input"]) / "video_metadata.json"
+    if meta_file.exists():
+        try:
+            import json as json_mod
+            with open(meta_file, "r") as f:
+                meta = json_mod.load(f)
+                video_title = meta.get("title", "")
+        except:
+            pass
+
+    if use_ai_refinement and len(merged) >= 2:
+        # Convert merged to candidate format for AI
+        ai_candidates = [
+            {
+                "start": w["start"],
+                "end": w["end"],
+                "start_ts": _format_ts(w["start"]),
+                "end_ts": _format_ts(w["end"]),
+                "score": w["score"]
+            }
+            for w in merged[:10]  # Send top 10 to AI
+        ]
+        merged = _refine_highlights_with_ai(segments, ai_candidates, video_title)
+        # Re-sort by start time after AI reorder
+        merged.sort(key=lambda w: w["start"])
+
     # CRITICAL FIX: Ensure intro coverage (first 30 seconds)
     # If there's a high-scoring segment in the intro, force-include it
     intro_threshold = max_score * 0.45  # 45% of max score

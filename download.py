@@ -130,9 +130,24 @@ def _base_yt_dlp_cmd(dl_cfg: dict, template: str) -> list[str]:
         "--sleep-requests", str(dl_cfg.get("sleep_requests", 0)),
     ]
 
+    # aria2c downloader (2-3x faster on Colab gigabit)
+    if dl_cfg.get("use_aria2c", False):
+        try:
+            subprocess.run(["aria2c", "--version"], capture_output=True, check=True)
+            cmd.extend([
+                "--downloader", "aria2c",
+                "--downloader-args", "aria2c:-x 16 -s 16 -k 1M",
+            ])
+            log.info("aria2c downloader enabled — 16 connections")
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            log.warning("aria2c not found — falling back to default downloader")
+
     proxy = dl_cfg.get("proxy")
     if proxy:
         cmd.extend(["--proxy", str(proxy)])
+
+    # Throttled-rate keepalive — prevents connection drops on long downloads
+    cmd.extend(["--throttled-rate", "100K"])
 
     cmd.extend(_cookie_args(dl_cfg))
     cmd.extend(_js_runtime_args(dl_cfg))
