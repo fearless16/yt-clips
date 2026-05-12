@@ -326,6 +326,8 @@ Return ONLY a JSON list of indices (1-based) of the best candidates:
             # Re-order candidates based on AI selection
             refined = []
             for idx in selected_indices:
+                if len(refined) >= max_clips:
+                    break
                 if 0 < idx <= len(candidates):
                     refined.append(candidates[idx - 1])
 
