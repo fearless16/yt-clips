@@ -11,6 +11,8 @@ from typing import List, Dict, Optional
 from utils.config import load_config
 from utils.logger import get_logger
 from utils.ai_client import AIClient
+from trends import TEAM_MAPPINGS
+from seo_learner import enhance_seo_prompt, generate_performance_report, learn_from_clip_performance
 
 cfg = load_config()
 log = get_logger("seo", cfg["logging"]["log_file"], cfg["logging"]["level"])
@@ -30,58 +32,98 @@ GENERIC_TAGS = {
     "highlight","highlights","amazing","awesome","incredible","wow",
 }
 
+# ── Viral Hooks & CTAs ──────────────────────────────────────────────────────────
+
+VIRAL_HOOKS = [
+    "Arey yeh kya ho raha hai?! 😱",
+    "Ye toh shot of the tournament! 🔥",
+    "Full drama! Dekho takraar mein aatma",
+    "Insaan ban ke dekhna ye moment! 🏏",
+    "Isse zyada close match nahi hota!",
+    "Brutal finish - sab ne socha tha nahi hoga!",
+    "Ye catch Pakka nahi tha, kya?! 🤯",
+    "Match winner ya match loser?! 😈",
+    "Hat-trick ka matlab - khaali haath jaana!",
+    "Last over dhamaal - full tension! 🔥",
+]
+
+ENGAGING_CTAS = [
+    "Aaj ke match ka full recap dekho aur like share karo!",
+    "Agar ye video pasand aaya toh LIKE + SUBSCRIBE zaroor karo!",
+    "Next match ke liye bell icon dabana na bhoolna! 🔔",
+    "Live matches ke liye channel ko subscribe karo aur notification on karo!",
+    "Ye highlight miss kaise karo? LIKE + SHARE + SUBSCRIBE!",
+    "Tension free match dekhne ke liye channel join karo now!",
+    "Aapke liye poora match ready hai - full video dekho!",
+    "Cricket ke har ek moment ke liye stay tuned!",
+]
+
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
 _SYSTEM = (
-    "You are an elite YouTube Shorts SEO engine for Indian cricket live-stream clips. "
-    "Return ONLY valid JSON — no markdown, no explanation, no preamble."
+    "You are an elite YouTube Shorts SEO expert for Indian cricket. "
+    "Your goal: Maximize CTR (Click-Through Rate) and watch time. "
+    "Return ONLY valid JSON — no markdown, no explanation."
 )
 
 _PROMPT_TMPL = """
-Match: {video_title}
-Scorecard: {scorecard}
-Trending topics: {trend_topics}
-Live stream CTA: {live_cta}
+CONTEXT:
+  Match: {video_title}
+  Scorecard: {scorecard}
+  Live Trending: {trend_topics}
+  CTA: {live_cta}
 
-Clip transcript:
-{transcript}
+CLIP CONTENT:
+  Transcript: {transcript}
+  Key moments: {local_kw}
 
-Local keywords extracted from transcript: {local_kw}
+TASK: Generate PERFECT SEO metadata for ONE viral cricket short.
 
-Generate YouTube Shorts metadata for this ONE clip. Rules:
+═══════════════════════════════════════════════════════════════════════════════
+TITLE FORMULA (pick ONE and make it SPECIFIC):
+═══════════════════════════════════════════════════════════════════════════════
+  1. SHOCK: "cricket live: <unexpected moment> | IPL 2026"
+  2. STAR: "IPL 2026: <star player> <action> <result>"
+  3. CLOSE: "cricket live: <close call> - did they?! | IPL 2026"
+  4. NUMBERS: "IPL 2026: <score> runs in <overs> - game changer!"
+  5. EMOTION: "Ye toh <emotion> hai bhai! <moment> | IPL 2026"
 
-TITLE (≤100 chars):
-  - Format: cricket live: <Unique, Specific Moment> | IPL 2026
-  - MUST start EXACTLY with "cricket live:" or "IPL:" (these are high-volume keywords).
-  - CRITICAL: You MUST inject at least one EXACT PHRASE from the "Trending topics" list directly into the title to capture real-time search spikes.
-  - Every clip MUST have a UNIQUE, highly specific title. DO NOT repeat generic titles like "Unbelievable Cricket Moments! Kya Yeh Catch/Six Tha?".
-  - Max 1 emoji. NEVER exceed 100 chars.
+RULES:
+  - MUST start with "cricket live:" or "IPL 2026" (SEO gold)
+  - Inject 1-2 trending topics naturally into title
+  - Max 100 chars, MAX 1 emoji
+  - NEVER generic like "Cricket Amazing!"
 
-DESCRIPTION (≤5000 chars, ideal 400-1200):
-  - First 150 chars must have: match keyword + player/moment + "IPL 2026"
-  - Natural Hinglish, NOT ChatGPT tone
-  - Paragraphs: (1) 2-3 factual match lines, (2) Hinglish analysis/scenario prediction, (3) short CTA
-  - Then 3-5 hashtags. Then search terms one per line.
-  - NO markdown, NO bullets, NO excessive emojis
+═══════════════════════════════════════════════════════════════════════════════
+DESCRIPTION FORMULA:
+═══════════════════════════════════════════════════════════════════════════════
+  First 100 chars: "{{hook}}" + what happened + "IPL 2026"
+  Next 200 chars: Hindi/English mix - emotional reaction
+  Last 100 chars: "{{cta}}"
+  Then 3-5 hashtags (tournament + teams + #Shorts)
 
-HASHTAGS (exactly 3-5, match/tournament/team specific, NO spam):
+═══════════════════════════════════════════════════════════════════════════════
+HASHTAGS (exactly 4, strategic order):
+═══════════════════════════════════════════════════════════════════════════════
+  1. #IPL or #T20WorldCup or #Cricket
+  2. Winning team #RCB #CSK #MI etc
+  3. Losing team or star player
+  4. #Shorts (ALWAYS)
 
-SEARCH TERMS (18-30 terms, lowercase, 2-5 words each, total ≤500 chars):
-  - Target: match, tournament, players, Hindi viewers, live viewers
-  - CRITICAL: You MUST include ALL exact phrases listed in "Trending topics" as search terms.
-  - NO generic: cricket, viral, shorts, trending
-  - NO duplicates of hashtags
+═══════════════════════════════════════════════════════════════════════════════
+SEARCH TERMS (15-25, super targeted):
+═══════════════════════════════════════════════════════════════════════════════
+  - Include ALL trending topics as search terms
+  - Player names + "catch" / "six" / "boundary" / "wicket"
+  - NO generic "cricket viral"
 
-CRITICAL: Whisper auto-transcription has phonetic errors.
-Silently correct player names from context (e.g. "Chakris Gale" → "Chris Gayle").
-
-Return ONLY this JSON (no other text):
+Return ONLY JSON:
 {{
   "clip_id": "{clip_id}",
   "title": "...",
   "description": "...",
-  "hashtags": ["#A", "#B", "#C"],
-  "search_terms": ["term one", "term two"]
+  "hashtags": ["#...", "#...", "#...", "#..."],
+  "search_terms": ["...", "..."]
 }}
 """
 
@@ -95,6 +137,110 @@ def _extract_keywords(text: str, limit: int = 14) -> List[str]:
     for w in kw:
         freq[w] = freq.get(w, 0) + 1
     return [k for k, _ in sorted(freq.items(), key=lambda x: x[1], reverse=True)[:limit]]
+
+
+def _inject_viral_elements(title: str, description: str, hashtags: List[str]) -> Dict:
+    """Inject viral hooks and CTAs into SEO output."""
+    import random
+
+    # Pick random hook and CTA
+    hook = random.choice(VIRAL_HOOKS)
+    cta = random.choice(ENGAGING_CTAS)
+
+    # Ensure description has hook and CTA
+    if hook not in description and len(description) > 50:
+        # Insert hook near beginning
+        desc_parts = description.split("\n\n")
+        if desc_parts:
+            desc_parts[0] = f"{hook} {desc_parts[0][:100]}"
+        description = "\n\n".join(desc_parts)
+
+    # Ensure CTA at end
+    if cta not in description:
+        if len(description) > 100:
+            description = f"{description}\n\n{cta}"
+        else:
+            description = f"{description} {cta}"
+
+    # Ensure hashtags have proper structure
+    if len(hashtags) < 3:
+        hashtags = ["#IPL2026", "#Cricket", "#Shorts"] + hashtags
+
+    return {
+        "title": title,
+        "description": description,
+        "hashtags": hashtags[:5]
+    }
+
+
+def _generate_template_seo(
+    clip_id: str,
+    transcript: str,
+    video_title: str,
+    scorecard: str,
+    trend_topics: List[str],
+) -> Dict:
+    """
+    Template-based fallback when AI fails.
+    Generates solid SEO without API calls.
+    """
+    import random
+    import json
+
+    local_kw = _extract_keywords(transcript, limit=8)
+
+    # Extract team/moment from transcript
+    teams_found = []
+    for team_code, aliases in TEAM_MAPPINGS.items():
+        for alias in aliases:
+            if alias in transcript.lower()[:200]:
+                teams_found.append(team_code)
+                break
+    teams_found = list(set(teams_found))[:2]
+
+    # Build title from template
+    team_str = " vs ".join(teams_found) if teams_found else "Cricket Live"
+
+    title_variants = [
+        f"cricket live: {local_kw[0].title() if local_kw else 'Match'} moment! | IPL 2026",
+        f"IPL 2026: {team_str} - {local_kw[0].title() if local_kw else 'Highlight'}",
+        f"cricket live: Full {local_kw[0] if local_kw else 'Match'} 🔥 | IPL 2026",
+    ]
+    title = random.choice(title_variants)[:100]
+
+    # Build description
+    hook = random.choice(VIRAL_HOOKS)
+    cta = random.choice(ENGAGING_CTAS)
+    description = (
+        f"{hook}\n\n"
+        f"Match: {scorecard[:100] if scorecard else video_title}\n"
+        f"Moment: {', '.join(local_kw[:5])}\n\n"
+        f"{cta}\n\n"
+        f"#IPL2026 #{teams_found[0] if teams_found else 'Cricket'} #Shorts"
+    )
+
+    # Build hashtags
+    hashtags = [
+        "#IPL2026",
+        f"#{teams_found[0]}" if teams_found else "#Cricket",
+        f"#{teams_found[1]}" if len(teams_found) > 1 else "#T20",
+        "#Shorts"
+    ]
+
+    # Search terms
+    search_terms = (
+        [t for t in trend_topics[:10]] +
+        [f"{w} six" for w in local_kw[:3]] +
+        [f"{w} wicket" for w in local_kw[:2]]
+    )[:20]
+
+    return {
+        "clip_id": clip_id,
+        "title": title,
+        "description": description,
+        "hashtags": hashtags,
+        "search_terms": search_terms
+    }
 
 
 def _enforce_limits(item: Dict) -> Dict:
@@ -186,6 +332,9 @@ def generate_clip_seo(
         local_kw=local_kw,
         clip_id=clip_id,
     )
+    
+    # Enhance prompt with learned insights from performance data
+    prompt = enhance_seo_prompt(prompt)
 
     backoff = [0, 8, 20, 45]
     for attempt, delay in enumerate(backoff):
@@ -205,6 +354,15 @@ def generate_clip_seo(
                 "hashtags": data.get("hashtags", ["#IPL2026", "#Cricket", "#Shorts"]),
                 "search_terms": data.get("search_terms", []),
             })
+
+            # Inject viral hooks and CTAs
+            result = _inject_viral_elements(
+                result["title"],
+                result["description"],
+                result["hashtags"]
+            )
+            result["clip_id"] = clip_id
+
             log.info("[%s] SEO done — title: %s", clip_id, result["title"][:60])
             return result
 
@@ -217,14 +375,25 @@ def generate_clip_seo(
             if attempt < len(backoff) - 1:
                 continue
 
-    log.error("[%s] SEO generation failed after all retries", clip_id)
-    return {
-        "clip_id": clip_id,
-        "title": f"Cricket Live Highlights | {clip_id}",
-        "description": "",
-        "hashtags": ["#IPL2026", "#Cricket", "#Shorts"],
-        "search_terms": [],
-    }
+    # ── Fallback: Template-based SEO (no AI needed) ─────────────────────────
+    log.warning("[%s] AI failed, using template fallback", clip_id)
+    result = _generate_template_seo(
+        clip_id=clip_id,
+        transcript=transcript[:1000],
+        video_title=video_title,
+        scorecard=scorecard,
+        trend_topics=trend_topics,
+    )
+
+    # Inject viral elements
+    result = _inject_viral_elements(
+        result["title"],
+        result["description"],
+        result["hashtags"]
+    )
+
+    result["clip_id"] = clip_id
+    return _enforce_limits(result)
 
 
 # ── Pipeline entry: called after each clip export ─────────────────────────────

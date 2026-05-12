@@ -1,11 +1,13 @@
 # yt-clips — AI-Powered YouTube Shorts Automation
-# Core dependencies only — keep it lean
+# Premium Pipeline v2
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PyYAML>=6.0
+python-dotenv>=1.0.0
 
 # ── Downloading ───────────────────────────────────────────────────────────────
 yt-dlp>=2024.1.0
+# aria2c recommended for faster downloads (install separately)
 
 # ── Transcription ─────────────────────────────────────────────────────────────
 faster-whisper>=1.0.0
@@ -15,15 +17,34 @@ google-api-python-client>=2.100.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.1.0
 
-# ── HTTP (for tunnel bridge) ──────────────────────────────────────────────────
+# ── HTTP ──────────────────────────────────────────────────────────────────────
 requests
 
-# ── Optional: OpenCV for advanced reframing (Phase 2+ roadmap) ────────────────
-# opencv-python-headless>=4.9.0
+# ── Pipeline Logging ──────────────────────────────────────────────────────────
+rich>=13.0.0
 
-# ── SEO & Thumbnails (New Automation) ─────────────────────────────────────────
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-timeout>=2.3.0
+
+# ── Frame Analysis ────────────────────────────────────────────────────────────
+opencv-python-headless>=4.9.0
+numpy>=1.24.0
+filterpy>=1.4.5
+scipy>=1.11.0
+
+# ── Premium (GPU) — Colab T4 ─────────────────────────────────────────────────
+# ultralytics>=8.3.0       # YOLOv8-face (uncomment on Colab)
+# torch>=2.1.0             # PyTorch (uncomment on Colab)
+# --extra-index-url https://download.pytorch.org/whl/cu121
+
+# ── Premium Render (GPU) — Colab T4 ──────────────────────────────────────────
+# gfpgan>=1.3.8            # Face enhancement (uncomment on Colab)
+# basicsr>=1.4.2           # GFPGAN dependency
+# realesrgan>=0.3.0        # Optional upscaling
+
+# ── SEO & Thumbnails ──────────────────────────────────────────────────────────
 openai>=1.0.0
 google-genai
-google-generativeai # Note: Please migrate to google-genai
+google-generativeai
 Pillow>=10.0.0
-python-dotenv>=1.0.0

@@ -14,15 +14,16 @@ channel:
   live_stream_url: "https://www.youtube.com/watch?v=qAA6KKwHLU8"              # static fallback (optional)
 # ─── Download ─────────────────────────────────────────────────────────────────
 download:
-  # Shorts-friendly source cap. 1440p is much faster than 4K and still leaves room for 1080x1920 crops.
-  format: "bv*[height<=1440]+ba/b[height<=1440]/bv*+ba/b"
+  # Best available quality (no cap — downloads highest resolution available)
+  format: "bv*+ba/b"
   concurrent_fragments: 8
   sleep_requests: 0
   progress_interval_seconds: 10
   progress_percent_step: 5
   output_filename: "video.mp4"
+  # aria2c: 2-3x faster downloads on Colab (install: apt-get install -y aria2)
+  use_aria2c: true
   # Proof of Origin (PO) Token — for bypassing bot detection
-  # Get this from your browser using a PO Token Generator script
   po_token: "" 
   # Optional: Proxy for bypassing Colab IP blocks (e.g. http://user:pass@host:port)
   proxy: ""
@@ -34,6 +35,8 @@ transcription:
   compute_type: "float16"    # Optimized for GPU; auto-switches to int8 on CPU fallback
 # ─── Highlight Detection ──────────────────────────────────────────────────────
 highlight:
+  # AI-powered highlight refinement
+  use_ai_refinement: true              # Use LLM to select viral-worthy clips
   # Audio energy spike detection
   audio_energy_threshold: 0.3          # 0–1 relative to score range; lower = more clips
   # Minimum/maximum clip duration (seconds)
@@ -42,11 +45,19 @@ highlight:
   # Merge nearby highlights that are closer than this (seconds)
   merge_gap: 8
   # How many highlights to extract at most
-  max_clips: 5
+  max_clips: 10
   # Words-per-minute threshold for "fast speech" detection
   fast_speech_wpm: 140
   # Silence threshold (seconds of silence to penalise a segment)
   silence_penalty_seconds: 1.5
+
+# ─── Premium Mode ──────────────────────────────────────────────────────────────
+# Toggle between cheap (Haar Cascade) and premium (YOLOv8-face + ByteTrack)
+premium:
+  enabled: false                     # Set true on Colab T4 for studio-grade quality
+  face_enhancement: true             # GFPGAN face restoration (GPU only)
+  frame_interpolation: true          # FILM 30→60fps (GPU only)
+  host_ref_photos: ""                # Path to reference photos for host ID (optional)
 
 # ─── Layout ──────────────────────────────────────────────────────────────────
 # Describes where the facecam lives in the SOURCE 16:9 frame (pixels).
@@ -65,12 +76,23 @@ layout:
   facecam_output_height: 400
   # Gameplay strip height = 1920 - facecam_output_height
   gameplay_output_height: 1520
+  # Chat overlay detection (common in gaming/streams)
+  # Chat typically appears on the RIGHT side of 16:9 streams
+  has_chat_overlay: true
+  chat:
+    side: "right"            # right | left
+    # Estimated chat width in source video (will be auto-detected if possible)
+    estimated_width: 350
+    # Minimum brightness threshold to detect chat area (chat is usually brighter/darker than gameplay)
+    brightness_threshold: 30
 
 # ─── Export ───────────────────────────────────────────────────────────────────
 export:
   width: 1080
   height: 1920
-  global_speed_factor: 1.25             # User requested all videos at 1.25x speed
+  global_speed_factor: 1.0              # Set to 1.0 to use variable speed only (frame_analyzer.py calculates dynamic speed)
+  enable_variable_speed: true            # Enable smart speed adjustment based on silence/tempo
+  variable_speed_aggressive: true       # Apply more aggressive speed up on dead air
   fps: 60                               # Target FPS (motion interpolation fills gaps)
   video_bitrate: "25M"                  # Max bitrate (used with CRF as ceiling)
   audio_bitrate: "320k"                 # Studio-grade audio
@@ -118,7 +140,13 @@ quality:
   # Solo frame preference weight (higher = more likely to use solo)
   solo_preference_weight: 1.5
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
+# ─── Testing ───────────────────────────────────────────────────────────────────
+# Pre-generation pytest guard — tests run before every pipeline execution
+testing:
+  enabled: true                     # Set false or use --skip-tests to bypass
+  timeout_seconds: 120              # Max time per test
+  fail_fast: true                   # Stop on first failure (-x mode)
+
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
   provider: "gemini"                # gemini | openai | ollama

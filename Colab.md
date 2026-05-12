@@ -13,131 +13,37 @@ Use the pre-built `Colab_Bridge.ipynb` notebook for a seamless experience:
 
 The bridge automatically syncs your code and beams jobs to Colab.
 
-## Option B: Manual Setup
+## Option B: Manual Setup (Colab_Setup.ipynb)
 
-### 1. Open Google Colab
-Go to [colab.research.google.com](https://colab.research.google.com) and create a **New Notebook**.
+Upload `Colab_Setup.ipynb` to Colab — it has 6 cells:
+1. Install deps (ffmpeg, aria2c, python packages, premium GPU deps)
+2. Upload code files via 📁 sidebar
+3. Write optimized config.yaml with `premium.enabled: true`
+4. Run pre-flight tests (185 tests)
+5. Paste YouTube URL → run pipeline
+6. Download shorts.zip
 
-### 2. Set to GPU Mode (Crucial for Speed)
-- In the top menu, go to **Runtime** > **Change runtime type**.
-- Select **T4 GPU** (or any available GPU).
-- Click **Save**.
+## Premium Mode (Colab T4 Only)
 
-### 3. Copy and Paste this into the first cell
+Set `premium.enabled: true` in `config.yaml` on Colab for studio-grade quality:
 
-```python
-# 1. Install system dependencies
-!apt-get install -y ffmpeg
+| Feature | Cheap (CPU) | Premium (GPU) |
+|---|---|---|
+| Face Detection | Haar Cascade (2005) | YOLOv8-face (95%+ acc) |
+| Face Tracking | None | ByteTrack (persistent IDs) |
+| Crop Smoothing | EMA (lags) | Kalman + Bezier (buttery) |
+| Layout Detection | Heuristic | Smart classifier |
+| Frame Interpolation | FFmpeg framerate | FILM (true AI 30→60fps) |
+| Face Enhancement | None | GFPGAN (eye/texture detail) |
+| Speed Variation | Discrete steps | Gaussian-smoothed map |
 
-# 2. Install JS Runtime (Deno) — Fixes "Sign in to confirm you're not a bot"
-!curl -fsSL https://deno.land/x/install/install.sh | sh
-import os
-os.environ["PATH"] += ":/root/.deno/bin"
+## Pre-Generation Test Guard
 
-# 3. Install Python packages
-!pip install -U yt-dlp
-!pip install faster-whisper PyYAML google-api-python-client google-auth-httplib2 google-auth-oauthlib requests
-
-# 3. Create the directory structure
-import os
-for folder in ['input', 'temp', 'transcripts', 'highlights', 'shorts', 'logs', 'utils']:
-    os.makedirs(folder, exist_ok=True)
-
-# 4. Write the Colab-optimized config.yaml
-# IMPORTANT: device=cuda and compute_type=float16 for GPU acceleration
-config_content = """
-paths:
-  input:       input/
-  temp:        temp/
-  transcripts: transcripts/
-  highlights:  highlights/
-  shorts:      shorts/
-  logs:        logs/
-
-download:
-  format: "bv*[height<=1440]+ba/b[height<=1440]/bv*+ba/b"
-  concurrent_fragments: 8
-  sleep_requests: 0
-  progress_interval_seconds: 10
-  progress_percent_step: 5
-  output_filename: "video.mp4"
-
-transcription:
-  model: "base"
-  language: "en"
-  device: "cuda"
-  compute_type: "float16"
-
-highlight:
-  audio_energy_threshold: 0.75
-  min_duration: 15
-  max_duration: 29
-  merge_gap: 8
-  max_clips: 5
-  fast_speech_wpm: 160
-  silence_penalty_seconds: 1.5
-
-layout:
-  has_facecam: true
-  facecam: {x: 0, y: 540, width: 320, height: 180}
-  facecam_output_height: 400
-  gameplay_output_height: 1520
-
-export:
-  width: 1080
-  height: 1920
-  fps: 60
-  video_bitrate: "15M"
-  audio_bitrate: "192k"
-  crf: 23
-  encoder: "libx264"
-  encoder_preset: "veryfast"
-
-youtube:
-  privacy_status: "private"
-  category_id: "17"
-  self_declared_made_for_kids: false
-  upload_enabled: false
-  schedule_interval_hours: 2
-  niche: "Cricket"
-
-ai:
-  provider: "gemini"
-  model: "gemini-1.5-flash"
-  image_model: "gemini-2.5-flash-image"
-
-thumbnail:
-  use_ai: true
-  font_size: 120
-  text_color: "#FFFFFF"
-  stroke_color: "#000000"
-  stroke_width: 8
-
-quality:
-  black_threshold: 20
-  backlit_brightness_threshold: 80
-  overexposed_brightness_threshold: 210
-  silence_threshold_db: -35
-  min_silence_duration: 1.0
-  slow_wpm_threshold: 100
-  frame_sample_count: 5
-  solo_preference_weight: 1.5
-
-logging:
-  level: "INFO"
-  log_file: "logs/pipeline.log"
-"""
-with open('config.yaml', 'w') as f:
-    f.write(config_content)
+Before ANY expensive operation, the pipeline auto-runs:
+```bash
+pytest tests/ -x --timeout=120
 ```
-
-### 4. Upload your files
-1.  Click the **Folder icon** on the left sidebar of Colab.
-2.  Drag and drop all your `.py` files and the `utils` folder into that space.
-3.  Run a cell with:
-    ```python
-    !python pipeline.py "https://www.youtube.com/watch?v=YOUR_VIDEO_ID"
-    ```
+Aborts immediately if tests fail. Use `--skip-tests` to bypass.
 
 ## Key Differences: Colab vs Local
 
@@ -145,11 +51,13 @@ with open('config.yaml', 'w') as f:
 |---|---|---|
 | `transcription.device` | `cpu` | `cuda` |
 | `transcription.compute_type` | `int8` | `float16` |
-| `export.encoder` | `h264_videotoolbox` | `libx264` |
+| `export.encoder` | `h264_videotoolbox` | `h264_nvenc` or `libx264` |
+| `premium.enabled` | `false` | `true` |
 
 ## Why Colab is Better for Heavy Workloads
 
 - **No PC Lag**: All processing happens on Google's servers.
 - **Fast Transcription**: Whisper runs on a GPU (CUDA), taking seconds instead of minutes.
-- **Fast Download**: Colab has gigabit internet, bypassing many 403 errors.
+- **Fast Download**: Colab has gigabit internet — use aria2c for 2-3x faster downloads
+- **Premium Pipeline**: YOLOv8-face + ByteTrack + FILM + GFPGAN = studio-grade shorts
 - **Auto-Sync**: Once finished, your Shorts will be in the `shorts/` folder or synced to Google Drive with `--sync`.

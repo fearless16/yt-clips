@@ -1,0 +1,649 @@
+"""
+premium_analyzer.py — YOLOv8-face + ByteTrack + Kalman filter + bezier crop.
+Replaces frame_analyzer.py's cheap Haar Cascade + EMA with proper tracking.
+
+Usage:
+    from premium_analyzer import PremiumAnalyzer
+    pa = PremiumAnalyzer()
+    result = pa.analyze_clip(video_path, start, end)
+"""
+
+import json
+import subprocess
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+import numpy as np
+import cv2
+
+from utils.config import load_config
+from utils.logger import get_logger
+
+cfg = load_config()
+log = get_logger("premium", cfg["logging"]["log_file"], cfg["logging"]["level"])
+
+# ─── GPU / Backend Detection ──────────────────────────────────────────────
+
+HAS_TORCH = False
+HAS_YOLO = False
+HAS_FILTERPY = False
+HAS_SCIPY = False
+try:
+    import torch
+    HAS_TORCH = True
+    from ultralytics import YOLO
+    HAS_YOLO = True
+except ImportError:
+    pass
+try:
+    from filterpy.kalman import KalmanFilter
+    HAS_FILTERPY = True
+except ImportError:
+    pass
+try:
+    from scipy.optimize import linear_sum_assignment
+    HAS_SCIPY = True
+except ImportError:
+    pass
+
+# ─── ByteTrack helpers ────────────────────────────────────────────────────
+
+class KalmanBoxTracker:
+
+    def __init__(self, bbox: np.ndarray):
+        if not HAS_FILTERPY:
+            raise ImportError("filterpy required for Kalman tracking — pip install filterpy")
+        self.id = KalmanBoxTracker._next_id()
+        self.hits = 1
+        self.no_loss = 0
+        self.bbox = bbox.astype(np.float32)
+        self.kf = self._init_kf(bbox)
+
+    @staticmethod
+    def _next_id():
+        id_ = getattr(KalmanBoxTracker, "_counter", 0)
+        KalmanBoxTracker._counter = id_ + 1
+        return id_
+
+    @staticmethod
+    def _init_kf(bbox: np.ndarray):
+        kf = KalmanFilter(dim_x=7, dim_z=4)
+        kf.F = np.array([
+            [1,0,0,0,1,0,0],
+            [0,1,0,0,0,1,0],
+            [0,0,1,0,0,0,1],
+            [0,0,0,1,0,0,0],
+            [0,0,0,0,1,0,0],
+            [0,0,0,0,0,1,0],
+            [0,0,0,0,0,0,1],
+        ], dtype=np.float32)
+        kf.H = np.array([
+            [1,0,0,0,0,0,0],
+            [0,1,0,0,0,0,0],
+            [0,0,1,0,0,0,0],
+            [0,0,0,1,0,0,0],
+        ], dtype=np.float32)
+        kf.R[2:,2:] *= 10.
+        kf.P[4:,4:] *= 1000.
+        kf.P *= 10.
+        kf.Q[-1,-1] *= 0.01
+        kf.Q[4:,4:] *= 0.01
+        kf.x[:4] = bbox.reshape(4, 1)
+        return kf
+
+    def update(self, bbox: np.ndarray):
+        self.hits += 1
+        self.no_loss = 0
+        self.kf.update(bbox.reshape(4, 1))
+
+    def predict(self) -> np.ndarray:
+        if (self.kf.x[6] + self.kf.x[2]) <= 0:
+            self.kf.x[6] *= 0.0
+        self.kf.predict()
+        self.no_loss += 1
+        return self.kf.x[:4].flatten()
+
+    @property
+    def state(self) -> np.ndarray:
+        return self.kf.x[:4].flatten()
+
+
+def _iou(a: np.ndarray, b: np.ndarray) -> float:
+    xx1 = max(a[0], b[0])
+    yy1 = max(a[1], b[1])
+    xx2 = min(a[2], b[2])
+    yy2 = min(a[3], b[3])
+    w = max(0., xx2 - xx1)
+    h = max(0., yy2 - yy1)
+    inter = w * h
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    denom = area_a + area_b - inter
+    return inter / denom if denom > 0 else 0.0
+
+
+def _linear_assignment(cost_matrix: np.ndarray) -> List[Tuple[int, int]]:
+    if not HAS_SCIPY:
+        # Fallback: greedy matching (no SciPy available)
+        matched = []
+        used_rows, used_cols = set(), set()
+        for i in range(cost_matrix.shape[0]):
+            for j in range(cost_matrix.shape[1]):
+                if i not in used_rows and j not in used_cols:
+                    matched.append((i, j))
+                    used_rows.add(i)
+                    used_cols.add(j)
+        return matched
+    row, col = linear_sum_assignment(cost_matrix)
+    return list(zip(row, col))
+
+
+class ByteTrack:
+    """Simple ByteTrack — Kalman filter + IoU matching with two thresholds."""
+
+    def __init__(self, high_thresh: float = 0.5, low_thresh: float = 0.1, max_lost: int = 30):
+        self.high = high_thresh
+        self.low = low_thresh
+        self.max_lost = max_lost
+        self.trackers: List[KalmanBoxTracker] = []
+        self._frame_count = 0
+
+    def update(self, detections: np.ndarray, scores: np.ndarray) -> List[Dict]:
+        if detections.size == 0:
+            detections = np.empty((0, 4))
+
+        self._frame_count += 1
+
+        # Predict
+        for t in self.trackers:
+            t.predict()
+
+        # Split detections by score
+        high_mask = scores >= self.high
+        high_dets = detections[high_mask]
+        high_scores = scores[high_mask]
+        low_dets = detections[~high_mask]
+        low_scores = scores[~high_mask]
+
+        # First match: high score detections with trackers — UPDATE matched trackers
+        matched, unmatched_dets, unmatched_trks = self._match(high_dets, self.trackers)
+        for dt_idx, trk_idx in matched:
+            self.trackers[trk_idx].update(high_dets[dt_idx])
+
+        # Second match: low score detections with remaining unmatched trackers
+        if len(unmatched_trks) > 0 and len(low_dets) > 0:
+            remaining_trks = [self.trackers[i] for i in unmatched_trks]
+            matched2, _, still_unmatched = self._match(low_dets, remaining_trks)
+            for dt_idx, trk_idx in matched2:
+                actual_trk = unmatched_trks[trk_idx]
+                self.trackers[actual_trk].update(low_dets[dt_idx])
+            unmatched_trks = [unmatched_trks[i] for i in still_unmatched if i < len(unmatched_trks)]
+
+        # Create new trackers for unmatched high-score detections
+        for dt_idx in unmatched_dets:
+            if dt_idx < len(high_dets):
+                self.trackers.append(KalmanBoxTracker(high_dets[dt_idx]))
+
+        # Remove lost trackers
+        self.trackers = [t for t in self.trackers if t.no_loss < self.max_lost]
+
+        # Return active tracks
+        results = []
+        for t in self.trackers:
+            if t.hits >= 1:
+                bbox = t.state
+                results.append({
+                    "id": t.id,
+                    "bbox": [float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])],
+                    "hits": t.hits,
+                })
+        return results
+
+    def _match(self, detections: np.ndarray, trackers: List[KalmanBoxTracker]):
+        if len(detections) == 0 or len(trackers) == 0:
+            return [], list(range(len(detections))), list(range(len(trackers)))
+
+        cost = np.zeros((len(detections), len(trackers)), dtype=np.float32)
+        for i, det in enumerate(detections):
+            for j, trk in enumerate(trackers):
+                cost[i, j] = 1 - _iou(det, trk.state)
+
+        matches = _linear_assignment(cost)
+        matched_dt = set()
+        matched_trk = set()
+        result = []
+        for i, j in matches:
+            if cost[i, j] < 1 - self.low:
+                result.append((i, j))
+                matched_dt.add(i)
+                matched_trk.add(j)
+        unmatched_dets = [i for i in range(len(detections)) if i not in matched_dt]
+        unmatched_trks = [j for j in range(len(trackers)) if j not in matched_trk]
+        return result, unmatched_dets, unmatched_trks
+
+
+# ─── Face Detection ────────────────────────────────────────────────────────
+
+class FaceDetector:
+    def __init__(self):
+        self.backend = "haar"
+        self.yolo_model = None
+        if HAS_YOLO:
+            try:
+                self.yolo_model = YOLO("yolov8n-face.pt")
+                self.backend = "yolo"
+                log.info("Premium: YOLOv8-face loaded")
+            except Exception as e:
+                log.warning("YOLOv8-face load failed: %s — falling back to Haar", e)
+        if self.backend == "haar":
+            self.haar = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+
+    def detect(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        if self.backend == "yolo" and self.yolo_model:
+            return self._detect_yolo(frame_bgr)
+        return self._detect_haar(frame_bgr)
+
+    def _detect_yolo(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        results = self.yolo_model(frame_bgr, verbose=False, conf=0.3, iou=0.5)
+        boxes = results[0].boxes
+        if boxes is None or len(boxes) == 0:
+            return np.empty((0, 4)), np.empty((0,))
+        xyxy = boxes.xyxy.cpu().numpy()
+        conf = boxes.conf.cpu().numpy()
+        return xyxy, conf
+
+    def _detect_haar(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        faces = self.haar.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30),
+        )
+        if len(faces) == 0:
+            return np.empty((0, 4)), np.empty((0,))
+        xyxy = np.array([[x, y, x + w, y + h] for (x, y, w, h) in faces], dtype=np.float32)
+        conf = np.ones(len(faces), dtype=np.float32) * 0.5
+        return xyxy, conf
+
+
+# ─── Crop Trajectory (Bezier / Kalman) ────────────────────────────────────
+
+def _bezier_interpolate(p0: float, p1: float, p2: float, p3: float, t: float) -> float:
+    """Cubic bezier: smooth ease-in-out."""
+    u = 1 - t
+    return u*u*u * p0 + 3*u*u*t * p1 + 3*u*t*t * p2 + t*t*t * p3
+
+
+class SmoothCrop:
+    """Produces buttery-smooth 9:16 crop windows from face trajectories."""
+
+    def __init__(self, frame_w: int, frame_h: int, smooth_factor: float = 0.15):
+        self.frame_w = frame_w
+        self.frame_h = frame_h
+        self.crop_w = int(frame_h * 9 / 16)
+        self.crop_h = frame_h
+        self.history: List[float] = []
+        self.smooth_factor = smooth_factor
+
+    def get_crop(self, face_center_x: float, face_center_y: float, frame_idx: int = 0) -> Dict:
+        target_x = face_center_x - self.crop_w // 2
+        target_x = max(0, min(target_x, self.frame_w - self.crop_w))
+
+        self.history.append(target_x)
+        if len(self.history) > 10:
+            self.history.pop(0)
+
+        smooth_x = self._smooth_bezier(target_x)
+        return {"x": int(smooth_x), "y": 0, "width": self.crop_w, "height": self.crop_h}
+
+    def _smooth_bezier(self, target: float) -> float:
+        if len(self.history) < 3:
+            return target
+        p0 = self.history[-3]
+        p3 = target
+        mid = (p0 + p3) / 2
+        cp1 = p0 + (mid - p0) * self.smooth_factor
+        cp2 = p3 - (p3 - mid) * self.smooth_factor
+        t = min(1.0, 1.0 / max(1, len(self.history)))
+        return _bezier_interpolate(p0, cp1, cp2, p3, t)
+
+
+# ─── Layout Classifier (Lightweight CNN) ──────────────────────────────────
+
+def _classify_layout(frame_bgr: np.ndarray) -> str:
+    """Heuristic-based layout classification (CNN replacement).
+    Returns: solo | split_both | split_guest_off | screen_share | blank
+    """
+    h, w = frame_bgr.shape[:2]
+    if h < 4 or w < 4:
+        return "solo"
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+
+    # Check blank / black
+    if gray.mean() < 25 and gray.var() < 100:
+        return "blank"
+
+    # Check vertical divider (split-screen)
+    center_col = w // 2
+    left_half = gray[:, :center_col]
+    right_half = gray[:, center_col:]
+    left_avg = left_half.mean()
+    right_avg = right_half.mean()
+
+    # Check if one side is black
+    right_black = right_avg < 25 and right_half.var() < 100
+    left_black = left_avg < 25 and left_half.var() < 100
+
+    if right_black or left_black:
+        return "split_guest_off"
+
+    # Check vertical divider line (dark AND light divider)
+    center_strip = gray[:, center_col - 2:center_col + 2]
+    left_right_avg = (left_avg + right_avg) / 2
+    center_deviation = abs(float(center_strip.mean()) - left_right_avg)
+    if center_deviation > 25:
+        return "split_both"
+
+    # Also detect divider as sharp horizontal brightness edge
+    center_edge = cv2.Canny(gray[:, center_col - 4:center_col + 4], 30, 100)
+    if center_edge.mean() > 0.05:
+        return "split_both"
+
+    # Screen share: high edge density + contrast (higher threshold to avoid false-positives from dual layout)
+    edges = cv2.Canny(gray, 50, 150)
+    edge_density = float(edges.sum()) / edges.size
+    if edge_density > 0.15 and gray.var() > 800:
+        return "screen_share"
+
+    return "solo"
+
+
+# ─── Chat Overlay Detection ──────────────────────────────────────────────
+
+def _detect_chat_region(frame_bgr: np.ndarray) -> Optional[Dict]:
+    layout_cfg = cfg.get("layout", {})
+    if not layout_cfg.get("has_chat_overlay", False):
+        return None
+
+    h, w = frame_bgr.shape[:2]
+    chat_side = layout_cfg.get("chat", {}).get("side", "right")
+    sample_w = min(w // 4, 350)
+
+    if chat_side == "right":
+        edge = frame_bgr[:, w - sample_w:]
+        center = frame_bgr[:, w // 4:3 * w // 4]
+    else:
+        edge = frame_bgr[:, :sample_w]
+        center = frame_bgr[:, w // 4:3 * w // 4]
+
+    edge_gray = cv2.cvtColor(edge, cv2.COLOR_BGR2GRAY)
+    center_gray = cv2.cvtColor(center, cv2.COLOR_BGR2GRAY)
+
+    edge_avg = edge_gray.mean()
+    center_avg = center_gray.mean()
+    edge_var = edge_gray.var()
+
+    brightness_diff = abs(edge_avg - center_avg)
+    if brightness_diff > 30 and edge_var > 500:
+        return {
+            "chat_detected": True,
+            "chat_side": chat_side,
+            "chat_x": w - sample_w if chat_side == "right" else 0,
+            "chat_width": sample_w,
+        }
+    return None
+
+
+# ─── Main Analysis ────────────────────────────────────────────────────────
+
+class PremiumAnalyzer:
+    """Drop-in replacement for analyze_clip with Premium tracking + smoothing."""
+
+    def __init__(self):
+        self.face_detector = FaceDetector()
+        self.tracker = ByteTrack()
+        self.smooth_crop: Optional[SmoothCrop] = None
+        self._frame_idx = 0
+
+    def reset(self):
+        self.tracker = ByteTrack()
+        self.smooth_crop = None
+        self._frame_idx = 0
+
+    def analyze_clip(
+        self,
+        video_path: str,
+        start: float,
+        end: float,
+        transcript_segments: Optional[List[Dict]] = None,
+        clip_id: str = "clip",
+    ) -> Dict:
+        """Full premium analysis. Returns same schema as frame_analyzer.analyze_clip."""
+        self.reset()
+        log.info("[%s] 🚀 Premium analysis: %.1fs-%.1fs", clip_id, start, end)
+
+        info = _get_video_info(video_path)
+        frame_w, frame_h = info["width"], info["height"]
+        self.smooth_crop = SmoothCrop(frame_w, frame_h)
+
+        # Sample frames
+        duration = max(0.01, end - start)
+        margin = min(0.5, duration * 0.1)
+        sample_times = np.linspace(start + margin, end - margin, num=12)
+
+        all_faces = []
+        layouts = []
+        chats = []
+
+        for t in sample_times:
+            frame = _extract_frame(video_path, float(t), frame_w, frame_h)
+            if frame is None:
+                continue
+
+            xyxy, conf = self.face_detector.detect(frame)
+            tracks = self.tracker.update(xyxy, conf)
+
+            layout = _classify_layout(frame)
+            layouts.append(layout)
+
+            chat = _detect_chat_region(frame)
+            if chat:
+                chats.append(chat)
+
+            for trk in tracks:
+                if trk["hits"] >= 2:
+                    b = trk["bbox"]
+                    cx = (b[0] + b[2]) / 2
+                    cy = (b[1] + b[3]) / 2
+                    all_faces.append({
+                        "x": cx, "y": cy,
+                        "w": b[2] - b[0],
+                        "h": b[3] - b[1],
+                        "id": trk["id"],
+                        "frame": float(t),
+                    })
+            self._frame_idx += 1
+
+        # Determine dominant layout
+        if layouts:
+            from collections import Counter
+            dominant_layout = Counter(layouts).most_common(1)[0][0]
+        else:
+            dominant_layout = "solo"
+
+        # Determine best face (most tracked, highest confidence)
+        best_face = None
+        if all_faces:
+            from collections import Counter
+            face_id_counts = Counter(f["id"] for f in all_faces)
+            if face_id_counts:
+                best_id = face_id_counts.most_common(1)[0][0]
+                best_candidates = [f for f in all_faces if f["id"] == best_id]
+                if best_candidates:
+                    mid_idx = len(best_candidates) // 2
+                    best_face = best_candidates[mid_idx]
+
+        # Build export strategy
+        strategy = self._build_strategy(best_face, dominant_layout, frame_w, frame_h, chats)
+
+        # Layout metadata
+        layout_info = {
+            "layout_type": dominant_layout,
+            "prefer_solo": dominant_layout == "solo",
+            "has_black_panel": dominant_layout == "split_guest_off",
+            "black_panel_side": "right" if dominant_layout == "split_guest_off" else None,
+            "guest_cam_on": dominant_layout == "split_both",
+            "guest_cam_off": dominant_layout == "split_guest_off",
+            "is_screen_share": dominant_layout == "screen_share",
+            "chat_overlay": chats[-1] if chats else None,
+        }
+
+        # Audio / silence
+        silence = _detect_dead_air(video_path, start, end)
+
+        # Speed factor from transcript
+        speed_factor = 1.0
+        if transcript_segments:
+            clip_segs = [
+                s for s in transcript_segments
+                if s["end"] > start and s["start"] < end
+            ]
+            total_text = " ".join(s.get("text", "") for s in clip_segs)
+            words = len(total_text.split())
+            clip_dur = max(0.01, end - start)
+            wpm = (words / (clip_dur / 60)) if clip_dur > 0 else 0
+            if wpm > 150:
+                speed_factor = 1.15
+            elif wpm < 80:
+                speed_factor = 1.25
+            else:
+                silence_ratio = max(0.0, (clip_dur - words * 0.35) / clip_dur)
+                if silence_ratio > 0.5:
+                    speed_factor = 1.35
+                elif silence_ratio > 0.3:
+                    speed_factor = 1.25
+
+        strategy["speed_factor"] = speed_factor
+        strategy["skip_silence"] = silence.get("has_dead_air", False)
+
+        return {
+            "black_frames": {"has_black_frames": dominant_layout == "blank", "is_mostly_black": dominant_layout == "blank"},
+            "lighting": {"needs_correction": False},
+            "layout": layout_info,
+            "dead_air": silence,
+            "export_strategy": strategy,
+            "premium": {
+                "face_tracks": len(all_faces),
+                "tracked_ids": list(set(f["id"] for f in all_faces)) if all_faces else [],
+                "dominant_layout": dominant_layout,
+                "detection_backend": self.face_detector.backend,
+            },
+        }
+
+    def _build_strategy(
+        self,
+        best_face: Optional[Dict],
+        layout_type: str,
+        frame_w: int,
+        frame_h: int,
+        chats: List[Dict],
+    ) -> Dict:
+        strategy = {
+            "use_solo_frame": False,
+            "use_vertical_stack": False,
+            "has_black_panel": layout_type == "split_guest_off",
+            "black_panel_side": "right" if layout_type == "split_guest_off" else None,
+            "guest_cam_on": layout_type == "split_both",
+            "guest_cam_off": layout_type == "split_guest_off",
+            "is_screen_share": layout_type == "screen_share",
+            "should_drop": False,
+            "active_crop": None,
+            "speed_factor": 1.0,
+            "apply_lighting_fix": False,
+            "lighting_filter": "",
+            "skip_silence": False,
+            "export_aspect_ratio": "9:16",
+            "chat_exclusion": None,
+        }
+
+        if layout_type == "blank":
+            strategy["should_drop"] = True
+            return strategy
+
+        if layout_type == "split_guest_off":
+            strategy["should_drop"] = True
+            return strategy
+
+        if layout_type == "split_both":
+            strategy["use_vertical_stack"] = True
+            return strategy
+
+        if layout_type == "screen_share":
+            return strategy
+
+        if best_face and self.smooth_crop:
+            crop = self.smooth_crop.get_crop(best_face["x"], best_face["y"], self._frame_idx)
+            strategy["use_solo_frame"] = True
+            strategy["active_crop"] = crop
+        else:
+            strategy["should_drop"] = True
+
+        if chats:
+            c = chats[-1]
+            strategy["chat_exclusion"] = {
+                "exclude_chat": True,
+                "chat_side": c["chat_side"],
+                "chat_exclude_width": c["chat_width"],
+            }
+
+        return strategy
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────
+
+def _get_video_info(path: str) -> Dict:
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "json", path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        data = json.loads(result.stdout)
+        s = data.get("streams", [{}])[0]
+        return {"width": int(s.get("width", 1920)), "height": int(s.get("height", 1080))}
+    except Exception:
+        return {"width": 1920, "height": 1080}
+
+
+def _extract_frame(video_path: str, timestamp: float, w: int, h: int) -> Optional[np.ndarray]:
+    cmd = [
+        "ffmpeg", "-y", "-ss", f"{timestamp:.3f}",
+        "-i", video_path,
+        "-frames:v", "1",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-vf", f"scale={w}:{h}",
+        "pipe:1",
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=10)
+    except Exception:
+        return None
+    if not res.stdout or len(res.stdout) != w * h * 3:
+        return None
+    return np.frombuffer(res.stdout, dtype=np.uint8).reshape((h, w, 3))
+
+
+def _detect_dead_air(video_path: str, start: float, end: float) -> Dict:
+    duration = max(0.01, end - start)
+    cmd = [
+        "ffmpeg", "-y", "-ss", str(start), "-t", str(duration),
+        "-i", video_path,
+        "-af", "silencedetect=noise=-35dB:d=1",
+        "-f", "null", "-",
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        silence_count = (res.stderr or "").count("silence_start")
+        return {"has_dead_air": silence_count > 0}
+    except Exception:
+        return {"has_dead_air": False}

@@ -23,9 +23,15 @@ from bs4 import BeautifulSoup
 
 from utils.config import load_config
 from utils.logger import get_logger
+from utils.resilience import CircuitBreaker, retry_with_backoff
 
 cfg = load_config()
 log = get_logger("trends", cfg["logging"]["log_file"], cfg["logging"]["level"])
+
+# Circuit breakers for external APIs
+_cricbuzz_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
+_google_trends_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=120.0)
+_yt_suggest_breaker = CircuitBreaker(failure_threshold=5, recovery_timeout=30.0)
 
 GOOGLE_TRENDS_RSS_IN = "https://trends.google.com/trending/rss?geo=IN"
 YT_SUGGEST = "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={q}"
@@ -271,27 +277,43 @@ def _extract_topics_from_rss(xml_text: str, max_topics: int = 12) -> List[str]:
 
 
 def fetch_google_trends_in() -> List[str]:
+    if _google_trends_breaker.state == "OPEN":
+        log.warning("Circuit breaker OPEN for Google Trends, skipping...")
+        return []
     try:
-        r = _session().get(GOOGLE_TRENDS_RSS_IN, timeout=6)
-        r.raise_for_status()
-        topics = _extract_topics_from_rss(r.text, max_topics=15)
-        if topics:
-            return topics
+        result = _google_trends_breaker.call(_fetch_google_trends_internal)
+        return result if result else []
     except Exception as e:
         log.warning("Google Trends IN fetch failed: %s", e)
-    return []
+        return []
+
+
+def _fetch_google_trends_internal() -> List[str]:
+    r = _session().get(GOOGLE_TRENDS_RSS_IN, timeout=6)
+    r.raise_for_status()
+    topics = _extract_topics_from_rss(r.text, max_topics=15)
+    return topics if topics else []
 
 
 def fetch_youtube_suggestions(seed_query: str = "cricket live") -> List[str]:
+    if _yt_suggest_breaker.state == "OPEN":
+        log.warning("Circuit breaker OPEN for YouTube Suggest, skipping...")
+        return []
     try:
-        url = YT_SUGGEST.format(q=urllib.parse.quote(seed_query))
-        r = _session().get(url, timeout=6)
-        r.raise_for_status()
-        data = r.json()
-        if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
-            return [_clean(x) for x in data[1][:10] if _clean(x)]
+        result = _yt_suggest_breaker.call(_fetch_yt_suggest_internal, seed_query)
+        return result if result else []
     except Exception as e:
         log.warning("YouTube suggestion fetch failed: %s", e)
+        return []
+
+
+def _fetch_yt_suggest_internal(seed_query: str) -> List[str]:
+    url = YT_SUGGEST.format(q=urllib.parse.quote(seed_query))
+    r = _session().get(url, timeout=6)
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
+        return [_clean(x) for x in data[1][:10] if _clean(x)]
     return []
 
 

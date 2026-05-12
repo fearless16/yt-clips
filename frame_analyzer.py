@@ -141,7 +141,7 @@ def _sample_brightness_series(video_path: str, start: float, end: float, sample_
 
 def detect_black_frames(samples: List[Dict]) -> Dict:
     threshold = cfg.get("quality", {}).get("black_threshold", 20)
-    black = [s for s in samples if s["avg"] < threshold and s["var"] < 50]
+    black = [s for s in samples if isinstance(s, dict) and s.get("avg", 255) < threshold and s.get("var", 9999) < 50]
     return {
         "has_black_frames": len(black) > 0,
         "black_ratio": len(black) / len(samples) if samples else 0,
@@ -151,7 +151,10 @@ def detect_black_frames(samples: List[Dict]) -> Dict:
 def analyze_lighting(samples: List[Dict]) -> Dict:
     if not samples:
         return {"needs_correction": False}
-    avg = sum(s["avg"] for s in samples) / len(samples)
+    avgs = [s.get("avg", 128) for s in samples if isinstance(s, dict)]
+    if not avgs:
+        return {"needs_correction": False}
+    avg = sum(avgs) / len(avgs)
     if avg < 70:
         return {"needs_correction": True, "lighting_filter": "eq=gamma=1.3:contrast=1.1"}
     elif avg > 200:
@@ -169,9 +172,67 @@ def _has_vertical_divider(frame_array: np.ndarray, width: int) -> bool:
     center_avg = float(center_band.mean())
     left_avg = float(left_band.mean())
     right_avg = float(right_band.mean())
-    has_dark_divider = center_avg < min(left_avg, right_avg) - 30
+    left_right_avg = (left_avg + right_avg) / 2
+    has_bright_divider = center_avg > left_right_avg + 25  # white divider
+    has_dark_divider = center_avg < left_right_avg - 25     # dark divider
     has_sharp_edge = abs(left_avg - right_avg) > 40
-    return has_dark_divider or has_sharp_edge
+    return has_bright_divider or has_dark_divider or has_sharp_edge
+
+
+def _detect_chat_overlay(frame_array: np.ndarray, width: int, height: int, cfg: dict) -> Optional[Dict]:
+    """
+    Detect chat overlay in the frame.
+    Chat typically appears on the right or left side of streams.
+    Returns dict with chat_x, chat_width if detected.
+    """
+    layout_cfg = cfg.get("layout", {})
+    if not layout_cfg.get("has_chat_overlay", False):
+        return None
+
+    chat_side = layout_cfg.get("chat", {}).get("side", "right")
+    est_width = layout_cfg.get("chat", {}).get("estimated_width", 350)
+    bright_thresh = layout_cfg.get("chat", {}).get("brightness_threshold", 30)
+
+    # Sample the edge region (right or left 25% of frame)
+    sample_width = min(width // 4, est_width)
+    if chat_side == "right":
+        edge_region = frame_array[:, width - sample_width:]
+    else:
+        edge_region = frame_array[:, :sample_width]
+
+    if edge_region.size == 0:
+        return None
+
+    edge_avg = float(edge_region.mean())
+    edge_var = float(edge_region.var())
+
+    # Center region for comparison (middle 50%)
+    center_region = frame_array[:, width // 4:3 * width // 4]
+    center_avg = float(center_region.mean()) if center_region.size > 0 else edge_avg
+
+    # Chat detection heuristics:
+    # 1. Edge region is significantly different in brightness from center
+    # 2. High variance (text/details) in chat area vs smooth gameplay
+    brightness_diff = abs(edge_avg - center_avg)
+
+    # Check for chat-like characteristics
+    is_chat_like = (
+        brightness_diff > bright_thresh and  # Different brightness than gameplay
+        edge_var > 500 and  # High variance = text/details
+        edge_var < center_region.var() * 2 if center_region.size > 0 else True  # Not too noisy
+    )
+
+    if is_chat_like:
+        chat_x = width - sample_width if chat_side == "right" else 0
+        return {
+            "chat_detected": True,
+            "chat_side": chat_side,
+            "chat_x": chat_x,
+            "chat_width": sample_width,
+            "brightness_diff": brightness_diff
+        }
+
+    return None
 
 def _detect_faces_per_half(frame_array: np.ndarray, width: int) -> dict:
     left_half = frame_array[:, :width // 2]
@@ -285,16 +346,49 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
         len(screen_share_votes), black_panel_side,
     )
 
+    # ── Chat overlay detection ─────────────────────────────────────────────────
+    chat_overlay = None
+    chat_cfg = cfg.get("layout", {}).get("chat", {})
+    if chat_cfg and chat_cfg.get("side"):
+        # Re-run analysis with chat detection
+        chat_side = chat_cfg.get("side", "right")
+        est_width = chat_cfg.get("estimated_width", 350)
+        bright_thresh = chat_cfg.get("brightness_threshold", 30)
+
+        # Use the first frame for chat detection
+        if res and res.stdout:
+            sample_width = min(320 // 4, int(est_width * (320 / 1920)))
+            frame_data = res.stdout[:320 * 180]
+            if len(frame_data) >= 320 * 180:
+                frame_array = np.frombuffer(frame_data, dtype=np.uint8).reshape(180, 320)
+                if chat_side == "right":
+                    edge_region = frame_array[:, 320 - sample_width:]
+                else:
+                    edge_region = frame_array[:, :sample_width]
+
+                if edge_region.size > 0:
+                    edge_avg = float(edge_region.mean())
+                    center_region = frame_array[:, 80:240]
+                    center_avg = float(center_region.mean()) if center_region.size > 0 else edge_avg
+                    brightness_diff = abs(edge_avg - center_avg)
+
+                    if brightness_diff > bright_thresh and float(edge_region.var()) > 500:
+                        chat_overlay = {
+                            "chat_detected": True,
+                            "chat_side": chat_side,
+                            "chat_x": 320 - sample_width if chat_side == "right" else 0,
+                            "chat_width": sample_width,
+                        }
+
     return {
         "layout_type": layout_type,
         "prefer_solo": layout_type == "solo",
         "has_black_panel": has_black_panel,
         "black_panel_side": black_panel_side,
-        # True only when guest cam is OFF (split detected but one side black)
         "guest_cam_off": layout_type == "split_guest_off",
-        # True only when guest has live video
         "guest_cam_on": layout_type == "split_both_active",
         "is_screen_share": is_screen_share,
+        "chat_overlay": chat_overlay,
     }
 
 def _get_video_dimensions(video_path: str) -> Dict:
@@ -366,6 +460,7 @@ def analyze_clip(
         )
 
     is_fast_paced = False
+    silence_ratio = 0.0
     if transcript_segments:
         clip_segments = [s for s in transcript_segments if s["start"] < end and s["end"] > start]
         total_text = " ".join([s["text"] for s in clip_segments])
@@ -373,7 +468,13 @@ def analyze_clip(
         duration = end - start
         wpm = (words / (duration / 60)) if duration > 0 else 0
         is_fast_paced = wpm > 150
-        log.debug("[%s] Tempo: %.1f WPM (fast=%s)", clip_id, wpm, is_fast_paced)
+
+        # Analyze silence for variable speed
+        # Estimate silence based on words: avg 0.35s per word, rest is silence
+        speech_duration = words * 0.35
+        silence_ratio = max(0.0, (duration - speech_duration) / duration) if duration > 0 else 0.0
+
+        log.debug("[%s] Tempo: %.1f WPM (fast=%s), Silence: %.1f%%", clip_id, wpm, is_fast_paced, silence_ratio * 100)
 
     layout_type = layout.get("layout_type", "solo")
     is_screen_share = layout.get("is_screen_share", False)
@@ -431,6 +532,42 @@ def analyze_clip(
         if should_drop:
             log.info("[%s] Solo but no face detected → DROP", clip_id)
 
+    # ── Chat overlay handling for 9:16 crop ────────────────────────────────────
+    chat_overlay = layout.get("chat_overlay")
+    exclude_chat_from_crop = False
+    crop_adjustment = None
+
+    if chat_overlay and chat_overlay.get("chat_detected"):
+        exclude_chat_from_crop = True
+        # Calculate chat exclusion zone
+        chat_side = chat_overlay.get("chat_side", "right")
+        chat_width = chat_overlay.get("chat_width", 0)
+        # Scale to full resolution
+        scale_factor = info["width"] / 320
+        crop_adjustment = {
+            "exclude_chat": True,
+            "chat_side": chat_side,
+            "chat_exclude_width": int(chat_width * scale_factor)
+        }
+        log.info("[%s] Chat detected on %s — will exclude from 9:16 crop", clip_id, chat_side)
+
+    # ── Variable Speed Logic ────────────────────────────────────────────────────
+    # Analyze silence ratio to determine optimal speed
+    # High silence (dead air) → speed up more aggressively
+    # Fast speech → slight speed up to increase retention
+    # Normal speech → use global speed factor
+    if silence_ratio > 0.5:
+        speed_factor = 1.35  # Aggressive speed up for dead air
+    elif silence_ratio > 0.3:
+        speed_factor = 1.25
+    elif is_fast_paced:
+        speed_factor = 1.15  # Slight speed up for fast speech
+    else:
+        speed_factor = 1.0  # Normal speed (global config will multiply later)
+
+    log.info("[%s] Variable speed: %.2fx (silence=%.1f%%, fast_paced=%s)",
+            clip_id, speed_factor, silence_ratio * 100, is_fast_paced)
+
     strategy = {
         "use_solo_frame": use_solo_frame,
         "use_vertical_stack": use_vertical_stack,
@@ -441,11 +578,12 @@ def analyze_clip(
         "is_screen_share": is_screen_share,
         "should_drop": should_drop,
         "active_crop": face_crop,
-        "speed_factor": 1.25 if (silence["has_dead_air"] and not is_fast_paced) else 1.0,
+        "speed_factor": speed_factor,
         "apply_lighting_fix": lighting["needs_correction"],
         "lighting_filter": lighting.get("lighting_filter", ""),
         "skip_silence": silence["has_dead_air"],
         "export_aspect_ratio": "9:16",
+        "chat_exclusion": crop_adjustment,
     }
 
     return {

@@ -1,4 +1,3 @@
-```
 # yt-clips Git Ignore
 
 # Python
@@ -35,5 +34,9 @@ remote_job_result.json
 .gemini/
 graphify-out/
 scratch/
-tests/
 *pipeline.log
+
+# User Data (DO NOT PUSH)
+data/
+photos/
+cookies.txt
