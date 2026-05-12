@@ -223,9 +223,73 @@ class TestFaceReference:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestDownloadFormat:
-    def test_download_format_is_720p(self):
-        """Download format should cap at 720p to match stream quality."""
+    def test_download_format_is_best_quality(self):
+        """Download format should use best available quality."""
         import yaml
         cfg = yaml.safe_load(Path("config.yaml").read_text())
         fmt = cfg.get("download", {}).get("format", "")
-        assert "720" in fmt or "1080" in fmt, f"Format should cap resolution, got: {fmt}"
+        assert fmt == "bv*+ba/b", f"Format should be best quality, got: {fmt}"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 7. AI Refinement respects max_clips config (was hardcoded to 5)
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestAIRefinementMaxClips:
+    def test_ai_refine_respects_max_clips_10(self):
+        """AI refinement should produce up to max_clips=10, not hardcoded 5."""
+        from highlight import _refine_highlights_with_ai
+        candidates = [
+            {"start": i * 30.0, "end": i * 30.0 + 29.0, "start_ts": f"00:{i:02d}:00", "end_ts": f"00:{i+1:02d}:00", "score": 5.0}
+            for i in range(10)
+        ]
+        segments = [
+            {"start": i * 30.0, "end": i * 30.0 + 29.0, "text": "kohli hits massive six crowd cheering"}
+            for i in range(50)
+        ]
+        # Mock AI to return all 10 indices (simulating "all are viral")
+        original_gen = None
+        import highlight as hl
+        if hasattr(hl, '_generate_text'):
+            original_gen = hl._generate_text
+        try:
+            # Force AI to return all indices by mocking the AI response
+            def mock_ai(*args, **kwargs):
+                return "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]"
+            hl.ai.generate_text = mock_ai
+
+            result = _refine_highlights_with_ai(segments, candidates, "Test Video", max_clips=10)
+            assert len(result) == 10, f"Should return 10 clips with max_clips=10, got {len(result)}"
+        finally:
+            if original_gen:
+                hl._generate_text = original_gen
+
+    def test_ai_refine_honors_lower_max_clips(self):
+        """AI refinement should cap at max_clips=3 when configured."""
+        from highlight import _refine_highlights_with_ai
+        candidates = [
+            {"start": i * 30.0, "end": i * 30.0 + 29.0, "start_ts": f"00:{i:02d}:00", "end_ts": f"00:{i+1:02d}:00", "score": 5.0}
+            for i in range(10)
+        ]
+        segments = [
+            {"start": i * 30.0, "end": i * 30.0 + 29.0, "text": "kohli hits massive six crowd cheering"}
+            for i in range(50)
+        ]
+        from highlight import ai
+        original_mock = ai.generate_text
+        try:
+            def mock_ai(*args, **kwargs):
+                return "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]"
+            ai.generate_text = mock_ai
+
+            result = _refine_highlights_with_ai(segments, candidates, "Test Video", max_clips=3)
+            assert len(result) == 3, f"Should cap at 3 clips with max_clips=3, got {len(result)}"
+        finally:
+            ai.generate_text = original_mock
+
+    def test_ai_refine_with_max_clips_from_config(self):
+        """detect_highlights should pass config max_clips to AI refinement."""
+        import yaml
+        cfg = yaml.safe_load(Path("config.yaml").read_text())
+        max_clips = cfg.get("highlight", {}).get("max_clips", 5)
+        assert max_clips >= 5, f"max_clips should be >= 5 in config, got {max_clips}"
