@@ -60,6 +60,9 @@ def run(
     auto_schedule: bool = False,
     skip_tests: bool = False,
 ) -> None:
+    cfg = load_config()
+    if not skip_tests and not cfg.get("testing", {}).get("enabled", False):
+        skip_tests = True
     _run_tests(skip_tests)
     start_total = time.perf_counter()
     failures = []
