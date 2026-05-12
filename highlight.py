@@ -262,7 +262,8 @@ def _format_ts(seconds: float) -> str:
 def _refine_highlights_with_ai(
     segments: List[Dict],
     candidates: List[Dict],
-    video_title: str = ""
+    video_title: str = "",
+    max_clips: int = 5
 ) -> List[Dict]:
     """
     Use LLM to analyze transcript and refine highlight selection.
@@ -303,14 +304,14 @@ Transcript (first 50 segments):
 Candidate Highlights:
 {candidates_str}
 
-Select the TOP 3 most viral-worthy candidates based on:
+Select the TOP {max_clips} most viral-worthy candidates based on:
 1. Excitement/Reaction moments
 2. Key match moments (wickets, sixes, fours, close calls)
 3. Humor or dramatic tension
 4. Audience hook potential
 
 Return ONLY a JSON list of indices (1-based) of the best candidates:
-[1, 2, 3]
+[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 """
 
     try:
@@ -331,7 +332,7 @@ Return ONLY a JSON list of indices (1-based) of the best candidates:
             # Add any remaining candidates not selected
             selected_set = set(selected_indices)
             for i, c in enumerate(candidates, 1):
-                if i not in selected_set and len(refined) < 5:
+                if i not in selected_set and len(refined) < max_clips:
                     refined.append(c)
 
             log.info("✅ AI refined highlights: selected %d top clips", len(refined))
@@ -479,9 +480,9 @@ def detect_highlights(
                 "end_ts": _format_ts(w["end"]),
                 "score": w["score"]
             }
-            for w in merged[:10]  # Send top 10 to AI
+            for w in merged[:max(int(h_cfg["max_clips"]) * 2, 10)]  # Send 2x max_clips to AI
         ]
-        merged = _refine_highlights_with_ai(segments, ai_candidates, video_title)
+        merged = _refine_highlights_with_ai(segments, ai_candidates, video_title, h_cfg["max_clips"])
         # Re-sort by start time after AI reorder
         merged.sort(key=lambda w: w["start"])
 
