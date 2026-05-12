@@ -16,7 +16,7 @@ channel:
 download:
   # Best available quality (no cap — downloads highest resolution available)
   format: "bv*+ba/b"
-  concurrent_fragments: 8
+  concurrent_fragments: 16
   sleep_requests: 0
   progress_interval_seconds: 10
   progress_percent_step: 5
