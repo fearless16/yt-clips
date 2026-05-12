@@ -242,17 +242,31 @@ def _generate_template_seo(
                 break
     teams_found = list(set(teams_found))[:2]
 
-    # Build title from template — NO garbage transcript keywords
+    # Build title from template — use scorecard + known moment patterns
     team_str = " vs ".join(teams_found) if teams_found else "Cricket Live"
     score_str = scorecard.replace("Live: ", "").strip() if scorecard else ""
 
+    # Extract moment type from transcript keywords
+    moment_keywords = set(k.strip().lower() for k in local_kw[:10])
+    moment_type = "HIGHLIGHTS"
+    if any(w in moment_keywords for w in {"six", "sixer", "chhakka", "maximum"}):
+        moment_type = "SIXES"
+    elif any(w in moment_keywords for w in {"wicket", "bowled", "lbw", "caught", "stump"}):
+        moment_type = "WICKETS"
+    elif any(w in moment_keywords for w in {"century", "hundred", "100", "fifty", "halfcentury"}):
+        moment_type = "CENTURY"
+    elif any(w in moment_keywords for w in {"catch", "fielding", "dive", "runout"}):
+        moment_type = "CATCHES"
+    elif any(w in moment_keywords for w in {"last", "over", "final", "drama", "thrill", "close"}):
+        moment_type = "FINISH"
+
     title_variants = [
-        f"{team_str} - Unbelievable Finish! 🔥 | IPL 2026",
-        f"{team_str} - Match Ka Turning Point! | IPL 2026",
-        f"Arey Yeh Kya Ho Gaya?! {team_str} | IPL 2026 🏏",
-        f"{score_str} - {team_str} Full Drama! | IPL 2026" if score_str else f"{team_str} Full Drama! | IPL 2026",
-        f"Last Over Ka Dhamaal! {team_str} | IPL 2026 🔥",
-        f"{team_str} - Brutal Sixes & Wickets! | IPL 2026 🏏",
+        f"{team_str} - {moment_type} | IPL 2026",
+        f"{team_str} Ka {moment_type} Moment! 🔥 | IPL 2026",
+        f"{team_str} - Match Ka {moment_type} | IPL 2026 🏏",
+        f"{team_str} Ki {moment_type}! Full Tension 🔥 | IPL 2026",
+        f"{score_str} - {team_str} {moment_type}" if score_str else f"{team_str} {moment_type} | IPL 2026",
+        f"{team_str} - Brutal {moment_type} & Action! | IPL 2026 🏏",
     ]
     title = random.choice(title_variants)[:100]
 
@@ -384,7 +398,7 @@ def generate_clip_seo(
     # Enhance prompt with learned insights from performance data
     prompt = enhance_seo_prompt(prompt)
 
-    backoff = [0, 8, 20, 45]
+    backoff = [0, 30, 60, 120]
     for attempt, delay in enumerate(backoff):
         if delay:
             log.info("[%s] SEO retry %d — waiting %ds...", clip_id, attempt, delay)
