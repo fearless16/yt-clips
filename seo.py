@@ -343,13 +343,29 @@ def _enforce_limits(item: Dict) -> Dict:
 
 def _parse_json_response(text: str) -> Optional[Dict]:
     """Extract and parse the first JSON object from model response."""
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
+    if not text:
         return None
+    # 1. Try direct parsing
     try:
-        return json.loads(match.group(0))
+        return json.loads(text.strip())
     except json.JSONDecodeError:
-        return None
+        pass
+    # 2. Try markdown extraction
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+    # 3. Fallback to bracket matching
+    start = text.find('{')
+    end = text.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(text[start:end+1])
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 # ── Per-clip SEO (one AI call, retries with backoff) ──────────────────────────
