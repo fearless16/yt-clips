@@ -2,28 +2,21 @@
 
 Since Google Colab provides free high-end GPUs (T4) and ultra-fast internet, it is the perfect place to run this pipeline without lagging your local PC.
 
-## Setup: `colab_setup.py` (Recommended)
+## Steps
 
-Upload `colab_setup.py` + `watcher.py` + all `.py` files + `utils/` to Colab and run:
+1. **Sync code to Drive:** On your Mac, run `./automate.sh` → option 3 (Sync Only)
+2. **Open notebook:** Upload `Colab.ipynb` to [colab.research.google.com](https://colab.research.google.com)
+3. **Set runtime:** Runtime → Change runtime type → **T4 GPU**
+4. **Run all cells:** The worker will start and show a tunnel URL
+5. **Send job:** On your Mac, run `./automate.sh "URL"` → option 2 (Remote Run)
 
-```
-!python colab_setup.py
-```
+## What the notebook does
 
-Or sync from Google Drive (run `./automate.sh` → option 3 on your Mac first).
-
-What it does:
-1. Mounts Google Drive
-2. Installs all deps (ffmpeg, aria2, Deno, Python packages, PyTorch + CUDA, YOLOv8, GFPGAN)
-3. Writes GPU-optimized `config.yaml` with `premium.enabled: true`
-4. Starts `watcher.py` (HTTP server on port 5000) + localtunnel
-5. Shows tunnel URL — use with `./automate.sh` → **Remote Run**
-
-## Remote Job Worker
-
-`watcher.py` runs on Colab and accepts pipeline jobs two ways:
-- **Tunnel (instant):** bridge.py POSTs to the tunnel URL → watcher processes it
-- **File poll (fallback):** watches for `remote_job.json` in Drive sync
+- Mounts Google Drive (gets code from `yt-clips/` folder)
+- Installs all deps: ffmpeg, aria2, Deno, Python packages, **PyTorch CUDA + YOLOv8 + GFPGAN**
+- Writes GPU-optimized `config.yaml` (`premium.enabled: true`, `h264_nvenc`)
+- Starts `watcher.py` (job listener) + localtunnel
+- Shows tunnel URL for bridge communication
 
 ## Premium Mode (Colab T4 Only)
 

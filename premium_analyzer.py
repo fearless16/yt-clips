@@ -487,12 +487,23 @@ class PremiumAnalyzer:
                     b = trk["bbox"]
                     cx = (b[0] + b[2]) / 2
                     cy = (b[1] + b[3]) / 2
+                    # Extract face region brightness for lighting analysis
+                    face_brightness = 128
+                    try:
+                        x1, y1, x2, y2 = map(int, [b[0], b[1], b[2], b[3]])
+                        if frame is not None and y2 > y1 and x2 > x1:
+                            face_roi = frame[max(0,y1):min(frame.shape[0],y2), max(0,x1):min(frame.shape[1],x2)]
+                            if face_roi.size > 0:
+                                face_brightness = int(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)))
+                    except Exception:
+                        pass
                     all_faces.append({
                         "x": cx, "y": cy,
                         "w": b[2] - b[0],
                         "h": b[3] - b[1],
                         "id": trk["id"],
                         "frame": float(t),
+                        "brightness": face_brightness,
                     })
             self._frame_idx += 1
 
@@ -558,15 +569,29 @@ class PremiumAnalyzer:
         strategy["speed_factor"] = speed_factor
         strategy["skip_silence"] = silence.get("has_dead_air", False)
 
-        # Lighting analysis
-        needs_lighting = False
+        # Lighting analysis + studio-grade color grading — set on strategy for export to use
+        strategy["apply_lighting_fix"] = True
+        lighting_filter = ""
+        avg_brightness = 128
         if all_faces:
-            avg_brightness = np.mean([f.get("brightness", 128) for f in all_faces])
-            if avg_brightness < 80 or avg_brightness > 210:
-                needs_lighting = True
+            face_brightness = []
+            for f in all_faces:
+                br = f.get("brightness", 128)
+                if isinstance(br, (int, float)):
+                    face_brightness.append(br)
+            if face_brightness:
+                avg_brightness = np.mean(face_brightness)
+        # Studio grade: natural contrast, warm saturation, light denoise, no washout
+        if avg_brightness < 80:
+            lighting_filter = "eq=contrast=1.25:saturation=1.15:brightness=-0.02,curves=all='0/0 0.15/0.12 0.50/0.42 0.85/0.78 1/1',hqdn3d=1.5:1.5:1:1,unsharp=3:3:0.5:3:3:0.0"
+        elif avg_brightness > 190:
+            lighting_filter = "eq=contrast=1.3:saturation=1.1:brightness=-0.06,curves=all='0/0 0.15/0.10 0.50/0.40 0.85/0.75 1/0.95',hqdn3d=1.5:1.5:1:1,unsharp=3:3:0.5:3:3:0.0"
+        else:
+            lighting_filter = "eq=contrast=1.15:saturation=1.05:brightness=-0.03,hqdn3d=1:1:1:1,unsharp=3:3:0.3:3:3:0.0"
+        strategy["lighting_filter"] = lighting_filter
         return {
             "black_frames": {"has_black_frames": dominant_layout in ("blank", "split_guest_off"), "is_mostly_black": dominant_layout == "blank"},
-            "lighting": {"needs_correction": needs_lighting, "avg_brightness": avg_brightness if all_faces else 128},
+            "lighting": {"needs_correction": True, "lighting_filter": lighting_filter, "avg_brightness": avg_brightness},
             "layout": layout_info,
             "dead_air": silence,
             "export_strategy": strategy,
