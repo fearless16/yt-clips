@@ -8,7 +8,11 @@ from google import genai
 from google.genai import types
 from openai import OpenAI
 
+from utils.config import load_config
+
 load_dotenv()
+
+_cfg = load_config()
 
 
 class AIClient:
@@ -28,6 +32,7 @@ class AIClient:
         )
 
         self.ollama_url = "http://localhost:11434/api/generate"
+        self._model = _cfg.get("ai", {}).get("model", "gemini-2.0-flash")
 
     def generate_text(self, prompt: str, system_instruction: Optional[str] = None) -> str:
         """Generic text generation wrapper, prioritizes Gemini then falls back."""
@@ -64,7 +69,7 @@ class AIClient:
             )
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=self._model,
             contents=prompt,
             config=config,
         )

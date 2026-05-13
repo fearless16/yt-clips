@@ -293,7 +293,7 @@ Examples:
         skip_sync=args.skip_sync,
         auto_sync=args.sync,
         auto_upload=args.upload,
-        auto_schedule=args.schedule or args.upload,
+        auto_schedule=args.schedule,
         skip_tests=args.skip_tests,
     )
 
