@@ -283,7 +283,7 @@ class FaceDetector:
             if (fx - margin_w) <= cx <= (fx + fw_cfg + margin_w) and (fy - margin_h) <= cy <= (fy + fh_cfg + margin_h):
                 keep.append(i)
         if not keep:
-            return xyxy, conf
+            return np.empty((0, 4)), np.empty((0,))
         return xyxy[keep], conf[keep]
 
 

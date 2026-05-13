@@ -123,6 +123,79 @@ class TestSmoothCrop:
         expected_x = 960 - sc.crop_w // 2
         assert abs(crop["x"] - expected_x) < 10
 
+    def test_y_axis_stays_in_bounds(self):
+        """For full-height crop (1080p), Y should always be 0 (crop = full frame)."""
+        sc = SmoothCrop(1920, 1080)
+        crop = sc.get_crop(960, 540, 0)
+        assert crop["y"] >= 0, f"Y should be >=0, got {crop['y']}"
+        assert crop["y"] + crop["height"] <= 1080, f"Crop overflow, y={crop['y']}+{crop['height']}"
+
+    def test_crop_keeps_full_height(self):
+        """For 16:9 source, crop height = frame height (full vertical capture)."""
+        sc = SmoothCrop(1920, 1080)
+        crop = sc.get_crop(500, 540, 0)
+        assert crop["height"] == 1080, "Crop should capture full frame height"
+
+
+# ─── Facecam Region Filter ─────────────────────────────────────────
+
+
+class TestFilterByFacecamRegion:
+    """TDD: Faces outside facecam area (e.g. poster players) must be filtered."""
+
+    def test_keeps_face_in_facecam_region(self, monkeypatch):
+        """Face inside facecam bounds should be kept."""
+        monkeypatch.setattr("premium_analyzer.cfg", {
+            "layout": {"has_facecam": True, "facecam": {"x": 0, "y": 540, "width": 320, "height": 180}},
+        })
+        xyxy = np.array([[50, 560, 150, 680]], dtype=np.float32)  # Inside facecam
+        conf = np.array([0.9])
+        result, rconf = FaceDetector._filter_by_facecam_region(xyxy, conf, 1920, 1080)
+        assert len(result) == 1, "Face in facecam should be kept"
+
+    def test_filters_face_outside_facecam(self, monkeypatch):
+        """Face outside facecam bounds (e.g. poster on wall) should be filtered."""
+        monkeypatch.setattr("premium_analyzer.cfg", {
+            "layout": {"has_facecam": True, "facecam": {"x": 0, "y": 540, "width": 320, "height": 180}},
+        })
+        xyxy = np.array([[500, 100, 600, 250]], dtype=np.float32)  # Poster face, outside facecam
+        conf = np.array([0.9])
+        result, rconf = FaceDetector._filter_by_facecam_region(xyxy, conf, 1920, 1080)
+        assert len(result) == 0, "Face outside facecam should be filtered"
+
+    def test_mixed_faces_keeps_only_facecam_ones(self, monkeypatch):
+        """Multiple faces, only those in facecam region should survive."""
+        monkeypatch.setattr("premium_analyzer.cfg", {
+            "layout": {"has_facecam": True, "facecam": {"x": 0, "y": 540, "width": 320, "height": 180}},
+        })
+        xyxy = np.array([
+            [50, 560, 150, 680],    # In facecam
+            [800, 100, 900, 250],   # Poster — outside
+            [100, 600, 180, 700],   # In facecam
+        ], dtype=np.float32)
+        conf = np.array([0.9, 0.8, 0.7])
+        result, rconf = FaceDetector._filter_by_facecam_region(xyxy, conf, 1920, 1080)
+        assert len(result) == 2, f"Should keep 2 facecam faces, got {len(result)}"
+
+    def test_disabled_when_no_facecam(self, monkeypatch):
+        """When has_facecam=False, all faces should pass through."""
+        monkeypatch.setattr("premium_analyzer.cfg", {
+            "layout": {"has_facecam": False},
+        })
+        xyxy = np.array([[500, 100, 600, 250]], dtype=np.float32)
+        conf = np.array([0.9])
+        result, rconf = FaceDetector._filter_by_facecam_region(xyxy, conf, 1920, 1080)
+        assert len(result) == 1, "All faces should pass when facecam disabled"
+
+    def test_empty_detections_returns_empty(self, monkeypatch):
+        monkeypatch.setattr("premium_analyzer.cfg", {
+            "layout": {"has_facecam": True, "facecam": {"x": 0, "y": 540, "width": 320, "height": 180}},
+        })
+        xyxy = np.empty((0, 4))
+        conf = np.empty((0,))
+        result, rconf = FaceDetector._filter_by_facecam_region(xyxy, conf, 1920, 1080)
+        assert len(result) == 0
+
 
 # ─── Layout Classification ────────────────────────────────────────────────
 
