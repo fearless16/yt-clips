@@ -29,7 +29,7 @@ download:
   proxy: ""
 # ─── Transcription ────────────────────────────────────────────────────────────
 transcription:
-  model: "base"                         # tiny | base | small | medium | large
+  model: "large-v3"                     # tiny | base | small | medium | large-v3
   language: "hi"                        # Hindi commentary — use hi for better accuracy
   device: "cuda"            # Prioritizes GPU, auto-falls back to CPU if missing
   compute_type: "float16"    # Optimized for GPU; auto-switches to int8 on CPU fallback
