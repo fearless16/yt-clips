@@ -83,12 +83,18 @@ print("  -> Select option 2 (Remote Run)")
 print("\nMonitoring watcher.log...")
 
 try:
+    last_pos = 0
     while True:
-        time.sleep(30)
+        time.sleep(10)
         if Path("watcher.log").exists():
-            with open("watcher.log") as f:
-                for l in f.readlines()[-3:]:
+            with open("watcher.log", "r") as f:
+                f.seek(0, 2)
+                if f.tell() < last_pos:
+                    last_pos = 0
+                f.seek(last_pos)
+                for l in f.readlines():
                     if l.strip():
                         print(f"  {l.strip()}")
+                last_pos = f.tell()
 except KeyboardInterrupt:
     print("\nStopped.")
