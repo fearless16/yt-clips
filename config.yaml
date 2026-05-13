@@ -149,19 +149,17 @@ testing:
 
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
-  provider: "gemini"                # gemini | openai | ollama
-  api_key: ""                       # Reading AI_API_KEY from .env
-  model: "gemini-2.0-flash-lite" 
-  image_model: "gemini-2.5-flash-image" # Nano Banana 2 (FREE Tier)
+  provider: "groq"                  # groq | nvidia | openrouter | xai | ollama
+  model: "llama-3.3-70b-versatile"  # API keys loaded from .env file
   system_prompt: |
     You are a YouTube SEO expert specializing in Cricket Shorts.
-    Generate high-CTR titles, engaging descriptions, and trending tags.
-    Focus on Indian cricket audience. Use a mix of English and Hinglish.
+    Generate high-CTR titles, engaging descriptions, and optimized tags.
+    Focus on Indian cricket audience. Use English only — no Hinglish or Hindi.
 
 # ── Thumbnail Automation ──────────────────────────────────────────────────────
 thumbnail:
   enabled: true
-  use_ai: true                      # Set to true to use Nano Banana 2
+  use_ai: false                     # Set to true for AI image generation (Nano Banana 2)
   template_path: "channel_logo.png"  # Use logo as a watermark/element
   font_path: "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" # Colab friendly
   font_size: 120

@@ -30,7 +30,7 @@ class TestPerformanceScoring:
         assert len(learner.learned_insights["clips"]) >= 1
         last = learner.learned_insights["clips"][-1]
         assert last["clip_id"] == "test123"
-        assert last["features"]["has_shock_hook"] is True
+        assert last["features"]["has_player_name"] is True
 
     def test_performance_score_bounds(self):
         from seo_learner import SEOLearner

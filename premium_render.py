@@ -64,9 +64,15 @@ def generate_speed_profile(
             speed[mask] = max_speed
 
     # Gaussian smoothing — no abrupt changes
-    from scipy.ndimage import gaussian_filter1d
-    sigma = max(1.0, duration * fps * 0.05)  # 5% of clip as transition window
-    speed = gaussian_filter1d(speed, sigma=sigma, mode="nearest")
+    try:
+        from scipy.ndimage import gaussian_filter1d
+        sigma = max(1.0, duration * fps * 0.05)  # 5% of clip as transition window
+        speed = gaussian_filter1d(speed, sigma=sigma, mode="nearest")
+    except ImportError:
+        # Fallback: simple moving-average smoothing when scipy unavailable
+        kernel_size = max(3, int(duration * fps * 0.05) * 2 + 1)
+        kernel = np.ones(kernel_size) / kernel_size
+        speed = np.convolve(speed, kernel, mode="same")
     speed = np.clip(speed, base_speed, max_speed)
 
     return time_stamps, speed

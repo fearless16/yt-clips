@@ -144,28 +144,13 @@ class TestAiClientModelConfig:
         """AIClient should use model name from config.yaml, not hardcoded."""
         import yaml
         cfg = yaml.safe_load(Path("config.yaml").read_text())
-        config_model = cfg.get("ai", {}).get("model", "gemini-2.0-flash-lite")
+        config_model = cfg.get("ai", {}).get("model", "llama-3.3-70b-versatile")
         from utils.ai_client import AIClient
         client = AIClient()
         assert client._model == config_model, (
             f"Client _model ({client._model}) should match config ({config_model})"
         )
 
-    def test_gemini_model_not_hardcoded(self):
-        """gemini model passed to generate_content should read from config, not hardcoded."""
-        import yaml
-        cfg = yaml.safe_load(Path("config.yaml").read_text())
-        config_model = cfg.get("ai", {}).get("model", "gemini-2.0-flash-lite")
-        from utils.ai_client import AIClient
-        from unittest.mock import patch
-        with patch('google.genai.Client') as mock_client:
-            c = AIClient()
-            c.generate_gemini("test prompt", "test system")
-            mock_client.return_value.models.generate_content.assert_called_once()
-            call_kwargs = mock_client.return_value.models.generate_content.call_args[1]
-            assert call_kwargs.get("model") == config_model, (
-                f"generate_content model ({call_kwargs.get('model')}) should match config ({config_model})"
-            )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -17,13 +17,28 @@ class Config(dict):
                 return default
         return curr
 
+# Module-level cache — config is loaded once and reused across all imports
+_config_cache: dict = {}
+
 def load_config(path: str = "config.yaml") -> Config:
-    """Load config.yaml from the given path and return as a Config object."""
+    """Load config.yaml from the given path and return as a Config object.
+    
+    Caches the result so repeated calls (15+ modules at import time)
+    return the same object without re-parsing YAML.
+    """
+    if path in _config_cache:
+        return _config_cache[path]
+    
     config_path = Path(path)
     if not config_path.exists():
         # Using print here as logger might not be initialized yet
         print(f"⚠️ Warning: Config file not found at {config_path}. Using empty defaults.")
-        return Config({})
-    with config_path.open("r") as f:
-        data = yaml.safe_load(f) or {}
-        return Config(data)
+        result = Config({})
+    else:
+        with config_path.open("r") as f:
+            data = yaml.safe_load(f) or {}
+            result = Config(data)
+    
+    _config_cache[path] = result
+    return result
+

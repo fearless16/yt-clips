@@ -14,8 +14,6 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
-import hashlib
-
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -211,17 +209,85 @@ def get_rotated_hashtags(match_type: str = "ipl", seed: Optional[int] = None) ->
 # ── Cricbuzz ──────────────────────────────────────────────────────────────────
 
 def parse_cricbuzz_scorecard(html: str) -> str:
+    """
+    Extract structured match context from Cricbuzz match page HTML.
+    Returns a detailed text summary including teams, scores, overs,
+    current batters/bowlers, run rate, and match situation.
+    """
     try:
         soup = BeautifulSoup(html, "lxml")
-        score_divs = soup.select(
-            ".cb-hm-scg-bat-txt, .cb-hm-scg-bwl-txt, .team-score, .ui-score, .cb-font-16"
+        parts = []
+
+        # 1. Match status / header context
+        status_el = soup.select_one(
+            ".cb-min-stts, .cb-match-status, .cb-text-gray, "
+            ".cb-col-100 .cb-text-complete, .cb-text-live, .cb-text-preview"
         )
-        scores = [d.get_text(strip=True) for d in score_divs[:2] if d.get_text(strip=True)]
-        if scores:
-            return " | ".join(scores)
-        matches = re.findall(r"([A-Z]{2,4}|[A-Za-z]+)\s+(\d+/\d+)", html)
-        if matches:
-            return " | ".join(f"{m[0]} {m[1]}" for m in matches[:2])
+        if status_el:
+            status_text = status_el.get_text(strip=True)
+            if status_text:
+                parts.append(f"Status: {status_text}")
+
+        # 2. Team scores (primary scorecard area)
+        score_divs = soup.select(
+            ".cb-hm-scg-bat-txt, .cb-hm-scg-bwl-txt, .cb-sc-hm-runs, "
+            ".cb-ovr-num, .cb-font-16, .cb-col-100, .team-score, .ui-score "
+        )
+        for div in score_divs[:6]:
+            text = div.get_text(strip=True)
+            if text and len(text) > 3:
+                parts.append(text)
+
+        # 3. Current batters
+        batting_section = soup.select_one(".cb-min-bat-runs, .cb-min-itm-rw")
+        if batting_section:
+            rows = batting_section.find_all("div", class_="cb-col cb-col-100")
+            for row in rows[:2]:
+                cells = row.find_all(["div", "span"], class_=re.compile(r"cb-col-\d+"))
+                batter_text = " ".join(c.get_text(strip=True) for c in cells if c.get_text(strip=True))
+                if batter_text and len(batter_text) > 5:
+                    parts.append(f"Batting: {batter_text}")
+
+        # 4. Current bowlers
+        bowling_section = soup.select_one(".cb-min-bwl-figures, .cb-min-itm-rw")
+        if bowling_section:
+            rows = bowling_section.find_all("div", class_="cb-col cb-col-100")
+            for row in rows[:2]:
+                cells = row.find_all(["div", "span"], class_=re.compile(r"cb-col-\d+"))
+                bowler_text = " ".join(c.get_text(strip=True) for c in cells if c.get_text(strip=True))
+                if bowler_text and len(bowler_text) > 5:
+                    parts.append(f"Bowling: {bowler_text}")
+
+        # 5. Recent overs / commentary
+        recent = soup.select_one(
+            ".cb-min-rcnt, .cb-col-100.cb-min-rcnt, "
+            ".cb-tms-bd-list, .cb-list-item"
+        )
+        if recent:
+            rtext = recent.get_text(strip=True)[:300]
+            if rtext:
+                parts.append(f"Recent: {rtext}")
+
+        # 6. Fallback: regex patterns for scores + overs
+        if not parts:
+            team_score_pattern = re.findall(
+                r"([A-Z]{2,5}|[A-Za-z\s]{3,20})\s+(\d{1,3}[/-]\d{1,2})\s+\((\d{1,2}\.\d)\)",
+                html
+            )
+            for ts in team_score_pattern[:2]:
+                parts.append(f"{ts[0].strip()} {ts[1]} ({ts[2]} ov)")
+
+            crr_pattern = re.findall(r"CRR[:\s]*(\d+\.\d+)", html)
+            if crr_pattern:
+                parts.append(f"CRR: {crr_pattern[0]}")
+
+            rrr_pattern = re.findall(r"Req\.? RR[:\s]*(\d+\.\d+)", html, re.IGNORECASE)
+            if rrr_pattern:
+                parts.append(f"Req RR: {rrr_pattern[0]}")
+
+        combined = " | ".join(dict.fromkeys(parts))
+        return combined[:1000] if combined else ""
+
     except Exception as e:
         log.warning("Cricbuzz parsing failed: %s", e)
     return ""

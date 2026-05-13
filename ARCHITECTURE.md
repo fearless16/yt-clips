@@ -27,7 +27,11 @@
 │  └─────────────────────────────────────────────────────────────┘│
 ├──────────────────────────────────────────────────────────────────┤
 │  PHASE 4.5: SEO + THUMBNAILS                                    │
-│  Gemini generates: title, description, hashtags, thumbnail       │
+│  Model chain: MinMax → Groq → NVIDIA (quality-gated)            │
+│  LLM generates: title, description, hashtags, tags, search      │
+│  terms. Quality validator ensures pipe format, sections, tags.  │
+│  Falls back to template if all models fail.                     │
+│  seo_learner tracks performance → self-improving prompts.       │
 ├──────────────────────────────────────────────────────────────────┤
 │  PHASE 5: SYNC (optional)                                       │
 │  Google Drive upload via Drive API                               │
@@ -75,7 +79,42 @@ Custom lightweight ByteTrack (not the full boxmot library):
 - Hungarian algorithm via scipy (fallback: greedy matching)
 - Graceful degradation: falls back to Haar Cascade + EMA if filterpy/scipy missing
 
-### 5. Speed Profile
+### 5. SEO Generation Architecture
+
+Three-tier fallback with quality validation:
+
+```
+generate_clip_seo(clip_id, transcript, ...)
+  │
+  ├─ #1: _try_model_chain()
+  │   ├─ MinMax-m2.5 (OpenRouter, free) — best quality, 25+ tags/terms
+  │   ├─ llama-3.3-70b (Groq, free, fast) — reliable fallback
+  │   └─ llama-3.3-70b (NVIDIA) — last resort
+  │   └─ Each output validated by validate_seo_quality():
+  │       ✓ Title has "| Team vs Team | Tournament" pipe format
+  │       ✓ Description has 3+ of 4 required sections
+  │       ✓ 10+ SEO tags, 10+ search terms
+  │       ✓ Includes #Shorts hashtag
+  │       ✓ No generic patterns ("cricket live:", etc.)
+  │
+  ├─ #2: Direct AI call (configured provider, retry loop with backoff)
+  │   └─ Also quality-validated
+  │
+  └─ #3: Template fallback (_generate_template_seo)
+      └─ ai_generated=False → upload skips these clips
+```
+
+**Self-improving loop** (seo_learner.py):
+- After upload, `learn_from_clip_performance()` records views/likes/CTR
+- Tracks patterns: pipe_format, power_word, player_name, sections, tags count
+- `enhance_seo_prompt()` appends learned insights to next prompt:
+  ```
+  ✅ What WORKS: pipe_format:true_power_word:true (avg score: 0.85)
+  ❌ What to AVOID: pipe_format:false (avg score: 0.32)
+  💡 Recommendation: Always add | Team vs Team | Tournament
+  ```
+
+### 6. Speed Profile
 Gaussian-smoothed per-frame speed multiplier (1.0-1.25x):
 - Base: 1.0x (normal pace)
 - Fast speech (>150 WPM): 1.15x
@@ -105,7 +144,7 @@ premium:         # premium toggle + feature flags
 layout:          # facecam position, chat overlay config
 export:          # resolution, fps, bitrate, encoder, transitions
 youtube:         # upload privacy, scheduling, category
-ai:              # LLM provider (gemini/openai)
+ai:              # LLM provider (groq/nvidia/openrouter)
 thumbnail:       # AI thumbnail generation
 quality:         # black detection, silence, frame sampling
 testing:         # pre-generation test guard config
@@ -127,7 +166,8 @@ tests/
 ├── test_flow.py             # Integration flow tests (3)
 ├── test_frame_analyzer.py   # Frame analyzer unit tests (17)
 ├── test_full_scan_and_layout.py  # Full scan tests (5)
-├── test_seo.py              # SEO generation tests (16)
+├── test_seo.py              # SEO generation tests (50+): unit, quality validation,
+│                           # model fallback chain, AI failure threshold, upload guard
 ├── test_premium_analyzer.py # Premium analyzer unit tests (20)
 ├── test_premium_render.py   # Premium render unit tests (9)
 ├── test_synthetic_quality.py # Synthetic image/video quality tests (14)
@@ -143,6 +183,7 @@ tests/
 - faster-whisper, yt-dlp, opencv-python-headless, numpy
 - rich (logging), PyYAML, Pillow
 - google-api-python-client (Drive/YouTube)
+- openai (OpenRouter, Groq, NVIDIA providers)
 
 ### Testing
 - pytest, pytest-timeout, pytest-mock

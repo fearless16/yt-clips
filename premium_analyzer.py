@@ -436,6 +436,36 @@ class PremiumAnalyzer:
         self.tracker = ByteTrack()
         self.smooth_crop: Optional[SmoothCrop] = None
         self._frame_idx = 0
+        self.host_detector: Optional[HostDetector] = None
+        self._init_host_detector()
+
+    def _init_host_detector(self):
+        """Initialize host detector with reference photos from config."""
+        host_photos_path = cfg.get("premium", {}).get("host_ref_photos", "")
+        if not host_photos_path:
+            self.host_detector = HostDetector([])
+            return
+
+        ref_photos = []
+        photos_dir = Path(host_photos_path)
+        if photos_dir.exists() and photos_dir.is_dir():
+            for img_path in photos_dir.glob("*"):
+                if img_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
+                    try:
+                        img = cv2.imread(str(img_path))
+                        if img is not None:
+                            ref_photos.append(img)
+                    except Exception as e:
+                        log.warning("Failed to load reference photo %s: %s", img_path, e)
+        elif Path(host_photos_path).exists():
+            try:
+                img = cv2.imread(host_photos_path)
+                if img is not None:
+                    ref_photos.append(img)
+            except Exception as e:
+                log.warning("Failed to load reference photo: %s", e)
+
+        self.host_detector = HostDetector(ref_photos)
 
     def reset(self):
         self.tracker = ByteTrack()
@@ -487,14 +517,16 @@ class PremiumAnalyzer:
                     b = trk["bbox"]
                     cx = (b[0] + b[2]) / 2
                     cy = (b[1] + b[3]) / 2
-                    # Extract face region brightness for lighting analysis
+                    # Extract face region brightness + image for host identification
                     face_brightness = 128
+                    face_img_roi = None
                     try:
                         x1, y1, x2, y2 = map(int, [b[0], b[1], b[2], b[3]])
                         if frame is not None and y2 > y1 and x2 > x1:
                             face_roi = frame[max(0,y1):min(frame.shape[0],y2), max(0,x1):min(frame.shape[1],x2)]
                             if face_roi.size > 0:
                                 face_brightness = int(np.mean(cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)))
+                                face_img_roi = face_roi.copy()
                     except Exception:
                         pass
                     all_faces.append({
@@ -502,7 +534,7 @@ class PremiumAnalyzer:
                         "w": b[2] - b[0],
                         "h": b[3] - b[1],
                         "id": trk["id"],
-                        "frame": float(t),
+                        "face_img": face_img_roi,
                         "brightness": face_brightness,
                     })
             self._frame_idx += 1
@@ -516,6 +548,7 @@ class PremiumAnalyzer:
 
         # Determine best face (most tracked, highest confidence)
         best_face = None
+        host_face = None
         if all_faces:
             from collections import Counter
             face_id_counts = Counter(f["id"] for f in all_faces)
@@ -526,8 +559,31 @@ class PremiumAnalyzer:
                     mid_idx = len(best_candidates) // 2
                     best_face = best_candidates[mid_idx]
 
-        # Build export strategy
-        strategy = self._build_strategy(best_face, dominant_layout, frame_w, frame_h, chats)
+            # ── Host Identification ───────────────────────────────────────────
+            # Group faces by unique positions (different people)
+            unique_faces = []
+            for f in all_faces:
+                is_new = True
+                for uf in unique_faces:
+                    if abs(f["x"] - uf["x"]) < 150 and abs(f["y"] - uf["y"]) < 100:
+                        if f.get("id") == uf.get("id"):
+                            is_new = False
+                            break
+                if is_new:
+                    unique_faces.append(f)
+
+            if unique_faces and self.host_detector:
+                host_idx = self.host_detector.identify_host(unique_faces)
+                if 0 <= host_idx < len(unique_faces):
+                    host_face = unique_faces[host_idx]
+                    host_face["is_host"] = True
+                    log.info("[%s] Host identified at position (%.0f, %.0f)", clip_id, host_face["x"], host_face["y"])
+                    # Use host as best face if identified
+                    if best_face is None or host_face.get("w", 0) * host_face.get("h", 0) > 0:
+                        best_face = host_face
+
+        # Build export strategy (with host priority)
+        strategy = self._build_strategy(best_face, dominant_layout, frame_w, frame_h, chats, host_face)
 
         # Layout metadata
         layout_info = {
@@ -539,6 +595,8 @@ class PremiumAnalyzer:
             "guest_cam_off": dominant_layout == "split_guest_off",
             "is_screen_share": dominant_layout == "screen_share",
             "chat_overlay": chats[-1] if chats else None,
+            "host_detected": host_face is not None,
+            "host_position": {"x": host_face["x"], "y": host_face["y"]} if host_face else None,
         }
 
         # Audio / silence
@@ -610,6 +668,7 @@ class PremiumAnalyzer:
         frame_w: int,
         frame_h: int,
         chats: List[Dict],
+        host_face: Optional[Dict] = None,
     ) -> Dict:
         strategy = {
             "use_solo_frame": False,
@@ -627,6 +686,7 @@ class PremiumAnalyzer:
             "skip_silence": False,
             "export_aspect_ratio": "9:16",
             "chat_exclusion": None,
+            "host_prioritized": host_face is not None,
         }
 
         if layout_type == "blank":
@@ -637,6 +697,15 @@ class PremiumAnalyzer:
             strategy["should_drop"] = True
             return strategy
 
+        # Host priority in split layout: crop to host instead of vertical stack
+        if layout_type == "split_both" and host_face and self.smooth_crop:
+            crop = self.smooth_crop.get_crop(host_face["x"], host_face["y"], self._frame_idx)
+            strategy["use_solo_frame"] = True
+            strategy["use_vertical_stack"] = False
+            strategy["active_crop"] = crop
+            log.info("Host prioritized in split layout - using solo crop")
+            return strategy
+
         if layout_type == "split_both":
             strategy["use_vertical_stack"] = True
             return strategy
@@ -644,8 +713,10 @@ class PremiumAnalyzer:
         if layout_type == "screen_share":
             return strategy
 
-        if best_face and self.smooth_crop:
-            crop = self.smooth_crop.get_crop(best_face["x"], best_face["y"], self._frame_idx)
+        # Use host face if available, otherwise best_face
+        target_face = host_face if host_face else best_face
+        if target_face and self.smooth_crop:
+            crop = self.smooth_crop.get_crop(target_face["x"], target_face["y"], self._frame_idx)
             strategy["use_solo_frame"] = True
             strategy["active_crop"] = crop
         else:
@@ -711,3 +782,175 @@ def _detect_dead_air(video_path: str, start: float, end: float) -> Dict:
         return {"has_dead_air": silence_count > 0}
     except Exception:
         return {"has_dead_air": False}
+
+
+# ─── Host Identification via Reference Photos ────────────────────────────────
+
+class HostDetector:
+    """
+    Identifies the host among multiple detected faces using reference photos.
+    Uses simple template matching (histogram comparison) for host identification.
+    Falls back to largest face + facecam region when no references provided.
+    """
+
+    def __init__(self, reference_photos: List[np.ndarray]):
+        self.reference_embeddings: List[np.ndarray] = []
+        self.has_host_reference = len(reference_photos) > 0
+
+        for ref_img in reference_photos:
+            if ref_img is not None and ref_img.size > 0:
+                try:
+                    gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
+                    if gray.size > 0:
+                        resized = cv2.resize(gray, (64, 64))
+                        hist = cv2.calcHist([resized], [0], None, [32], [0, 256])
+                        hist = cv2.normalize(hist, hist).flatten()
+                        self.reference_embeddings.append(hist)
+                except Exception as e:
+                    log.warning("Failed to process reference photo: %s", e)
+
+        if self.has_host_reference:
+            log.info("HostDetector initialized with %d reference photos", len(self.reference_embeddings))
+        else:
+            log.info("HostDetector initialized in fallback mode (largest face + facecam region)")
+
+    def _compute_face_embedding(self, face_img: np.ndarray) -> Optional[np.ndarray]:
+        """Compute histogram embedding for a face region."""
+        try:
+            if face_img is None or face_img.size == 0:
+                return None
+            gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+            if gray.size == 0:
+                return None
+            resized = cv2.resize(gray, (64, 64))
+            hist = cv2.calcHist([resized], [0], None, [32], [0, 256])
+            hist = cv2.normalize(hist, hist).flatten()
+            return hist
+        except Exception:
+            return None
+
+    def _histogram_similarity(self, hist1: np.ndarray, hist2: np.ndarray) -> float:
+        """Compute similarity between two histograms (0-1)."""
+        if hist1 is None or hist2 is None:
+            return 0.0
+        if len(hist1) != len(hist2):
+            return 0.0
+        return float(np.clip(np.dot(hist1, hist2), 0, 1))
+
+    def identify_host(self, faces: List[Dict]) -> int:
+        """
+        Identify which face is the host.
+        Returns: index of host face in faces list.
+
+        Strategy:
+        1. If reference photos: match by histogram similarity
+        2. Else: use facecam region as hint
+        3. Fallback: largest face
+        """
+        if not faces:
+            return -1
+
+        if not self.has_host_reference:
+            return self._identify_by_facecam_region(faces)
+
+        best_idx = 0
+        best_score = -1.0
+
+        for idx, face in enumerate(faces):
+            face_img = face.get("face_img")
+            if face_img is None:
+                continue
+
+            embedding = self._compute_face_embedding(face_img)
+            if embedding is None:
+                continue
+
+            max_sim = 0.0
+            for ref_emb in self.reference_embeddings:
+                sim = self._histogram_similarity(embedding, ref_emb)
+                max_sim = max(max_sim, sim)
+
+            if max_sim > best_score:
+                best_score = max_sim
+                best_idx = idx
+
+        return best_idx if best_score > 0.1 else self._identify_by_facecam_region(faces)
+
+    def _identify_by_facecam_region(self, faces: List[Dict]) -> int:
+        """Fallback: use facecam region config to identify host."""
+        layout_cfg = cfg.get("layout", {})
+        if not layout_cfg.get("has_facecam", False):
+            return self._identify_largest_face(faces)
+
+        fc = layout_cfg.get("facecam", {})
+        fc_x = fc.get("x", 0)
+        fc_y = fc.get("y", 540)
+        fc_w = fc.get("width", 320)
+        fc_h = fc.get("height", 180)
+
+        best_idx = 0
+        best_dist = float('inf')
+
+        for idx, face in enumerate(faces):
+            # x,y in face dicts are already CENTER coordinates (set in analyze_clip)
+            face_cx = face.get("x", 0)
+            face_cy = face.get("y", 0)
+
+            fc_center_x = fc_x + fc_w / 2
+            fc_center_y = fc_y + fc_h / 2
+
+            dist = ((face_cx - fc_center_x) ** 2 + (face_cy - fc_center_y) ** 2) ** 0.5
+
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+
+        return best_idx
+
+    def _identify_largest_face(self, faces: List[Dict]) -> int:
+        """Final fallback: largest face area."""
+        if not faces:
+            return 0
+        return max(range(len(faces)), key=lambda i: faces[i].get("w", 0) * faces[i].get("h", 0))
+
+
+def get_fallback_host_position(frame_w: int, frame_h: int) -> Dict:
+    """Get fallback host position when no faces detected - uses facecam region."""
+    layout_cfg = cfg.get("layout", {})
+    if layout_cfg.get("has_facecam", False):
+        fc = layout_cfg.get("facecam", {})
+        return {
+            "x": fc.get("x", 0) + fc.get("width", 320) // 2,
+            "y": fc.get("y", 540) + fc.get("height", 180) // 2,
+        }
+    return {
+        "x": frame_w // 4,
+        "y": frame_h // 2,
+    }
+
+
+def analyze_clip_with_host_priority(analysis: Dict) -> Dict:
+    """Analyze clip ensuring host is prioritized for framing."""
+    if "faces" not in analysis or not analysis["faces"]:
+        return analysis
+
+    layout_type = analysis.get("layout", {}).get("layout_type", "solo")
+
+    if layout_type == "split_both_active":
+        faces = analysis["faces"]
+        host_idx = -1
+
+        for idx, face in enumerate(faces):
+            if face.get("is_host", False):
+                host_idx = idx
+                break
+
+        if host_idx >= 0:
+            analysis["primary_face"] = faces[host_idx]
+            analysis["use_solo_frame"] = True
+            analysis["use_vertical_stack"] = False
+            log.info("Host prioritized in split layout - using solo crop")
+        else:
+            analysis["use_vertical_stack"] = True
+
+    return analysis
