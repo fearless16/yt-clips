@@ -648,13 +648,12 @@ def export_clip(
     global_speed = _normalize_speed(cfg["export"].get("global_speed_factor", 1.0))
     analysis_speed = _normalize_speed(strategy.get("speed_factor", 1.0))
 
-    # Apply variable speed if enabled, otherwise use global config
     if enable_var_speed:
         speed = _normalize_speed(analysis_speed)
         log.info("[%s] Using variable speed: %.2fx", clip_id, speed)
     else:
-        speed = _normalize_speed(global_speed * analysis_speed)
-        log.info("[%s] Using global + analysis speed: %.2fx", clip_id, speed)
+        speed = _normalize_speed(global_speed)
+        log.info("[%s] Variable speed disabled, using global speed: %.2fx", clip_id, speed)
 
     try:
         pre_seek = float(cfg["export"].get("pre_seek", 4.0))

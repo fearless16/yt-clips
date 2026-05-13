@@ -34,11 +34,12 @@ Set `premium.enabled: true` in `config.yaml` on Colab for studio-grade quality:
 
 ## Pre-Generation Test Guard
 
-Before ANY expensive operation, the pipeline auto-runs:
+Tests are DISABLED by default on Colab (`testing.enabled: false`).
+Set `testing.enabled: true` in the Drive-synced config to enable the pre-run guard:
 ```bash
 pytest tests/ -x --timeout=120
 ```
-Aborts immediately if tests fail. Use `--skip-tests` to bypass.
+Use `--skip-tests` to bypass even when enabled.
 
 ## Key Differences: Colab vs Local
 

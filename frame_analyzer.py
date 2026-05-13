@@ -155,9 +155,12 @@ def analyze_lighting(samples: List[Dict]) -> Dict:
     if not avgs:
         return {"needs_correction": False}
     avg = sum(avgs) / len(avgs)
-    if avg < 70:
+    quality_cfg = cfg.get("quality", {})
+    backlit_thresh = quality_cfg.get("backlit_brightness_threshold", 80)
+    overexposed_thresh = quality_cfg.get("overexposed_brightness_threshold", 210)
+    if avg < backlit_thresh:
         return {"needs_correction": True, "lighting_filter": "eq=gamma=1.3:contrast=1.1"}
-    elif avg > 200:
+    elif avg > overexposed_thresh:
         return {"needs_correction": True, "lighting_filter": "eq=gamma=0.8:contrast=0.9"}
     return {"needs_correction": False}
 
@@ -215,11 +218,10 @@ def _detect_chat_overlay(frame_array: np.ndarray, width: int, height: int, cfg: 
     # 2. High variance (text/details) in chat area vs smooth gameplay
     brightness_diff = abs(edge_avg - center_avg)
 
-    # Check for chat-like characteristics
     is_chat_like = (
-        brightness_diff > bright_thresh and  # Different brightness than gameplay
-        edge_var > 500 and  # High variance = text/details
-        edge_var < center_region.var() * 2 if center_region.size > 0 else True  # Not too noisy
+        brightness_diff > bright_thresh
+        and edge_var > 500
+        and (edge_var < center_region.var() * 2 if center_region.size > 0 else True)
     )
 
     if is_chat_like:

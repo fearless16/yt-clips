@@ -37,8 +37,9 @@ Convert 16:9 live streams → studio-grade 9:16 shorts automatically. Two modes:
 | Speed variation | Gaussian-smoothed 1.0-1.25x | Dynamic pacing |
 
 ### Pre-Generation Test Guard
-Before any expensive operation, `pytest tests/ -x --timeout=120` runs automatically.
-Aborts on failure. Use `--skip-tests` to bypass.
+Controlled by `testing.enabled` in config.yaml (default: `false` for speed).
+Set `testing.enabled: true` to auto-run `pytest tests/ -x --timeout=120` before any operation.
+Use `--skip-tests` to bypass.
 
 ## Project Structure
 
@@ -65,7 +66,7 @@ yt-clips/
 ├── config.yaml          # All configuration
 ├── colab_setup.py       # Colab GPU worker setup (one-shot)
 ├── watcher.py           # Colab job listener (tunnel + file poll)
-├── tests/               # 185 tests
+├── tests/               # 219+ tests
 └── utils/
     ├── logger.py         # Rich + JSON structured logging
     ├── config.py         # YAML config loader
@@ -91,7 +92,7 @@ download:
 
 transcription:
   language: "hi"             # Hinglish/Hindi detection
-  model: "small"             # small/medium/large (larger = more accurate)
+  model: "large-v3"          # base | small | medium | large-v3 (larger = more accurate)
   device: "cuda"             # GPU on Colab, CPU on local
 
 export:
@@ -116,7 +117,7 @@ URL → Download (yt-dlp + aria2c)
 ## Tests
 
 ```bash
-pytest tests/ -v                  # 185 tests, ~60s
+pytest tests/ -v                  # 219+ tests, ~60s
 pytest tests/ -m "not slow"       # Skip slow integration tests
 pytest tests/ --timeout=120       # With 2-min timeout per test
 ```
