@@ -63,8 +63,8 @@ yt-clips/
 ├── channel_watcher.py   # Auto-pilot: watch channel for new VODs
 ├── scheduler.py         # Upload scheduling
 ├── config.yaml          # All configuration
-├── Colab_Bridge.ipynb   # Colab worker notebook
-├── Colab_Setup.ipynb    # Manual Colab notebook
+├── colab_setup.py       # Colab GPU worker setup (one-shot)
+├── watcher.py           # Colab job listener (tunnel + file poll)
 ├── tests/               # 185 tests
 └── utils/
     ├── logger.py         # Rich + JSON structured logging
@@ -127,6 +127,6 @@ pytest tests/ --timeout=120       # With 2-min timeout per test
 |---|---|
 | `ARCHITECTURE.md` | Pipeline design, GPU/CPU split, config reference |
 | `Colab.md` | Colab setup guide |
-| `Colab_Bridge.ipynb` | Colab notebook for remote job processing |
-| `Colab_Setup.ipynb` | Colab notebook for manual one-shot runs |
+| `colab_setup.py` | Colab GPU worker setup (mounts Drive, installs deps, starts tunnel) |
+| `watcher.py` | Colab job listener — accepts jobs via HTTP tunnel or file poll |
 ```

@@ -65,7 +65,7 @@ graph LR
 The bridge system:
 1. `push_code.py` syncs code files to Google Drive
 2. `bridge.py` writes a job file (youtube URL + flags)
-3. `Colab_Bridge.ipynb` on Colab polls for job files, runs pipeline when found
+3. `colab_setup.py` + `watcher.py` on Colab — sets up deps + tunnel, listens for pipeline jobs
 4. Results sync back to Drive
 
 ### 4. ByteTrack Implementation

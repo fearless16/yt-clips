@@ -1,27 +1,29 @@
-# Running yt-clips on Google Colab 🚀
+# Running yt-clips on Google Colab
 
 Since Google Colab provides free high-end GPUs (T4) and ultra-fast internet, it is the perfect place to run this pipeline without lagging your local PC.
 
-## Option A: Colab Bridge (Recommended)
+## Setup: `colab_setup.py` (Recommended)
 
-Use the pre-built `Colab_Bridge.ipynb` notebook for a seamless experience:
+Upload `colab_setup.py` + `watcher.py` + all `.py` files + `utils/` to Colab and run:
 
-1. Upload `Colab_Bridge.ipynb` to [colab.research.google.com](https://colab.research.google.com).
-2. Set Runtime to **GPU** (Runtime → Change runtime type → T4 GPU).
-3. Run all cells — the worker will start and listen for jobs.
-4. On your local machine, run: `./automate.sh` and select **Remote Run** (option 2).
+```
+!python colab_setup.py
+```
 
-The bridge automatically syncs your code and beams jobs to Colab.
+Or sync from Google Drive (run `./automate.sh` → option 3 on your Mac first).
 
-## Option B: Manual Setup (Colab_Setup.ipynb)
+What it does:
+1. Mounts Google Drive
+2. Installs all deps (ffmpeg, aria2, Deno, Python packages, PyTorch + CUDA, YOLOv8, GFPGAN)
+3. Writes GPU-optimized `config.yaml` with `premium.enabled: true`
+4. Starts `watcher.py` (HTTP server on port 5000) + localtunnel
+5. Shows tunnel URL — use with `./automate.sh` → **Remote Run**
 
-Upload `Colab_Setup.ipynb` to Colab — it has 6 cells:
-1. Install deps (ffmpeg, aria2c, python packages, premium GPU deps)
-2. Upload code files via 📁 sidebar
-3. Write optimized config.yaml with `premium.enabled: true`
-4. Run pre-flight tests (185 tests)
-5. Paste YouTube URL → run pipeline
-6. Download shorts.zip
+## Remote Job Worker
+
+`watcher.py` runs on Colab and accepts pipeline jobs two ways:
+- **Tunnel (instant):** bridge.py POSTs to the tunnel URL → watcher processes it
+- **File poll (fallback):** watches for `remote_job.json` in Drive sync
 
 ## Premium Mode (Colab T4 Only)
 
