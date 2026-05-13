@@ -62,6 +62,7 @@ def transcribe(video_path: str, output_path: str):
     results = []
     last_progress_log = time.monotonic()
     last_progress_pct = -10.0
+    _prog_start = time.monotonic()
     progress_interval = float(t_cfg.get("progress_interval_seconds", 15))
     progress_percent_step = float(t_cfg.get("progress_percent_step", 10))
     
@@ -69,7 +70,12 @@ def transcribe(video_path: str, output_path: str):
         progress_pct = (segment.end / info.duration * 100) if info.duration else 0.0
         now = time.monotonic()
         if progress_pct >= last_progress_pct + progress_percent_step or now - last_progress_log >= progress_interval:
-            log.info("Transcription progress: %.1f%% (%.1fs / %.1fs)", progress_pct, segment.end, info.duration)
+            elapsed = now - _prog_start
+            eta = ""
+            if progress_pct > 1:
+                remaining_s = (elapsed / progress_pct) * (100 - progress_pct)
+                eta = f", ETA {remaining_s:.0f}s ({elapsed:.0f}s elapsed)"
+            log.info("Progress: %.1f%% (%d/%ds)%s", progress_pct, int(segment.end), int(info.duration), eta)
             last_progress_pct = progress_pct
             last_progress_log = now
         
