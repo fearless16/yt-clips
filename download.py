@@ -208,6 +208,11 @@ def _should_log_download_line(line: str, state: dict, interval: float, percent_s
             return True
         return False
 
+    # Filter aria2c raw fragment noise (hash IDs, byte counters)
+    if re.match(r'^[\[#0-9]', line) and any(c in line for c in ('#', '[DL:', 'B/0B', '](+')):
+        return False
+    if '#' in line[:6] and any(c.isdigit() for c in line[:10]):
+        return False
     return not line.startswith("[download]")
 
 
