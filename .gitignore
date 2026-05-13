@@ -40,3 +40,6 @@ scratch/
 data/
 photos/
 cookies.txt
+
+# Screenshots / Debug Images
+*.png
