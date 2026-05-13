@@ -305,7 +305,7 @@ def _generate_template_seo(
     }
 
 
-def _enforce_limits(item: Dict) -> Dict:
+def _enforce_limits(item: Dict, fallback_terms: List[str] = None) -> Dict:
     title = (item.get("title") or "")[:100]
     description = (item.get("description") or "")[:5000]
 
@@ -336,6 +336,32 @@ def _enforce_limits(item: Dict) -> Dict:
             break
         cleaned.append(t)
         total += extra
+
+    # Ensure at least 10 search terms to avoid only_0_tags_need_10 error
+    if len(cleaned) < 10 and fallback_terms:
+        for t in fallback_terms:
+            t = str(t).strip().lower()
+            if t not in cleaned and t not in GENERIC_TAGS:
+                extra = len(t) + (2 if cleaned else 0)
+                if total + extra > 500:
+                    break
+                cleaned.append(t)
+                total += extra
+            if len(cleaned) >= 10:
+                break
+                
+    # If still not 10, add some safe defaults
+    safe_defaults = ["cricket highlights", "cricket live match", "ipl match video", "t20 cricket live", "best cricket moments", "cricket shorts live", "indian cricket team", "cricket action", "match highlights", "cricket viral shorts"]
+    if len(cleaned) < 10:
+        for t in safe_defaults:
+            if t not in cleaned:
+                extra = len(t) + (2 if cleaned else 0)
+                if total + extra > 500:
+                    break
+                cleaned.append(t)
+                total += extra
+            if len(cleaned) >= 10:
+                break
 
     return {**item, "title": title, "description": description,
             "hashtags": hashtags, "search_terms": cleaned}
@@ -431,7 +457,7 @@ def generate_clip_seo(
                 "description": data.get("description", ""),
                 "hashtags": data.get("hashtags", ["#IPL2026", "#Cricket", "#Shorts"]),
                 "search_terms": data.get("search_terms", []),
-            })
+            }, fallback_terms=trend_topics)
 
             # Inject viral hooks and CTAs
             result = _inject_viral_elements(
@@ -441,7 +467,7 @@ def generate_clip_seo(
             )
             result["clip_id"] = clip_id
 
-            log.info("[%s] SEO done — title: %s", clip_id, result["title"][:60])
+            log.info("[%s] SEO done — title: %s", clip_id, result["title"][:100])
             return result
 
         except Exception as e:
@@ -471,7 +497,7 @@ def generate_clip_seo(
     )
 
     result["clip_id"] = clip_id
-    return _enforce_limits(result)
+    return _enforce_limits(result, fallback_terms=trend_topics)
 
 
 # ── Pipeline entry: called after each clip export ─────────────────────────────
