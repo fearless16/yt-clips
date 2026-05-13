@@ -107,112 +107,49 @@ def main():
     print("\n--- Step 4: Localtunnel ---")
     run("npm install -g localtunnel > /dev/null 2>&1", "Installing localtunnel")
 
-    # --- 5. Write Config --------------------------------------------------
-    print("\n--- Step 5: Writing Colab Config ---")
+    # --- 5. Configure (patch existing config from Drive) ------------------
+    print("\n--- Step 5: Patching Config for Colab GPU ---")
     for folder in ["input", "temp", "transcripts", "highlights", "shorts", "logs"]:
         Path(folder).mkdir(exist_ok=True)
 
-    config = """\
-paths:
-  input:       input/
-  temp:        temp/
-  transcripts: transcripts/
-  highlights:  highlights/
-  shorts:      shorts/
-  logs:        logs/
-channel:
-  id: ""
-  live_stream_url: ""
-download:
-  format: "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
-  concurrent_fragments: 32
-  output_filename: "video.mp4"
-  use_aria2c: true
-  po_token: ""
-  proxy: ""
-transcription:
-  model: "base"
-  language: "hi"
-  device: "cuda"
-  compute_type: "float16"
-highlight:
-  use_ai_refinement: true
-  audio_energy_threshold: 0.3
-  min_duration: 10
-  max_duration: 29
-  merge_gap: 8
-  max_clips: 10
-premium:
-  enabled: true
-  face_enhancement: true
-  frame_interpolation: true
-  host_ref_photos: ""
-layout:
-  has_facecam: true
-  facecam: {x: 0, y: 540, width: 320, height: 180}
-  facecam_output_height: 400
-  gameplay_output_height: 1520
-  has_chat_overlay: true
-  chat:
-    side: "right"
-    estimated_width: 350
-    brightness_threshold: 30
-export:
-  width: 1080
-  height: 1920
-  fps: 60
-  video_bitrate: "25M"
-  audio_bitrate: "320k"
-  crf: 18
-  encoder: "h264_nvenc"
-  enable_variable_speed: true
-  crop_smooth_factor: 0.2
-youtube:
-  privacy_status: "private"
-  category_id: "17"
-  upload_enabled: false
-  schedule_interval_hours: 2
-  niche: "Cricket"
-ai:
-  provider: "gemini"
-  api_key: ""
-  model: "gemini-2.0-flash-lite"
-  image_model: "gemini-2.5-flash-image"
-thumbnail:
-  enabled: true
-  use_ai: true
-  template_path: "channel_logo.png"
-  font_size: 120
-  variants_count: 3
-quality:
-  black_threshold: 20
-  silence_threshold_db: -35
-  frame_sample_count: 5
-testing:
-  enabled: false
-logging:
-  level: "INFO"
-  log_file: "logs/pipeline.log"
-"""
-    with open("config.yaml", "w") as f:
-        f.write(config.strip())
-    print("  config.yaml written (GPU mode, premium enabled)")
-
+    # Don't overwrite the Drive-synced config — just patch GPU settings
+    import yaml
+    config_path = Path("config.yaml")
+    if config_path.exists():
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+    else:
+        cfg = {}
+    patched = 0
+    # GPU overrides
+    gpu_overrides = {
+        "transcription": {"device": "cuda", "compute_type": "float16"},
+        "premium": {"enabled": True, "face_enhancement": True, "frame_interpolation": True},
+        "export": {"encoder": "h264_nvenc"},
+        "testing": {"enabled": False},
+    }
+    for section, values in gpu_overrides.items():
+        if section not in cfg:
+            cfg[section] = {}
+        for k, v in values.items():
+            if cfg[section].get(k) != v:
+                cfg[section][k] = v
+                patched += 1
     # Load API key from Colab secrets
     try:
         from google.colab import userdata
-        key = userdata.get("AI_API_KEY")
+        key = userdata.get("GOOGLE_API_KEY") or userdata.get("AI_API_KEY")
         if key:
+            os.environ["GOOGLE_API_KEY"] = key
             os.environ["AI_API_KEY"] = key
-            import yaml
-            with open("config.yaml") as f:
-                cfg = yaml.safe_load(f)
-            cfg["ai"]["api_key"] = key
-            with open("config.yaml", "w") as f:
-                yaml.dump(cfg, f, default_flow_style=False)
-            print("  AI_API_KEY loaded from Colab secrets")
+            print("  ✅ GOOGLE_API_KEY loaded from Colab secrets")
+        else:
+            print("  ⚠️  No GOOGLE_API_KEY in Colab secrets. Gemini will have low rate limits.")
     except Exception:
-        print("  No AI_API_KEY secret -- add via Secrets tab (key icon) or ignore for now")
+        print("  ⚠️  No GOOGLE_API_KEY in Colab secrets. Gemini will have low rate limits.")
+    with open(config_path, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False)
+    print(f"  Config patched ({patched} GPU overrides applied)")
 
     # --- 6. Start Watcher + Tunnel ----------------------------------------
     print("\n--- Step 6: Starting Watcher + Tunnel ---")
