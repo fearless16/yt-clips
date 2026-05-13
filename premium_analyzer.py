@@ -241,8 +241,11 @@ class FaceDetector:
 
     def detect(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         if self.backend == "yolo" and self.yolo_model:
-            return self._detect_yolo(frame_bgr)
-        return self._detect_haar(frame_bgr)
+            xyxy, conf = self._detect_yolo(frame_bgr)
+        else:
+            xyxy, conf = self._detect_haar(frame_bgr)
+        # Filter out non-facecam faces (poster players in background)
+        return self._filter_by_facecam_region(xyxy, conf, frame_bgr.shape[1], frame_bgr.shape[0])
 
     def _detect_yolo(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         results = self.yolo_model(frame_bgr, verbose=False, conf=0.3, iou=0.5)
@@ -264,6 +267,25 @@ class FaceDetector:
         conf = np.ones(len(faces), dtype=np.float32) * 0.5
         return xyxy, conf
 
+    @staticmethod
+    def _filter_by_facecam_region(xyxy: np.ndarray, conf: np.ndarray, fw: int, fh: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Keep only faces in the bottom-left facecam region. Poster faces in background get filtered."""
+        layout_cfg = cfg.get("layout", {})
+        fc = layout_cfg.get("facecam", {})
+        if not layout_cfg.get("has_facecam", False):
+            return xyxy, conf
+        fx, fy, fw_cfg, fh_cfg = fc.get("x", 0), fc.get("y", 540), fc.get("width", 320), fc.get("height", 180)
+        margin_w, margin_h = fw_cfg * 0.3, fh_cfg * 0.3
+        keep = []
+        for i in range(len(xyxy)):
+            cx = (xyxy[i, 0] + xyxy[i, 2]) / 2
+            cy = (xyxy[i, 1] + xyxy[i, 3]) / 2
+            if (fx - margin_w) <= cx <= (fx + fw_cfg + margin_w) and (fy - margin_h) <= cy <= (fy + fh_cfg + margin_h):
+                keep.append(i)
+        if not keep:
+            return xyxy, conf
+        return xyxy[keep], conf[keep]
+
 
 # ─── Crop Trajectory (Bezier / Kalman) ────────────────────────────────────
 
@@ -274,36 +296,47 @@ def _bezier_interpolate(p0: float, p1: float, p2: float, p3: float, t: float) ->
 
 
 class SmoothCrop:
-    """Produces buttery-smooth 9:16 crop windows from face trajectories."""
+    """Produces buttery-smooth 9:16 crop windows from face trajectories. Centers face in frame."""
 
     def __init__(self, frame_w: int, frame_h: int, smooth_factor: float = 0.15):
         self.frame_w = frame_w
         self.frame_h = frame_h
         self.crop_w = int(frame_h * 9 / 16)
         self.crop_h = frame_h
-        self.history: List[float] = []
+        self.x_history: List[float] = []
+        self.y_history: List[float] = []
         self.smooth_factor = smooth_factor
 
     def get_crop(self, face_center_x: float, face_center_y: float, frame_idx: int = 0) -> Dict:
+        # Center X: put face in horizontal center of 9:16 crop
         target_x = face_center_x - self.crop_w // 2
         target_x = max(0, min(target_x, self.frame_w - self.crop_w))
 
-        self.history.append(target_x)
-        if len(self.history) > 10:
-            self.history.pop(0)
+        # Center Y: put face in vertical center of 9:16 frame (face at ~40% from top = talking head framing)
+        face_in_frame_h = int(self.crop_h * 0.40)  # Face at 40% from top for natural framing
+        target_y = int(face_center_y - face_in_frame_h)
+        target_y = max(0, min(target_y, max(0, self.frame_h - self.crop_h)))
 
-        smooth_x = self._smooth_bezier(target_x)
-        return {"x": int(smooth_x), "y": 0, "width": self.crop_w, "height": self.crop_h}
+        self.x_history.append(target_x)
+        self.y_history.append(target_y)
+        if len(self.x_history) > 10:
+            self.x_history.pop(0)
+        if len(self.y_history) > 10:
+            self.y_history.pop(0)
 
-    def _smooth_bezier(self, target: float) -> float:
-        if len(self.history) < 3:
+        smooth_x = self._smooth_bezier(target_x, self.x_history)
+        smooth_y = self._smooth_bezier(target_y, self.y_history)
+        return {"x": int(smooth_x), "y": int(smooth_y), "width": self.crop_w, "height": self.crop_h}
+
+    def _smooth_bezier(self, target: float, history: List[float]) -> float:
+        if len(history) < 3:
             return target
-        p0 = self.history[-3]
+        p0 = history[-3]
         p3 = target
         mid = (p0 + p3) / 2
         cp1 = p0 + (mid - p0) * self.smooth_factor
         cp2 = p3 - (p3 - mid) * self.smooth_factor
-        t = min(1.0, 1.0 / max(1, len(self.history)))
+        t = min(1.0, 1.0 / max(1, len(history)))
         return _bezier_interpolate(p0, cp1, cp2, p3, t)
 
 
@@ -525,9 +558,15 @@ class PremiumAnalyzer:
         strategy["speed_factor"] = speed_factor
         strategy["skip_silence"] = silence.get("has_dead_air", False)
 
+        # Lighting analysis
+        needs_lighting = False
+        if all_faces:
+            avg_brightness = np.mean([f.get("brightness", 128) for f in all_faces])
+            if avg_brightness < 80 or avg_brightness > 210:
+                needs_lighting = True
         return {
-            "black_frames": {"has_black_frames": dominant_layout == "blank", "is_mostly_black": dominant_layout == "blank"},
-            "lighting": {"needs_correction": False},
+            "black_frames": {"has_black_frames": dominant_layout in ("blank", "split_guest_off"), "is_mostly_black": dominant_layout == "blank"},
+            "lighting": {"needs_correction": needs_lighting, "avg_brightness": avg_brightness if all_faces else 128},
             "layout": layout_info,
             "dead_air": silence,
             "export_strategy": strategy,
