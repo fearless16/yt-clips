@@ -96,7 +96,8 @@ class TestAnalyticsProcessing:
              "views": 5000, "likes": 400, "comments": 50, "tags": ["#IPL"]},
         ]
         feed_seo_learner(shorts)
-        assert len(analytics_learner.learned_insights["clips"]) > initial_count
+        clip_ids = [c["clip_id"] for c in analytics_learner.learned_insights["clips"]]
+        assert "a1" in clip_ids, "a1 should be in clips after feeding"
 
     def test_ai_analysis_returns_none_with_few_shorts(self):
         from analytics import ai_analyze

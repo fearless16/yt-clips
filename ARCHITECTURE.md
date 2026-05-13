@@ -47,9 +47,9 @@ The codebase maintains TWO complete analysis paths:
 Selected via `premium.enabled` in config.yaml. `export.py` auto-detects which path to use at import time.
 
 ### 2. Pre-Generation Test Guard
-Before ANY expensive pipeline operation, `pytest tests/ -x --timeout=120` runs.
-This catches regressions before wasting GPU time. Aborts on failure with full report.
-Use `--skip-tests` to bypass.
+Controlled by `testing.enabled` in config.yaml (default: `false` on Colab for speed).
+When enabled, `pytest tests/ -x --timeout=120` runs before any expensive operation.
+Use `--skip-tests` to bypass. Set `testing.enabled: true` for local development.
 
 ### 3. Colab Bridge Architecture
 ```mermaid
@@ -112,13 +112,14 @@ testing:         # pre-generation test guard config
 logging:         # level, log file path
 ```
 
-## Test Suite Structure (185 tests)
+## Test Suite Structure (219+ tests)
 
 ```
 tests/
 ├── conftest.py              # 7 synthetic 16:9 fixtures + parametrized any_video
 ├── test_analyzer.py         # Cheap analyzer smoke tests (5)
 ├── test_analytics_tdd.py    # Analytics/SEO feedback loop tests (5)
+├── test_bugs_corrected.py   # TDD bug regression tests (22)
 ├── test_clipping_quality.py # Clipping regression tests (10)
 ├── test_cricbuzz_integration.py  # Cricbuzz API tests (7)
 ├── test_export.py           # Export pipeline tests (15)

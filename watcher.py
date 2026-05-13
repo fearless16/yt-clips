@@ -71,7 +71,9 @@ def process_queue():
     while job_queue:
         with processing_lock:
             currently_processing = True
-        job = job_queue.pop(0)
+            if not job_queue:
+                break
+            job = job_queue.pop(0)
         url = job.get("url", "")
         flags = job.get("flags", [])
 

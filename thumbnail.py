@@ -163,13 +163,15 @@ def process_all_thumbnails(shorts_dir: str):
     generator = ThumbnailGenerator()
     shorts_path = Path(shorts_dir)
     
-    # Find all .mp4 files that have a matching _metadata.json
     videos = list(shorts_path.glob("*.mp4"))
     for video in videos:
         meta_path = video.with_name(f"{video.stem}_metadata.json")
         if meta_path.exists():
             thumb_path = video.with_name(f"{video.stem}_thumb.jpg")
-            generator.generate_for_clip(str(video), str(meta_path), str(thumb_path))
+            try:
+                generator.generate_for_clip(str(video), str(meta_path), str(thumb_path))
+            except Exception as e:
+                log.warning("Thumbnail generation failed for %s: %s", video.name, e)
 
 if __name__ == "__main__":
     import sys
@@ -198,10 +200,9 @@ def generate_thumbnail_variants(video_path: str, metadata: dict, count: int = 3)
     
     variants = []
     
-    # First generate base thumbnail if it doesn't exist
     base_thumb = output_dir / "thumbnail.jpg"
     if not base_thumb.exists():
-        meta_path = output_dir / "metadata.json"
+        meta_path = video_file.with_name(f"{video_file.stem}_metadata.json")
         if meta_path.exists():
             generator.generate_for_clip(str(video_file), str(meta_path), str(base_thumb))
     

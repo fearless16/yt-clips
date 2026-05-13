@@ -12,6 +12,7 @@ import math
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import re
 import httplib2
 import google_auth_httplib2
 
@@ -32,6 +33,17 @@ from utils.config import load_config
 from utils.logger import get_logger, phase_tracker
 from utils.ai_client import AIClient
 from seo_learner import SEOLearner
+
+def _parse_iso8601_duration(dur: str) -> int:
+    """Parse ISO 8601 duration string to seconds (robust to H/M/S combos)."""
+    if not dur:
+        return 0
+    match = re.match(r'PT?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', dur)
+    if not match:
+        return 0
+    h, m, s = match.groups()
+    return int(h or 0) * 3600 + int(m or 0) * 60 + int(s or 0)
+
 
 console = Console()
 cfg = load_config()
@@ -94,7 +106,8 @@ def fetch_shorts(days: int = 30) -> List[Dict]:
             if pub < cutoff:
                 continue
             dur = v["contentDetails"]["duration"]  # ISO 8601
-            if "M" in dur and int(dur.split("M")[0].split("PT")[-1]) > 3:
+            seconds = _parse_iso8601_duration(dur)
+            if seconds > 180:
                 continue  # Not a short (>3 min)
             stats = v.get("statistics", {})
             shorts.append({
