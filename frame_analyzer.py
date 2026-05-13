@@ -1,5 +1,6 @@
 import json
 import subprocess
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 import cv2
@@ -13,13 +14,25 @@ log = get_logger("analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"]
 
 FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
-# Per-clip crop smoothing state — reset via reset_crop_state() at start of each clip
-_PREV_CROP_X: Optional[int] = None
+# Per-clip crop smoothing state — thread-local to prevent bleed across parallel exports
+_crop_local = threading.local()
+
+def _get_prev_crop_x() -> Optional[int]:
+    """Get the previous crop X position for the current thread."""
+    return getattr(_crop_local, 'prev_crop_x', None)
+
+def _set_prev_crop_x(value: Optional[int]) -> None:
+    """Set the previous crop X position for the current thread."""
+    _crop_local.prev_crop_x = value
+
+# Backward-compatible module-level accessor (read-only, for tests)
+_PREV_CROP_X = None  # Only used by tests checking reset; actual state is in _crop_local
 
 def reset_crop_state() -> None:
     """Call once at the start of each new clip to prevent crop history bleeding across clips."""
     global _PREV_CROP_X
-    _PREV_CROP_X = None
+    _crop_local.prev_crop_x = None
+    _PREV_CROP_X = None  # Keep module-level in sync for backward compat
 
 def _smooth_int(prev: Optional[int], current: int, alpha: float = 0.25) -> int:
     if prev is None:
@@ -84,9 +97,8 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
     target_w = int(target_h * 9 / 16)
     crop_x = x + w // 2 - target_w // 2
     crop_x = max(0, min(crop_x, frame_width - target_w))
-    global _PREV_CROP_X
-    crop_x = _smooth_int(_PREV_CROP_X, crop_x, alpha=0.25)
-    _PREV_CROP_X = crop_x
+    crop_x = _smooth_int(_get_prev_crop_x(), crop_x, alpha=0.25)
+    _set_prev_crop_x(crop_x)
 
     return {
         "x": int(crop_x), "y": 0,

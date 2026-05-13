@@ -268,13 +268,23 @@ def _refine_highlights_with_ai(
     """
     Use LLM to analyze transcript and refine highlight selection.
     Scores segments based on 'virality potential' (excitement, hooks, key moments).
+    Only sends candidate-overlapping segments to minimize token usage.
     """
     if not candidates or len(candidates) <= 1:
         return candidates  # No need to refine if 0 or 1 clip
 
-    # Build context for AI
+    # Only collect segments that overlap with ANY candidate window
+    candidate_min = min(c["start"] for c in candidates)
+    candidate_max = max(c["end"] for c in candidates)
+    overlapping_segments = [
+        seg for seg in segments
+        if seg["end"] > candidate_min and seg["start"] < candidate_max
+        and any(seg["end"] > c["start"] and seg["start"] < c["end"] for c in candidates)
+    ]
+
+    # Build compact transcript context (only overlapping segments, capped)
     transcript_snippets = []
-    for seg in segments[:50]:  # Limit to first 50 segments for prompt size
+    for seg in overlapping_segments[:30]:  # Cap at 30 overlapping segments
         transcript_snippets.append(f"[{_format_ts(seg['start'])}] {seg.get('text', '')}")
 
     transcript_text = "\n".join(transcript_snippets)
@@ -285,34 +295,25 @@ def _refine_highlights_with_ai(
         overlap_text = " ".join([
             s.get("text", "") for s in segments
             if s["end"] > c["start"] and s["start"] < c["end"]
-        ][:100])  # Limit text
+        ][:20])  # Limit overlap text
         candidate_list.append(
-            f"{i}. {c['start_ts']}-{c['end_ts']}: {overlap_text[:150]}..."
+            f"{i}. {c['start_ts']}-{c['end_ts']}: {overlap_text[:120]}"
         )
 
     candidates_str = "\n".join(candidate_list)
 
-    prompt = f"""
-You are a viral highlight detection expert for cricket shorts.
-Analyze the transcript and select the BEST highlights that would go viral.
+    prompt = f"""Pick the TOP {max_clips} viral cricket highlights.
 
-Video Title: {video_title}
+Title: {video_title}
 
-Transcript (first 50 segments):
+Transcript:
 {transcript_text}
 
-Candidate Highlights:
+Candidates:
 {candidates_str}
 
-Select the TOP {max_clips} most viral-worthy candidates based on:
-1. Excitement/Reaction moments
-2. Key match moments (wickets, sixes, fours, close calls)
-3. Humor or dramatic tension
-4. Audience hook potential
-
-Return ONLY a JSON list of indices (1-based) of the best candidates:
-[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-"""
+Rank by: excitement, key moments (wickets/sixes), drama, hook potential.
+Return ONLY a JSON list of 1-based indices: [1, 3, 5]"""
 
     try:
         log.info("🤖 Sending %d candidates to AI for refinement...", len(candidates))

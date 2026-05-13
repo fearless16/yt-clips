@@ -24,7 +24,6 @@ cfg = load_config()
 log = get_logger("upload", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 try:
-    import google.auth
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -218,11 +217,19 @@ def upload_video(
     with open(metadata_path, "r") as f:
         meta = json.load(f)
 
+    # Skip clips that fell back to template generation (generic/low-quality)
+    if not meta.get("ai_generated", True):
+        log.warning("Skipping upload — clip uses template fallback (not AI-generated): %s", metadata_path)
+        return None
+
     title = meta.get("title", "Cricket Highlights #Shorts")
     description = meta.get("description", "")
-    # search_terms are the discoverability tags for YouTube (separate from hashtags)
-    search_terms = meta.get("search_terms", meta.get("tags", []))
-    title, description, search_terms = _ensure_shorts_metadata(title, description, search_terms)
+    # Use dedicated SEO tags + search_terms for YouTube API tags field
+    seo_tags = meta.get("tags", [])
+    search_terms = meta.get("search_terms", [])
+    # Merge both: SEO tags (dedicated discoverability tags) + search terms (search phrases)
+    all_tags = list(dict.fromkeys([str(t).strip() for t in seo_tags + search_terms if str(t).strip()]))
+    title, description, all_tags = _ensure_shorts_metadata(title, description, all_tags)
 
     log.info(f"🚀 Uploading to YouTube: {title}...")
     if publish_at:
@@ -231,14 +238,15 @@ def upload_video(
 
     body = {
         "snippet": {
-            "title": title[:100],  # YouTube title limit
-            "description": description[:5000],  # YouTube description limit
-            "tags": search_terms,  # YouTube tags limit is enforced above
+            "title": title[:100],
+            "description": description[:5000],
+            "tags": all_tags,
             "categoryId": cfg["youtube"]["category_id"],
         },
         "status": {
             "privacyStatus": privacy,
             "selfDeclaredMadeForKids": cfg["youtube"]["self_declared_made_for_kids"],
+            "selfDeclaredContentAltered": False,
         },
     }
 
