@@ -24,7 +24,7 @@ if premium_enabled:
         _premium_analyzer = PremiumAnalyzer()
         analyze_clip = _premium_analyzer.analyze_clip
         log.info("Premium analyzer ACTIVE — YOLOv8-face + ByteTrack")
-    except Exception as e:
+    except ImportError as e:
         analyze_clip = cheap_analyze_clip
         log.warning("Premium import failed (%s) — using cheap analyzer", e)
 else:

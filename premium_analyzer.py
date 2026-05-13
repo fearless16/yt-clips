@@ -336,7 +336,7 @@ class SmoothCrop:
         mid = (p0 + p3) / 2
         cp1 = p0 + (mid - p0) * self.smooth_factor
         cp2 = p3 - (p3 - mid) * self.smooth_factor
-        t = min(1.0, 1.0 / max(1, len(history)))
+        t = 1.0 - 1.0 / max(1, len(history))
         return _bezier_interpolate(p0, cp1, cp2, p3, t)
 
 

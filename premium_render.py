@@ -355,7 +355,7 @@ class PremiumRender:
                 )
 
                 pm.update(f"{clip_id}: render", description=f"{clip_id}: interpolate 30→60fps")
-                ok = self.interpolator.interpolate(str(temp1.parent / "interp.mp4"), start, end, str(temp1), speed_profile[1])
+                ok = self.interpolator.interpolate(video_path, start, end, str(temp1), speed_profile[1])
                 if not ok:
                     log.error("[%s] Interpolation failed", clip_id)
                     return None

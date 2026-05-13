@@ -384,7 +384,14 @@ def detect_highlights(
 
     # Extract audio energy (reliable WAV-based method)
     rms_list = _extract_audio_rms(video_path)
-    rms_map  = {int(t): v for t, v in rms_list}
+    from collections import defaultdict
+    _rms_sums = defaultdict(float)
+    _rms_counts = defaultdict(int)
+    for t, v in rms_list:
+        key = int(t)
+        _rms_sums[key] += v
+        _rms_counts[key] += 1
+    rms_map = {k: _rms_sums[k] / _rms_counts[k] for k in _rms_sums}
 
     if rms_list:
         all_rms = [v for _, v in rms_list]
