@@ -42,5 +42,9 @@ data/
 photos/
 cookies.txt
 
+# AI Assistant Artifacts
+.aider*
+
 # Screenshots / Debug Images
 *.png
+benchmark_llms.py

@@ -150,7 +150,14 @@ testing:
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
   provider: "groq"                  # groq | nvidia | openrouter | xai | ollama
-  model: "llama-3.3-70b-versatile"  # API keys loaded from .ai.env via .zshrc
+  model: "llama-3.1-8b-instant"     # Best speed/quality for SEO JSON (benchmarked)
+  # Benchmark results (16 May 2026, same SEO prompt):
+  # 1. OpenRouter google/gemini-2.0-flash-001  score=60  2.4s  ← best quality
+  # 2. Groq     llama-3.1-8b-instant           score=55  0.7s  ← selected (fastest)
+  # 3. Groq     llama-3.3-70b-versatile        score=50  1.0s  ← previous default
+  # 4. OpenRouter anthropic/claude-3.5-haiku   score=50  4.3s
+  # 5. NVIDIA   meta/llama-3.3-70b-instruct    score=45  7.4s
+  # Models decommissioned: mixtral-8x7b, gemma2-9b-it, deepseek-r1-distill-llama-70b
   system_prompt: |
     You are a YouTube SEO expert specializing in Cricket Shorts.
     Generate high-CTR titles, engaging descriptions, and optimized tags.
