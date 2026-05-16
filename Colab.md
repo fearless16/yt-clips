@@ -12,8 +12,8 @@ Since Google Colab provides free high-end GPUs (T4) and ultra-fast internet, it 
 
 ## What the notebook does
 
-- Mounts Google Drive (gets code from `yt-clips/` folder)
-- Installs all deps: ffmpeg, aria2, Deno, Python packages, **PyTorch CUDA + YOLOv8 + GFPGAN**
+- Installs all deps: ffmpeg, aria2, Deno, Python packages (**Face Recognition**, PyTorch CUDA, YOLOv8, GFPGAN)
+- Automatically matches the host's face against reference photos in the `photos/` folder.
 - Writes GPU-optimized `config.yaml` (`premium.enabled: true`, `h264_nvenc`)
 - Starts `watcher.py` (job listener) + localtunnel
 - Shows tunnel URL for bridge communication
@@ -57,3 +57,18 @@ Use `--skip-tests` to bypass even when enabled.
 - **Fast Download**: Colab has gigabit internet — use aria2c for 2-3x faster downloads
 - **Premium Pipeline**: YOLOv8-face + ByteTrack + FILM + GFPGAN = studio-grade shorts
 - **Auto-Sync**: Once finished, your Shorts will be in the `shorts/` folder or synced to Google Drive with `--sync`.
+
+## Colab Code Snippets
+
+### 1. Setup & Installation
+Run this in a Colab cell to install the new dynamic facial recognition engine:
+```python
+!pip install face_recognition
+!python colab_setup.py
+```
+
+### 2. Manual Run
+If you want to run a specific video manually on Colab:
+```python
+!python pipeline.py "YOUR_YOUTUBE_URL" --sync
+```

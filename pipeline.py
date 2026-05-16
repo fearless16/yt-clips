@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from utils.config import load_config
 from utils.logger import get_logger, phase_tracker
@@ -59,6 +60,7 @@ def run(
     auto_upload: bool = False,
     auto_schedule: bool = False,
     skip_tests: bool = False,
+    sample_minutes: Optional[int] = None,
 ) -> None:
     cfg = load_config()
     if not skip_tests and not cfg.get("testing", {}).get("enabled", False):
@@ -86,7 +88,7 @@ def run(
         
         t0 = time.perf_counter()
         from download import download
-        video_path = str(download(url, video_path))
+        video_path = str(download(url, video_path, sample_minutes=sample_minutes))
         log.info("Phase 1 complete in %.1f s", time.perf_counter() - t0)
 
     stem = Path(video_path).stem
@@ -282,6 +284,7 @@ Examples:
     parser.add_argument("-upload", "--upload",          action="store_true", help="Auto-upload exported Shorts to YouTube")
     parser.add_argument("-schedule", "--schedule",        action="store_true", help="Auto-schedule uploads (2-hour intervals)")
     parser.add_argument("-skip-tests", "--skip-tests",    action="store_true", help="Skip pre-generation pytest guard")
+    parser.add_argument("--sample-minutes", type=int, default=None, help="Download only a random N-minute sample of the video")
     args = parser.parse_args()
 
     run(
@@ -295,6 +298,7 @@ Examples:
         auto_upload=args.upload,
         auto_schedule=args.schedule,
         skip_tests=args.skip_tests,
+        sample_minutes=args.sample_minutes,
     )
 
 
