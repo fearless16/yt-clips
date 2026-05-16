@@ -59,25 +59,45 @@ def _detect_face_at_timestamp(video_path: str, timestamp: float, frame_w: int, f
     return detect_face_crop(frame_bgr, frame_w, frame_h)
 
 def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int) -> Optional[Dict]:
+    # ── 0. Top padding for hair clearance ─────────────────────────────────────
+    # When the face is near the top of the frame, shift the crop down so
+    # hair/forehead isn't clipped.  Crop height shrinks to stay in-bounds;
+    # the export scaler (force_original_aspect_ratio=decrease) handles the rest.
+    _TOP_PAD_RATIO = 0.10  # leave ~10% of frame height as headroom above face
+
+    def _apply_top_padding(face_top_y: int):
+        """Return (crop_y, crop_h, crop_w) with top padding if face is near edge.
+        Crop starts at (face_top_y - desired_pad), clamped to [0, face_top_y].
+        This ensures headroom above face while keeping face visible in crop."""
+        target_h = frame_height
+        target_w = int(target_h * 9 / 16)
+        desired_pad = int(frame_height * _TOP_PAD_RATIO)
+        crop_y = max(0, face_top_y - desired_pad)
+        crop_h = min(target_h, frame_height - crop_y)
+        crop_w = int(crop_h * 9 / 16)
+        return crop_y, crop_h, crop_w
+
     # ── 1. Dynamic Host Matching (Priority) ──────────────────────────────────
     # Try to find the host specifically using reference photos
-    host_box = find_host_in_frame(frame_bgr)
+    # Pass facecam bounds so detection can crop to the facecam region if full-frame fails
+    layout_cfg = cfg.get("layout", {})
+    facecam_bounds = layout_cfg.get("facecam") if layout_cfg.get("has_facecam") else None
+    host_box = find_host_in_frame(frame_bgr, facecam_bounds=facecam_bounds)
     if host_box:
         hx, hy = host_box["x"], host_box["y"]
         hw, hh = host_box["width"], host_box["height"]
         
-        target_h = frame_height
-        target_w = int(target_h * 9 / 16)
-        crop_x = hx + hw // 2 - target_w // 2
-        crop_x = max(0, min(crop_x, frame_width - target_w))
+        crop_y, crop_h, crop_w = _apply_top_padding(hy)
+        crop_x = hx + hw // 2 - crop_w // 2
+        crop_x = max(0, min(crop_x, frame_width - crop_w))
         
         # Smooth and return
         crop_x = _smooth_int(_get_prev_crop_x(), crop_x, alpha=0.25)
         _set_prev_crop_x(crop_x)
         
         return {
-            "x": int(crop_x), "y": 0,
-            "width": int(target_w), "height": int(target_h),
+            "x": int(crop_x), "y": int(crop_y),
+            "width": int(crop_w), "height": int(crop_h),
             "face_w": int(hw), "face_h": int(hh),
             "face_x": int(hx), "face_y": int(hy),
             "confidence": host_box.get("confidence", 0.9),
@@ -120,16 +140,15 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         return None
 
     x, y, w, h = best_face
-    target_h = frame_height
-    target_w = int(target_h * 9 / 16)
-    crop_x = x + w // 2 - target_w // 2
-    crop_x = max(0, min(crop_x, frame_width - target_w))
+    crop_y, crop_h, crop_w = _apply_top_padding(y)
+    crop_x = x + w // 2 - crop_w // 2
+    crop_x = max(0, min(crop_x, frame_width - crop_w))
     crop_x = _smooth_int(_get_prev_crop_x(), crop_x, alpha=0.25)
     _set_prev_crop_x(crop_x)
 
     return {
-        "x": int(crop_x), "y": 0,
-        "width": int(target_w), "height": int(target_h),
+        "x": int(crop_x), "y": int(crop_y),
+        "width": int(crop_w), "height": int(crop_h),
         "face_w": int(w), "face_h": int(h),
         "face_x": int(x), "face_y": int(y),
         "confidence": min(1.0, best_score / 5000.0),
@@ -516,7 +535,7 @@ def analyze_clip(
         fc_w, fc_h = fc.get("width", 320), fc.get("height", 180)
         
         for f in face_candidates:
-            fx, fy = f.get("face_x", f["x"]), f.get("face_y", f["y"])
+            fx, fy = f.get("face_x", f.get("x", 0)), f.get("face_y", f.get("y", 0))
             if (fc_x - 50) <= fx <= (fc_x + fc_w + 50) and (fc_y - 50) <= fy <= (fc_y + fc_h + 50):
                 # Valid face found in config area
                 face_crop = f

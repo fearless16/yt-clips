@@ -17,6 +17,7 @@ from utils.subtitles import generate_ass_subtitles
 cfg = load_config()
 log = get_logger("export", cfg["logging"]["log_file"], cfg["logging"]["level"])
 premium_enabled = cfg.get("premium", {}).get("enabled", False)
+super_res_enabled = cfg.get("export", {}).get("super_resolution", False)
 
 if premium_enabled:
     try:
@@ -407,6 +408,7 @@ def _build_enhance_stack(
     source_fps: float = 30.0,
     use_logo: Optional[bool] = None,
     output_duration: Optional[float] = None,
+    native_res: bool = False,
 ) -> str:
     """
     Build filtergraph based on frame analysis.
@@ -416,6 +418,9 @@ def _build_enhance_stack(
       guest_cam_on      → vertical stack, both panels stacked 9:16
       screen_share      → 9:16 canvas with blurred bg + sharp readable content
       guest_cam_off     → should have been dropped; crop active half as fallback
+
+    When native_res=True, skip final scale to 1080x1920 — export at crop
+    resolution for super-resolution processing.
     """
     strategy = analysis.get("export_strategy", {}) if isinstance(analysis, dict) else {}
     strategy = _sanitize_strategy(strategy)
@@ -454,20 +459,29 @@ def _build_enhance_stack(
         # A blurred cover-fill background avoids black bars while preserving the
         # foreground content instead of cropping off scorecards/charts.
         log.debug("SCREEN SHARE → 9:16 shorts canvas (blurred bg + fit foreground)")
-        filter_base = (
-            f"{enhance},split=2[bg_raw][fg_raw];"
-            f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-            f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=-0.08:saturation=0.9[bg];"
-            f"[fg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
-            f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
-        )
+        if native_res:
+            # Export at source resolution, super-res will handle upscaling
+            filter_base = f"{enhance}"
+        else:
+            filter_base = (
+                f"{enhance},split=2[bg_raw][fg_raw];"
+                f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=0.0:saturation=1.1[bg];"
+                f"[fg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
+            )
 
     elif guest_cam_off:
         # Guest cam off: crop to the active (non-black) side only
         # This path should rarely be reached (should be dropped upstream),
         # but acts as a safety fallback.
         log.debug("GUEST CAM OFF fallback → crop active side (%s)", black_panel_side)
-        if black_panel_side == "right":
+        if native_res:
+            if black_panel_side == "right":
+                filter_base = f"{enhance},crop=iw/2:ih:0:0"
+            else:
+                filter_base = f"{enhance},crop=iw/2:ih:iw/2:0"
+        elif black_panel_side == "right":
             filter_base = (
                 f"{enhance},"
                 f"crop=iw/2:ih:0:0,"
@@ -490,23 +504,35 @@ def _build_enhance_stack(
             cy = max(0, int(active_crop["y"]))
             cw = max(2, int(active_crop["width"]))
             ch = max(2, int(active_crop["height"]))
-            filter_base = (
-                f"{enhance},split=2[bg_raw][fg_raw];"
-                f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=-0.08:saturation=0.9[bg];"
-                f"[fg_raw]crop={cw}:{ch}:{cx}:{cy},"
-                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
-            )
+            if native_res:
+                # Crop only — super-res handles upscaling
+                filter_base = (
+                    f"{enhance},split=2[bg_raw][fg_raw];"
+                    f"[bg_raw]crop={cw}:{ch}:{cx}:{cy}[bg];"
+                    f"[fg_raw]crop={cw}:{ch}:{cx}:{cy}[fg];"
+                    f"[bg][fg]overlay=0:0"
+                )
+            else:
+                filter_base = (
+                    f"{enhance},split=2[bg_raw][fg_raw];"
+                    f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=0.0:saturation=1.1[bg];"
+                    f"[fg_raw]crop={cw}:{ch}:{cx}:{cy},"
+                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
+                    f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
+                )
         except (TypeError, ValueError):
-            filter_base = (
-                f"{enhance},split=2[bg_raw][fg_raw];"
-                f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=-0.08:saturation=0.9[bg];"
-                f"[fg_raw]crop='trunc(ih*9/16)':ih,"
-                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
-            )
+            if native_res:
+                filter_base = f"{enhance},crop='trunc(ih*9/16)':ih"
+            else:
+                filter_base = (
+                    f"{enhance},split=2[bg_raw][fg_raw];"
+                    f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=0.0:saturation=1.1[bg];"
+                    f"[fg_raw]crop='trunc(ih*9/16)':ih,"
+                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
+                    f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
+                )
 
     else:
         # Default solo: center 9:16 crop (you only in frame)
@@ -537,14 +563,23 @@ def _build_enhance_stack(
                 )
                 log.debug("Chat exclusion: cropped right side to exclude left chat (%dpx)", chat_w)
         else:
-            filter_base = (
-                f"{enhance},split=2[bg_raw][fg_raw];"
-                f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=-0.08:saturation=0.9[bg];"
-                f"[fg_raw]crop='trunc(ih*9/16)':ih,"
-                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
-            )
+            if native_res:
+                # Just crop to 9:16 — super-res handles upscaling
+                filter_base = (
+                    f"{enhance},split=2[bg_raw][fg_raw];"
+                    f"[bg_raw]crop='trunc(ih*9/16)':ih[bg];"
+                    f"[fg_raw]crop='trunc(ih*9/16)':ih[fg];"
+                    f"[bg][fg]overlay=0:0"
+                )
+            else:
+                filter_base = (
+                    f"{enhance},split=2[bg_raw][fg_raw];"
+                    f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=0.0:saturation=1.1[bg];"
+                    f"[fg_raw]crop='trunc(ih*9/16)':ih,"
+                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
+                    f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
+                )
 
     # ── Lighting fix ──────────────────────────────────────────────────────────
     if strategy.get("apply_lighting_fix"):
@@ -585,6 +620,61 @@ def _build_enhance_stack(
             return f"[v_src]{filter_base}[v_tmp];[v_tmp]{scale_format}[v_out]"
         else:
             return f"[v_src]{filter_base},{scale_format}[v_out]"
+
+
+def _export_native_res(
+    video_path: str,
+    input_seek: float,
+    trim_start: float,
+    clip_duration: float,
+    speed: float,
+    v_filter: str,
+    clip_id: str,
+) -> Optional[str]:
+    """
+    Export clip at native crop resolution (no 1080x1920 upscale).
+    Returns path to temp file, or None on failure.
+    """
+    import tempfile as _tf
+    temp_dir = _tf.mkdtemp()
+    temp_path = str(Path(temp_dir) / f"{clip_id}_native.mp4")
+
+    video_complex = (
+        f"[0:v]trim=start={trim_start:.6f}:duration={clip_duration:.6f},"
+        f"setpts=(PTS-STARTPTS)/{speed:.6f}[v_src];{v_filter}"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", f"{input_seek:.6f}",
+        "-t", f"{(trim_start + clip_duration):.6f}",
+        "-i", video_path,
+        "-filter_complex", video_complex,
+        "-map", "[v_out]",
+        "-c:v", "libx264", "-crf", "16", "-preset", "fast",
+        "-pix_fmt", "yuv420p",
+    ]
+
+    # Include audio if available
+    if _has_audio_stream(video_path):
+        a_filter = _build_audio_filter(speed, trim_start=trim_start,
+                                       trim_duration=clip_duration,
+                                       output_duration=clip_duration / speed)
+        if a_filter:
+            cmd.extend(["-map", "0:a:0?", "-af", a_filter,
+                        "-c:a", "aac", "-b:a", "192k", "-shortest"])
+
+    cmd.append(temp_path)
+
+    log.info("[%s] Exporting native-res for super-res...", clip_id)
+    success, error = _run_ffmpeg_with_retry(cmd, temp_path, clip_id,
+                                            expected_duration=clip_duration / speed)
+    if not success:
+        log.error("[%s] Native-res export failed: %s", clip_id, error)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return None
+
+    return temp_path
 
 
 def export_clip(
@@ -683,6 +773,49 @@ def export_clip(
 
     if not _check_free_space(output_path, output_duration):
         return None
+
+    # ── Super-Resolution Path ───────────────────────────────────────────────
+    if super_res_enabled and not premium_enabled:
+        try:
+            from utils.super_res import SuperResEnhancer
+            sr = SuperResEnhancer(scale=4)
+            if sr.available:
+                log.info("[%s] Super-res mode: native-res export → 4x upscale", clip_id)
+                v_filter_native = _build_enhance_stack(
+                    analysis, source_fps=info["fps"],
+                    use_logo=use_logo, output_duration=output_duration,
+                    native_res=True,
+                )
+                native_path = _export_native_res(
+                    video_path, input_seek, trim_start, clip_duration,
+                    speed, v_filter_native, clip_id,
+                )
+                if native_path:
+                    output_file = Path(output_path)
+                    output_file.parent.mkdir(parents=True, exist_ok=True)
+                    target_w = int(cfg["export"]["width"])
+                    target_h = int(cfg["export"]["height"])
+                    success = sr.upscale_video(
+                        native_path, output_path,
+                        target_w=target_w, target_h=target_h,
+                    )
+                    # Clean up temp native-res file
+                    try:
+                        temp_dir = str(Path(native_path).parent)
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                    if success:
+                        dur = max(time.perf_counter() - t_start, 0.001)
+                        log.info("✅ [%s] Super-res done in %.1fs", clip_id, dur)
+                        return output_path
+                    log.error("[%s] Super-res failed; falling back to standard", clip_id)
+                else:
+                    log.error("[%s] Native-res export failed; falling back to standard", clip_id)
+            else:
+                log.info("[%s] Super-res unavailable; using standard pipeline", clip_id)
+        except Exception as e:
+            log.warning("[%s] Super-res error (%s); falling back to standard", clip_id, e)
 
     a_filter = (
         _build_audio_filter(speed, trim_start=trim_start,
