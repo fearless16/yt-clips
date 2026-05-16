@@ -77,6 +77,9 @@ def push(include_data: bool = False) -> bool:
             + list(root.glob("utils/*.yaml"))     # Any config in utils/
             + list(root.glob("transcripts/*.json"))
             + list(root.glob("highlights/*.yaml"))
+            + list(root.glob("photos/*.png"))     # Reference face photos for host matching
+            + list(root.glob("photos/*.jpg"))
+            + list(root.glob("photos/*.jpeg"))
         )
         
         if include_data:

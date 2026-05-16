@@ -33,8 +33,9 @@ install("curl -fsSL https://deno.land/x/install/install.sh | sh > /dev/null 2>&1
 os.environ["PATH"] += ":/root/.deno/bin"
 install("pip install -q yt-dlp faster-whisper rich PyYAML opencv-python-headless numpy "
         "filterpy scipy google-genai google-generativeai openai python-dotenv "
-        "ultralytics torch face_recognition --extra-index-url https://download.pytorch.org/whl/cu121",
-        "Python + PyTorch + YOLO + FaceRec")
+        "ultralytics torch face_recognition realesrgan basicsr "
+        "--extra-index-url https://download.pytorch.org/whl/cu121",
+        "Python + PyTorch + YOLO + FaceRec + RealESRGAN")
 
 gpu = subprocess.run("nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null",
                      shell=True, capture_output=True, text=True).stdout.strip()
@@ -53,7 +54,7 @@ except:
     print("     Add GOOGLE_API_KEY via 🔑 tab (left sidebar)")
 
 # Create folders
-for folder in ["input", "temp", "transcripts", "highlights", "shorts", "logs"]:
+for folder in ["input", "temp", "transcripts", "highlights", "shorts", "logs", "photos"]:
     Path(folder).mkdir(exist_ok=True)
 
 # Start watcher + tunnel

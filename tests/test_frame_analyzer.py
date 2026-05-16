@@ -192,7 +192,7 @@ class TestAnalyzeClipIntegration:
         })
         # Small facecam face
         monkeypatch.setattr(frame_analyzer, "_detect_face_at_timestamp", lambda *a: {
-            "face_h": 100, "confidence": 0.9
+            "face_h": 100, "face_w": 80, "face_x": 100, "face_y": 560, "confidence": 0.9
         })
         monkeypatch.setattr(frame_analyzer, "_get_video_dimensions", lambda *a: {"width": 1920, "height": 1080})
         
@@ -207,7 +207,7 @@ class TestAnalyzeClipIntegration:
         })
         # Large face (>35% of 1080)
         monkeypatch.setattr(frame_analyzer, "_detect_face_at_timestamp", lambda *a: {
-            "face_h": 500, "confidence": 0.9
+            "face_h": 500, "face_w": 400, "face_x": 100, "face_y": 560, "confidence": 0.9
         })
         monkeypatch.setattr(frame_analyzer, "_get_video_dimensions", lambda *a: {"width": 1920, "height": 1080})
         

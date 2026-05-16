@@ -2,10 +2,16 @@ import os
 import glob
 import logging
 import numpy as np
+from pathlib import Path
 
 log = logging.getLogger("face_matcher")
 
 _HOST_ENCODINGS = None
+
+# Resolve photos directory relative to the project root (where config.yaml lives),
+# NOT the current working directory — avoids broken globs when the worker CWD differs.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PHOTOS_DIR = _PROJECT_ROOT / "photos"
 
 def get_host_encodings():
     global _HOST_ENCODINGS
@@ -20,14 +26,18 @@ def get_host_encodings():
         return []
 
     encodings = []
-    # Search for reference photos in the 'photos' directory
-    photo_paths = glob.glob("photos/*.png") + glob.glob("photos/*.jpg") + glob.glob("photos/*.jpeg")
+    # Search for reference photos using absolute path relative to project root
+    photo_paths = sorted(
+        str(p) for p in _PHOTOS_DIR.iterdir()
+        if p.suffix.lower() in {".png", ".jpg", ".jpeg"}
+    )
     if not photo_paths:
-        log.warning("No reference photos found in 'photos/' directory.")
+        log.warning("No reference photos found in '%s' directory.", _PHOTOS_DIR)
         _HOST_ENCODINGS = []
         return []
 
-    log.info("Loading ML face recognition model and encoding %d reference photos...", len(photo_paths))
+    log.info("Loading ML face recognition model and encoding %d reference photos from %s...",
+             len(photo_paths), _PHOTOS_DIR)
     for path in photo_paths:
         try:
             image = face_recognition.load_image_file(path)
@@ -37,6 +47,7 @@ def get_host_encodings():
             if face_encs:
                 # Assume the largest face or first face is the host
                 encodings.append(face_encs[0])
+                log.info("  Encoded face from %s", os.path.basename(path))
             else:
                 log.warning("No faces found in reference photo: %s", path)
         except Exception as e:
@@ -46,9 +57,14 @@ def get_host_encodings():
     log.info("Successfully loaded %d host face encodings.", len(_HOST_ENCODINGS))
     return _HOST_ENCODINGS
 
-def find_host_in_frame(frame_bgr: np.ndarray) -> dict:
+def find_host_in_frame(frame_bgr: np.ndarray, facecam_bounds: dict = None) -> dict:
     """
     Detects faces in the frame and returns the bounding box of the host.
+    Args:
+        frame_bgr: BGR numpy array of the full frame
+        facecam_bounds: Optional dict with x, y, width, height of facecam region.
+                        When provided and full-frame detection fails, tries detection
+                        on the cropped facecam region for better accuracy on small faces.
     Returns: {"x": x, "y": y, "width": w, "height": h} or None
     """
     host_encs = get_host_encodings()
@@ -70,6 +86,27 @@ def find_host_in_frame(frame_bgr: np.ndarray) -> dict:
             
         model_type = "cnn" if use_gpu else "hog"
         face_locations = face_recognition.face_locations(rgb_frame, model=model_type)
+        
+        # If full-frame detection fails and facecam bounds provided, try cropped region
+        if not face_locations and facecam_bounds:
+            fc_x = facecam_bounds.get("x", 0)
+            fc_y = facecam_bounds.get("y", 0)
+            fc_w = facecam_bounds.get("width", 320)
+            fc_h = facecam_bounds.get("height", 180)
+            fh, fw = frame_bgr.shape[:2]
+            # Clamp to frame bounds
+            x1, y1 = max(0, fc_x), max(0, fc_y)
+            x2, y2 = min(fw, fc_x + fc_w), min(fh, fc_y + fc_h)
+            if x2 > x1 and y2 > y1:
+                facecam_rgb = rgb_frame[y1:y2, x1:x2]
+                face_locations = face_recognition.face_locations(facecam_rgb, model=model_type)
+                if face_locations:
+                    # Offset back to full-frame coordinates
+                    face_locations = [(top + y1, right + x1, bottom + y1, left + x1)
+                                      for (top, right, bottom, left) in face_locations]
+                    log.debug("Face found via facecam-region crop (%d,%d %dx%d)",
+                              fc_x, fc_y, fc_w, fc_h)
+        
         if not face_locations:
             return None
             
