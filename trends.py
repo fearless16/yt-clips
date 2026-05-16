@@ -211,8 +211,12 @@ def get_rotated_hashtags(match_type: str = "ipl", seed: Optional[int] = None) ->
 def parse_cricbuzz_scorecard(html: str) -> str:
     """
     Extract structured match context from Cricbuzz match page HTML.
-    Returns a detailed text summary including teams, scores, overs,
-    current batters/bowlers, run rate, and match situation.
+    Returns a detailed text summary including:
+    - Venue, match status
+    - Team scores with overs
+    - Individual batter stats (runs, balls, 4s, 6s, SR)
+    - Individual bowler stats (overs, runs, wickets, economy)
+    - Current run rate, required rate, match phase
     """
     try:
         soup = BeautifulSoup(html, "lxml")
@@ -228,7 +232,24 @@ def parse_cricbuzz_scorecard(html: str) -> str:
             if status_text:
                 parts.append(f"Status: {status_text}")
 
-        # 2. Team scores (primary scorecard area)
+        # 2. Venue extraction
+        venue_el = soup.select_one(
+            ".cb-match-venue, .cb-text-gray, "
+            ".cb-col-100 .cb-text-gray, [class*=venue]"
+        )
+        if not venue_el:
+            venue_patterns = re.findall(
+                r"at\s+([A-Za-z\s]+(?:Stadium|Ground|Oval|Park|Sports\s+Complex|Cricket\s+Ground))",
+                html
+            )
+            if venue_patterns:
+                parts.append(f"Venue: {venue_patterns[0].strip()}")
+        else:
+            vt = venue_el.get_text(strip=True)
+            if vt and len(vt) > 5:
+                parts.append(f"Venue: {vt}")
+
+        # 3. Team scores (primary scorecard area)
         score_divs = soup.select(
             ".cb-hm-scg-bat-txt, .cb-hm-scg-bwl-txt, .cb-sc-hm-runs, "
             ".cb-ovr-num, .cb-font-16, .cb-col-100, .team-score, .ui-score "
@@ -238,27 +259,70 @@ def parse_cricbuzz_scorecard(html: str) -> str:
             if text and len(text) > 3:
                 parts.append(text)
 
-        # 3. Current batters
-        batting_section = soup.select_one(".cb-min-bat-runs, .cb-min-itm-rw")
-        if batting_section:
-            rows = batting_section.find_all("div", class_="cb-col cb-col-100")
-            for row in rows[:2]:
-                cells = row.find_all(["div", "span"], class_=re.compile(r"cb-col-\d+"))
-                batter_text = " ".join(c.get_text(strip=True) for c in cells if c.get_text(strip=True))
-                if batter_text and len(batter_text) > 5:
-                    parts.append(f"Batting: {batter_text}")
+        # 4. Full batting scorecard — individual player stats
+        batting_table = soup.select_one("table.cb-table, .cb-series-summary table, .cb-score-bat")
+        if batting_table:
+            rows = batting_table.find_all("tr")
+            batter_stats = []
+            for row in rows[1:6]:  # Top 5 batters
+                cells = row.find_all("td")
+                if len(cells) >= 7:
+                    name = cells[0].get_text(strip=True) if cells[0] else ""
+                    runs = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                    balls = cells[3].get_text(strip=True) if len(cells) > 3 else ""
+                    fours = cells[5].get_text(strip=True) if len(cells) > 5 else ""
+                    sixes = cells[6].get_text(strip=True) if len(cells) > 6 else ""
+                    sr = cells[7].get_text(strip=True) if len(cells) > 7 else ""
+                    if name and runs:
+                        detail = f"{name}: {runs}({balls}b {fours}x4 {sixes}x6 SR:{sr})"
+                        batter_stats.append(detail)
+            if batter_stats:
+                parts.append("Batters: " + " | ".join(batter_stats))
+        else:
+            # Fallback: use compact batting display
+            batting_section = soup.select_one(".cb-min-bat-runs, .cb-min-itm-rw")
+            if batting_section:
+                rows = batting_section.find_all("div", class_="cb-col cb-col-100")
+                for row in rows[:4]:
+                    cells = row.find_all(["div", "span"], class_=re.compile(r"cb-col-\d+"))
+                    btext = " ".join(c.get_text(strip=True) for c in cells if c.get_text(strip=True))
+                    if btext and len(btext) > 5:
+                        batter_stats.append(btext)
+                if batter_stats:
+                    parts.append("Batting: " + " | ".join(batter_stats))
 
-        # 4. Current bowlers
-        bowling_section = soup.select_one(".cb-min-bwl-figures, .cb-min-itm-rw")
-        if bowling_section:
-            rows = bowling_section.find_all("div", class_="cb-col cb-col-100")
-            for row in rows[:2]:
-                cells = row.find_all(["div", "span"], class_=re.compile(r"cb-col-\d+"))
-                bowler_text = " ".join(c.get_text(strip=True) for c in cells if c.get_text(strip=True))
-                if bowler_text and len(bowler_text) > 5:
-                    parts.append(f"Bowling: {bowler_text}")
+        # 5. Full bowling scorecard — individual bowler stats
+        bowling_table = soup.select_one(".cb-score-bwl table, .cb-series-summary table + table")
+        if bowling_table:
+            rows = bowling_table.find_all("tr")
+            bowler_stats = []
+            for row in rows[1:5]:  # Top 4 bowlers
+                cells = row.find_all("td")
+                if len(cells) >= 7:
+                    name = cells[0].get_text(strip=True) if cells[0] else ""
+                    overs = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+                    runs = cells[3].get_text(strip=True) if len(cells) > 3 else ""
+                    wickets = cells[2].get_text(strip=True) if len(cells) > 2 else ""
+                    econ = cells[5].get_text(strip=True) if len(cells) > 5 else ""
+                    if name and runs:
+                        detail = f"{name}: {wickets}-{runs}({overs}ov econ:{econ})"
+                        bowler_stats.append(detail)
+            if bowler_stats:
+                parts.append("Bowlers: " + " | ".join(bowler_stats))
+        else:
+            # Fallback: compact bowling display
+            bowling_section = soup.select_one(".cb-min-bwl-figures, .cb-min-itm-rw")
+            if bowling_section:
+                rows = bowling_section.find_all("div", class_="cb-col cb-col-100")
+                for row in rows[:4]:
+                    cells = row.find_all(["div", "span"], class_=re.compile(r"cb-col-\d+"))
+                    btext = " ".join(c.get_text(strip=True) for c in cells if c.get_text(strip=True))
+                    if btext and len(btext) > 5:
+                        bowler_stats.append(btext)
+                if bowler_stats:
+                    parts.append("Bowling: " + " | ".join(bowler_stats))
 
-        # 5. Recent overs / commentary
+        # 6. Recent overs / commentary
         recent = soup.select_one(
             ".cb-min-rcnt, .cb-col-100.cb-min-rcnt, "
             ".cb-tms-bd-list, .cb-list-item"
@@ -268,7 +332,26 @@ def parse_cricbuzz_scorecard(html: str) -> str:
             if rtext:
                 parts.append(f"Recent: {rtext}")
 
-        # 6. Fallback: regex patterns for scores + overs
+        # 7. Match phase — target, overs remaining, required rate
+        innings_info = soup.select_one(".cb-text-innings, .cb-sc-otr, .cb-ovr-num")
+        if innings_info:
+            itext = innings_info.get_text(strip=True)
+            if itext:
+                parts.append(f"Innings: {itext}")
+
+        target_pattern = re.findall(r"target[:\s]*(\d+)", html, re.IGNORECASE)
+        if target_pattern:
+            parts.append(f"Target: {target_pattern[0]}")
+
+        # CRR + RRR always useful
+        crr_pattern = re.findall(r"CRR[:\s]*(\d+\.\d+)", html)
+        if crr_pattern:
+            parts.append(f"CRR: {crr_pattern[0]}")
+        rrr_pattern = re.findall(r"Req\.? RR[:\s]*(\d+\.\d+)", html, re.IGNORECASE)
+        if rrr_pattern:
+            parts.append(f"Req RR: {rrr_pattern[0]}")
+
+        # 8. Fallback: basic regex for scores + overs (if structured parse yielded nothing)
         if not parts:
             team_score_pattern = re.findall(
                 r"([A-Z]{2,5}|[A-Za-z\s]{3,20})\s+(\d{1,3}[/-]\d{1,2})\s+\((\d{1,2}\.\d)\)",
@@ -276,17 +359,13 @@ def parse_cricbuzz_scorecard(html: str) -> str:
             )
             for ts in team_score_pattern[:2]:
                 parts.append(f"{ts[0].strip()} {ts[1]} ({ts[2]} ov)")
-
-            crr_pattern = re.findall(r"CRR[:\s]*(\d+\.\d+)", html)
             if crr_pattern:
                 parts.append(f"CRR: {crr_pattern[0]}")
-
-            rrr_pattern = re.findall(r"Req\.? RR[:\s]*(\d+\.\d+)", html, re.IGNORECASE)
             if rrr_pattern:
                 parts.append(f"Req RR: {rrr_pattern[0]}")
 
         combined = " | ".join(dict.fromkeys(parts))
-        return combined[:1000] if combined else ""
+        return combined[:1500] if combined else ""
 
     except Exception as e:
         log.warning("Cricbuzz parsing failed: %s", e)

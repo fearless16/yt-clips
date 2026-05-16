@@ -206,16 +206,40 @@ Return ONLY 3-5 bullet points, no preamble:
 
 def feed_seo_learner(shorts: List[Dict]):
     for s in shorts:
+        # Try to load local SEO metadata for model/provider tracking
+        provider = None
+        model = None
+        desc = ""
+        tags = s.get("tags", [])
+        meta_paths = [
+            Path("shorts") / s["id"] / f"{s['id']}_metadata.json",
+            Path("shorts") / f"{s['id']}_metadata.json",
+        ]
+        for mp in meta_paths:
+            if mp.exists():
+                try:
+                    meta = json.loads(mp.read_text())
+                    provider = meta.get("_generated_by_provider")
+                    model = meta.get("_generated_by_model")
+                    desc = meta.get("description", "")
+                    if meta.get("hashtags"):
+                        tags = meta["hashtags"]
+                except Exception:
+                    pass
+                break
+
         seo_learner.record_performance(
             clip_id=s["id"],
             title=s["title"],
-            description="",
-            hashtags=s.get("tags", []),
+            description=desc,
+            hashtags=tags,
             analytics={
                 "viewCount": s["views"],
                 "likeCount": s["likes"],
                 "commentCount": s["comments"],
             },
+            provider=provider,
+            model=model,
         )
     log.info(f"Fed {len(shorts)} shorts into SEO learner")
 

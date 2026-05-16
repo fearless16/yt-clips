@@ -12,11 +12,24 @@ from utils.config import load_config
 from utils.logger import get_logger
 from utils.ai_client import AIClient
 from trends import TEAM_MAPPINGS
-from seo_learner import enhance_seo_prompt, generate_performance_report, learn_from_clip_performance
+from seo_learner import enhance_seo_prompt, generate_performance_report, learn_from_clip_performance, get_best_model, run_auto_benchmark
 
 cfg = load_config()
 log = get_logger("seo", cfg["logging"]["log_file"], cfg["logging"]["level"])
 ai = AIClient()
+
+# ── Auto-benchmark: if enabled, discover best model on startup ──────────────
+if cfg.get("ai", {}).get("auto_benchmark", False):
+    try:
+        log.info("🔬 Auto-benchmark enabled — discovering best model...")
+        run_auto_benchmark()
+        best_provider, best_model = get_best_model()
+        if best_provider and best_model:
+            log.info("⚡ Applying best model: %s/%s", best_provider, best_model)
+            ai._provider = best_provider
+            ai._model = best_model
+    except Exception as e:
+        log.warning("Auto-benchmark failed: %s", e)
 
 STOP_WORDS = {
     "i","me","my","you","your","we","our","they","their","this","that","these","those",
@@ -69,61 +82,82 @@ _SYSTEM = (
 _PROMPT_TMPL = """
 CONTEXT:
   Match: {video_title}
-  Scorecard: {scorecard}
-  Live Trending: {trend_topics}
+  Scorecard (with venue, player stats, match situation): {scorecard}
+  Live Trending / Search Spikes: {trend_topics}
   CTA: {live_cta}
 
 CLIP CONTENT:
-  Transcript: {transcript}
+  Raw Transcript (may have misspellings): {transcript}
   Key moments: {local_kw}
 
-TASK: Generate PERFECT SEO metadata for ONE viral cricket short.
+══ STEP 1: TRANSCRIPTION CORRECTION ════════════════════════════════════════
+  First, fix any misspelled cricket names in the Raw Transcript:
+  - Cross-reference against the Scorecard above (has correct player/venue names)
+  - Fix mistakes e.g. "Sunder" → "Sundar", "Kohli" → "Kohli" (if correct), "Sirage" → "Siraj"
+  - If Scorecard shows correct names, ALWAYS prefer them
+  - For names not in Scorecard, use your cricket knowledge
+  - Use CORRECTED names in ALL output fields below
 
-═══════════════════════════════════════════════════════════════════════════════
-TITLE FORMULA (pick ONE and make it SPECIFIC):
-═══════════════════════════════════════════════════════════════════════════════
-  1. SHOCK: "cricket live: <unexpected moment> | IPL 2026"
-  2. STAR: "IPL 2026: <star player> <action> <result>"
-  3. CLOSE: "cricket live: <close call> - did they?! | IPL 2026"
-  4. NUMBERS: "IPL 2026: <score> runs in <overs> - game changer!"
-  5. EMOTION: "Ye toh <emotion> hai bhai! <moment> | IPL 2026"
+══ STEP 2: GENERATE SEO METADATA ═══════════════════════════════════════════
 
-RULES:
-  - MUST start with "cricket live:" or "IPL 2026" (SEO gold)
-  - Inject 1-2 trending topics naturally into title
-  - Max 100 chars, MAX 1 emoji
-  - NEVER generic like "Cricket Amazing!"
+TITLE (max 100 chars, MAX 1 emoji):
+  Pick ONE proven formula:
+    1. SHOCK: "cricket live: <unexpected moment> | IPL 2026"
+    2. STAR: "IPL 2026: <star player> <action> <result>"
+    3. CLOSE: "cricket live: <close call> - did they?! | IPL 2026"
+    4. NUMBERS: "IPL 2026: <score> runs in <overs> - game changer!"
+    5. EMOTION: "Ye toh <emotion> hai bhai! <moment> | IPL 2026"
+  RULES:
+    - MUST start with "cricket live:" or "IPL 2026"
+    - Inject 1-2 trending topics naturally
+    - Include individual player name + action (e.g. "Kohli smashes 67 off 34")
+    - Mention venue if notable (e.g. "at Wankhede", "in Chennai")
+    - NEVER generic like "Cricket Amazing!"
 
-═══════════════════════════════════════════════════════════════════════════════
-DESCRIPTION FORMULA:
-═══════════════════════════════════════════════════════════════════════════════
-  First 100 chars: "{{hook}}" + what happened + "IPL 2026"
-  Next 200 chars: Hindi/English mix - emotional reaction
-  Last 100 chars: "{{cta}}"
-  Then 3-5 hashtags (tournament + teams + #Shorts)
+DESCRIPTION (600-900 chars total, structured):
+  Section 1 — Hook + Context (120-150 chars):
+    "{{viral hook}} | <what happened> | <venue> | IPL 2026"
+    Include the key moment that makes this clip viral
 
-═══════════════════════════════════════════════════════════════════════════════
-HASHTAGS (exactly 4, strategic order):
-═══════════════════════════════════════════════════════════════════════════════
-  1. #IPL or #T20WorldCup or #Cricket
-  2. Winning team #RCB #CSK #MI etc
-  3. Losing team or star player
-  4. #Shorts (ALWAYS)
+  Section 2 — Match Situation & Individual Performances (200-300 chars):
+    "Match: <team1> vs <team2> at <venue>"
+    "Key batting: <player> scored <runs> off <balls> with <fours> fours & <sixes> sixes"
+    "Key bowling: <player> took <wickets>/<runs> in <overs> overs"
+    "Match phase: <innings>, target <runs>, required rate <rrr>"
+    Use Hinglish naturally — mix of Hindi emotion + English facts
 
-═══════════════════════════════════════════════════════════════════════════════
-SEARCH TERMS (15-25, super targeted):
-═══════════════════════════════════════════════════════════════════════════════
-  - Include ALL trending topics as search terms
-  - Player names + "catch" / "six" / "boundary" / "wicket"
-  - NO generic "cricket viral"
+  Section 3 — Emotional Reaction (150-200 chars):
+    Hindi/English mix — "Arre wah! Kya shot tha ye! Fans going crazy..."
+    Describe crowd reaction, commentator excitement, tension in the moment
 
-Return ONLY JSON:
+  Section 4 — CTA (100-150 chars):
+    "{{cta}}"
+    MUST include subscribe/like/share prompt
+    Add "Aaj ka poora match dekho channel pe!" variant
+
+  Section 5 — Hashtags (exactly 4-5):
+    1. Tournament (#IPL2026 / #T20WorldCup / #Cricket)
+    2. Winning team (e.g. #RCB)
+    3. Losing team OR star player (e.g. #ViratKohli)
+    4. #Shorts (ALWAYS)
+    5. Optional: venue hashtag (e.g. #Wankhede)
+
+  Section 6 — Divider: "---" then search terms line
+
+SEARCH TERMS (18-25 terms):
+  - ALL trending topics as search terms
+  - Specific player-name + action combos: "Kohli six", "Bumrah yorker", "Surya catch"
+  - Venue + event phrases: "Wankhede IPL", "Chinnaswamy six"
+  - NO generic like "cricket viral"
+  - Mix of Hindi and English search terms
+
+Return ONLY valid JSON — no markdown, no explanation:
 {{
   "clip_id": "{clip_id}",
-  "title": "...",
-  "description": "...",
+  "title": "<corrected title>",
+  "description": "<full structured description>",
   "hashtags": ["#...", "#...", "#...", "#..."],
-  "search_terms": ["...", "..."]
+  "search_terms": ["<term1>", "<term2>", "..."]
 }}
 """
 
@@ -403,16 +437,19 @@ def generate_clip_seo(
     scorecard: str = "",
     trend_topics: List[str] = None,
     live_stream_url: str = "",
+    provider_override: str = "",
+    model_override: str = "",
 ) -> Dict:
     """
     Generate SEO metadata for a single clip.
     Retries up to 3 times with exponential backoff on 429/593.
+    provider_override/model_override: allow dynamic model selection for A/B testing.
     """
     trend_topics = trend_topics or []
     local_kw_list = _extract_keywords(transcript)
     local_kw = ", ".join(local_kw_list)
     
-    # [NEW] Intercept exact players/events to ping YouTube Suggest API
+    # Intercept exact players/events to ping YouTube Suggest API
     try:
         from trends import fetch_clip_specific_suggestions
         clip_suggestions = fetch_clip_specific_suggestions(local_kw_list)
@@ -432,7 +469,7 @@ def generate_clip_seo(
         scorecard=scorecard or "Live match in progress",
         trend_topics=trend_str,
         live_cta=live_cta,
-        transcript=transcript[:2000],   # keep prompt tight
+        transcript=transcript[:2500],   # keep prompt tight
         local_kw=local_kw,
         clip_id=clip_id,
     )
@@ -440,6 +477,30 @@ def generate_clip_seo(
     # Enhance prompt with learned insights from performance data
     prompt = enhance_seo_prompt(prompt)
 
+    # Apply dynamic model override if set (used by self-learner for A/B testing)
+    if provider_override:
+        old_provider = ai._provider
+        old_model = ai._model
+        ai._provider = provider_override
+        if model_override:
+            ai._model = model_override
+        try:
+            result = _attempt_seo_generation(clip_id, prompt, trend_topics)
+            return result
+        finally:
+            ai._provider = old_provider
+            ai._model = old_model
+
+    result = _attempt_seo_generation(clip_id, prompt, trend_topics)
+    return result
+
+
+def _attempt_seo_generation(
+    clip_id: str,
+    prompt: str,
+    trend_topics: List[str],
+) -> Dict:
+    """Inner generation loop with retries. Returns SEO result dict."""
     backoff = [0, 30, 60, 120]
     for attempt, delay in enumerate(backoff):
         if delay:
@@ -466,6 +527,9 @@ def generate_clip_seo(
                 result["hashtags"]
             )
             result["clip_id"] = clip_id
+            # Track which model/provider generated this
+            result["_generated_by_provider"] = ai.get_used_provider()
+            result["_generated_by_model"] = ai.get_used_model()
 
             log.info("[%s] SEO done — title: %s", clip_id, result["title"][:100])
             return result
@@ -516,10 +580,22 @@ def generate_seo_for_exported_clip(
     Generate + save SEO for one exported clip.
     inter_clip_pause: seconds to wait BEFORE the API call (rate-limit buffer).
     Pass 0.0 for the first clip, 8.0 for subsequent ones.
+    Dynamically uses best model discovered by learner.
     """
     if inter_clip_pause > 0:
         log.debug("[%s] Waiting %.0fs before SEO call...", clip_id, inter_clip_pause)
         time.sleep(inter_clip_pause)
+
+    # Apply best model from learner (if available)
+    provider_override = None
+    model_override = None
+    try:
+        best_prov, best_mod = get_best_model()
+        if best_prov and best_mod:
+            provider_override = best_prov
+            model_override = best_mod
+    except Exception:
+        pass
 
     result = generate_clip_seo(
         clip_id=clip_id,
@@ -528,6 +604,8 @@ def generate_seo_for_exported_clip(
         scorecard=scorecard,
         trend_topics=trend_topics or [],
         live_stream_url=live_stream_url,
+        provider_override=provider_override,
+        model_override=model_override,
     )
 
     out_path = Path(output_dir) / f"{clip_id}_metadata.json"

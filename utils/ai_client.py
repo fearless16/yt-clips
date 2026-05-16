@@ -16,6 +16,14 @@ _cfg = load_config()
 
 
 class AIClient:
+    PROVIDER_MODELS = {
+        "groq": ["llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"],
+        "openrouter": ["google/gemini-2.0-flash-001", "anthropic/claude-3.5-haiku", "deepseek/deepseek-v4-flash:free"],
+        "nvidia": ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.1-8b-instruct", "nvidia/nemotron-3-super-120b-a12b"],
+        "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        "xai": ["grok-2"],
+    }
+
     def __init__(self):
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
         self.openrouter_base_url = os.getenv(
@@ -41,15 +49,26 @@ class AIClient:
             "https://api.groq.com/openai/v1",
         )
 
+        self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
+        self.deepseek_base_url = os.getenv(
+            "DEEPSEEK_BASE_URL",
+            "https://api.deepseek.com",
+        )
+
         self.ollama_url = "http://localhost:11434/api/generate"
         ai_cfg = _cfg.get("ai", {})
         self._provider = ai_cfg.get("provider", "groq")
-        self._model = ai_cfg.get("model", "llama-3.3-70b-versatile")
+        self._model = ai_cfg.get("model", "llama-4-scout-17b-16e-instruct")
+        self._last_provider = None
+        self._last_model = None
 
     def generate_text(self, prompt: str, system_instruction: Optional[str] = None) -> str:
-        """Generic text generation wrapper, prioritizes configured provider."""
+        """Generic text generation wrapper, prioritizes configured provider.
+        Tracks which provider/model was used for performance analysis."""
         provider = self._provider
-        if provider == "openrouter" and self.openrouter_api_key:
+        if provider == "deepseek" and self.deepseek_api_key:
+            return self.generate_deepseek(prompt, system_instruction)
+        elif provider == "openrouter" and self.openrouter_api_key:
             return self.generate_openrouter(prompt, system_instruction)
         elif provider == "nvidia" and self.nvidia_api_key:
             return self.generate_nvidia(prompt, system_instruction)
@@ -57,6 +76,8 @@ class AIClient:
             return self.generate_grok(prompt, system_instruction)
         elif provider == "groq" and self.groq_api_key:
             return self.generate_groq(prompt, system_instruction)
+        elif self.deepseek_api_key:
+            return self.generate_deepseek(prompt, system_instruction)
         elif self.openrouter_api_key:
             return self.generate_openrouter(prompt, system_instruction)
         elif self.nvidia_api_key:
@@ -87,11 +108,14 @@ class AIClient:
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": prompt})
 
+        self._last_provider = "openrouter"
+        self._last_model = self._model
+
         response = client.chat.completions.create(
             model=self._model,
             messages=messages,
             temperature=0.7,
-            max_tokens=4096,
+            max_tokens=8192,
             extra_headers={"HTTP-Referer": "https://github.com/prajwalbairagi/yt-clips"},
         )
 
@@ -132,11 +156,14 @@ class AIClient:
             }
         )
 
+        self._last_provider = "nvidia"
+        self._last_model = self._model
+
         response = client.chat.completions.create(
             model=self._model,
             messages=messages,
             temperature=0.7,
-            max_tokens=4096,
+            max_tokens=8192,
         )
 
         content = response.choices[0].message.content
@@ -176,6 +203,9 @@ class AIClient:
             }
         )
 
+        self._last_provider = "xai"
+        self._last_model = self._model
+
         response = client.chat.completions.create(
             model=self._model,
             messages=messages,
@@ -207,16 +237,75 @@ class AIClient:
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": prompt})
 
+        self._last_provider = "groq"
+        self._last_model = self._model
+
         response = client.chat.completions.create(
             model=self._model,
             messages=messages,
             temperature=0.7,
-            max_tokens=4096,
+            max_tokens=8192,
         )
 
         content = response.choices[0].message.content
         if content is None:
             raise ValueError(f"Groq returned empty content (finish_reason={response.choices[0].finish_reason})")
+        return content.strip()
+
+    def get_used_provider(self) -> str:
+        return self._last_provider or self._provider
+
+    def get_used_model(self) -> str:
+        return self._last_model or self._model
+
+    def get_available_providers(self) -> Dict:
+        """Return dict of available providers and their candidate models."""
+        available = {}
+        if self.groq_api_key:
+            available["groq"] = self.PROVIDER_MODELS["groq"]
+        if self.openrouter_api_key:
+            available["openrouter"] = self.PROVIDER_MODELS["openrouter"]
+        if self.nvidia_api_key:
+            available["nvidia"] = self.PROVIDER_MODELS["nvidia"]
+        if self.deepseek_api_key:
+            available["deepseek"] = self.PROVIDER_MODELS["deepseek"]
+        if self.xai_api_key:
+            available["xai"] = self.PROVIDER_MODELS["xai"]
+        return available
+
+    # ---------------- DEEPSEEK ----------------
+
+    def generate_deepseek(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+    ) -> str:
+        if not self.deepseek_api_key:
+            return "DeepSeek API key missing"
+
+        client = OpenAI(
+            api_key=self.deepseek_api_key,
+            base_url=self.deepseek_base_url,
+        )
+
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+
+        self._last_provider = "deepseek"
+        self._last_model = self._model
+
+        response = client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=8192,
+        )
+
+        content = response.choices[0].message.content
+        if content is None:
+            raise ValueError(f"DeepSeek returned empty content (finish_reason={response.choices[0].finish_reason})")
         return content.strip()
 
     def generate_image(self, prompt: str, output_path: str) -> bool:
@@ -275,6 +364,16 @@ class AIClient:
             ),
         }
 
+        if self.groq_api_key:
+            providers["groq"] = lambda: self.generate_groq(
+                prompt,
+                system_instruction,
+            )
+        if self.deepseek_api_key:
+            providers["deepseek"] = lambda: self.generate_deepseek(
+                prompt,
+                system_instruction,
+            )
         if self.xai_api_key:
             providers["grok"] = lambda: self.generate_grok(
                 prompt,

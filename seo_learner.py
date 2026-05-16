@@ -3,6 +3,7 @@ seo_learner.py — Self-improving SEO system that learns from past performance.
 Analyzes which titles, hooks, and CTAs drive the most engagement and updates prompts.
 """
 import json
+import math
 import re
 import time
 from collections import Counter, defaultdict
@@ -42,6 +43,10 @@ class SEOLearner:
             "hooks_performance": {},  # Which hooks drive engagement
             "ctas_performance": {},  # Which CTAs drive action
             "hashtag_performance": {},  # Which hashtags boost discovery
+            "model_performance": {},  # Which models/providers perform best
+            "benchmark_history": [],  # History of auto-benchmark runs
+            "current_best_provider": None,  # Dynamically selected best provider
+            "current_best_model": None,
             "last_updated": None
         }
 
@@ -53,7 +58,8 @@ class SEOLearner:
 
     def record_performance(self, clip_id: str, title: str, description: str, 
                          hashtags: List[str], analytics: Dict,
-                         tags: List[str] = None, search_terms: List[str] = None):
+                         tags: List[str] = None, search_terms: List[str] = None,
+                         provider: str = None, model: str = None):
         """
         Record performance data for a clip.
         
@@ -65,6 +71,8 @@ class SEOLearner:
             analytics: Dict with views, likes, comments, avg_view_duration, ctr
             tags: SEO tags for YouTube API
             search_terms: Search phrases
+            provider: Which provider generated the SEO (groq/openrouter/deepseek etc.)
+            model: Which model generated the SEO
         """
         features = self._extract_seo_features(title, description, hashtags)
         features["tags_count"] = len(tags or [])
@@ -79,7 +87,9 @@ class SEOLearner:
             "timestamp": datetime.now().isoformat(),
             "performance_score": performance_score,
             "analytics": analytics,
-            "features": features
+            "features": features,
+            "provider": provider,
+            "model": model,
         }
         
         self.learned_insights["clips"].append(record)
@@ -91,8 +101,11 @@ class SEOLearner:
         # Update learned patterns
         self._update_learned_patterns(features, performance_score)
         
+        # Track model/provider performance
+        self._update_model_performance(provider, model, performance_score)
+        
         self._save_performance_data()
-        log.info(f"📊 Recorded SEO performance for {clip_id}: score={performance_score:.2f}")
+        log.info(f"📊 Recorded SEO performance for {clip_id}: score={performance_score:.2f} [{provider}/{model}]")
 
     def _extract_seo_features(self, title: str, description: str, hashtags: List[str]) -> Dict:
         """Extract SEO features from title, description, and hashtags."""
@@ -195,6 +208,108 @@ class SEOLearner:
             if features["has_sections"]:
                 ct = "full_sections"
                 self.learned_insights["ctas_performance"].setdefault(ct, []).append(performance_score)
+
+    def _update_model_performance(self, provider: str = None, model: str = None, performance_score: float = 0):
+        """Track which models/providers drive the best engagement."""
+        if not provider and not model:
+            return
+        key = f"{provider or '?'}/{model or '?'}"
+        mp = self.learned_insights["model_performance"]
+        if key not in mp:
+            mp[key] = {"count": 0, "total_score": 0.0, "avg_score": 0.0, "provider": provider, "model": model}
+        mp[key]["count"] += 1
+        mp[key]["total_score"] += performance_score
+        mp[key]["avg_score"] = mp[key]["total_score"] / mp[key]["count"]
+        self._update_best_model()
+
+    def _update_best_model(self):
+        """Auto-select the best performing provider/model combo."""
+        mp = self.learned_insights["model_performance"]
+        if not mp:
+            return
+        candidates = [(k, v["avg_score"], v["count"]) for k, v in mp.items() if v["count"] >= 2]
+        if not candidates:
+            return
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        best_key = candidates[0][0]
+        best = mp[best_key]
+        self.learned_insights["current_best_provider"] = best["provider"]
+        self.learned_insights["current_best_model"] = best["model"]
+        log.info(f"🏆 Best model auto-selected: {best_key} (avg score: {candidates[0][1]:.3f}, n={candidates[0][2]})")
+
+    def get_best_model(self) -> Tuple[Optional[str], Optional[str]]:
+        """Return the best (provider, model) based on learned performance."""
+        return (
+            self.learned_insights.get("current_best_provider"),
+            self.learned_insights.get("current_best_model"),
+        )
+
+    def run_auto_benchmark(self):
+        """
+        Auto-discover best models by running a benchmark across all available
+        providers. Uses the AIClient to test each model and score results.
+        Called on-the-fly to dynamically select best model.
+        """
+        log.info("🔬 Running auto-benchmark to discover best model...")
+        from utils.ai_client import AIClient
+        ai = AIClient()
+        available = ai.get_available_providers()
+        benchmark_prompt = (
+            "Generate YouTube SEO for this cricket clip:\n"
+            "Title: RCB vs CSK IPL 2026 - Kohli hits 67 off 34\n"
+            "Description: Virat Kohli smashed 67 runs off 34 balls with 8 fours and 3 sixes "
+            "at M Chinnaswamy Stadium. RCB posted 198/4 in 20 overs. Match situation: "
+            "CSK needs 199 to win. CRR: 9.9, RRR: 9.95.\n\n"
+            "Return ONLY JSON with title, description, hashtags, search_terms."
+        )
+        results = []
+        for provider, models in available.items():
+            for model in models[:2]:  # Test top 2 models per provider
+                log.info(f"  Benchmarking {provider}/{model}...")
+                try:
+                    old_provider = ai._provider
+                    old_model = ai._model
+                    ai._provider = provider
+                    ai._model = model
+                    t0 = time.time()
+                    resp = ai.generate_text(benchmark_prompt, system_instruction="You are a cricket SEO expert. Return only valid JSON.")
+                    latency = time.time() - t0
+                    ai._provider = old_provider
+                    ai._model = old_model
+                    # Score: check for valid JSON and required fields
+                    score = 0
+                    try:
+                        data = json.loads(resp)
+                        if "title" in data: score += 20
+                        if "description" in data and len(data["description"]) > 200: score += 20
+                        if "hashtags" in data and len(data["hashtags"]) >= 4: score += 20
+                        if "search_terms" in data and len(data["search_terms"]) >= 10: score += 20
+                        if any(p in data.get("title","").lower() for p in ["kohli", "rcb", "csk", "ipl"]): score += 20
+                    except json.JSONDecodeError:
+                        score = 10  # At least returned something
+                    results.append({
+                        "provider": provider,
+                        "model": model,
+                        "score": score,
+                        "latency": round(latency, 2),
+                        "timestamp": datetime.now().isoformat(),
+                    })
+                    log.info(f"    Score: {score}/100, Latency: {latency:.1f}s")
+                except Exception as e:
+                    log.warning(f"    Failed: {e}")
+        results.sort(key=lambda x: x["score"], reverse=True)
+        self.learned_insights["benchmark_history"].append({
+            "timestamp": datetime.now().isoformat(),
+            "results": results,
+            "top_result": results[0] if results else None,
+        })
+        # Update best model from benchmark
+        if results and results[0]["score"] >= 40:
+            best = results[0]
+            self.learned_insights["current_best_provider"] = best["provider"]
+            self.learned_insights["current_best_model"] = best["model"]
+            log.info(f"🏆 Benchmark complete. Best: {best['provider']}/{best['model']} (score={best['score']}, latency={best['latency']}s)")
+        self._save_performance_data()
 
     def get_learned_title_preferences(self) -> Dict:
         """Get insights about what title structures perform best."""
@@ -304,6 +419,8 @@ seo_learner = SEOLearner()
 
 learn_from_clip_performance = seo_learner.record_performance
 get_seo_improvement_suggestions = seo_learner.get_seo_improvement_suggestions
+get_best_model = seo_learner.get_best_model
+run_auto_benchmark = seo_learner.run_auto_benchmark
 
 
 def enhance_seo_prompt(base_prompt: str) -> str:

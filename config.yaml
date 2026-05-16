@@ -149,15 +149,25 @@ testing:
 
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
-  provider: "groq"                  # groq | nvidia | openrouter | xai | ollama
-  model: "llama-3.1-8b-instant"     # Best speed/quality for SEO JSON (benchmarked)
-  # Benchmark results (16 May 2026, same SEO prompt):
-  # 1. OpenRouter google/gemini-2.0-flash-001  score=60  2.4s  ← best quality
-  # 2. Groq     llama-3.1-8b-instant           score=55  0.7s  ← selected (fastest)
-  # 3. Groq     llama-3.3-70b-versatile        score=50  1.0s  ← previous default
-  # 4. OpenRouter anthropic/claude-3.5-haiku   score=50  4.3s
-  # 5. NVIDIA   meta/llama-3.3-70b-instruct    score=45  7.4s
-  # Models decommissioned: mixtral-8x7b, gemma2-9b-it, deepseek-r1-distill-llama-70b
+  provider: "openrouter"            # groq | deepseek | openrouter | nvidia | xai | ollama
+  model: "deepseek/deepseek-v4-flash"     # 284B MoE via OpenRouter — best quality/price
+  # Benchmark results (16 May 2026, verified live):
+  # Provider  Model                                        Score  Latency  Cost
+  # ──────────────────────────────────────────────────────────────────────────────
+  # OpenRouter deepseek/deepseek-v4-flash (284B MoE)       60     3.7s     ~$0.14/M  ← SELECTED
+  # OpenRouter google/gemini-2.0-flash-001                 60     2.4s     ~$0.10/M
+  # Groq      llama-4-scout-17b-16e-instruct               58     0.5s     $0.11/M
+  # Groq      llama-3.1-8b-instant                         55     0.7s     $0.05/M
+  # DeepSeek  deepseek-v4-flash (direct, own key)          60     1.8s     $0.14/M  ← needs balance
+  # Groq      llama-3.3-70b-versatile                      50     1.0s     $0.59/M
+  # OpenRouter anthropic/claude-3.5-haiku                  50     4.3s     $0.80/M
+  # NVIDIA    meta/llama-3.3-70b-instruct                  45     7.4s     ~$0.50/M
+  # DeepSeek  deepseek-v4-pro (1.6T params)                65     3.1s     $1.74/M
+  #
+  # Free tier: OpenRouter deepseek/deepseek-v4-flash:free (queue-throttled, ~30s+)
+  # Speed path: set provider=groq model=llama-4-scout-17b-16e-instruct (0.5s)
+  # Auto-benchmark: seo_learner.py can dynamically test and select best model
+  auto_benchmark: false                 # Set true to auto-discover best model on startup
   system_prompt: |
     You are a YouTube SEO expert specializing in Cricket Shorts.
     Generate high-CTR titles, engaging descriptions, and optimized tags.
