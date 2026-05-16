@@ -85,7 +85,10 @@ def push(include_data: bool = False) -> bool:
             files_to_sync += list(root.glob("input/*.json"))
 
         # Add specific files that may exist
-        for special_file in ["channel_logo.png", "client_secrets.json", "yt_token.json"]:
+        for special_file in [
+            "channel_logo.png", "client_secrets.json", "yt_token.json",
+            "remote_job.json", "colab_url.txt",
+        ]:
             p = Path(special_file)
             if p.exists():
                 files_to_sync.append(p)
