@@ -307,7 +307,7 @@ def _is_readable_media_input(path: Path) -> bool:
         return False
 
 
-def _validate_output(path: str) -> bool:
+def _validate_output(path: str, expected_duration: float = 0.0) -> bool:
     output = Path(path)
     min_bytes = int(cfg["export"].get("min_output_bytes", MIN_OUTPUT_BYTES))
     if not output.exists():
@@ -324,6 +324,15 @@ def _validate_output(path: str) -> bool:
         if duration <= 0:
             log.error("Output has invalid duration: %s", output)
             return False
+            
+        if expected_duration > 0 and abs(duration - expected_duration) > 2.0:
+            log.error("Output duration %.1fs deviates too much from expected %.1fs: %s", duration, expected_duration, output)
+            return False
+
+        if duration < 5.0:
+            log.error("Output is too short (%.1fs) to be a valid Short: %s", duration, output)
+            return False
+            
     except Exception as e:
         log.error("Output validation failed for %s: %s", output, e)
         return False
@@ -369,7 +378,7 @@ def _without_logo_cmd(cmd: List[str], logo_file: Path, filter_complex: str) -> L
     return no_logo
 
 
-def _run_ffmpeg_with_retry(cmd: List[str], output_path: str, clip_id: str, attempts: int = 2) -> Tuple[bool, str]:
+def _run_ffmpeg_with_retry(cmd: List[str], output_path: str, clip_id: str, attempts: int = 2, expected_duration: float = 0.0) -> Tuple[bool, str]:
     last_error = ""
     output = Path(output_path)
     timeout = _ffmpeg_timeout()
@@ -386,7 +395,7 @@ def _run_ffmpeg_with_retry(cmd: List[str], output_path: str, clip_id: str, attem
             last_error = f"FFmpeg timed out after {timeout}s"
             log.warning("[%s] attempt %d/%d: %s", clip_id, attempt, attempts, last_error)
             continue
-        if res.returncode == 0 and _validate_output(output_path):
+        if res.returncode == 0 and _validate_output(output_path, expected_duration):
             return True, ""
         last_error = _compact_text(res.stderr) or f"FFmpeg exited {res.returncode}"
         log.warning("[%s] attempt %d/%d failed: %s", clip_id, attempt, attempts, last_error)
@@ -482,17 +491,21 @@ def _build_enhance_stack(
             cw = max(2, int(active_crop["width"]))
             ch = max(2, int(active_crop["height"]))
             filter_base = (
-                f"{enhance},"
-                f"crop={cw}:{ch}:{cx}:{cy},"
-                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                f"crop={target_w}:{target_h}"
+                f"{enhance},split=2[bg_raw][fg_raw];"
+                f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=-0.08:saturation=0.9[bg];"
+                f"[fg_raw]crop={cw}:{ch}:{cx}:{cy},"
+                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
             )
         except (TypeError, ValueError):
             filter_base = (
-                f"{enhance},"
-                f"crop='trunc(ih*9/16)':ih,"
-                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                f"crop={target_w}:{target_h}"
+                f"{enhance},split=2[bg_raw][fg_raw];"
+                f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=-0.08:saturation=0.9[bg];"
+                f"[fg_raw]crop='trunc(ih*9/16)':ih,"
+                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
             )
 
     else:
@@ -525,10 +538,12 @@ def _build_enhance_stack(
                 log.debug("Chat exclusion: cropped right side to exclude left chat (%dpx)", chat_w)
         else:
             filter_base = (
-                f"{enhance},"
-                f"crop='trunc(ih*9/16)':ih,"
-                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                f"crop={target_w}:{target_h}"
+                f"{enhance},split=2[bg_raw][fg_raw];"
+                f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=-0.08:saturation=0.9[bg];"
+                f"[fg_raw]crop='trunc(ih*9/16)':ih,"
+                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
+                f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
             )
 
     # ── Lighting fix ──────────────────────────────────────────────────────────
@@ -741,7 +756,7 @@ def export_clip(
              clip_id, end - start, speed, encoder)
 
     try:
-        success, error = _run_ffmpeg_with_retry(cmd, output_path, clip_id)
+        success, error = _run_ffmpeg_with_retry(cmd, output_path, clip_id, expected_duration=output_duration)
 
         if not success:
             fallback_source_cmd = cmd
@@ -755,7 +770,7 @@ def export_clip(
                 )
                 fallback_source_cmd = _without_logo_cmd(cmd, logo_file, no_logo_complex)
                 success, error = _run_ffmpeg_with_retry(
-                    fallback_source_cmd, output_path, clip_id, attempts=1)
+                    fallback_source_cmd, output_path, clip_id, attempts=1, expected_duration=output_duration)
                 if success:
                     dur = max(time.perf_counter() - t_start, 0.001)
                     log.info("✅ [%s] Done in %.1fs (logo skipped)", clip_id, dur)
@@ -765,7 +780,7 @@ def export_clip(
                 log.warning("[%s] NVENC failed; retrying with libx264...", clip_id)
                 fallback_cmd = _libx264_fallback_cmd(fallback_source_cmd)
                 success, error = _run_ffmpeg_with_retry(
-                    fallback_cmd, output_path, clip_id, attempts=1)
+                    fallback_cmd, output_path, clip_id, attempts=1, expected_duration=output_duration)
                 if success:
                     dur = max(time.perf_counter() - t_start, 0.001)
                     log.info("✅ [%s] Done in %.1fs (libx264 fallback)", clip_id, dur)

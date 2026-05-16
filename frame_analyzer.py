@@ -2,12 +2,13 @@ import json
 import subprocess
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
 from utils.config import load_config
 from utils.logger import get_logger
+from utils.face_matcher import find_host_in_frame
 
 cfg = load_config()
 log = get_logger("analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"])
@@ -58,6 +59,32 @@ def _detect_face_at_timestamp(video_path: str, timestamp: float, frame_w: int, f
     return detect_face_crop(frame_bgr, frame_w, frame_h)
 
 def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int) -> Optional[Dict]:
+    # ── 1. Dynamic Host Matching (Priority) ──────────────────────────────────
+    # Try to find the host specifically using reference photos
+    host_box = find_host_in_frame(frame_bgr)
+    if host_box:
+        hx, hy = host_box["x"], host_box["y"]
+        hw, hh = host_box["width"], host_box["height"]
+        
+        target_h = frame_height
+        target_w = int(target_h * 9 / 16)
+        crop_x = hx + hw // 2 - target_w // 2
+        crop_x = max(0, min(crop_x, frame_width - target_w))
+        
+        # Smooth and return
+        crop_x = _smooth_int(_get_prev_crop_x(), crop_x, alpha=0.25)
+        _set_prev_crop_x(crop_x)
+        
+        return {
+            "x": int(crop_x), "y": 0,
+            "width": int(target_w), "height": int(target_h),
+            "face_w": int(hw), "face_h": int(hh),
+            "face_x": int(hx), "face_y": int(hy),
+            "confidence": host_box.get("confidence", 0.9),
+            "is_dynamic_match": True
+        }
+
+    # ── 2. Fallback to Haar Cascade (Anonymous Detection) ───────────────────
     gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
     faces = FACE_CASCADE.detectMultiScale(
         gray, scaleFactor=1.03, minNeighbors=3, minSize=(30, 30),
@@ -104,6 +131,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         "x": int(crop_x), "y": 0,
         "width": int(target_w), "height": int(target_h),
         "face_w": int(w), "face_h": int(h),
+        "face_x": int(x), "face_y": int(y),
         "confidence": min(1.0, best_score / 5000.0),
     }
 
@@ -457,21 +485,51 @@ def analyze_clip(
     silence = detect_dead_air(video_path, start, end)
 
     info = _get_video_dimensions(video_path)
-    # Trim 10% from each end to avoid scene transitions and black lead-in frames
+    
+    # ── Facecam / Host Location ────────────────────────────────────────────────
+    layout_cfg = cfg.get("layout", {})
+    has_facecam = layout_cfg.get("has_facecam", False)
+    
     margin = min(0.5, (end - start) * 0.1)
     sample_times = np.linspace(start + margin, end - margin, num=5)
     face_candidates = []
+    
     for t in sample_times:
         face = _detect_face_at_timestamp(video_path, float(t), info["width"], info["height"])
         if face:
             face_candidates.append(face)
 
     face_crop = None
-    if face_candidates:
-        face_crop = max(
-            face_candidates,
-            key=lambda f: (f.get("face_w", 0) * f.get("face_h", 0)) * f.get("confidence", 0.0)
-        )
+    host_absent = False
+
+    # 1. Prioritize any candidate that is a dynamic match (matched reference photo)
+    dynamic_matches = [f for f in face_candidates if f.get("is_dynamic_match")]
+    if dynamic_matches:
+        log.info("[%s] Found dynamic face match using reference photos", clip_id)
+        face_crop = max(dynamic_matches, key=lambda f: f.get("confidence", 0.0))
+    
+    # 2. If no dynamic match, but we have a facecam config, check for presence there
+    elif has_facecam:
+        fc = layout_cfg.get("facecam", {})
+        log.info("[%s] No dynamic match; validating config facecam bounds", clip_id)
+        fc_x, fc_y = fc.get("x", 0), fc.get("y", 0)
+        fc_w, fc_h = fc.get("width", 320), fc.get("height", 180)
+        
+        for f in face_candidates:
+            fx, fy = f.get("face_x", f["x"]), f.get("face_y", f["y"])
+            if (fc_x - 50) <= fx <= (fc_x + fc_w + 50) and (fc_y - 50) <= fy <= (fc_y + fc_h + 50):
+                # Valid face found in config area
+                face_crop = f
+                break
+        
+        if not face_crop:
+            log.warning("[%s] Host absent from configured facecam bounds", clip_id)
+            host_absent = True
+    
+    # 3. Last fallback: just pick the best detected face overall
+    elif face_candidates:
+        face_crop = max(face_candidates, key=lambda f: (f.get("face_w", 0) * f.get("face_h", 0)) * f.get("confidence", 0.0))
+
 
     is_fast_paced = False
     silence_ratio = 0.0

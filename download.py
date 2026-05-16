@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import random
 from typing import Optional
 from pathlib import Path
 
@@ -295,9 +296,10 @@ def _client_attempts(dl_cfg: dict) -> list[str]:
     ]
 
 
-def download(url: str, output_path: Optional[str] = None) -> Path:
+def download(url: str, output_path: Optional[str] = None, sample_minutes: Optional[int] = None) -> Path:
     """
     Download a YouTube video using yt-dlp at the highest available quality.
+    If sample_minutes is provided, downloads a random N-minute section from the video.
     """
     dl_cfg = cfg.get("download", {})
     paths_cfg = cfg.get("paths", {"input": "input"})
@@ -344,8 +346,22 @@ def download(url: str, output_path: Optional[str] = None) -> Path:
         meta_file.parent.mkdir(parents=True, exist_ok=True)
         with open(meta_file, "w", encoding="utf-8") as f:
             json.dump({"title": video_title, "url": url}, f, indent=4)
+            
+        if sample_minutes is not None and sample_minutes > 0:
+            duration = video_info.get("duration", 0)
+            if duration > sample_minutes * 60:
+                sample_sec = sample_minutes * 60
+                max_start = duration - sample_sec
+                # pick a random start time from 10% to 90% of max_start to avoid intro/outro if possible
+                start_sec = random.uniform(max_start * 0.1, max_start * 0.9)
+                end_sec = start_sec + sample_sec
+                log.info(f"🎲 Random sample requested: downloading {sample_minutes} min from {start_sec:.1f}s to {end_sec:.1f}s")
+                # Add --download-sections
+                base_cmd.extend(["--download-sections", f"*{start_sec}-{end_sec}"])
+            else:
+                log.warning(f"Video duration ({duration}s) is shorter than requested sample ({sample_minutes * 60}s). Downloading full video.")
     except Exception as e:
-        log.warning(f"Failed to capture video title: {e}")
+        log.warning(f"Failed to capture video metadata or set sections: {e}")
 
     attempts = _client_attempts(dl_cfg)
     last_result: subprocess.CompletedProcess | None = None

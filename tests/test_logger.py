@@ -1,6 +1,6 @@
 import logging
 import pytest
-from utils.logger import get_logger, _REGISTERED_LOGGERS
+from utils.logger import get_logger
 
 
 class TestLoggerDeduplication:
