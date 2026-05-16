@@ -6,7 +6,6 @@ import sys
 import json
 import hashlib
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from utils.config import load_config
 from utils.logger import get_logger
@@ -211,31 +210,23 @@ def push(include_data: bool = False) -> bool:
 
         log.info(f"  Uploading {len(to_upload)} files...")
 
-        # 7. Parallel upload
+        # 7. Sequential upload (parallel causes SSL issues with Drive API)
         updated = 0
         created = 0
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {}
-            for fp, existing in to_upload:
-                sub = fp.parts[0] if len(fp.parts) > 1 else "__root__"
-                target_id = subfolder_map.get(sub, folder_id)
-                drive_id = existing["id"] if existing else None
-                fut = pool.submit(_upload_one, service, fp, target_id, drive_id)
-                futures[fut] = fp
-
-            for fut in as_completed(futures):
-                fp = futures[fut]
-                try:
-                    fut.result()
-                    existing = to_upload[[t[0] for t in to_upload].index(fp)][1]
-                    if existing:
-                        updated += 1
-                        log.info(f"✅ Updated: {fp.name}")
-                    else:
-                        created += 1
-                        log.info(f"✨ Created: {fp.name}")
-                except Exception as e:
-                    log.warning(f"⚠️ Failed: {fp.name}: {e}")
+        for fp, existing in to_upload:
+            sub = fp.parts[0] if len(fp.parts) > 1 else "__root__"
+            target_id = subfolder_map.get(sub, folder_id)
+            drive_id = existing["id"] if existing else None
+            try:
+                _upload_one(service, fp, target_id, drive_id)
+                if existing:
+                    updated += 1
+                    log.info(f"✅ Updated: {fp.name}")
+                else:
+                    created += 1
+                    log.info(f"✨ Created: {fp.name}")
+            except Exception as e:
+                log.warning(f"⚠️ Failed: {fp.name}: {e}")
 
         # 8. Save cache
         _save_cache(local_hashes)
