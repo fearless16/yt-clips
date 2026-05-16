@@ -1036,7 +1036,8 @@ def export_all(
 
     # ── Parallel Export ─────────────────────────────────────────────────────────
     # Use thread pool for I/O-bound FFmpeg processes
-    max_workers = max(1, min(4, len(filtered_items)))  # Max 4 parallel exports, min 1
+    encoder = _get_best_encoder()
+    max_workers = max(1, min(2 if encoder == "h264_nvenc" else 4, len(filtered_items)))
     log.info(f"🚀 Starting parallel export with {max_workers} workers...")
 
     exported_clips = []
