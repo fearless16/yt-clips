@@ -82,7 +82,19 @@ def process_queue():
         print(f"{'='*55}\n")
 
         cmd = [sys.executable, "pipeline.py", url] + flags
-        result = subprocess.run(cmd)
+        result = None
+        try:
+            result = subprocess.run(cmd)
+        except KeyboardInterrupt:
+            print("\n  Job interrupted by user")
+            with open(RESULT_FILE, "w") as f:
+                json.dump({
+                    "status": "failed",
+                    "returncode": -1,
+                    "url": url,
+                    "error": "KeyboardInterrupt",
+                }, f, indent=2)
+            continue
 
         with open(RESULT_FILE, "w") as f:
             json.dump({
