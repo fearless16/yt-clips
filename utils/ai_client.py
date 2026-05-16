@@ -43,9 +43,8 @@ class AIClient:
 
         self.ollama_url = "http://localhost:11434/api/generate"
         ai_cfg = _cfg.get("ai", {})
-        self._provider = ai_cfg.get("provider", "xai")
-        self._model = ai_cfg.get("model", "grok-2-1212")
-        self._fallback_model = ai_cfg.get("fallback_model", "llama-3.3-70b-versatile")
+        self._provider = ai_cfg.get("provider", "groq")
+        self._model = ai_cfg.get("model", "llama-3.3-70b-versatile")
 
     def generate_text(self, prompt: str, system_instruction: Optional[str] = None) -> str:
         """Generic text generation wrapper, prioritizes configured provider."""
@@ -177,12 +176,8 @@ class AIClient:
             }
         )
 
-        model = self._model
-        if "llama" in model.lower() or "mixtral" in model.lower():
-            model = "grok-2-1212"
-
         response = client.chat.completions.create(
-            model=model,
+            model=self._model,
             messages=messages,
             temperature=0.7,
         )
@@ -212,12 +207,8 @@ class AIClient:
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": prompt})
 
-        model = self._model
-        if "grok" in model.lower():
-            model = self._fallback_model
-
         response = client.chat.completions.create(
-            model=model,
+            model=self._model,
             messages=messages,
             temperature=0.7,
             max_tokens=4096,

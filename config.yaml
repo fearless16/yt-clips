@@ -149,9 +149,8 @@ testing:
 
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
-  provider: "xai"                   # xai (Grok) | groq | nvidia | openrouter | ollama
-  model: "grok-2-1212"              # xAI model (used when provider=xai)
-  fallback_model: "llama-3.3-70b-versatile"  # Used when xAI unavailable
+  provider: "groq"                  # groq | nvidia | openrouter | xai | ollama
+  model: "llama-3.3-70b-versatile"  # API keys loaded from .ai.env via .zshrc
   system_prompt: |
     You are a YouTube SEO expert specializing in Cricket Shorts.
     Generate high-CTR titles, engaging descriptions, and optimized tags.
