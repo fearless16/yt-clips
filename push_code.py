@@ -1,16 +1,20 @@
 """
-push_code.py — Smart Code Sync with MD5 Hash Checking.
+push_code.py — Fast Code Sync with batch Drive API + local MD5 cache.
 Only uploads files that have actually changed.
 """
 import sys
+import json
 import hashlib
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from utils.config import load_config
 from utils.logger import get_logger
 
 cfg = load_config()
 log = get_logger("push_code", cfg["logging"]["log_file"], cfg["logging"]["level"])
+
+CACHE_FILE = Path(".push_cache.json")
 
 try:
     from googleapiclient.http import MediaFileUpload
@@ -48,8 +52,70 @@ def _get_mime_type(file_path: Path) -> str:
     return MIME_MAP.get(file_path.suffix.lower(), "application/octet-stream")
 
 
+def _load_cache() -> dict:
+    """Load local MD5 cache."""
+    if CACHE_FILE.exists():
+        try:
+            return json.loads(CACHE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_cache(cache: dict):
+    """Save local MD5 cache."""
+    try:
+        CACHE_FILE.write_text(json.dumps(cache))
+    except Exception:
+        pass
+
+
+def _batch_list_folder(service, folder_id: str) -> dict:
+    """List ALL files in a folder in one paginated call. Returns {name: {id, md5, size}}."""
+    result = {}
+    page_token = None
+    while True:
+        resp = service.files().list(
+            q=f"'{folder_id}' in parents and trashed = false",
+            fields="nextPageToken,files(id,name,md5Checksum,size)",
+            pageToken=page_token,
+            pageSize=1000,
+        ).execute()
+        for f in resp.get("files", []):
+            result[f["name"]] = {
+                "id": f["id"],
+                "md5": f.get("md5Checksum"),
+                "size": int(f.get("size", 0)),
+            }
+        page_token = resp.get("nextPageToken")
+        if not page_token:
+            break
+    return result
+
+
+def _batch_list_all_folders(service, folder_id: str, subfolders: dict) -> dict:
+    """List files in root + all subfolders. Returns {folder_name: {name: {id, md5, size}}}."""
+    result = {"__root__": _batch_list_folder(service, folder_id)}
+    for sub_name, sub_id in subfolders.items():
+        result[sub_name] = _batch_list_folder(service, sub_id)
+    return result
+
+
+def _upload_one(service, file_path: Path, target_folder_id: str,
+                drive_file_id: str = None) -> bool:
+    """Upload a single file (create or update)."""
+    mimetype = _get_mime_type(file_path)
+    media = MediaFileUpload(str(file_path), mimetype=mimetype, resumable=True)
+    if drive_file_id:
+        service.files().update(fileId=drive_file_id, media_body=media).execute()
+    else:
+        file_metadata = {"name": file_path.name, "parents": [target_folder_id]}
+        service.files().create(body=file_metadata, media_body=media).execute()
+    return True
+
+
 def push(include_data: bool = False) -> bool:
-    """Sync local code files to Google Drive with smart change detection."""
+    """Sync local code files to Google Drive with batch API + local cache."""
     try:
         from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
 
@@ -65,29 +131,28 @@ def push(include_data: bool = False) -> bool:
         # 1. Get or Create the 'yt-clips' folder
         folder_id = find_or_create_folder(service, "yt-clips")
 
-        # 2. Build file list to sync (root + subdirectories + data files)
+        # 2. Build file list to sync
         root = Path(".")
         files_to_sync = (
             list(root.glob("*.py"))
             + list(root.glob("*.yaml"))
             + list(root.glob("*.sh"))
-            + list(root.glob("*.txt"))           # requirements.txt, colab_url.txt
-            + list(root.glob(".env"))            # API Keys
+            + list(root.glob("*.txt"))
+            + list(root.glob(".env"))
             + list(root.glob("utils/*.py"))
-            + list(root.glob("utils/*.yaml"))     # Any config in utils/
+            + list(root.glob("utils/*.yaml"))
             + list(root.glob("transcripts/*.json"))
             + list(root.glob("highlights/*.yaml"))
-            + list(root.glob("photos/*.png"))     # Reference face photos for host matching
+            + list(root.glob("photos/*.png"))
             + list(root.glob("photos/*.jpg"))
             + list(root.glob("photos/*.jpeg"))
         )
-        
+
         if include_data:
             log.info("📦 Including input data (video) in sync...")
             files_to_sync += list(root.glob("input/*.mp4"))
             files_to_sync += list(root.glob("input/*.json"))
 
-        # Add specific files that may exist
         for special_file in [
             "channel_logo.png", "client_secrets.json", "yt_token.json",
             "remote_job.json", "colab_url.txt",
@@ -96,69 +161,88 @@ def push(include_data: bool = False) -> bool:
             if p.exists():
                 files_to_sync.append(p)
 
-        # Deduplicate
         files_to_sync = list(set(files_to_sync))
+        files_to_sync = [f for f in files_to_sync if f.exists()]
 
         log.info(f"🔄 Checking {len(files_to_sync)} files for changes...")
-        updated_count = 0
-        created_count = 0
-        skipped_count = 0
 
-        for file_path in sorted(files_to_sync):
-            if not file_path.exists():
-                continue
+        # 3. Compute local MD5s and compare with cache
+        local_cache = _load_cache()
+        local_hashes = {}
+        changed_files = []
+        for fp in sorted(files_to_sync):
+            h = get_md5(fp)
+            local_hashes[str(fp)] = h
+            if local_cache.get(str(fp)) != h:
+                changed_files.append(fp)
 
-            # Determine target folder ID (handle subdirectories like 'utils/')
-            target_folder_id = folder_id
-            if len(file_path.parts) > 1:
-                subfolder_name = file_path.parts[0]
-                target_folder_id = find_or_create_folder(service, subfolder_name, folder_id)
+        if not changed_files:
+            log.info("✅ No changes detected (local cache hit). Skipped all.")
+            return True
 
-            name = file_path.name
-            
-            # For very large files, skip MD5 check and just check existence or size
-            if file_path.stat().st_size > 50 * 1024 * 1024: # > 50MB
-                log.info(f"  (Processing large file: {name}...)")
-                local_md5 = None
-            else:
-                local_md5 = get_md5(file_path)
+        log.info(f"  {len(changed_files)} files changed locally.")
 
-            # Check if file exists in the target folder on Drive
-            results = service.files().list(
-                q=f"name = '{name}' and '{target_folder_id}' in parents and trashed = false",
-                fields="files(id, md5Checksum, size)",
-            ).execute()
-            existing = results.get("files", [])
+        # 4. Resolve subfolder IDs (pre-create them)
+        subfolder_map = {}  # folder_name -> folder_id
+        for fp in changed_files:
+            if len(fp.parts) > 1:
+                subfolder_name = fp.parts[0]
+                if subfolder_name not in subfolder_map:
+                    subfolder_map[subfolder_name] = find_or_create_folder(
+                        service, subfolder_name, folder_id)
 
-            mimetype = _get_mime_type(file_path)
-            media = MediaFileUpload(str(file_path), mimetype=mimetype, resumable=True)
+        # 5. Batch list Drive contents (1 call per folder instead of N per file)
+        drive_files = _batch_list_all_folders(service, folder_id, subfolder_map)
 
-            if existing:
-                drive_md5 = existing[0].get("md5Checksum")
-                drive_size = int(existing[0].get("size", 0))
-                file_id = existing[0]["id"]
+        # 6. Determine what to upload
+        to_upload = []
+        for fp in changed_files:
+            sub = fp.parts[0] if len(fp.parts) > 1 else "__root__"
+            drive_folder = drive_files.get(sub, {})
+            existing = drive_folder.get(fp.name)
+            if existing and existing.get("md5") == local_hashes[str(fp)]:
+                continue  # Already up to date on Drive
+            to_upload.append((fp, existing))
 
-                if local_md5 and local_md5 == drive_md5:
-                    skipped_count += 1
-                    continue
-                
-                # For large files without MD5, compare size
-                if not local_md5 and drive_size == file_path.stat().st_size:
-                    skipped_count += 1
-                    continue
+        if not to_upload:
+            log.info("✅ All changed files already up to date on Drive.")
+            _save_cache(local_hashes)
+            return True
 
-                service.files().update(fileId=file_id, media_body=media).execute()
-                log.info(f"✅ Updated: {name}")
-                updated_count += 1
-            else:
-                file_metadata = {"name": name, "parents": [target_folder_id]}
-                service.files().create(body=file_metadata, media_body=media).execute()
-                log.info(f"✨ Created: {name}")
-                created_count += 1
+        log.info(f"  Uploading {len(to_upload)} files...")
+
+        # 7. Parallel upload
+        updated = 0
+        created = 0
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = {}
+            for fp, existing in to_upload:
+                sub = fp.parts[0] if len(fp.parts) > 1 else "__root__"
+                target_id = subfolder_map.get(sub, folder_id)
+                drive_id = existing["id"] if existing else None
+                fut = pool.submit(_upload_one, service, fp, target_id, drive_id)
+                futures[fut] = fp
+
+            for fut in as_completed(futures):
+                fp = futures[fut]
+                try:
+                    fut.result()
+                    existing = to_upload[[t[0] for t in to_upload].index(fp)][1]
+                    if existing:
+                        updated += 1
+                        log.info(f"✅ Updated: {fp.name}")
+                    else:
+                        created += 1
+                        log.info(f"✨ Created: {fp.name}")
+                except Exception as e:
+                    log.warning(f"⚠️ Failed: {fp.name}: {e}")
+
+        # 8. Save cache
+        _save_cache(local_hashes)
 
         log.info(
-            f"🏁 Sync complete! "
-            f"({created_count} created, {updated_count} updated, {skipped_count} unchanged)"
+            f"🏁 Sync done! ({created} created, {updated} updated, "
+            f"{len(files_to_sync) - len(to_upload)} skipped)"
         )
         return True
 
