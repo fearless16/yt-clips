@@ -84,17 +84,21 @@ print("\nMonitoring watcher.log...")
 
 try:
     last_pos = 0
+    last_inode = None
     while True:
         time.sleep(10)
-        if Path("watcher.log").exists():
-            with open("watcher.log", "r") as f:
-                f.seek(0, 2)
-                if f.tell() < last_pos:
-                    last_pos = 0
-                f.seek(last_pos)
-                for l in f.readlines():
-                    if l.strip():
-                        print(f"  {l.strip()}")
-                last_pos = f.tell()
+        try:
+            st = Path("watcher.log").stat()
+        except FileNotFoundError:
+            continue
+        if last_inode is not None and st.st_ino != last_inode:
+            last_pos = 0
+        last_inode = st.st_ino
+        with open("watcher.log", "r") as f:
+            f.seek(last_pos)
+            for l in f.readlines():
+                if l.strip():
+                    print(f"  {l.strip()}")
+            last_pos = f.tell()
 except KeyboardInterrupt:
     print("\nStopped.")
