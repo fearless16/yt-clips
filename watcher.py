@@ -27,6 +27,37 @@ class JobHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok", "processing": currently_processing}).encode())
+        elif parsed.path == "/files":
+            import os
+            data = {}
+            for name in ["input", "transcripts", "highlights", "shorts", "photos"]:
+                p = Path(name)
+                if p.exists():
+                    files = []
+                    for f in sorted(p.iterdir()):
+                        if f.is_file() and not f.name.startswith("."):
+                            files.append({"name": f.name, "size": f.stat().st_size})
+                    data[name] = files
+                else:
+                    data[name] = []
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(data, indent=2).encode())
+        elif parsed.path.startswith("/download/"):
+            file_path = parsed.path[len("/download/"):]
+            target = Path(file_path)
+            if target.exists() and target.is_file() and target.stat().st_size > 0:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", f'attachment; filename="{target.name}"')
+                self.send_header("Content-Length", str(target.stat().st_size))
+                self.end_headers()
+                with open(target, "rb") as f:
+                    self.wfile.write(f.read())
+            else:
+                self.send_response(404)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": f"File not found: {file_path}"}).encode())
         else:
             self.send_response(404)
             self.end_headers()

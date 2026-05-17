@@ -204,6 +204,85 @@ def sync_to_drive(
     return uploaded_ids
 
 
+# ─── Download from Drive ─────────────────────────────────────────────────────
+
+def download_from_drive(
+    filenames: Optional[List[str]] = None,
+    dest_dir: str = ".",
+) -> List[Path]:
+    """
+    Download files from yt-clips Drive folder to local directory.
+
+    Args:
+        filenames: Specific filenames to download (e.g. ["video.mp4", "video.json"]).
+                   If None, downloads everything from yt-clips/ root.
+        dest_dir:  Local destination directory.
+
+    Returns:
+        List of downloaded file paths.
+    """
+    from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
+
+    service = get_drive_service()
+    if not service or service == FILESYSTEM_MODE:
+        log.error("Cannot download — Drive API not available (need API auth, not filesystem)")
+        return []
+
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # Find yt-clips folder on Drive
+    folder_id = find_or_create_folder(service, "yt-clips")
+
+    # List files in yt-clips root
+    query = f"'{folder_id}' in parents and trashed = false"
+    if filenames:
+        name_filter = " or ".join(f"name = '{f}'" for f in filenames)
+        query += f" and ({name_filter})"
+
+    results = service.files().list(
+        q=query, spaces="drive", fields="files(id, name, size)", pageSize=100
+    ).execute()
+    items = results.get("files", [])
+
+    if not items:
+        log.warning("No matching files found on Drive in yt-clips/")
+        return []
+
+    downloaded = []
+    for item in items:
+        file_id = item["id"]
+        file_name = item["name"]
+        file_size = int(item.get("size", 0))
+        local_path = dest / file_name
+
+        if local_path.exists() and local_path.stat().st_size == file_size:
+            log.info("⏩ %s already exists (%.1f MB), skipping", file_name, file_size / 1e6)
+            downloaded.append(local_path)
+            continue
+
+        log.info("📥 Downloading %s (%.1f MB)...", file_name, file_size / 1e6)
+        request = service.files().get_media(fileId=file_id)
+
+        from googleapiclient.http import MediaIoBaseDownload
+        import io
+
+        with open(local_path, "wb") as f:
+            downloader = MediaIoBaseDownload(f, request)
+            done = False
+            while not done:
+                status, done = downloader.next_chunk()
+                if status:
+                    pct = int(status.progress() * 100)
+                    if pct % 25 == 0:
+                        log.info("   %s: %d%%", file_name, pct)
+
+        log.info("✅ Downloaded %s (%.1f MB)", file_name, local_path.stat().st_size / 1e6)
+        downloaded.append(local_path)
+
+    return downloaded
+
+
 # ─── CLI entry-point ──────────────────────────────────────────────────────────
 
 def main() -> None:
