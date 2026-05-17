@@ -42,6 +42,10 @@ def _is_colab() -> bool:
     return bool(os.environ.get("COLAB_GPU") or Path("/content").exists())
 
 
+def _is_kaggle() -> bool:
+    return bool(os.environ.get("KAGGLE_KERNEL_RUN_TYPE") or Path("/kaggle").exists())
+
+
 def _compact_stderr(stderr: str, max_lines: int = 12) -> str:
     lines = [line.strip() for line in stderr.splitlines() if line.strip()]
     return "\n".join(lines[-max_lines:])
@@ -114,6 +118,12 @@ def _extractor_args(client: str, dl_cfg: dict) -> list[str]:
 
 
 def _base_yt_dlp_cmd(dl_cfg: dict, template: str) -> list[str]:
+    # Kaggle/datacenter IPs get blocked by aggressive download settings
+    kaggle = _is_kaggle()
+    concurrent = 4 if kaggle else dl_cfg.get("concurrent_fragments", 8)
+    sleep_req = 2 if kaggle else dl_cfg.get("sleep_requests", 0)
+    use_aria2c = False if kaggle else dl_cfg.get("use_aria2c", False)
+
     cmd = [
         "yt-dlp",
         "--format", dl_cfg.get("format", "bv*+ba/b"),
@@ -126,13 +136,16 @@ def _base_yt_dlp_cmd(dl_cfg: dict, template: str) -> list[str]:
         "--no-warnings",
         "--retries", str(dl_cfg.get("retries", 5)),
         "--fragment-retries", str(dl_cfg.get("fragment_retries", 5)),
-        "--concurrent-fragments", str(dl_cfg.get("concurrent_fragments", 8)),
+        "--concurrent-fragments", str(concurrent),
         "--retry-sleep", str(dl_cfg.get("retry_sleep", "fragment:exp=1:20")),
-        "--sleep-requests", str(dl_cfg.get("sleep_requests", 0)),
+        "--sleep-requests", str(sleep_req),
     ]
 
+    if kaggle:
+        log.info("Kaggle detected — using gentle download settings (4 fragments, 2s sleep, no aria2c)")
+
     # aria2c downloader (2-3x faster on Colab gigabit)
-    if dl_cfg.get("use_aria2c", False):
+    if use_aria2c:
         aria2c_path = shutil.which("aria2c")
         if aria2c_path:
             try:
