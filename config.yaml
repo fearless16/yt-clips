@@ -43,7 +43,7 @@ highlight:
   min_duration: 10
   max_duration: 29                      # User requested less than 30s
   # Merge nearby highlights that are closer than this (seconds)
-  merge_gap: 5
+  merge_gap: 8
   # How many highlights to extract at most
   max_clips: 10
   # Words-per-minute threshold for "fast speech" detection
@@ -105,18 +105,6 @@ export:
   encoder_preset: "medium"              # Only used by libx264; videotoolbox ignores this
   # Crop smoothing factor (0–1); lower = smoother but more lag
   crop_smooth_factor: 0.2
-  # ─── Cloud Enhancement (Replicate API) ──────────────────────────────────────
-  # Alternative to local GPU — works on any machine, ~$0.18/clip
-  # Set REPLICATE_API_TOKEN env var or add to .env
-  cloud_enhancement:
-    enabled: false                      # Enable Replicate API for enhancement
-    reframe: true                       # AI face-aware 16:9 → 9:16 reframe
-    upscale: true                       # Cloud upscaling (2x)
-    reframe_model: "luma/reframe-video"
-    upscale_model: "lucataco/real-esrgan-video"
-    upscale_scale: 2                    # 2x or 4x
-    # Falls back to local GPU (super_res.py) if cloud fails
-    fallback_to_local: true
   # ─── Cinematic Transitions ─────────────────────────────────────────────────
   transitions:
     fade_in_duration: 0.5               # seconds — smooth fade from black on open

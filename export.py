@@ -933,33 +933,6 @@ def export_clip(
 
         dur = max(time.perf_counter() - t_start, 0.001)
         log.info("✅ [%s] Done in %.1fs (%.1fx real-time)", clip_id, dur, output_duration / dur)
-
-        # ── Cloud enhancement (Replicate API) ──────────────────────────────
-        cloud_cfg = cfg.get("export", {}).get("cloud_enhancement", {})
-        if cloud_cfg.get("enabled", False) and Path(output_path).exists():
-            try:
-                from utils.replicate_enhance import ReplicateEnhancer
-                enhancer = ReplicateEnhancer()
-                if enhancer.available:
-                    enhanced_path = output_path.replace(".mp4", "_enhanced.mp4")
-                    result = enhancer.enhance_clip(
-                        output_path, enhanced_path,
-                        do_reframe=cloud_cfg.get("reframe", True),
-                        do_upscale=cloud_cfg.get("upscale", True),
-                        reframe_model=cloud_cfg.get("reframe_model", "luma/reframe-video"),
-                        upscale_model=cloud_cfg.get("upscale_model", "lucataco/real-esrgan-video"),
-                        upscale_scale=cloud_cfg.get("upscale_scale", 2),
-                    )
-                    if result and Path(result).exists():
-                        shutil.move(result, output_path)
-                        log.info("[%s] Cloud enhanced: %s", clip_id, output_path)
-                    elif cloud_cfg.get("fallback_to_local", True):
-                        log.info("[%s] Cloud enhancement failed — falling back to local GPU", clip_id)
-                else:
-                    log.debug("[%s] Replicate not available — skipping cloud enhancement", clip_id)
-            except Exception as e:
-                log.warning("[%s] Cloud enhancement error: %s", clip_id, e)
-
         return output_path
 
     except Exception as e:
