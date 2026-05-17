@@ -100,8 +100,8 @@ export:
   super_resolution: true                 # AI 4x upscale via Real-ESRGAN (GPU only; auto-skips on CPU)
   ffmpeg_timeout_seconds: 900           # Prevent hung FFmpeg exports
   min_output_bytes: 100000              # Reject tiny/corrupt exports
-  # Hardware encoder — h264_videotoolbox is best for Mac
-  encoder: "h264_videotoolbox"          # h264_videotoolbox | h264_nvenc | libx264
+  # Hardware encoder — auto-detected in export.py; config is fallback
+  encoder: "libx264"                      # h264_videotoolbox (Mac) | h264_nvenc (NVIDIA) | libx264 (CPU)
   encoder_preset: "medium"              # Only used by libx264; videotoolbox ignores this
   # Crop smoothing factor (0–1); lower = smoother but more lag
   crop_smooth_factor: 0.2

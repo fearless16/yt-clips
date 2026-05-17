@@ -1095,7 +1095,11 @@ def export_all(
     # ── Parallel Export ─────────────────────────────────────────────────────────
     # Use thread pool for I/O-bound FFmpeg processes
     encoder = _get_best_encoder()
-    max_workers = max(1, min(2 if encoder == "h264_nvenc" else 4, len(filtered_items)))
+    super_res = cfg.get("export", {}).get("super_resolution", False)
+    if super_res:
+        max_workers = 1  # super-res uses ~6GB VRAM per worker — limit to prevent OOM
+    else:
+        max_workers = max(1, min(2 if encoder == "h264_nvenc" else 4, len(filtered_items)))
     log.info(f"🚀 Starting parallel export with {max_workers} workers...")
 
     exported_clips = []

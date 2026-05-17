@@ -99,26 +99,27 @@ class FaceReference:
             return 0
             
         count = 0
-        for img_path in self.dataset_dir.glob("*.{jpg,jpeg,png,webp}"):
-            try:
-                img = cv2.imread(str(img_path))
-                if img is None:
-                    continue
-                    
-                face = self._extract_face(img)
-                if face is None:
-                    continue
-                    
-                embedding = self._get_embedding(face)
-                if embedding is not None:
-                    self.dataset_embeddings.append({
-                        "path": str(img_path),
-                        "embedding": embedding,
-                        "face": face,
-                    })
-                    count += 1
-            except Exception as e:
-                log.debug("Failed to process %s: %s", img_path, e)
+        for ext in ("jpg", "jpeg", "png", "webp"):
+            for img_path in self.dataset_dir.glob(f"*.{ext}"):
+                try:
+                    img = cv2.imread(str(img_path))
+                    if img is None:
+                        continue
+                        
+                    face = self._extract_face(img)
+                    if face is None:
+                        continue
+                        
+                    embedding = self._get_embedding(face)
+                    if embedding is not None:
+                        self.dataset_embeddings.append({
+                            "path": str(img_path),
+                            "embedding": embedding,
+                            "face": face,
+                        })
+                        count += 1
+                except Exception as e:
+                    log.debug("Failed to process %s: %s", img_path, e)
                 
         log.info("Loaded %d face embeddings from dataset", count)
         return count

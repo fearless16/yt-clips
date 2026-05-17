@@ -335,7 +335,7 @@ class SuperResEnhancer:
                 if sr_img.shape[0] != target_h or sr_img.shape[1] != target_w:
                     sr_img = cv2.resize(sr_img, (target_w, target_h),
                                         interpolation=cv2.INTER_LANCZOS4)
-                cv2.imwrite(str(frames_dir / f"{frame_idx:06d}.png"), sr_img)
+                cv2.imwrite(str(frames_dir / f"{frame_idx:06d}.jpg"), sr_img, [cv2.IMWRITE_JPEG_QUALITY, 95])
                 frame_idx += 1
 
                 if frame_idx % 10 == 0 or frame_idx == 1:
@@ -354,7 +354,7 @@ class SuperResEnhancer:
             cmd_encode = [
                 "ffmpeg", "-y",
                 "-framerate", str(fps),
-                "-i", str(frames_dir / "%06d.png"),
+                "-i", str(frames_dir / "%06d.jpg"),
                 "-i", input_path,
                 "-map", "0:v",
                 "-map", "1:a?",
@@ -405,7 +405,7 @@ def upscale_frames_in_dir(
         return frames_dir
 
     frames_path = Path(frames_dir)
-    frame_files = sorted(frames_path.glob("*.png"))
+    frame_files = sorted(frames_path.glob("*.jpg"))
     if not frame_files:
         return frames_dir
 

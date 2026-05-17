@@ -14,6 +14,7 @@ import time
 import tempfile
 from pathlib import Path
 from typing import Optional, Tuple, List
+import cv2
 import numpy as np
 
 from utils.config import load_config
@@ -254,7 +255,7 @@ class FaceRestorer:
                 restored_frame = self._restore_frame(frame)
                 
                 # Save frame
-                cv2.imwrite(str(frames_dir / f"{frame_idx:06d}.png"), restored_frame)
+                cv2.imwrite(str(frames_dir / f"{frame_idx:06d}.jpg"), restored_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
                 frame_idx += 1
                 
                 if frame_idx % 10 == 0 or frame_idx == 1:
@@ -273,7 +274,7 @@ class FaceRestorer:
             cmd_encode = [
                 "ffmpeg", "-y",
                 "-framerate", str(fps),
-                "-i", str(frames_dir / "%06d.png"),
+                "-i", str(frames_dir / "%06d.jpg"),
                 "-i", input_path,
                 "-map", "0:v",
                 "-map", "1:a?",

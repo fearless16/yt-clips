@@ -17,6 +17,8 @@ def _find_best_font() -> str:
         "/System/Library/Fonts/Supplemental/Impact.ttf",          # macOS
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", # Linux/Colab
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",   # Linux
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",    # Kaggle
+        "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",          # Kaggle
         "C:\\Windows\\Fonts\\impact.ttf",                         # Windows
         "impact.ttf",                                             # Local fallback
     ]
