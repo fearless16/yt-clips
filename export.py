@@ -12,7 +12,6 @@ from typing import Dict, List, Optional, Tuple
 from utils.config import load_config
 from utils.logger import get_logger
 from frame_analyzer import analyze_clip as cheap_analyze_clip
-from utils.subtitles import generate_ass_subtitles
 
 cfg = load_config()
 log = get_logger("export", cfg["logging"]["log_file"], cfg["logging"]["level"])
@@ -473,11 +472,9 @@ def _build_enhance_stack(
             filter_base = f"{enhance}"
         else:
             filter_base = (
-                f"{enhance},split=2[bg_raw][fg_raw];"
-                f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=0.0:saturation=1.1[bg];"
-                f"[fg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
-                f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
+                f"{enhance},"
+                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h}"
             )
 
     elif guest_cam_off:
@@ -522,25 +519,22 @@ def _build_enhance_stack(
                     f"[bg][fg]overlay=0:0"
                 )
             else:
+                # Fill-crop: scale up to cover frame, then crop to exact size
                 filter_base = (
-                    f"{enhance},split=2[bg_raw][fg_raw];"
-                    f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                    f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=0.0:saturation=1.1[bg];"
-                    f"[fg_raw]crop={cw}:{ch}:{cx}:{cy},"
-                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
-                    f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
+                    f"{enhance},"
+                    f"crop={cw}:{ch}:{cx}:{cy},"
+                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{target_h}"
                 )
         except (TypeError, ValueError):
             if native_res:
                 filter_base = f"{enhance},crop='trunc(ih*9/16)':ih"
             else:
                 filter_base = (
-                    f"{enhance},split=2[bg_raw][fg_raw];"
-                    f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                    f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=0.0:saturation=1.1[bg];"
-                    f"[fg_raw]crop='trunc(ih*9/16)':ih,"
-                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
-                    f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
+                    f"{enhance},"
+                    f"crop='trunc(ih*9/16)':ih,"
+                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{target_h}"
                 )
 
     else:
@@ -587,12 +581,10 @@ def _build_enhance_stack(
                 )
             else:
                 filter_base = (
-                    f"{enhance},split=2[bg_raw][fg_raw];"
-                    f"[bg_raw]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                    f"crop={target_w}:{target_h},gblur=sigma=32,eq=brightness=0.0:saturation=1.1[bg];"
-                    f"[fg_raw]crop='trunc(ih*9/16)':ih,"
-                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
-                    f"[bg][fg]overlay=(W-w)/2:(H-h)/4"
+                    f"{enhance},"
+                    f"crop='trunc(ih*9/16)':ih,"
+                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                    f"crop={target_w}:{target_h}"
                 )
 
     # ── Lighting fix ──────────────────────────────────────────────────────────
@@ -624,10 +616,13 @@ def _build_enhance_stack(
     scale_format = "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"
 
     if logo_enabled:
+        # Circular mask: scale to 200px, apply circular alpha, position bottom-right
+        # Bottom-right: 30px from right, 280px from bottom (above YouTube UI buttons)
         return (
             f"[v_src]{filter_base}[v_tmp];"
-            f"[1:v]scale=120:-1[logo];"
-            f"[v_tmp][logo]overlay=W-w-40:40,{scale_format}[v_out]"
+            f"[1:v]scale=200:-1,format=rgba,"
+            f"geq=lum='p(X,Y)':a='if(lt(pow(X-W/2,2)+pow(Y-H/2,2),pow(W/2,2)),255,0)'[logo];"
+            f"[v_tmp][logo]overlay=W-w-30:H-h-280,{scale_format}[v_out]"
         )
     else:
         if is_graph:
@@ -841,9 +836,6 @@ def export_clip(
     )
 
     output_file = Path(output_path)
-    ass_path = str(output_file.with_suffix('.ass'))
-    if transcript_segments:
-        generate_ass_subtitles(transcript_segments, ass_path, start, end)
 
     v_filter = _build_enhance_stack(analysis, source_fps=info["fps"],
                                     use_logo=use_logo, output_duration=output_duration)
@@ -948,6 +940,42 @@ def export_clip(
         return None
 
 
+def _validate_av_sync(video_path: str, clip_id: str, tolerance: float = 0.5) -> bool:
+    """Validate audio-video duration sync. Returns True if OK."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ]
+        v_result = subprocess.run(cmd, capture_output=True, text=True)
+        v_dur = float(v_result.stdout.strip()) if v_result.stdout.strip() else 0.0
+
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ]
+        a_result = subprocess.run(cmd, capture_output=True, text=True)
+        a_dur = float(a_result.stdout.strip()) if a_result.stdout.strip() else 0.0
+
+        if v_dur > 0 and a_dur > 0:
+            diff = abs(v_dur - a_dur)
+            if diff > tolerance:
+                log.warning("[%s] A/V sync issue: video=%.2fs audio=%.2fs (diff=%.2fs > %.2fs tolerance)",
+                           clip_id, v_dur, a_dur, diff, tolerance)
+                return False
+            log.debug("[%s] A/V sync OK: diff=%.3fs", clip_id, diff)
+        return True
+    except Exception as e:
+        log.debug("[%s] A/V validation failed: %s", clip_id, e)
+        return True  # Don't block on validation failure
+
+
 def _parse_time_to_seconds(time_val) -> float:
     if isinstance(time_val, (int, float)):
         return float(time_val)
@@ -1034,6 +1062,7 @@ def export_all(
     items.sort(key=lambda x: x[1])
 
     # Pre-filter: run analysis upfront to reject bad clips early
+    # Degraded mode: if face detection fails, try center crop instead of dropping
     filtered_items = []
     for clip_id, start, end, info in items:
         analysis = analyze_clip(video_path, start, end,
@@ -1041,11 +1070,17 @@ def export_all(
         strategy = analysis.get("export_strategy", {})
         if strategy.get("should_drop", False):
             layout = analysis.get("layout", {}).get("layout_type", "unknown")
-            log.info("[%s] PRE-FILTERED (layout=%s)", clip_id, layout)
-            continue
+            # Degraded mode: override to center crop instead of dropping
+            log.info("[%s] PRE-FILTER layout=%s — trying degraded center-crop mode", clip_id, layout)
+            analysis["export_strategy"]["should_drop"] = False
+            analysis["export_strategy"]["layout_mode"] = "solo"
+            analysis["layout"]["layout_type"] = "solo"
+            analysis["layout"]["face_in_frame"] = True
+            analysis["layout"]["face_cx"] = None  # Force center detection
+            analysis["layout"]["face_cy"] = None
         filtered_items.append((clip_id, start, end, info, analysis))
 
-    log.info("Pre-filter: %d/%d clips passed", len(filtered_items), len(items))
+    log.info("Pre-filter: %d/%d clips passed (degraded mode for dropped)", len(filtered_items), len(items))
 
     if not filtered_items:
         log.warning("No clips passed pre-filter — nothing to export")
@@ -1066,6 +1101,9 @@ def export_all(
         out_file = out_dir / f"{clip_id}.mp4"
         path = export_clip(video_path, start, end, str(out_file),
                            clip_id, transcript_segments=transcript_segments, analysis=analysis)
+        # Post-export A/V sync validation
+        if path and Path(path).exists():
+            _validate_av_sync(path, clip_id)
         return (idx, total, clip_id, path, info)
 
     # Run exports in parallel
