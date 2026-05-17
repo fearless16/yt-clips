@@ -48,6 +48,7 @@ cookies.txt
 *.png
 !expectation.png
 !channel_logo.png
+!photos/*.png
 benchmark_llms.py
 .push_cache.json
 kaggle_url.txt
