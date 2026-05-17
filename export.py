@@ -704,6 +704,7 @@ def export_clip(
     transcript_segments: Optional[List[Dict]] = None,
     analysis: Optional[Dict] = None,
     device: str = None,
+    sr_instance=None,
 ) -> Optional[str]:
     t_start = time.perf_counter()
 
@@ -796,8 +797,10 @@ def export_clip(
     # ── Super-Resolution Path ───────────────────────────────────────────────
     if super_res_enabled and not premium_enabled:
         try:
-            from utils.super_res import SuperResEnhancer
-            sr = SuperResEnhancer(scale=4, device=device)
+            sr = sr_instance
+            if sr is None:
+                from utils.super_res import SuperResEnhancer
+                sr = SuperResEnhancer(scale=4, device=device)
             if sr.available:
                 log.info("[%s] Super-res mode: native-res export → 4x upscale", clip_id)
                 v_filter_native = _build_enhance_stack(
@@ -1105,6 +1108,28 @@ def export_all(
         max_workers = max(1, min(2 if encoder == "h264_nvenc" else 4, len(filtered_items)))
     log.info(f"🚀 Starting parallel export with {max_workers} workers (super_res={super_res})...")
 
+    # Pre-initialize SuperResEnhancer per GPU BEFORE spawning threads.
+    # This prevents concurrent GFPGAN model loading which causes heap corruption.
+    _sr_instances = {}
+    if super_res and not premium_enabled:
+        from utils.super_res import SuperResEnhancer
+        import torch
+        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        for g in range(gpu_count):
+            dev = f"cuda:{g}" if gpu_count > 1 else "cuda:0"
+            _sr_instances[dev] = SuperResEnhancer(scale=4, device=dev)
+            log.info("Pre-initialized SuperResEnhancer on %s", dev)
+        # Warm up: process a dummy frame on each device to avoid first-frame stall
+        for dev, sr in _sr_instances.items():
+            if sr.available and sr.upsampler is not None:
+                try:
+                    import numpy as np
+                    dummy = np.zeros((64, 64, 3), dtype=np.uint8)
+                    sr.upscale_frame(dummy)
+                    log.info("Warm-up complete for %s", dev)
+                except Exception as e:
+                    log.debug("Warm-up skip for %s: %s", dev, e)
+
     exported_clips = []
     seo_queue: List[Dict] = []   # queued after all encoding is done
 
@@ -1114,13 +1139,15 @@ def export_all(
         out_file = out_dir / f"{clip_id}.mp4"
         # Assign GPU round-robin for super-res workers
         device = None
+        sr_inst = None
         if super_res:
             import torch
             gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
             device = f"cuda:{(idx - 1) % gpu_count}" if gpu_count > 1 else "cuda:0"
+            sr_inst = _sr_instances.get(device)
         path = export_clip(video_path, start, end, str(out_file),
                            clip_id, transcript_segments=transcript_segments, analysis=analysis,
-                           device=device)
+                           device=device, sr_instance=sr_inst)
         # Post-export A/V sync validation
         if path and Path(path).exists():
             _validate_av_sync(path, clip_id)
