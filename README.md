@@ -5,11 +5,14 @@ Convert 16:9 live streams → studio-grade 9:16 shorts automatically. Two modes:
 ## Quick Start
 
 ```bash
-# Cheap (local, CPU-based)
+# Local (Mac/PC — CPU only, no GPU)
 ./automate.sh "https://youtu.be/VIDEO_ID"   # select option 1
 
-# Premium (Colab T4, GPU) — one-time Colab setup required
+# Remote GPU (Kaggle 2x T4 — recommended)
+# 1. Open Kaggle notebook, run all cells
+# 2. From Mac:
 ./automate.sh "https://youtu.be/VIDEO_ID"   # select option 2
+python kaggle_monitor.py --monitor            # watch progress
 ```
 
 ## Features
@@ -59,13 +62,14 @@ yt-clips/
 ├── thumbnail.py         # Thumbnail generation
 ├── upload.py            # YouTube upload
 ├── sync.py              # Google Drive sync
-├── bridge.py            # Colab bridge job pusher
+├── bridge.py            # Colab/Kaggle bridge job pusher
 ├── push_code.py         # Code sync to Drive
 ├── channel_watcher.py   # Auto-pilot: watch channel for new VODs
 ├── scheduler.py         # Upload scheduling
 ├── config.yaml          # All configuration
-├── colab_setup.py       # Colab GPU worker setup (one-shot)
-├── watcher.py           # Colab job listener (tunnel + file poll)
+├── Kaggle.ipynb         # Kaggle GPU worker notebook (2x T4)
+├── kaggle_monitor.py    # Mac-side progress monitor
+├── watcher.py           # Job listener (tunnel + file poll)
 ├── tests/               # 219+ tests
 └── utils/
     ├── logger.py         # Rich + JSON structured logging
@@ -81,25 +85,24 @@ Key config toggles in `config.yaml`:
 
 ```yaml
 premium:
-  enabled: false              # Set true on Colab T4
-  face_enhancement: true      # GFPGAN
-  frame_interpolation: true   # RIFE 30→60fps
+  enabled: false              # Set true for YOLO+ByteTrack
+  face_enhancement: true      # GFPGAN (auto on Kaggle)
+  frame_interpolation: true   # FILM 30→60fps
 
 download:
   format: "bv*+ba/b"         # Best available (no cap)
-  use_aria2c: true           # 2-3x faster downloads (install aria2c)
-  concurrent_fragments: 8    # Max connections
+  use_aria2c: true           # 2-3x faster (local only; disabled on Kaggle)
 
 transcription:
   language: "hi"             # Hinglish/Hindi detection
-  model: "large-v3"          # base | small | medium | large-v3 (larger = more accurate)
-  device: "cuda"             # GPU on Colab, CPU on local
+  model: "small"             # tiny | base | small | medium | large-v3
+  device: "cuda"             # GPU on Kaggle, CPU on local
+  compute_type: "float16"    # GPU optimized
 
 export:
   fps: 60                    # Target FPS
-  enable_variable_speed: true
-  video_bitrate: "25M"
-  encoder: "h264_nvenc"      # h264_videotoolbox on Mac
+  super_resolution: true     # RealESRGAN 4x (auto on Kaggle)
+  encoder: "libx264"         # auto-detects h264_nvenc on Kaggle
 ```
 
 ## Pipeline Flow
@@ -114,6 +117,43 @@ URL → Download (yt-dlp + aria2c)
     → Upload to YouTube (optional)
 ```
 
+## Kaggle Workflow
+
+1. Open `Kaggle.ipynb` on [kaggle.com](https://kaggle.com)
+2. Set **Settings → Accelerator → GPU × 2 (T4)**
+3. Run all cells → Worker prints tunnel URL
+4. From Mac, send job:
+   ```bash
+   ./automate.sh "https://youtu.be/VIDEO_ID"
+   ```
+5. Monitor progress:
+   ```bash
+   python kaggle_monitor.py                # quick status
+   python kaggle_monitor.py --monitor      # live tail
+   python kaggle_monitor.py --files        # list Kaggle files
+   python kaggle_monitor.py --log          # tail watcher log
+   python kaggle_monitor.py --exec "ls"    # run command on Kaggle
+   ```
+
+### Kaggle Remote Control
+The watcher exposes HTTP endpoints via tunnel:
+- `GET /health` — pipeline status
+- `GET /files` — list files in working dir
+- `GET /download/<path>` — download a file
+- `POST /exec {"cmd": "..."}` — run shell command
+- `POST /write {"path": "...", "content": "..."}` — write file
+- `POST /job {"url": "...", "flags": [...]}` — submit pipeline job
+
+### Pipeline Flags
+| Flag | What |
+|---|---|
+| `--skip-download` | Use existing `input/video.mp4` |
+| `--skip-transcribe` | Use existing transcript |
+| `--sync-from-drive` | Pull video+transcript from Google Drive |
+| `--sync` | Auto-sync shorts to Google Drive |
+| `--upload` | Auto-upload shorts to YouTube |
+| `--schedule` | Auto-schedule uploads (2-hour intervals) |
+
 ## Tests
 
 ```bash
@@ -127,7 +167,7 @@ pytest tests/ --timeout=120       # With 2-min timeout per test
 | File | What |
 |---|---|
 | `ARCHITECTURE.md` | Pipeline design, GPU/CPU split, config reference |
-| `Colab.md` | Colab setup guide |
-| `colab_setup.py` | Colab GPU worker setup (mounts Drive, installs deps, starts tunnel) |
-| `watcher.py` | Colab job listener — accepts jobs via HTTP tunnel or file poll |
-```
+| `Kaggle.ipynb` | Kaggle GPU worker notebook (2x T4) |
+| `kaggle_monitor.py` | Mac-side progress monitor for Kaggle |
+| `watcher.py` | Job listener — accepts jobs via HTTP tunnel |
+| `bridge.py` | Pushes jobs from Mac to Kaggle via tunnel |
