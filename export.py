@@ -446,13 +446,22 @@ def _build_enhance_stack(
         # Guest has video: stack both halves vertically into 9:16
         # Left half → top panel, right half → bottom panel
         log.debug("GUEST CAM ON → vertical stack (both panels)")
-        half_h = target_h // 2  # 960px each
-        filter_base = (
-            f"{enhance},split=2[left_raw][right_raw];"
-            f"[left_raw]crop=iw/2:ih:0:0,scale={target_w}:{half_h}:flags=lanczos[top];"
-            f"[right_raw]crop=iw/2:ih:iw/2:0,scale={target_w}:{half_h}:flags=lanczos[bot];"
-            f"[top][bot]vstack=inputs=2"
-        )
+        if native_res:
+            # Split + crop both halves, stack at native resolution
+            filter_base = (
+                f"{enhance},split=2[left_raw][right_raw];"
+                f"[left_raw]crop=iw/2:ih:0:0[top];"
+                f"[right_raw]crop=iw/2:ih:iw/2:0[bot];"
+                f"[top][bot]vstack=inputs=2"
+            )
+        else:
+            half_h = target_h // 2  # 960px each
+            filter_base = (
+                f"{enhance},split=2[left_raw][right_raw];"
+                f"[left_raw]crop=iw/2:ih:0:0,scale={target_w}:{half_h}:flags=lanczos[top];"
+                f"[right_raw]crop=iw/2:ih:iw/2:0,scale={target_w}:{half_h}:flags=lanczos[bot];"
+                f"[top][bot]vstack=inputs=2"
+            )
 
     elif is_screen_share:
         # Screen share → keep the full 16:9 source visible inside a 9:16 Short.
@@ -544,8 +553,14 @@ def _build_enhance_stack(
             chat_w = chat_exclusion.get("chat_exclude_width", 0)
 
             if chat_side == "right":
-                # Crop from left, excluding right chat area
-                # Calculate: crop from x=0, width = full_width - chat_width
+                crop_filter = f"crop=iw-{chat_w}:ih:0:0"
+            else:
+                crop_filter = f"crop=iw-{chat_w}:ih:{chat_w}:0"
+
+            if native_res:
+                # Crop only — super-res handles upscaling
+                filter_base = f"{enhance},{crop_filter}"
+            elif chat_side == "right":
                 filter_base = (
                     f"{enhance},"
                     f"crop=iw-{chat_w}:ih:0:0,"
@@ -554,7 +569,6 @@ def _build_enhance_stack(
                 )
                 log.debug("Chat exclusion: cropped left side to exclude right chat (%dpx)", chat_w)
             else:
-                # Crop from right, excluding left chat area
                 filter_base = (
                     f"{enhance},"
                     f"crop=iw-{chat_w}:ih:{chat_w}:0,"
@@ -667,12 +681,15 @@ def _export_native_res(
     cmd.append(temp_path)
 
     log.info("[%s] Exporting native-res for super-res...", clip_id)
+    t0 = time.perf_counter()
     success, error = _run_ffmpeg_with_retry(cmd, temp_path, clip_id,
                                             expected_duration=clip_duration / speed)
     if not success:
         log.error("[%s] Native-res export failed: %s", clip_id, error)
         shutil.rmtree(temp_dir, ignore_errors=True)
         return None
+    log.info("[%s] Native-res export done in %.1fs → %s", clip_id,
+             time.perf_counter() - t0, Path(temp_path).name)
 
     return temp_path
 
@@ -783,7 +800,7 @@ def export_clip(
                 log.info("[%s] Super-res mode: native-res export → 4x upscale", clip_id)
                 v_filter_native = _build_enhance_stack(
                     analysis, source_fps=info["fps"],
-                    use_logo=use_logo, output_duration=output_duration,
+                    use_logo=False, output_duration=output_duration,
                     native_res=True,
                 )
                 native_path = _export_native_res(
@@ -1036,7 +1053,8 @@ def export_all(
 
     # ── Parallel Export ─────────────────────────────────────────────────────────
     # Use thread pool for I/O-bound FFmpeg processes
-    max_workers = max(1, min(4, len(filtered_items)))  # Max 4 parallel exports, min 1
+    encoder = _get_best_encoder()
+    max_workers = max(1, min(2 if encoder == "h264_nvenc" else 4, len(filtered_items)))
     log.info(f"🚀 Starting parallel export with {max_workers} workers...")
 
     exported_clips = []

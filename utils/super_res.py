@@ -39,6 +39,7 @@ except ImportError:
     pass
 
 try:
+    import utils.torchvision_compat  # noqa: F401 — must precede realesrgan
     from realesrgan import RealESRGANer
     from basicsr.archs.rrdbnet_arch import RRDBNet
     HAS_REALESRGAN = True
@@ -68,16 +69,25 @@ class SuperResEnhancer:
             log.warning("Super-res unavailable: missing %s", ", ".join(missing))
             return
 
+        WEIGHT_URLS = {
+            "RealESRGAN_x4plus": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+            "RealESRGAN_x4plus_anime_6B": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
+        }
+        weights_dir = Path(__file__).parent.parent / "weights"
+        weights_dir.mkdir(exist_ok=True)
+        local_path = weights_dir / f"{model_name}.pth"
+        model_path = str(local_path) if local_path.exists() else WEIGHT_URLS.get(model_name, "")
+
         try:
             self.upsampler = RealESRGANer(
                 scale=scale,
-                model_path=None,  # auto-download
+                model_path=model_path,
                 model=self._build_model(),
                 tile=512,
                 tile_pad=10,
                 pre_pad=0,
                 half=True,
-                gpu_id=0,
+                device=None,
             )
             self.available = True
             log.info("Real-ESRGAN %dx loaded (%s, GPU)", scale, model_name)
@@ -160,20 +170,29 @@ class SuperResEnhancer:
             # 2. Upscale each frame
             upscaled_dir = temp_dir / "upscaled"
             upscaled_dir.mkdir()
+            import time
+            t_sr = time.perf_counter()
 
             for i, fp in enumerate(frame_files):
                 img = cv2.imread(str(fp))
                 if img is None:
                     continue
+                t_frame = time.perf_counter()
                 sr_img = self.upscale_frame(img)
+                frame_ms = (time.perf_counter() - t_frame) * 1000
                 # Downscale to target resolution
                 if sr_img.shape[0] != target_h or sr_img.shape[1] != target_w:
                     sr_img = cv2.resize(sr_img, (target_w, target_h),
                                         interpolation=cv2.INTER_LANCZOS4)
                 cv2.imwrite(str(upscaled_dir / fp.name), sr_img)
 
-                if (i + 1) % 10 == 0 or i == 0:
-                    log.info("  Super-res: %d/%d frames", i + 1, len(frame_files))
+                if (i + 1) % 5 == 0 or i == 0:
+                    elapsed = time.perf_counter() - t_sr
+                    eta = (elapsed / (i + 1)) * (len(frame_files) - i - 1)
+                    log.info("  Super-res: %d/%d frames (%.0fms/frame, ETA %.0fs)",
+                             i + 1, len(frame_files), frame_ms, eta)
+
+            log.info("Super-res upscale done in %.1fs", time.perf_counter() - t_sr)
 
             # 3. Get audio from original
             audio_tmp = temp_dir / "audio.aac"
@@ -198,12 +217,17 @@ class SuperResEnhancer:
                 f'"{output_path}"'
             )
 
+            log.info("Super-res: re-encoding %d frames → %s", len(frame_files), Path(output_path).name)
+            t_enc = time.perf_counter()
             r = subprocess.run(cmd_encode, shell=True, capture_output=True, text=True)
             if r.returncode != 0:
                 log.error("Super-res encode failed: %s", r.stderr[-200:])
                 return False
 
-            log.info("✅ Super-res done: %s", output_path)
+            t_total = time.perf_counter() - t_sr
+            t_encode = time.perf_counter() - t_enc
+            log.info("✅ Super-res done in %.1fs (upscale=%.1fs, encode=%.1fs): %s",
+                     t_total, t_total - t_encode, t_encode, output_path)
             return True
 
         except Exception as e:
