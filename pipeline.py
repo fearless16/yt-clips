@@ -61,6 +61,7 @@ def run(
     auto_schedule: bool = False,
     skip_tests: bool = False,
     sample_minutes: Optional[int] = None,
+    sync_from_drive: bool = False,
 ) -> None:
     cfg = load_config()
     if not skip_tests and not cfg.get("testing", {}).get("enabled", False):
@@ -75,6 +76,22 @@ def run(
 
     # ── Phase 1: Download ──────────────────────────────────────────────────────
     _banner("PHASE 1 — DOWNLOAD")
+    if sync_from_drive:
+        log.info("Pulling video + transcript from Google Drive...")
+        from sync import download_from_drive
+        # Download video to input/
+        download_from_drive(
+            filenames=["video.mp4"],
+            dest_dir=paths["input"],
+        )
+        # Download transcript to transcripts/
+        download_from_drive(
+            filenames=["video.json"],
+            dest_dir=paths["transcripts"],
+        )
+        skip_download = True
+        skip_transcribe = True
+        log.info("Drive sync complete — files ready.")
     if skip_download:
         log.info("Skipping download (--skip-download). Using: %s", video_path)
         if not Path(video_path).exists():
@@ -285,6 +302,7 @@ Examples:
     parser.add_argument("-schedule", "--schedule",        action="store_true", help="Auto-schedule uploads (2-hour intervals)")
     parser.add_argument("-skip-tests", "--skip-tests",    action="store_true", help="Skip pre-generation pytest guard")
     parser.add_argument("--sample-minutes", type=int, default=None, help="Download only a random N-minute sample of the video")
+    parser.add_argument("--sync-from-drive", action="store_true", help="Pull video + transcript from Google Drive instead of downloading")
     args = parser.parse_args()
 
     run(
@@ -299,6 +317,7 @@ Examples:
         auto_schedule=args.schedule,
         skip_tests=args.skip_tests,
         sample_minutes=args.sample_minutes,
+        sync_from_drive=args.sync_from_drive,
     )
 
 
