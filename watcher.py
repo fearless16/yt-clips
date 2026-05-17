@@ -96,6 +96,50 @@ class JobHandler(BaseHTTPRequestHandler):
                 self.send_response(400)
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
+        elif parsed.path == "/exec":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            try:
+                req = json.loads(body)
+                cmd = req.get("cmd", "")
+                if not cmd:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Missing cmd"}).encode())
+                    return
+                result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "returncode": result.returncode,
+                }).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
+        elif parsed.path == "/write":
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length)
+            try:
+                req = json.loads(body)
+                file_path = req.get("path", "")
+                content = req.get("content", "")
+                if not file_path:
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Missing path"}).encode())
+                    return
+                Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(file_path).write_text(content, encoding="utf-8")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "written", "path": file_path, "size": len(content)}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
         else:
             self.send_response(404)
             self.end_headers()
