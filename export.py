@@ -593,6 +593,11 @@ def _build_enhance_stack(
         if lf:
             filter_base += f",{lf}"
 
+    # ── Color boost (saturation + vibrance) ───────────────────────────────────
+    # Match expectation.png: saturation mean=133, 40K unique colors
+    # Boost saturation +35% and add slight contrast curve
+    filter_base += ",eq=saturation=1.35:contrast=1.08:brightness=0.03"
+
     # ── Motion interpolation ──────────────────────────────────────────────────
     try:
         target_fps = float(cfg["export"].get("fps", 60))
