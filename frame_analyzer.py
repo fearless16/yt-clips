@@ -65,24 +65,32 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
     # This positions face at ~20% from top of crop, which after fill-crop
     # puts face at ~35-40% from top of final 1080x1920 frame.
 
-    def _apply_top_padding(face_top_y: int, face_height: int):
+    def _apply_top_padding(face_top_y: int, face_height: int, face_width: int = 0):
         """Return (crop_y, crop_h, crop_w) with face-centered positioning.
-        Target: face at ~30-40% from top, ~20% of frame area.
-        Expectation reference: face at 41% from top, 20% of frame area.
-        Source limitation: face position depends on source video framing."""
-        # Headroom above face: 80% of face height (hair + background)
-        headroom = int(face_height * 0.80)
-        crop_y = max(0, face_top_y - headroom)
-        # Body below face: 120% of face height (chest + background)
-        body_below = int(face_height * 1.20)
-        crop_h = face_height + headroom + body_below
+        Target: face at ~20% of output width, face at ~30% from top.
+        Crop is calculated from FACE SIZE, not height, to prevent oversized faces."""
+        # Target: face should be ~25% of output width (1080px) = 270px
+        target_face_w = 270
+        if face_width > 0:
+            # Calculate scale: how much to zoom in
+            scale = target_face_w / face_width
+            # Crop dimensions from source
+            crop_w = int(1080 / scale)  # Source region width
+            crop_h = int(1920 / scale)  # Source region height (9:16)
+        else:
+            # Fallback: use height-based calculation
+            headroom = int(face_height * 0.80)
+            body_below = int(face_height * 1.20)
+            crop_h = face_height + headroom + body_below
+            crop_w = int(crop_h * 9 / 16)
+        
         # Don't exceed frame bounds
-        crop_h = min(crop_h, frame_height - crop_y)
-        crop_w = int(crop_h * 9 / 16)
-        # Ensure width doesn't exceed frame
-        if crop_w > frame_width:
-            crop_w = frame_width
-            crop_h = int(crop_w * 16 / 9)
+        crop_h = min(crop_h, frame_height)
+        crop_w = min(crop_w, frame_width)
+        
+        # Center crop vertically on face
+        crop_y = max(0, min(frame_height - crop_h, face_top_y - crop_h // 3))
+        
         return crop_y, crop_h, crop_w
 
     # ── 1. Dynamic Host Matching (Priority) ──────────────────────────────────
@@ -95,7 +103,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         hx, hy = host_box["x"], host_box["y"]
         hw, hh = host_box["width"], host_box["height"]
         
-        crop_y, crop_h, crop_w = _apply_top_padding(hy, hh)
+        crop_y, crop_h, crop_w = _apply_top_padding(hy, hh, hw)
         crop_x = hx + hw // 2 - crop_w // 2
         crop_x = max(0, min(crop_x, frame_width - crop_w))
         
@@ -148,7 +156,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         return None
 
     x, y, w, h = best_face
-    crop_y, crop_h, crop_w = _apply_top_padding(y, h)
+    crop_y, crop_h, crop_w = _apply_top_padding(y, h, w)
     crop_x = x + w // 2 - crop_w // 2
     crop_x = max(0, min(crop_x, frame_width - crop_w))
     crop_x = _smooth_int(_get_prev_crop_x(), crop_x, alpha=0.25)

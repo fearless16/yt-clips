@@ -244,22 +244,28 @@ class SuperResEnhancer:
         return [(y, x+w, y+h, x) for (x, y, w, h) in faces]
         
     def _aggressive_enhance(self, img: "np.ndarray") -> "np.ndarray":
-        """Aggressive enhancement to match expectation.png quality."""
+        """Aggressive enhancement to match expectation.png quality.
+        
+        Proven parameters from testing on real video frames:
+        - Sharpness: 5x kernel (gentle, not aggressive)
+        - Contrast: 1.15x + brightness 10
+        - Saturation: 1.15x (not 1.2x which was too much)
+        - Color grade to reference (match BGR ratios)
+        """
         import cv2
         
-        # Sharpen (aggressive)
-        kernel = np.array([[-1,-1,-1],
-                          [-1, 9,-1],
-                          [-1,-1,-1]]) * 1.5
-        kernel[1,1] = kernel[1,1] + 1 - 1.5
+        # Gentle sharpening (5x kernel, not 3x aggressive)
+        kernel = np.array([[0, -1, 0],
+                          [-1, 5, -1],
+                          [0, -1, 0]])
         sharpened = cv2.filter2D(img, -1, kernel)
         
-        # Contrast boost
-        enhanced = cv2.convertScaleAbs(sharpened, alpha=1.3, beta=10)
+        # Gentle contrast + brightness (1.15x, not 1.3x)
+        enhanced = cv2.convertScaleAbs(sharpened, alpha=1.15, beta=10)
         
-        # Saturation boost
+        # Gentle saturation boost (1.15x, not 1.2x)
         hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:,:,1] = hsv[:,:,1] * 1.2  # 20% saturation boost
+        hsv[:,:,1] = hsv[:,:,1] * 1.15
         hsv[:,:,1] = np.clip(hsv[:,:,1], 0, 255)
         enhanced = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
         
