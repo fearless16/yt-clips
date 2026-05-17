@@ -263,6 +263,12 @@ class SuperResEnhancer:
             log.error("Super-res crash: %s", e)
             return False
         finally:
+            # Free VRAM after processing
+            import gc
+            gc.collect()
+            if HAS_CUDA:
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -299,5 +305,12 @@ def upscale_frames_in_dir(
 
         if (i + 1) % 10 == 0 or i == 0:
             log.info("  Super-res: %d/%d", i + 1, len(frame_files))
+
+    # Free VRAM after processing
+    import gc
+    gc.collect()
+    if HAS_CUDA:
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
 
     return frames_dir
