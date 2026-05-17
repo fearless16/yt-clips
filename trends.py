@@ -519,6 +519,105 @@ def fetch_clip_specific_suggestions(local_keywords: List[str]) -> List[str]:
     return []
 
 
+def fetch_enhanced_clip_suggestions(
+    local_keywords: List[str],
+    teams: List[str] = None,
+    match_type: str = "ipl",
+) -> List[str]:
+    """
+    Multi-query YouTube Autocomplete harvesting for maximum tag coverage.
+    
+    Queries multiple seed patterns to find what people ACTUALLY search:
+      1. Player + action (e.g. "kohli six ipl")
+      2. Player + team (e.g. "bumrah mi")
+      3. Team + event (e.g. "csk vs srh ipl 2026")
+      4. Hindi search patterns (e.g. "kohli ka six")
+      5. Broad tournament (e.g. "ipl 2026 highlights")
+    
+    Returns deduplicated list of real search suggestions, ranked by specificity.
+    """
+    if not local_keywords:
+        return []
+
+    noise_words = {"oh", "ah", "ha", "he", "she", "it", "do", "go", "so", "yeah", "hey",
+                   "come", "get", "got", "let", "put", "say", "see", "use", "way", "like",
+                   "know", "take", "tell", "make", "think", "give", "will", "would", "could",
+                   "should", "can", "may", "might", "shall", "now", "then", "just", "also",
+                   "dumbing", "think", "him", "will", "video", "like", "chicken"}
+    
+    cricket_kw = [k for k in local_keywords if k in CRICKET_KEYWORDS and k not in noise_words]
+    if not cricket_kw:
+        return []
+
+    # Build multiple query seeds
+    queries = []
+    
+    # 1. Player + action combos (top 2 players × 2 actions)
+    actions = ["six", "wicket", "catch", "four", "run out", "century", "hat trick"]
+    player_actions = [f"{p} {a}" for p in cricket_kw[:2] for a in actions if a.split()[0] in cricket_kw or True][:4]
+    queries.extend(player_actions)
+    
+    # 2. Player + team combos
+    if teams:
+        for p in cricket_kw[:2]:
+            for t in teams[:2]:
+                queries.append(f"{p} {t.lower()} ipl")
+    
+    # 3. Team vs team
+    if teams and len(teams) >= 2:
+        queries.append(f"{teams[0].lower()} vs {teams[1].lower()} ipl 2026")
+        queries.append(f"{teams[0].lower()} vs {teams[1].lower()} highlights")
+    
+    # 4. Hindi search patterns
+    for p in cricket_kw[:2]:
+        queries.append(f"{p} ka six")
+        queries.append(f"{p} ka catch")
+    
+    # 5. Broad tournament queries
+    queries.extend([
+        "ipl 2026 highlights",
+        "ipl 2026 best moments",
+        "cricket live highlights",
+        f"ipl {teams[0].lower() if teams else 'cricket'}" if teams else "ipl cricket",
+    ])
+    
+    # Deduplicate and limit queries
+    seen = set()
+    unique_queries = []
+    for q in queries:
+        q_lower = q.lower().strip()
+        if q_lower not in seen and len(q_lower) > 3:
+            seen.add(q_lower)
+            unique_queries.append(q)
+    
+    log.info("🔍 Enhanced suggest: %d queries from %d keywords", len(unique_queries), len(cricket_kw))
+    
+    all_suggestions = []
+    for query in unique_queries[:12]:  # Max 12 queries to avoid rate limits
+        try:
+            url = YT_SUGGEST.format(q=urllib.parse.quote(query))
+            r = _session().get(url, timeout=4)
+            r.raise_for_status()
+            data = r.json()
+            if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
+                suggestions = [_clean(x) for x in data[1][:8] if _clean(x)]
+                all_suggestions.extend(suggestions)
+        except Exception:
+            pass
+    
+    # Deduplicate while preserving order
+    seen_sugs = set()
+    result = []
+    for s in all_suggestions:
+        s_lower = s.lower().strip()
+        if s_lower not in seen_sugs and len(s_lower) > 3:
+            seen_sugs.add(s_lower)
+            result.append(s)
+    
+    log.info("🎯 Enhanced suggest: %d unique suggestions from %d queries", len(result), len(unique_queries))
+    return result[:30]
+
+
 def _extract_tokens(texts: List[str], limit: int = 20) -> List[str]:
     words: Dict[str, int] = {}
     stop = {"live", "vs", "and", "the", "for", "with", "from", "today", "match", "cricket"}
