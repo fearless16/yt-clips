@@ -30,6 +30,13 @@ def push_job(url: str, flags: list):
         "status": "pending",
     }
 
+    # ─── Attach secrets (client_secrets.json, yt_token.json) ────────────────
+    for secret_file in ["client_secrets.json", "yt_token.json"]:
+        secret_path = Path(secret_file)
+        if secret_path.exists() and secret_path.stat().st_size > 0:
+            job[secret_file] = secret_path.read_text(encoding="utf-8")
+            log.info(f"🔑 Attached {secret_file} ({secret_path.stat().st_size} bytes)")
+
     # ─── Mode 1: Tunnel Bridge (PREFERRED for Kaggle) ──────────────────────────
     if _push_via_tunnel(job):
         return

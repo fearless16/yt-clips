@@ -45,6 +45,13 @@ class JobHandler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({"error": "Missing url"}).encode())
                     return
 
+                # ─── Save secrets delivered via tunnel ───────────────────────
+                for secret_file in ["client_secrets.json", "yt_token.json"]:
+                    if secret_file in job and job[secret_file]:
+                        Path(secret_file).write_text(job[secret_file], encoding="utf-8")
+                        print(f"[WATCHER] 🔑 Saved {secret_file} ({len(job[secret_file])} bytes)")
+                        del job[secret_file]  # don't pass to pipeline
+
                 job_queue.append(job)
                 print(f"[WATCHER] Job received via tunnel: {url}")
 
