@@ -59,24 +59,25 @@ def _detect_face_at_timestamp(video_path: str, timestamp: float, frame_w: int, f
     return detect_face_crop(frame_bgr, frame_w, frame_h)
 
 def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int) -> Optional[Dict]:
-    # ── 0. Top padding for hair clearance ─────────────────────────────────────
-    # With fill-crop (increase+crop), the face must be in the upper third of the
-    # frame.  Hair extends ~15-20% above the face.  We pad generously so the
-    # crop region starts well above the hair and the fill-crop scales it up to
-    # fill 1080x1920 edge-to-edge.
-    _TOP_PAD_RATIO = 0.25  # ~25% headroom above face for hair
+    # ── 0. Face-centered crop for YouTube Shorts style ───────────────────────
+    # Reference (expectation.png): face at 40% from top, 20% of frame area.
+    # Crop region = face + 70% headroom above + 180% body below.
+    # This positions face at ~20% from top of crop, which after fill-crop
+    # puts face at ~35-40% from top of final 1080x1920 frame.
 
-    def _apply_top_padding(face_top_y: int):
-        """Return (crop_y, crop_h, crop_w) with generous top padding for hair.
-        With fill-crop the region is scaled up to fill 1080x1920, so the face
-        ends up in the upper portion of the final frame."""
-        target_w = int(frame_height * 9 / 16)
-        desired_pad = int(frame_height * _TOP_PAD_RATIO)
-        # Ensure minimum headroom above face (at least 150px or 20% of face height)
-        min_headroom = max(150, int(desired_pad * 0.8))
-        crop_y = max(0, face_top_y - min_headroom)
-        # Crop height: fill as much as possible, but keep face in upper 40%
-        crop_h = frame_height - crop_y
+    def _apply_top_padding(face_top_y: int, face_height: int):
+        """Return (crop_y, crop_h, crop_w) with face-centered positioning.
+        Target: face at ~30-40% from top, ~20% of frame area.
+        Expectation reference: face at 41% from top, 20% of frame area.
+        Source limitation: face position depends on source video framing."""
+        # Headroom above face: 80% of face height (hair + background)
+        headroom = int(face_height * 0.80)
+        crop_y = max(0, face_top_y - headroom)
+        # Body below face: 120% of face height (chest + background)
+        body_below = int(face_height * 1.20)
+        crop_h = face_height + headroom + body_below
+        # Don't exceed frame bounds
+        crop_h = min(crop_h, frame_height - crop_y)
         crop_w = int(crop_h * 9 / 16)
         # Ensure width doesn't exceed frame
         if crop_w > frame_width:
@@ -94,7 +95,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         hx, hy = host_box["x"], host_box["y"]
         hw, hh = host_box["width"], host_box["height"]
         
-        crop_y, crop_h, crop_w = _apply_top_padding(hy)
+        crop_y, crop_h, crop_w = _apply_top_padding(hy, hh)
         crop_x = hx + hw // 2 - crop_w // 2
         crop_x = max(0, min(crop_x, frame_width - crop_w))
         
@@ -147,7 +148,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         return None
 
     x, y, w, h = best_face
-    crop_y, crop_h, crop_w = _apply_top_padding(y)
+    crop_y, crop_h, crop_w = _apply_top_padding(y, h)
     crop_x = x + w // 2 - crop_w // 2
     crop_x = max(0, min(crop_x, frame_width - crop_w))
     crop_x = _smooth_int(_get_prev_crop_x(), crop_x, alpha=0.25)
