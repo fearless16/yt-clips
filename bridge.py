@@ -30,12 +30,12 @@ def push_job(url: str, flags: list):
         "status": "pending",
     }
 
-    # ─── Mode 1: Direct Google Drive API (PREFERRED) ─────────────────────────
-    if _push_via_drive_api(job):
+    # ─── Mode 1: Tunnel Bridge (PREFERRED for Kaggle) ──────────────────────────
+    if _push_via_tunnel(job):
         return
 
-    # ─── Mode 2: Tunnel Bridge (colab_url.txt) ───────────────────────────────
-    if _push_via_tunnel(job):
+    # ─── Mode 2: Direct Google Drive API ──────────────────────────────────────
+    if _push_via_drive_api(job):
         return
 
     # ─── Mode 3: Local File Fallback ─────────────────────────────────────────
@@ -124,7 +124,7 @@ def _push_via_tunnel(job: dict) -> bool:
             headers={"bypass-tunnel-reminder": "true"},
             timeout=10,
         )
-        if response.status_code == 200:
+        if response.status_code in (200, 202):
             log.info("✅ Job received by Kaggle Tunnel instantly!")
             return True
         else:
