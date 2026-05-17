@@ -84,6 +84,7 @@ CONTEXT:
   Match: {video_title}
   Scorecard (with venue, player stats, match situation): {scorecard}
   Live Trending / Search Spikes: {trend_topics}
+  Actual YouTube Search Suggestions (what people ACTUALLY type): {yt_suggestions}
   CTA: {live_cta}
 
 CLIP CONTENT:
@@ -144,12 +145,28 @@ DESCRIPTION (600-900 chars total, structured):
 
   Section 6 — Divider: "---" then search terms line
 
-SEARCH TERMS (18-25 terms):
-  - ALL trending topics as search terms
-  - Specific player-name + action combos: "Kohli six", "Bumrah yorker", "Surya catch"
-  - Venue + event phrases: "Wankhede IPL", "Chinnaswamy six"
-  - NO generic like "cricket viral"
-  - Mix of Hindi and English search terms
+SEARCH TERMS (25-35 terms — maximize the 500 char budget):
+  CRITICAL: Use the "Actual YouTube Search Suggestions" above — these are REAL
+  queries people type. Prioritize them over invented terms.
+  
+  Structure your tags in this priority order:
+    Tier 1 — Player + action + tournament (highest search intent):
+      e.g. "virat kohli six ipl 2026", "bumrah yorker mi"
+    Tier 2 — Team matchup phrases:
+      e.g. "csk vs srh ipl", "rcb vs mi highlights"
+    Tier 3 — Hindi search patterns (massive Indian search volume):
+      e.g. "kohli ka six", "dhoni finish", "ipl ka best moment"
+    Tier 4 — Moment-specific:
+      e.g. "last over six ipl", "hat trick ipl 2026", "catch of the match"
+    Tier 5 — Broad but relevant:
+      e.g. "ipl highlights", "cricket live", "t20 cricket"
+  
+  RULES:
+    - Use EXACT phrases from YouTube suggestions when available
+    - Mix Hindi and English (Hinglish) — Indian users search in both
+    - NO generic single words like "cricket" or "six" alone
+    - Each tag must be a SEARCH PHRASE (2-5 words), not a hashtag
+    - Aim for 25-35 tags to maximize the 500 char limit
 
 Return ONLY valid JSON — no markdown, no explanation:
 {{
@@ -339,6 +356,160 @@ def _generate_template_seo(
     }
 
 
+def _rank_and_optimize_tags(
+    ai_terms: List[str],
+    yt_suggestions: List[str],
+    trend_topics: List[str],
+    local_keywords: List[str],
+    max_chars: int = 500,
+) -> List[str]:
+    """
+    Rank, deduplicate, and optimize tags to maximize 500 char budget.
+    
+    Priority tiers:
+      Tier 1: YouTube autocomplete suggestions (REAL search queries)
+      Tier 2: AI-generated player+action+tournament phrases
+      Tier 3: Trending topics
+      Tier 4: Hindi search patterns
+      Tier 5: Broad cricket terms
+    
+    Deduplicates by substring matching (e.g. "kohli six ipl" and "virat kohli six ipl" → keep longer).
+    """
+    import re as _re
+    
+    def _is_redundant(new_tag: str, existing: List[str]) -> bool:
+        """Check if new_tag is redundant with any existing tag."""
+        new_lower = new_tag.lower().strip()
+        for e in existing:
+            e_lower = e.lower().strip()
+            # If new is a substring of existing (or vice versa), it's redundant
+            if new_lower in e_lower or e_lower in new_lower:
+                return True
+            # If they share 80%+ words
+            new_words = set(new_lower.split())
+            e_words = set(e_lower.split())
+            if new_words and e_words:
+                overlap = len(new_words & e_words) / max(len(new_words), len(e_words))
+                if overlap > 0.75:
+                    return True
+        return False
+    
+    def _score_tag(tag: str) -> int:
+        """Score a tag for priority (higher = more important)."""
+        tag_lower = tag.lower().strip()
+        words = tag_lower.split()
+        score = 0
+        
+        # Length bonus (2-4 word phrases are ideal for search)
+        if 2 <= len(words) <= 4:
+            score += 10
+        elif len(words) == 1:
+            score -= 5  # Single words are low value
+        elif len(words) > 5:
+            score -= 3  # Too long
+        
+        # Player name bonus
+        player_names = {"kohli", "dhoni", "rohit", "bumrah", "suryakumar", "sky",
+                        "pandya", "jadeja", "ashwin", "gill", "rahul", "samson",
+                        "rashid", "warner", "maxwell", "stokes", "buttler", "narine"}
+        if any(p in tag_lower for p in player_names):
+            score += 15
+        
+        # Team name bonus
+        team_names = {"rcb", "csk", "mi", "srh", "dc", "kkr", "rr", "gt", "lsg", "pbks"}
+        if any(t in tag_lower for t in team_names):
+            score += 12
+        
+        # Action word bonus
+        action_words = {"six", "wicket", "catch", "four", "century", "yorker",
+                        "run out", "hat trick", "finish", "last over"}
+        if any(a in tag_lower for a in action_words):
+            score += 8
+        
+        # Tournament context bonus
+        if any(t in tag_lower for t in ["ipl", "t20", "2026", "cricket"]):
+            score += 5
+        
+        # Hinglish bonus (Hindi words boost Indian search reach)
+        hindi_indicators = ["ka", "ki", "ke", "hai", "tha", "ye", "wo", "kya",
+                           "dekho", "bhai", "arre", "wah", "match"]
+        if any(h in words for h in hindi_indicators):
+            score += 7
+        
+        # Penalty for generic/overused terms
+        generic = {"cricket", "shorts", "viral", "trending", "amazing", "best",
+                   "highlights", "live", "match", "video"}
+        if tag_lower in generic:
+            score -= 10
+        
+        return score
+    
+    # Combine all sources with priority markers
+    tagged_terms = []  # (tag, source_priority)
+    
+    # Priority 1: YouTube suggestions (REAL searches)
+    for t in yt_suggestions:
+        t = str(t).strip()
+        if t and len(t) > 2:
+            tagged_terms.append((t, 1))
+    
+    # Priority 2: AI-generated terms
+    for t in ai_terms:
+        t = str(t).strip()
+        if t and len(t) > 2:
+            tagged_terms.append((t, 2))
+    
+    # Priority 3: Trending topics
+    for t in trend_topics:
+        t = str(t).strip()
+        if t and len(t) > 2:
+            tagged_terms.append((t, 3))
+    
+    # Score and rank all terms
+    scored = []
+    for tag, priority in tagged_terms:
+        tag_clean = str(tag).strip().lower()
+        if not tag_clean or len(tag_clean) < 3:
+            continue
+        # Skip generic single words
+        if tag_clean in GENERIC_TAGS:
+            continue
+        score = _score_tag(tag_clean) + (10 if priority == 1 else 5 if priority == 2 else 0)
+        scored.append((tag_clean, score))
+    
+    # Sort by score (highest first), deduplicate
+    scored.sort(key=lambda x: x[1], reverse=True)
+    
+    # Build final list with 500 char budget, no redundancy
+    final = []
+    total_chars = 0
+    for tag, score in scored:
+        # Check redundancy
+        if _is_redundant(tag, final):
+            continue
+        
+        # Calculate chars needed (tag + comma separator)
+        needed = len(tag) + (1 if final else 0)
+        if total_chars + needed > max_chars:
+            # Try shorter version
+            words = tag.split()
+            if len(words) > 3:
+                shortened = " ".join(words[:3])
+                needed_short = len(shortened) + (1 if final else 0)
+                if total_chars + needed_short <= max_chars and not _is_redundant(shortened, final):
+                    final.append(shortened)
+                    total_chars += needed_short
+            continue
+        
+        final.append(tag)
+        total_chars += needed
+    
+    log.info("🏷  Tag optimization: %d terms → %d tags (%d/%d chars)",
+             len(tagged_terms), len(final), total_chars, max_chars)
+    
+    return final
+
+
 def _enforce_limits(item: Dict, fallback_terms: List[str] = None) -> Dict:
     title = (item.get("title") or "")[:100]
     description = (item.get("description") or "")[:5000]
@@ -439,6 +610,7 @@ def generate_clip_seo(
     live_stream_url: str = "",
     provider_override: str = "",
     model_override: str = "",
+    teams: List[str] = None,
 ) -> Dict:
     """
     Generate SEO metadata for a single clip.
@@ -449,16 +621,33 @@ def generate_clip_seo(
     local_kw_list = _extract_keywords(transcript)
     local_kw = ", ".join(local_kw_list)
     
-    # Intercept exact players/events to ping YouTube Suggest API
+    # Harvest YouTube autocomplete suggestions (multi-query)
+    yt_suggestions = []
+    try:
+        from trends import fetch_enhanced_clip_suggestions
+        yt_suggestions = fetch_enhanced_clip_suggestions(
+            local_kw_list, teams=teams, match_type="ipl"
+        )
+        log.info("🔍 YouTube suggestions harvested: %d terms", len(yt_suggestions))
+    except Exception as e:
+        log.warning("Enhanced suggest failed, falling back: %s", e)
+        try:
+            from trends import fetch_clip_specific_suggestions
+            yt_suggestions = fetch_clip_specific_suggestions(local_kw_list)
+        except Exception:
+            pass
+
+    # Also fetch clip-specific suggestions as fallback
     try:
         from trends import fetch_clip_specific_suggestions
         clip_suggestions = fetch_clip_specific_suggestions(local_kw_list)
         if clip_suggestions:
-            trend_topics = list(trend_topics) + clip_suggestions
+            yt_suggestions = list(dict.fromkeys(yt_suggestions + clip_suggestions))
     except Exception as e:
         log.warning("Could not fetch clip-specific suggestions: %s", e)
 
     trend_str = ", ".join(trend_topics) or "IPL 2026, cricket live"
+    yt_suggest_str = ", ".join(yt_suggestions[:15]) or "No suggestions available"
     live_cta = (
         f"Watch LIVE: {live_stream_url}" if live_stream_url
         else "Match chal raha hai LIVE — channel pe aao."
@@ -468,6 +657,7 @@ def generate_clip_seo(
         video_title=video_title or "Cricket Live Match",
         scorecard=scorecard or "Live match in progress",
         trend_topics=trend_str,
+        yt_suggestions=yt_suggest_str,
         live_cta=live_cta,
         transcript=transcript[:2500],   # keep prompt tight
         local_kw=local_kw,
@@ -485,13 +675,17 @@ def generate_clip_seo(
         if model_override:
             ai._model = model_override
         try:
-            result = _attempt_seo_generation(clip_id, prompt, trend_topics)
+            result = _attempt_seo_generation(clip_id, prompt, trend_topics,
+                                             yt_suggestions=yt_suggestions,
+                                             local_keywords=local_kw_list)
             return result
         finally:
             ai._provider = old_provider
             ai._model = old_model
 
-    result = _attempt_seo_generation(clip_id, prompt, trend_topics)
+    result = _attempt_seo_generation(clip_id, prompt, trend_topics,
+                                     yt_suggestions=yt_suggestions,
+                                     local_keywords=local_kw_list)
     return result
 
 
@@ -499,6 +693,8 @@ def _attempt_seo_generation(
     clip_id: str,
     prompt: str,
     trend_topics: List[str],
+    yt_suggestions: List[str] = None,
+    local_keywords: List[str] = None,
 ) -> Dict:
     """Inner generation loop with retries. Returns SEO result dict."""
     backoff = [0, 30, 60, 120]
@@ -512,12 +708,25 @@ def _attempt_seo_generation(
             if not data:
                 raise ValueError("No JSON in response")
 
+            # Get raw AI search terms
+            ai_terms = data.get("search_terms", [])
+            
+            # Rank and optimize tags using all intelligence sources
+            optimized_tags = _rank_and_optimize_tags(
+                ai_terms=ai_terms,
+                yt_suggestions=yt_suggestions or [],
+                trend_topics=trend_topics,
+                local_keywords=local_keywords or [],
+                max_chars=500,
+            )
+
             result = _enforce_limits({
                 "clip_id": clip_id,
                 "title": data.get("title", f"Cricket Live Highlights | {clip_id}"),
                 "description": data.get("description", ""),
                 "hashtags": data.get("hashtags", ["#IPL2026", "#Cricket", "#Shorts"]),
-                "search_terms": data.get("search_terms", []),
+                "search_terms": optimized_tags,
+                "tags": optimized_tags,  # YouTube API tags field
             }, fallback_terms=trend_topics)
 
             # Inject viral hooks and CTAs
@@ -531,7 +740,10 @@ def _attempt_seo_generation(
             result["_generated_by_provider"] = ai.get_used_provider()
             result["_generated_by_model"] = ai.get_used_model()
 
-            log.info("[%s] SEO done — title: %s", clip_id, result["title"][:100])
+            log.info("[%s] SEO done — title: %s | tags: %d (%d chars)",
+                     clip_id, result["title"][:100],
+                     len(result.get("search_terms", [])),
+                     sum(len(t) + 1 for t in result.get("search_terms", [])))
             return result
 
         except Exception as e:
@@ -654,6 +866,7 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
     live_stream_url = live_stream_url or trend.get("live_stream_url", "")
     scorecard = trend.get("scorecard", "")
     trend_topics = trend.get("topics", [])
+    teams = trend.get("teams", [])
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     all_results = []
@@ -670,6 +883,7 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
             scorecard=scorecard,
             trend_topics=trend_topics,
             live_stream_url=live_stream_url,
+            teams=teams,
         )
         all_results.append(result)
 
