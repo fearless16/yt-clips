@@ -1,14 +1,16 @@
 """
 super_res.py — Real-ESRGAN 4x super-resolution for frame upscaling.
 
-Optimizations for Colab T4 (16GB VRAM):
+Aggressive optimizations for Kaggle T4 (30GB VRAM):
 - cv2 VideoCapture/Writer instead of ffmpeg subprocess (2-3x faster I/O)
 - CUDA stream for async frame transfer
 - Tile size 512 for T4 (tuned for 16GB VRAM)
 - Half precision (fp16) for 2x throughput
 - GFPGAN face restoration after upscaling
+- Reference-guided enhancement (expectation.png)
+- Aggressive color/contrast matching
 
-Colab T4: ~0.3-0.5s per frame (x4plus model, optimized)
+Kaggle T4: ~0.3-0.5s per frame (x4plus model, optimized)
 Mac CPU: auto-skips with warning.
 
 Usage:
@@ -58,13 +60,26 @@ except ImportError:
 
 
 class SuperResEnhancer:
-    """Real-ESRGAN upscaler + optional GFPGAN face restoration."""
+    """Real-ESRGAN upscaler + optional GFPGAN face restoration + reference guidance."""
 
-    def __init__(self, scale: int = 4, model_name: str = "RealESRGAN_x4plus"):
+    def __init__(
+        self,
+        scale: int = 4,
+        model_name: str = "RealESRGAN_x4plus",
+        reference_image: str = "expectation.png",
+        dataset_dir: str = "photos/",
+        use_reference: bool = True,
+        aggressive_enhance: bool = True,
+    ):
         self.upsampler = None
         self.face_enhancer = None
+        self.face_ref = None
         self.scale = scale
         self.model_name = model_name
+        self.reference_image = reference_image
+        self.dataset_dir = dataset_dir
+        self.use_reference = use_reference
+        self.aggressive_enhance = aggressive_enhance
         self.available = False
         self._cuda_stream = None
 
@@ -120,6 +135,22 @@ class SuperResEnhancer:
             except Exception as e:
                 log.debug("GFPGAN not available: %s", e)
 
+        # Initialize face reference system
+        if self.use_reference:
+            try:
+                from utils.face_reference import FaceReference
+                self.face_ref = FaceReference(
+                    self.reference_image,
+                    self.dataset_dir,
+                )
+                if self.face_ref.extract_reference():
+                    self.face_ref.load_dataset()
+                    log.info("Face reference system initialized")
+                else:
+                    log.warning("Face reference not available")
+            except Exception as e:
+                log.debug("Face reference init failed: %s", e)
+
     def _build_model(self):
         if self.model_name == "RealESRGAN_x4plus":
             return RRDBNet(
@@ -137,25 +168,106 @@ class SuperResEnhancer:
         )
 
     def upscale_frame(self, img: "np.ndarray") -> "np.ndarray":
-        """Upscale a single BGR numpy frame. Returns original on failure."""
+        """Upscale a single BGR numpy frame with reference guidance."""
         if not self.available or self.upsampler is None:
             return img
         try:
+            import cv2
+            
+            # Upscale with Real-ESRGAN
             output, _ = self.upsampler.enhance(img, outscale=self.scale)
+            
+            # Face restoration with reference guidance
             if self.face_enhancer is not None:
                 try:
-                    import cv2
-                    output_rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB)
-                    _, _, output_enhanced = self.face_enhancer.enhance(
-                        output_rgb, has_aligned=False, only_center_face=False, paste_back=True
-                    )
-                    output = cv2.cvtColor(output_enhanced, cv2.COLOR_RGB2BGR)
+                    # Detect faces
+                    face_locations = self._detect_faces(output)
+                    
+                    for (top, right, bottom, left) in face_locations:
+                        # Add padding
+                        h, w = output.shape[:2]
+                        pad = int(max(bottom-top, right-left) * 0.3)
+                        y1 = max(0, top - pad)
+                        y2 = min(h, bottom + pad)
+                        x1 = max(0, left - pad)
+                        x2 = min(w, right + pad)
+                        
+                        face = output[y1:y2, x1:x2]
+                        if face.size == 0:
+                            continue
+                            
+                        # Restore face with reference guidance
+                        if self.face_ref and self.face_ref.reference_face is not None:
+                            restored = self.face_ref.restore_with_identity(
+                                face,
+                                strength=0.8,
+                                target_size=(face.shape[1], face.shape[0]),
+                            )
+                        else:
+                            # Fallback to basic GFPGAN
+                            face_rgb = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+                            _, _, restored = self.face_enhancer.enhance(
+                                face_rgb, has_aligned=False, only_center_face=False, paste_back=True
+                            )
+                            restored = cv2.cvtColor(restored, cv2.COLOR_RGB2BGR)
+                            
+                        # Paste back
+                        output[y1:y2, x1:x2] = restored
+                        
                 except Exception as e:
-                    log.debug("GFPGAN failed: %s", e)
+                    log.debug("Face restore failed: %s", e)
+                    
+            # Aggressive enhancement
+            if self.aggressive_enhance:
+                output = self._aggressive_enhance(output)
+                
             return output
         except Exception as e:
             log.debug("Frame upscale failed: %s", e)
             return img
+            
+    def _detect_faces(self, frame: "np.ndarray") -> list:
+        """Detect faces in frame."""
+        try:
+            import face_recognition
+            return face_recognition.face_locations(frame)
+        except Exception:
+            pass
+            
+        # Fallback to OpenCV
+        import cv2
+        cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = cascade.detectMultiScale(gray, 1.1, 4)
+        return [(y, x+w, y+h, x) for (x, y, w, h) in faces]
+        
+    def _aggressive_enhance(self, img: "np.ndarray") -> "np.ndarray":
+        """Aggressive enhancement to match expectation.png quality."""
+        import cv2
+        
+        # Sharpen (aggressive)
+        kernel = np.array([[-1,-1,-1],
+                          [-1, 9,-1],
+                          [-1,-1,-1]]) * 1.5
+        kernel[1,1] = kernel[1,1] + 1 - 1.5
+        sharpened = cv2.filter2D(img, -1, kernel)
+        
+        # Contrast boost
+        enhanced = cv2.convertScaleAbs(sharpened, alpha=1.3, beta=10)
+        
+        # Saturation boost
+        hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV).astype(np.float32)
+        hsv[:,:,1] = hsv[:,:,1] * 1.2  # 20% saturation boost
+        hsv[:,:,1] = np.clip(hsv[:,:,1], 0, 255)
+        enhanced = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+        
+        # Color match to reference if available
+        if self.face_ref and self.face_ref.reference_face is not None:
+            enhanced = self.face_ref.match_color_profile(enhanced)
+            
+        return enhanced
 
     def upscale_video(
         self,
