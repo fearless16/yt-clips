@@ -70,6 +70,7 @@ class SuperResEnhancer:
         dataset_dir: str = "photos/",
         use_reference: bool = True,
         aggressive_enhance: bool = True,
+        device: str = None,
     ):
         self.upsampler = None
         self.face_enhancer = None
@@ -82,6 +83,7 @@ class SuperResEnhancer:
         self.aggressive_enhance = aggressive_enhance
         self.available = False
         self._cuda_stream = None
+        self.device = device or ("cuda:0" if HAS_CUDA else "cpu")
 
         if not (HAS_REALESRGAN and HAS_TORCH and HAS_CUDA):
             missing = []
@@ -112,13 +114,13 @@ class SuperResEnhancer:
                 tile_pad=10,
                 pre_pad=0,
                 half=True,
-                device=None,
+                device=self.device,
             )
             # Create CUDA stream for async frame transfer
             if HAS_CUDA:
-                self._cuda_stream = torch.cuda.Stream()
+                self._cuda_stream = torch.cuda.Stream(device=self.device)
             self.available = True
-            log.info("Real-ESRGAN %dx loaded (%s, GPU, tile=512, fp16)", scale, model_name)
+            log.info("Real-ESRGAN %dx loaded (%s, %s, tile=512, fp16)", scale, model_name, self.device)
         except Exception as e:
             log.warning("Real-ESRGAN load failed: %s", e)
 
@@ -130,8 +132,9 @@ class SuperResEnhancer:
                     arch="clean",
                     channel_multiplier=2,
                     bg_upsampler=None,
+                    device=self.device,
                 )
-                log.info("GFPGAN face enhancer loaded")
+                log.info("GFPGAN face enhancer loaded on %s", self.device)
             except Exception as e:
                 log.debug("GFPGAN not available: %s", e)
 
@@ -385,8 +388,10 @@ class SuperResEnhancer:
             import gc
             gc.collect()
             if HAS_CUDA:
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
+                dev = torch.device(self.device)
+                with torch.cuda.device(dev):
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
             shutil.rmtree(temp_dir, ignore_errors=True)
 
 
