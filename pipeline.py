@@ -175,13 +175,21 @@ def run(
         _banner("PHASE 4.5 — SEO & THUMBNAILS")
         t0 = time.perf_counter()
         from thumbnail import process_all_thumbnails
-        
+        from seo import process_all_seo
+
         export_dir = str(exported[0].parent)
-        
-        # 2. Generate Thumbnails (Frame extraction or AI)
+
+        # Generate SEO metadata for all clips (skipped if export already did it)
+        seo_results = [f for f in Path(export_dir).glob("*_metadata.json")]
+        if not seo_results:
+            process_all_seo(highlights_path, export_dir)
+        else:
+            log.info("SEO metadata already exists for %d clips — skipping", len(seo_results))
+
+        # Generate Thumbnails (Frame extraction or AI)
         # This searches for mp4s and matching metadata in the folder
         process_all_thumbnails(export_dir)
-        
+
         log.info("Phase 4.5 complete in %.1f s", time.perf_counter() - t0)
 
     # ── Phase 5: Sync to Google Drive (optional) ──────────────────────────────
