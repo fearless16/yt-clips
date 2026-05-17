@@ -56,6 +56,7 @@ def run(
     skip_highlight: bool = False,
     skip_export: bool = False,
     skip_sync: bool = False,
+    skip_seo: bool = False,
     auto_sync: bool = False,
     auto_upload: bool = False,
     auto_schedule: bool = False,
@@ -175,16 +176,18 @@ def run(
         _banner("PHASE 4.5 — SEO & THUMBNAILS")
         t0 = time.perf_counter()
         from thumbnail import process_all_thumbnails
-        from seo import process_all_seo
 
         export_dir = str(exported[0].parent)
 
-        # Generate SEO metadata for all clips (skipped if export already did it)
-        seo_results = [f for f in Path(export_dir).glob("*_metadata.json")]
-        if not seo_results:
-            process_all_seo(highlights_path, export_dir)
+        if skip_seo:
+            log.info("Skipping SEO (--skip-seo)")
         else:
-            log.info("SEO metadata already exists for %d clips — skipping", len(seo_results))
+            from seo import process_all_seo
+            seo_results = [f for f in Path(export_dir).glob("*_metadata.json")]
+            if not seo_results:
+                process_all_seo(highlights_path, export_dir)
+            else:
+                log.info("SEO metadata already exists for %d clips — skipping", len(seo_results))
 
         # Generate Thumbnails (Frame extraction or AI)
         # This searches for mp4s and matching metadata in the folder
@@ -305,6 +308,7 @@ Examples:
     parser.add_argument("-skip-highlight", "--skip-highlight",  action="store_true", help="Skip Phase 3 (use existing highlights)")
     parser.add_argument("-skip-export", "--skip-export",     action="store_true", help="Skip Phase 4 (use existing clips in shorts/)")
     parser.add_argument("-skip-sync", "--skip-sync",       action="store_true", help="Skip Phase 5 (Drive Sync)")
+    parser.add_argument("-skip-seo", "--skip-seo",         action="store_true", help="Skip SEO generation in Phase 4.5")
     parser.add_argument("-sync", "--sync",            action="store_true", help="Auto-sync exported Shorts to Google Drive")
     parser.add_argument("-upload", "--upload",          action="store_true", help="Auto-upload exported Shorts to YouTube")
     parser.add_argument("-schedule", "--schedule",        action="store_true", help="Auto-schedule uploads (2-hour intervals)")
@@ -320,6 +324,7 @@ Examples:
         skip_highlight=args.skip_highlight,
         skip_export=args.skip_export,
         skip_sync=args.skip_sync,
+        skip_seo=args.skip_seo,
         auto_sync=args.sync,
         auto_upload=args.upload,
         auto_schedule=args.schedule,
