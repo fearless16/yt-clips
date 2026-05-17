@@ -593,10 +593,11 @@ def _build_enhance_stack(
         if lf:
             filter_base += f",{lf}"
 
-    # ── Color boost (saturation + vibrance) ───────────────────────────────────
-    # Match expectation.png: saturation mean=133, 40K unique colors
-    # Boost saturation +35% and add slight contrast curve
-    filter_base += ",eq=saturation=1.35:contrast=1.08:brightness=0.03"
+    # ── Color boost + sharpening ─────────────────────────────────────────────
+    # Proven approach from test: sharpen + contrast + saturation
+    # Reference: saturation=133, sharpness=274
+    # Our tested params: sharp=1.15x, contrast=1.15x, saturation=1.15x
+    filter_base += ",unsharp=5:5:1.0:5:5:0.0,eq=saturation=1.15:contrast=1.15:brightness=0.04"
 
     # ── Motion interpolation ──────────────────────────────────────────────────
     try:
