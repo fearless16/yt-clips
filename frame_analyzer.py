@@ -60,21 +60,28 @@ def _detect_face_at_timestamp(video_path: str, timestamp: float, frame_w: int, f
 
 def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int) -> Optional[Dict]:
     # ── 0. Top padding for hair clearance ─────────────────────────────────────
-    # When the face is near the top of the frame, shift the crop down so
-    # hair/forehead isn't clipped.  Crop height shrinks to stay in-bounds;
-    # the export scaler (force_original_aspect_ratio=decrease) handles the rest.
-    _TOP_PAD_RATIO = 0.10  # leave ~10% of frame height as headroom above face
+    # With fill-crop (increase+crop), the face must be in the upper third of the
+    # frame.  Hair extends ~15-20% above the face.  We pad generously so the
+    # crop region starts well above the hair and the fill-crop scales it up to
+    # fill 1080x1920 edge-to-edge.
+    _TOP_PAD_RATIO = 0.25  # ~25% headroom above face for hair
 
     def _apply_top_padding(face_top_y: int):
-        """Return (crop_y, crop_h, crop_w) with top padding if face is near edge.
-        Crop starts at (face_top_y - desired_pad), clamped to [0, face_top_y].
-        This ensures headroom above face while keeping face visible in crop."""
-        target_h = frame_height
-        target_w = int(target_h * 9 / 16)
+        """Return (crop_y, crop_h, crop_w) with generous top padding for hair.
+        With fill-crop the region is scaled up to fill 1080x1920, so the face
+        ends up in the upper portion of the final frame."""
+        target_w = int(frame_height * 9 / 16)
         desired_pad = int(frame_height * _TOP_PAD_RATIO)
-        crop_y = max(0, face_top_y - desired_pad)
-        crop_h = min(target_h, frame_height - crop_y)
+        # Ensure minimum headroom above face (at least 150px or 20% of face height)
+        min_headroom = max(150, int(desired_pad * 0.8))
+        crop_y = max(0, face_top_y - min_headroom)
+        # Crop height: fill as much as possible, but keep face in upper 40%
+        crop_h = frame_height - crop_y
         crop_w = int(crop_h * 9 / 16)
+        # Ensure width doesn't exceed frame
+        if crop_w > frame_width:
+            crop_w = frame_width
+            crop_h = int(crop_w * 16 / 9)
         return crop_y, crop_h, crop_w
 
     # ── 1. Dynamic Host Matching (Priority) ──────────────────────────────────
