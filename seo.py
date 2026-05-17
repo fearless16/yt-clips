@@ -677,7 +677,10 @@ def generate_clip_seo(
         try:
             result = _attempt_seo_generation(clip_id, prompt, trend_topics,
                                              yt_suggestions=yt_suggestions,
-                                             local_keywords=local_kw_list)
+                                             local_keywords=local_kw_list,
+                                             transcript=transcript,
+                                             video_title=video_title,
+                                             scorecard=scorecard)
             return result
         finally:
             ai._provider = old_provider
@@ -685,7 +688,10 @@ def generate_clip_seo(
 
     result = _attempt_seo_generation(clip_id, prompt, trend_topics,
                                      yt_suggestions=yt_suggestions,
-                                     local_keywords=local_kw_list)
+                                     local_keywords=local_kw_list,
+                                     transcript=transcript,
+                                     video_title=video_title,
+                                     scorecard=scorecard)
     return result
 
 
@@ -695,6 +701,9 @@ def _attempt_seo_generation(
     trend_topics: List[str],
     yt_suggestions: List[str] = None,
     local_keywords: List[str] = None,
+    transcript: str = "",
+    video_title: str = "",
+    scorecard: str = "",
 ) -> Dict:
     """Inner generation loop with retries. Returns SEO result dict."""
     backoff = [0, 30, 60, 120]
