@@ -391,13 +391,10 @@ def fetch_cricbuzz_live_score(query: str, match_type: str = "ipl") -> Dict:
                 break
 
         if not match_link:
-            for card in soup.find_all("a", href=re.compile(r"/live-cricket-scores/"))[:5]:
-                if "live" in card.get_text().lower():
-                    match_link = card.get("href")
-                    break
-
-        if not match_link:
-            return {"error": "No matching live match found", "scorecard": ""}
+            # No blind fallback to first "live" match — that grabs the wrong scorecard.
+            # Return empty scorecard so AI uses transcript-only context.
+            log.warning("No matching live match found for teams: %s — using transcript-only SEO", teams_in_query)
+            return {"error": "No matching live match found", "scorecard": "", "teams": teams_in_query}
 
         match_url = f"{CRICBUZZ_BASE}{match_link}" if match_link.startswith("/") else match_link
         log.info("🏏 Fetching scorecard from: %s", match_url)

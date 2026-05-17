@@ -167,18 +167,35 @@ def _score_segment(
         # Partial bonus for moderately fast speech
         score += 0.5
 
-    # 3. Silence penalty (enhanced — aggressively penalise dead air)
+    # 3. Silence penalty (gentle — penalise but don't kill)
     silence = _silence_seconds(text, duration)
     silence_ratio = silence / duration if duration > 0 else 0
     if silence > h_cfg["silence_penalty_seconds"]:
-        score -= 0.5 * (silence / duration)
-    # Heavy penalty for segments that are mostly silence (>60% dead air)
+        score -= 0.3 * (silence / duration)
+    # Soft penalty for mostly silence — don't drop, just deprioritise
     if silence_ratio > 0.6:
-        score -= 3.0  # Effectively skip these segments
-    # Minimum word count — avoid clips with barely any speech
+        score -= 1.5  # Down from -3.0 — still penalise, but don't skip
+    # Minimum word count — gentle penalty for very sparse segments
     word_count = len(text.split())
     if word_count < 5:
-        score -= 1.5  # Penalise very low speech content
+        score -= 0.5  # Down from -1.5 — allow short but energetic clips
+
+    # 3b. Hook potential — bonus if clip starts with high energy
+    # First 3 seconds of audio energy should be above average for a good hook
+    hook_buckets = [rms_map.get(int(t), 0.0) for t in range(int(start), min(int(start) + 3, int(end) + 1))]
+    if hook_buckets and max_rms > 0:
+        hook_energy = sum(hook_buckets) / len(hook_buckets)
+        if hook_energy > avg_rms * 1.2:
+            score += 1.0  # Strong hook
+
+    # 3c. Emotional arc — detect energy build-up (low→high within clip)
+    if len(buckets) >= 4:
+        first_half = buckets[:len(buckets) // 2]
+        second_half = buckets[len(buckets) // 2:]
+        avg_first = sum(first_half) / len(first_half) if first_half else 0
+        avg_second = sum(second_half) / len(second_half) if second_half else 0
+        if avg_second > avg_first * 1.3 and avg_first > 0:
+            score += 0.8  # Build-up arc (excitement builds)
 
     # 4. Reaction keyword bonus — single words
     reaction_words = {
@@ -515,6 +532,49 @@ def detect_highlights(
     top.extend(remaining[:remaining_slots])
     
     log.info("Selected %d clips (%d intro + %d others)", len(top), 1 if intro_segments else 0, len(top) - (1 if intro_segments else 0))
+
+    # ── Second-pass fallback: if too few clips, re-score with lower threshold ──
+    MIN_TARGET_CLIPS = 4
+    if len(top) < MIN_TARGET_CLIPS:
+        log.warning("Only %d clips found — running second pass with lower threshold", len(top))
+        # Lower the threshold to 15% of score range (was 30%)
+        fallback_threshold = min_score + (max_score - min_score) * 0.15
+        fallback_candidates = [s for s in scored if s["score"] >= fallback_threshold]
+        
+        # Rebuild windows from fallback candidates
+        fallback_windows = []
+        for c in fallback_candidates:
+            seg_duration = c["end"] - c["start"]
+            if seg_duration < min_dur:
+                pad = (min_dur - seg_duration) / 2
+                win_start = max(0.0, c["start"] - pad)
+                win_end = min(video_duration, c["end"] + pad) if video_duration > 0 else c["end"] + pad
+            else:
+                win_start = c["start"]
+                win_end = c["end"]
+            if win_end - win_start > max_dur:
+                win_end = win_start + max_dur
+            fallback_windows.append({"start": win_start, "end": win_end, "score": c["score"]})
+        
+        fallback_windows.sort(key=lambda w: w["start"])
+        fallback_merged = _merge_windows(fallback_windows, h_cfg["merge_gap"])
+        
+        # Add clips from fallback that don't overlap with existing top
+        existing_ranges = [(w["start"], w["end"]) for w in top]
+        for fw in fallback_merged:
+            if len(top) >= MIN_TARGET_CLIPS:
+                break
+            # Check no overlap with existing clips
+            overlaps = any(
+                fw["start"] < exist_end and fw["end"] > exist_start
+                for exist_start, exist_end in existing_ranges
+            )
+            if not overlaps:
+                top.append(fw)
+                existing_ranges.append((fw["start"], fw["end"]))
+                log.info("  + fallback clip: %s → %s (score=%.3f)", _format_ts(fw["start"]), _format_ts(fw["end"]), fw["score"])
+        
+        log.info("After fallback: %d clips total", len(top))
 
     # Re-sort by time for output
     top.sort(key=lambda w: w["start"])
