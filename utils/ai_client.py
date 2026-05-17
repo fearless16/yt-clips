@@ -333,17 +333,23 @@ class AIClient:
             "stream": False,
         }
 
-        response = requests.post(
-            self.ollama_url,
-            json=payload,
-            timeout=120,
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        return data.get("response", "").strip()
+        try:
+            response = requests.post(
+                self.ollama_url,
+                json=payload,
+                timeout=120,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data.get("response", "").strip()
+        except requests.ConnectionError:
+            return "Ollama connection refused — is Ollama running?"
+        except requests.Timeout:
+            return "Ollama request timed out (>120s)"
+        except requests.HTTPError as e:
+            return f"Ollama HTTP error: {e}"
+        except Exception as e:
+            return f"Ollama error: {e}"
 
     # ---------------- PARALLEL TEST ----------------
 
