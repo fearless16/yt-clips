@@ -46,6 +46,8 @@ cookies.txt
 
 # Screenshots / Debug Images
 *.png
+!expectation.png
+!channel_logo.png
 benchmark_llms.py
 .push_cache.json
 kaggle_url.txt
