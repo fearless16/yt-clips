@@ -54,7 +54,7 @@ def transcribe(video_path: str, output_path: str):
     log.info(f"Starting Transcription: {video} (language={language or 'auto'})")
 
     # ─── TRANSCRIPTION WITH HEARTBEATS ────────────────────────────────────────
-    segments, info = model.transcribe(video, language=language, beam_size=5, word_timestamps=True)
+    segments, info = model.transcribe(video, language=language, beam_size=3, word_timestamps=True)
     
     log.info(f"✅ Audio Stream Ready | Language: {info.language} | Duration: {info.duration:.1f}s")
     log.info("--- Processing Segments ---")
