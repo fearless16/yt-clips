@@ -165,8 +165,9 @@ class SuperResEnhancer:
         target_h: int = 1920,
     ) -> bool:
         """
-        Upscale video using cv2 I/O (no ffmpeg subprocess for frame extraction/encoding).
-        2-3x faster than the old ffmpeg-based approach on Colab T4.
+        Upscale video using cv2 for reading (fast) + ffmpeg for encoding (H.264 quality).
+        cv2 VideoCapture is 2-3x faster than ffmpeg subprocess for frame extraction.
+        ffmpeg H.264 encode preserves quality (mp4v would be lower quality).
         """
         if not self.available:
             log.warning("Super-res not available; copying input unchanged")
@@ -175,96 +176,94 @@ class SuperResEnhancer:
 
         import cv2
         import numpy as np
+        import subprocess
         import time
 
         t_start = time.perf_counter()
+        temp_dir = Path(tempfile.mkdtemp())
 
-        # Open input video with cv2 (much faster than ffmpeg subprocess)
-        cap = cv2.VideoCapture(input_path)
-        if not cap.isOpened():
-            log.error("Cannot open video: %s", input_path)
-            return False
+        try:
+            # Open input video with cv2 (fast)
+            cap = cv2.VideoCapture(input_path)
+            if not cap.isOpened():
+                log.error("Cannot open video: %s", input_path)
+                return False
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        if fps <= 0:
-            fps = 30.0
-        if total_frames <= 0:
-            total_frames = 1
+            if fps <= 0:
+                fps = 30.0
+            if total_frames <= 0:
+                total_frames = 1
 
-        log.info("Super-res: %dx%d → %dx%d @ %.1ffps (%d frames)",
-                 src_w, src_h, target_w, target_h, fps, total_frames)
+            log.info("Super-res: %dx%d → %dx%d @ %.1ffps (%d frames)",
+                     src_w, src_h, target_w, target_h, fps, total_frames)
 
-        # Prepare output video writer (H.264, YUV420p)
-        temp_out = str(Path(output_path).with_suffix(".tmp.mp4"))
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(temp_out, fourcc, fps, (target_w, target_h))
-        if not writer.isOpened():
-            log.error("Cannot create video writer")
+            # Write upscaled frames to temp dir (fast cv2 I/O)
+            frames_dir = temp_dir / "frames"
+            frames_dir.mkdir()
+            t_sr = time.perf_counter()
+            frame_idx = 0
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+
+                sr_img = self.upscale_frame(frame)
+                if sr_img.shape[0] != target_h or sr_img.shape[1] != target_w:
+                    sr_img = cv2.resize(sr_img, (target_w, target_h),
+                                        interpolation=cv2.INTER_LANCZOS4)
+                cv2.imwrite(str(frames_dir / f"{frame_idx:06d}.png"), sr_img)
+                frame_idx += 1
+
+                if frame_idx % 10 == 0 or frame_idx == 1:
+                    elapsed = time.perf_counter() - t_sr
+                    fps_proc = frame_idx / elapsed if elapsed > 0 else 0
+                    eta = (total_frames - frame_idx) / fps_proc if fps_proc > 0 else 0
+                    log.info("  Super-res: %d/%d (%.0f fps, ETA %.0fs)",
+                             frame_idx, total_frames, fps_proc, eta)
+
             cap.release()
+            t_upscale = time.perf_counter() - t_sr
+            log.info("Upscale: %d frames in %.1fs (%.0f fps)",
+                     frame_idx, t_upscale, frame_idx / t_upscale if t_upscale > 0 else 0)
+
+            # Encode with ffmpeg H.264 (preserves quality)
+            cmd_encode = [
+                "ffmpeg", "-y",
+                "-framerate", str(fps),
+                "-i", str(frames_dir / "%06d.png"),
+                "-i", input_path,
+                "-map", "0:v",
+                "-map", "1:a?",
+                "-c:v", "libx264",
+                "-crf", "18",
+                "-preset", "fast",  # fast preset — good speed/quality balance
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-shortest",
+                output_path,
+            ]
+            r = subprocess.run(cmd_encode, capture_output=True, text=True)
+            if r.returncode != 0:
+                log.error("Encode failed: %s", r.stderr[-300:])
+                return False
+
+            t_total = time.perf_counter() - t_start
+            out_size = Path(output_path).stat().st_size / 1e6
+            log.info("✅ Super-res complete: %.1fs total, %.1f MB output", t_total, out_size)
+            return True
+
+        except Exception as e:
+            log.error("Super-res crash: %s", e)
             return False
-
-        # Process frames
-        frame_idx = 0
-        t_sr = time.perf_counter()
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            # Upscale
-            sr_img = self.upscale_frame(frame)
-
-            # Downscale to target if needed
-            if sr_img.shape[0] != target_h or sr_img.shape[1] != target_w:
-                sr_img = cv2.resize(sr_img, (target_w, target_h),
-                                    interpolation=cv2.INTER_LANCZOS4)
-
-            writer.write(sr_img)
-            frame_idx += 1
-
-            if frame_idx % 10 == 0 or frame_idx == 1:
-                elapsed = time.perf_counter() - t_sr
-                fps_proc = frame_idx / elapsed if elapsed > 0 else 0
-                eta = (total_frames - frame_idx) / fps_proc if fps_proc > 0 else 0
-                log.info("  Super-res: %d/%d (%.0f fps, ETA %.0fs)",
-                         frame_idx, total_frames, fps_proc, eta)
-
-        cap.release()
-        writer.release()
-
-        t_upscale = time.perf_counter() - t_sr
-        log.info("Upscale done: %d frames in %.1fs (%.0f fps)",
-                 frame_idx, t_upscale, frame_idx / t_upscale if t_upscale > 0 else 0)
-
-        # Re-mux with audio using ffmpeg (single fast copy operation)
-        import subprocess
-        cmd_mux = [
-            "ffmpeg", "-y",
-            "-i", temp_out,
-            "-i", input_path,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-map", "0:v:0",
-            "-map", "1:a:0?",
-            "-shortest",
-            output_path,
-        ]
-        r = subprocess.run(cmd_mux, capture_output=True, text=True)
-        if r.returncode != 0:
-            # No audio or mux failed — use video-only
-            log.warning("Audio mux failed (may have no audio), using video-only")
-            shutil.move(temp_out, output_path)
-        else:
-            Path(temp_out).unlink(missing_ok=True)
-
-        t_total = time.perf_counter() - t_start
-        out_size = Path(output_path).stat().st_size / 1e6
-        log.info("✅ Super-res complete: %.1fs total, %.1f MB output", t_total, out_size)
-        return True
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def upscale_frames_in_dir(
