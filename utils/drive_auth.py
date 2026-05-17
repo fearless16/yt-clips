@@ -27,6 +27,7 @@ def get_drive_service():
 
     Auth cascade (tries in order):
       0. Google Colab filesystem mount (fastest, most reliable)
+      0b. Kaggle — use client_secrets.json delivered via tunnel
       1. Application Default Credentials (gcloud auth)
       2. Saved OAuth token.json
       3. Returns None if all fail
@@ -57,6 +58,48 @@ def get_drive_service():
                 log.info(f"🚀 Colab detected ({colab_drive.name}). Prioritizing Filesystem Sync.")
                 os.environ["COLAB_SYNC_PATH"] = str(colab_drive)
                 return FILESYSTEM_MODE
+
+    # ─── Method 0b: Kaggle — use delivered client_secrets.json ──────────────
+    is_kaggle = bool(os.environ.get("KAGGLE_KERNEL_RUN_TYPE") or Path("/kaggle").exists())
+    if is_kaggle:
+        kaggle_token = Path("yt_token.json")
+        kaggle_secrets = Path("client_secrets.json")
+        if kaggle_token.exists():
+            try:
+                from google.oauth2.credentials import Credentials
+                from google.auth.transport.requests import Request
+                credentials = Credentials.from_authorized_user_file(
+                    str(kaggle_token),
+                    scopes=["https://www.googleapis.com/auth/drive.file"],
+                )
+                if credentials and credentials.expired and credentials.refresh_token:
+                    credentials.refresh(Request())
+                if credentials and credentials.valid:
+                    log.info("✅ Kaggle: Using delivered yt_token.json")
+                    base_http = httplib2.Http(timeout=60)
+                    auth_http = google_auth_httplib2.AuthorizedHttp(credentials, http=base_http)
+                    return build("drive", "v3", http=auth_http)
+            except Exception as e:
+                log.warning("Kaggle token refresh failed: %s", e)
+
+        if kaggle_secrets.exists() and not kaggle_token.exists():
+            log.info("🔑 Kaggle: client_secrets.json found but no token — run OAuth flow")
+            try:
+                from google_auth_oauthlib.flow import InstalledAppFlow
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    str(kaggle_secrets),
+                    scopes=["https://www.googleapis.com/auth/drive.file"],
+                )
+                # Headless: run console flow (no browser on Kaggle)
+                creds = flow.run_local_server(port=0, open_browser=False)
+                # Save for future runs
+                kaggle_token.write_text(creds.to_json(), encoding="utf-8")
+                log.info("✅ Kaggle: OAuth complete, token saved")
+                base_http = httplib2.Http(timeout=60)
+                auth_http = google_auth_httplib2.AuthorizedHttp(creds, http=base_http)
+                return build("drive", "v3", http=auth_http)
+            except Exception as e:
+                log.warning("Kaggle OAuth failed: %s", e)
 
     credentials = None
 
