@@ -873,7 +873,7 @@ def export_clip(
     a_map = "0:a:0?"
     if has_audio:
         if use_cta:
-            video_filter_complex += f";[0:a:0?]{a_filter}[main_a];[main_a][{cta_idx}:a]amix=inputs=2:duration=first:dropout_transition=2:weights=0.8 1.5[a_out]"
+            video_filter_complex += f";[0:a:0?]{a_filter},volume=0.8[main_a];[{cta_idx}:a]volume=1.5[cta_a];[main_a][cta_a]amix=inputs=2:duration=first:dropout_transition=2[a_out]"
             a_map = "[a_out]"
             a_filter = None
 
