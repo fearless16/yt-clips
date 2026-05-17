@@ -126,6 +126,25 @@ def run(
         transcribe(video_path, transcript_path)
         log.info("Phase 2 complete in %.1f s", time.perf_counter() - t0)
 
+    # ── Phase 2.5: Video Analysis (face/lighting map) ─────────────────────────
+    _banner("PHASE 2.5 — VIDEO ANALYSIS")
+    analysis_path = str(Path(cfg["paths"]["temp"]) / f"{stem}_analysis.json")
+    try:
+        from video_analyzer import analyze_video
+        analysis = analyze_video(
+            video_path=video_path,
+            photos_dir="photos/",
+            reference_image="expectation.png",
+            sample_interval=2.0,
+            output_path=analysis_path,
+        )
+        log.info("Phase 2.5 complete — face rate: %.0f%%, avg quality: %.3f",
+                 analysis["summary"]["face_detection_rate"],
+                 analysis["summary"]["avg_quality"])
+    except Exception as e:
+        log.warning("Video analysis failed (non-fatal): %s", e)
+        analysis = None
+
     # ── Phase 3: Highlight Detection ───────────────────────────────────────────
     _banner("PHASE 3 — HIGHLIGHT DETECTION")
     if skip_highlight:
@@ -244,6 +263,20 @@ def run(
 
         log.info("Phase 6 complete in %.1f s — %d/%d clips uploaded",
                  time.perf_counter() - t0, uploaded_count, len(exported))
+
+    # ── Phase 7: Analytics & SEO Learning ──────────────────────────────────────
+    if auto_upload:
+        _banner("PHASE 7 — ANALYTICS & SEO LEARNING")
+        try:
+            from analytics import generate_daily_insights
+            generate_daily_insights()
+        except FileNotFoundError as e:
+            if "yt_analytics_token.json" in str(e) or "client_secrets" in str(e):
+                log.warning("Analytics skipped — need yt_analytics_token.json with youtube.readonly scope")
+            else:
+                log.warning("Analytics failed: %s", e)
+        except Exception as e:
+            log.warning("Analytics failed: %s", e)
 
     # ── Summary ────────────────────────────────────────────────────────────────
     total = time.perf_counter() - start_total

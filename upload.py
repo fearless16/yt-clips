@@ -105,7 +105,7 @@ def _has_shorts_marker(text: str) -> bool:
     return "#shorts" in (text or "").lower()
 
 
-def _limit_youtube_tags(tags: List[str], max_chars: int = 500) -> List[str]:
+def _limit_youtube_tags(tags: List[str], max_chars: int = 450) -> List[str]:
     limited: List[str] = []
     total = 0
     for tag in tags:
