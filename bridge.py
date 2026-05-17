@@ -103,17 +103,19 @@ def _push_via_drive_api(job: dict) -> bool:
 
 
 def _push_via_tunnel(job: dict) -> bool:
-    """Attempt to push job via Colab tunnel URL. Returns True on success."""
-    url_file = Path("colab_url.txt")
-    if not url_file.exists():
+    """Attempt to push job via Colab/Kaggle tunnel URL. Returns True on success."""
+    colab_url = None
+    for fname in ["colab_url.txt", "kaggle_url.txt"]:
+        fpath = Path(fname)
+        if fpath.exists():
+            colab_url = fpath.read_text().strip()
+            break
+
+    if not colab_url or not colab_url.startswith("http"):
         return False
 
     try:
         import requests
-
-        colab_url = url_file.read_text().strip()
-        if not colab_url.startswith("http"):
-            return False
 
         log.info(f"📡 Sending via Tunnel: {colab_url}")
         response = requests.post(
@@ -123,7 +125,7 @@ def _push_via_tunnel(job: dict) -> bool:
             timeout=10,
         )
         if response.status_code == 200:
-            log.info("✅ Job received by Colab Tunnel instantly!")
+            log.info("✅ Job received by Kaggle Tunnel instantly!")
             return True
         else:
             log.warning(f"⚠️ Tunnel returned error {response.status_code}")
