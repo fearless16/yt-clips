@@ -594,12 +594,10 @@ def _build_enhance_stack(
             filter_base += f",{lf}"
 
     # ── Color boost + sharpening ─────────────────────────────────────────────
-    # Proven approach from test: sharpen + contrast + saturation
-    # Reference: saturation=133, sharpness=274
-    # Our tested params: sharp=1.15x, contrast=1.15x, saturation=1.15x
-    # Skip when selective enhancement is enabled (Phase 4.25 handles this)
-    selective_enabled = cfg.get("enhancement", {}).get("selective", False)
-    if not selective_enabled:
+    # Skip when any Phase 4.25 enhancement is enabled (handles this)
+    enh = cfg.get("enhancement", {})
+    phase_425_active = enh.get("selective", False) or enh.get("ref_grade", False)
+    if not phase_425_active:
         filter_base += ",unsharp=5:5:1.0:5:5:0.0,eq=saturation=1.15:contrast=1.15:brightness=0.04"
 
     # ── Motion interpolation ──────────────────────────────────────────────────

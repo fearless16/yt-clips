@@ -37,7 +37,14 @@ log = get_logger("ref_grade", cfg["logging"]["log_file"], cfg["logging"]["level"
 
 def _detect_face_once(img: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    data_mod = getattr(cv2, "data", None)
+    if data_mod is not None:
+        cascade_path = getattr(data_mod, "haarcascades", None)
+    else:
+        cascade_path = None
+    if cascade_path is None:
+        cascade_path = os.path.join(os.path.dirname(cv2.__file__), "data")
+    cascade = cv2.CascadeClassifier(os.path.join(str(cascade_path), "haarcascade_frontalface_default.xml"))
     faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
     if not len(faces):
         return None
@@ -207,7 +214,7 @@ class ReferenceGrade:
         try:
             self.params = enroll(reference_path)
             self.valid = True
-        except ValueError as e:
+        except (ValueError, AttributeError, OSError) as e:
             log.error("Enrollment failed: %s", e)
         log.info("Total enrollment: %.1fs", time.perf_counter() - t0)
 
