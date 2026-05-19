@@ -293,17 +293,43 @@ def run(
         _banner("PHASE 6 — YOUTUBE UPLOAD")
         t0 = time.perf_counter()
         from upload import upload_video
-        from scheduler import get_next_slot, format_for_youtube
 
-        interval = cfg["youtube"].get("schedule_interval_hours", 2)
+        interval = cfg.get("upload_schedule", {}).get("interval_hours",
+                   cfg["youtube"].get("schedule_interval_hours", 1))
+
+        # Pre-generate schedule with jitter + prime-time assignment
+        if auto_schedule:
+            from scheduler import assign_clips_to_slots, format_for_youtube
+            # Optional: rank clips by SEO quality score
+            clip_scores = {}
+            for clip_path in exported:
+                meta_path = clip_path.with_name(f"{clip_path.stem}_metadata.json")
+                if meta_path.exists():
+                    try:
+                        import json
+                        with open(meta_path) as f:
+                            meta = json.load(f)
+                        score = meta.get("quality_score") or meta.get("seo_score") or 0.0
+                        clip_scores[clip_path.stem] = float(score)
+                    except (json.JSONDecodeError, OSError, ValueError):
+                        pass
+            assignments = assign_clips_to_slots(
+                clips=[p.stem for p in exported],
+                interval_hours=interval,
+                clip_scores=clip_scores if clip_scores else None,
+            )
+            slot_map = {stem: dt for stem, dt in assignments}
+            log.info("Schedule generated for %d clips (jittered hourly)", len(assignments))
 
         for clip_path in exported:
             meta_path = clip_path.with_name(f"{clip_path.stem}_metadata.json")
             if meta_path.exists():
                 publish_at = None
                 if auto_schedule:
-                    slot = get_next_slot(interval)
-                    publish_at = format_for_youtube(slot)
+                    slot = slot_map.get(clip_path.stem)
+                    if slot:
+                        publish_at = format_for_youtube(slot)
+                        log.info("⏰ Slot: %s → %s", clip_path.stem, slot.strftime("%Y-%m-%d %H:%M IST"))
 
                 try:
                     upload_video(

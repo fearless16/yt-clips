@@ -129,8 +129,19 @@ youtube:
   enforce_shorts_eligibility: true      # Refuse landscape/too-long files before upload
   shorts_max_seconds: 180               # Current YouTube Shorts maximum duration
   upload_enabled: true                  # 🚀 GO LIVE!
-  schedule_interval_hours: 2            # Automate posting every 2 hours (Algorithmic Sweet Spot)
+  schedule_interval_hours: 1            # Upload every hour (jittered, not fixed :00)
   niche: "Cricket"                      # Used for SEO trend analysis
+
+# ─── Upload Schedule ─────────────────────────────────────────────────────────
+# Controls the jittered hourly scheduling strategy.
+# Jitter ensures every upload hour has a different minute offset (e.g. 8:05, 9:12).
+upload_schedule:
+  interval_hours: 1                     # How often to upload (hours)
+  jitter_max_minutes: 55                # Max jitter offset (0-59). 55 ensures no hour spill.
+  prime_time:
+    enabled: true                       # Assign best clips to prime time
+    evening: [19, 22]                   # Evening prime window (IST)
+    lunch: [12, 14]                     # Lunch prime window (IST)
 
 # ─── Quality Intelligence ─────────────────────────────────────────────────────
 # Smart analysis thresholds for the Frame Analysis Engine.
