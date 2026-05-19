@@ -39,6 +39,17 @@ python kaggle_monitor.py --monitor            # watch progress
 | Encoding | Two-pass VBR | Optimal bit allocation |
 | Speed variation | Gaussian-smoothed 1.0-1.25x | Dynamic pacing |
 
+### Selective Enhancement (Phase 4.25 — enable `enhancement.selective: true`)
+3-pass enhancement on 9:16 cropped output. Fixes flicker, ghosting, uncanny results.
+
+| Pass | Module | What It Does |
+|---|---|---|
+| Pass 1 | `state_analyzer.py` | Per-frame classification: heavy/light/skip based on mouth, eyes, pose, lighting |
+| Pass 2 | `selective_enhancer.py` | Conditional: GFPGAN (heavy), sharpen (light), propagate (skip) |
+| Pass 3 | `temporal_consistency.py` | IIR face smoothing, drift correction, boundary blending |
+
+**Key design:** Operates on 9:16 cropped video from Phase 4, NOT raw 16:9 source. When enabled, FFmpeg filters in export.py are disabled to prevent double processing.
+
 ### Pre-Generation Test Guard
 Controlled by `testing.enabled` in config.yaml (default: `false` for speed).
 Set `testing.enabled: true` to auto-run `pytest tests/ -x --timeout=120` before any operation.
@@ -48,14 +59,18 @@ Use `--skip-tests` to bypass.
 
 ```
 yt-clips/
-├── pipeline.py          # Main orchestrator — 6 phases
+├── pipeline.py          # Main orchestrator — 7 phases
 ├── download.py          # yt-dlp + aria2c download
 ├── transcribe.py        # faster-whisper (Hindi/English)
 ├── highlight.py         # Audio RMS + transcript scoring
 ├── frame_analyzer.py    # Cheap analysis (Haar + heuristics)
 ├── premium_analyzer.py  # Premium analysis (YOLO + ByteTrack + Kalman)
+├── video_analyzer.py    # Pre-analysis: face/lighting map for full VOD
 ├── premium_render.py    # Premium render (RIFE + GFPGAN + VBR)
 ├── export.py            # Clip export + FFmpeg encoding
+├── state_analyzer.py    # Pass 1: Per-frame enhancement classification
+├── selective_enhancer.py # Pass 2: Conditional enhancement (GFPGAN/sharpen/propagate)
+├── temporal_consistency.py # Pass 3: Flicker removal + drift correction
 ├── seo.py               # SEO generation (Gemini AI)
 ├── seo_learner.py       # Self-improving SEO from past performance
 ├── analytics.py         # YouTube analytics dashboard + SEO feedback loop
@@ -76,7 +91,14 @@ yt-clips/
     ├── config.py         # YAML config loader
     ├── ai_client.py      # Gemini/OpenAI client
     ├── drive_auth.py     # Google Drive auth
-    └── subtitles.py      # ASS subtitle generation
+    ├── face_matcher.py   # Face matching utility
+    ├── face_reference.py # Reference face system
+    ├── face_restore.py   # Face restoration utility
+    ├── super_res.py      # Real-ESRGAN 4x + GFPGAN
+    ├── subtitles.py      # ASS subtitle generation
+    ├── torchvision_compat.py # Torchvision compatibility
+    ├── resilience.py     # Retry/error handling
+    └── reports.py        # Run report generation
 ```
 
 ## Configuration
@@ -88,6 +110,12 @@ premium:
   enabled: false              # Set true for YOLO+ByteTrack
   face_enhancement: true      # GFPGAN (auto on Kaggle)
   frame_interpolation: true   # FILM 30→60fps
+
+enhancement:
+  selective: false            # 3-pass selective enhancement (Phase 4.25)
+  gfpgan_strength: 0.7        # Face restoration strength (0-1)
+  temporal_alpha: 0.7         # Face temporal smoothing (0=smooth, 1=raw)
+  drift_threshold: 65         # Identity drift detection threshold
 
 download:
   format: "bv*+ba/b"         # Best available (no cap)
@@ -110,9 +138,11 @@ export:
 ```
 URL → Download (yt-dlp + aria2c)
     → Transcribe (faster-whisper GPU)
+    → Video Analysis (face/lighting map)
     → Highlight Detection (audio RMS + transcript scoring + Gemini AI)
     → Frame Analysis (cheap=Haar / premium=YOLO+ByteTrack)
     → Export (crop + enhance + interpolate + encode)
+    → Selective Enhancement (3-pass: state→enhance→temporal) [optional]
     → SEO + Thumbnails (Gemini)
     → Upload to YouTube (optional)
 ```

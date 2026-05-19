@@ -126,8 +126,15 @@ class SuperResEnhancer:
 
         if HAS_GFPGAN:
             try:
+                gfpgan_path = Path("weights/GFPGANv1.4.pth")
+                if not gfpgan_path.exists():
+                    gfpgan_url = "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"
+                    gfpgan_path.parent.mkdir(parents=True, exist_ok=True)
+                    log.info("Downloading GFPGAN weights...")
+                    import urllib.request
+                    urllib.request.urlretrieve(gfpgan_url, str(gfpgan_path))
                 self.face_enhancer = GFPGANer(
-                    model_path="experiments/pretrained_models/GFPGANv1.4.pth",
+                    model_path=str(gfpgan_path),
                     upscale=1,
                     arch="clean",
                     channel_multiplier=2,

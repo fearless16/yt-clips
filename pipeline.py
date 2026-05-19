@@ -190,6 +190,64 @@ def run(
         exported = export_all(highlights_path, video_path, transcript_path=transcript_path)
         log.info("Phase 4 complete in %.1f s — %d clips exported", time.perf_counter() - t0, len(exported))
 
+    # ── Phase 4.25: Selective Enhancement (optional) ─────────────────────────
+    if exported and cfg.get("enhancement", {}).get("selective", False):
+        _banner("PHASE 4.25 — SELECTIVE ENHANCEMENT")
+        t0 = time.perf_counter()
+        try:
+            from state_analyzer import analyze_clip as analyze_states
+            from selective_enhancer import enhance_clip as selective_enhance
+            from temporal_consistency import apply_temporal_consistency
+
+            enhanced_exported = []
+            for clip_path in exported:
+                clip_str = str(clip_path)
+                clip_id = clip_path.stem
+
+                # Pass 1: State analysis
+                log.info("[%s] Pass 1: State analysis...", clip_id)
+                analysis_path = str(Path(cfg["paths"]["temp"]) / f"{clip_id}_state_analysis.json")
+                analysis = analyze_states(
+                    video_path=clip_str,
+                    sample_rate=2,
+                    segment_size_sec=2.0,
+                    output_path=analysis_path,
+                )
+                if "error" in analysis:
+                    log.warning("[%s] State analysis failed — skipping enhancement", clip_id)
+                    enhanced_exported.append(clip_path)
+                    continue
+
+                # Pass 2: Selective enhancement
+                log.info("[%s] Pass 2: Selective enhancement...", clip_id)
+                enhanced_path = str(Path(cfg["paths"]["temp"]) / f"{clip_id}_enhanced.mp4")
+                enhanced = selective_enhance(
+                    video_path=clip_str,
+                    analysis_path=analysis_path,
+                    output_path=enhanced_path,
+                )
+
+                # Pass 3: Temporal consistency
+                log.info("[%s] Pass 3: Temporal consistency...", clip_id)
+                final_path = str(Path(cfg["paths"]["temp"]) / f"{clip_id}_final.mp4")
+                final = apply_temporal_consistency(
+                    video_path=enhanced,
+                    analysis_path=analysis_path,
+                    output_path=final_path,
+                )
+
+                # Replace original with enhanced version
+                import shutil
+                shutil.move(final, clip_str)
+                enhanced_exported.append(clip_path)
+                log.info("[%s] Enhancement complete", clip_id)
+
+            exported = enhanced_exported
+            log.info("Phase 4.25 complete in %.1f s — %d clips enhanced",
+                     time.perf_counter() - t0, len(exported))
+        except Exception as e:
+            log.warning("Selective enhancement failed (non-fatal): %s", e)
+
     # ── Phase 4.5: SEO & Thumbnails ──────────────────────────────────────────
     if exported:
         _banner("PHASE 4.5 — SEO & THUMBNAILS")

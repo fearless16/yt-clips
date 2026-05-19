@@ -59,6 +59,15 @@ premium:
   frame_interpolation: true          # FILM 30→60fps (GPU only)
   host_ref_photos: ""                # Path to reference photos for host ID (optional)
 
+# ─── Selective Enhancement (Phase 4.25) ───────────────────────────────────────
+# 3-pass enhancement on 9:16 cropped output from export.
+# Operates on cropped video, NOT raw 16:9 source.
+enhancement:
+  selective: false                   # Enable 3-pass selective enhancement
+  gfpgan_strength: 0.7               # Face restoration strength (0-1)
+  temporal_alpha: 0.7                # Face temporal smoothing (0=smooth, 1=raw)
+  drift_threshold: 65                # Identity drift detection threshold (mean pixel diff)
+
 # ─── Layout ──────────────────────────────────────────────────────────────────
 # Describes where the facecam lives in the SOURCE 16:9 frame (pixels).
 # Set has_facecam: false if the stream has no facecam overlay.
@@ -93,11 +102,11 @@ export:
   global_speed_factor: 1.0              # Set to 1.0 to use variable speed only (frame_analyzer.py calculates dynamic speed)
   enable_variable_speed: true            # Enable smart speed adjustment based on silence/tempo
   variable_speed_aggressive: true       # Apply more aggressive speed up on dead air
-  fps: 60                               # Target FPS (motion interpolation fills gaps)
+  fps: 30                               # Target FPS (motion interpolation fills gaps)
   video_bitrate: "25M"                  # Max bitrate (used with CRF as ceiling)
   audio_bitrate: "320k"                 # Studio-grade audio
   crf: 18                               # CRF quality (lower = higher quality, 15-23 recommended)
-  super_resolution: true                 # AI 4x upscale via Real-ESRGAN (GPU only; auto-skips on CPU)
+  super_resolution: false                 # AI 4x upscale via Real-ESRGAN (GPU only; auto-skips on CPU)
   ffmpeg_timeout_seconds: 900           # Prevent hung FFmpeg exports
   min_output_bytes: 100000              # Reject tiny/corrupt exports
   # Hardware encoder — auto-detected in export.py; config is fallback
@@ -150,8 +159,8 @@ testing:
 
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
-  provider: "openrouter"            # groq | deepseek | openrouter | nvidia | xai | ollama
-  model: "deepseek/deepseek-v4-flash"     # 284B MoE via OpenRouter — best quality/price
+  provider: "groq"            # groq | deepseek | openrouter | nvidia | xai | ollama
+  model: "meta-llama/llama-4-scout-17b-16e-instruct"     # fastest, free tier
   # Benchmark results (16 May 2026, verified live):
   # Provider  Model                                        Score  Latency  Cost
   # ──────────────────────────────────────────────────────────────────────────────

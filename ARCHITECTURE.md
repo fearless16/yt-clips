@@ -13,11 +13,16 @@
 │  Language: hi (Hinglish/Hindi)                                  │
 │  Device: cuda on Colab, cpu on Mac                              │
 ├──────────────────────────────────────────────────────────────────┤
+│  PHASE 2.5: VIDEO ANALYSIS                                      │
+│  video_analyzer.py — face/lighting map for full VOD             │
+│  Samples every 2s, builds quality map for highlight selection   │
+├──────────────────────────────────────────────────────────────────┤
 │  PHASE 3: HIGHLIGHT DETECTION                                   │
 │  Audio RMS energy + transcript scoring → highlights/{video}.yaml│
 │  Gemini AI refinement (optional)                                │
 ├──────────────────────────────────────────────────────────────────┤
 │  PHASE 4: FRAME ANALYSIS + EXPORT                               │
+│  16:9 → 9:16 smart crop + encode                                │
 │  ┌─ Cheap (default): ──────────────────────────────────────────┐│
 │  │ Haar Cascade → EMA smooth → heuristic layout → FFmpeg crop ││
 │  └─────────────────────────────────────────────────────────────┘│
@@ -25,6 +30,22 @@
 │  │ YOLOv8-face → ByteTrack → Kalman+bezier → layout classifier││
 │  │ → RIFE 30→60fps → GFPGAN enhance → two-pass VBR            ││
 │  └─────────────────────────────────────────────────────────────┘│
+├──────────────────────────────────────────────────────────────────┤
+│  PHASE 4.25: SELECTIVE ENHANCEMENT (config toggle)              │
+│  3-pass enhancement on 9:16 cropped output from Phase 4         │
+│  ┌─ Pass 1: state_analyzer.py ─────────────────────────────────┐│
+│  │ Per-frame state classification: heavy/light/skip             ││
+│  │ Based on mouth, eyes, pose, lighting, sharpness              ││
+│  ├─ Pass 2: selective_enhancer.py ─────────────────────────────┤│
+│  │ heavy: GFPGAN face restore + sharpen                        ││
+│  │ light: conservative sharpen + color                         ││
+│  │ skip:  temporal propagation from nearest enhanced            ││
+│  ├─ Pass 3: temporal_consistency.py ───────────────────────────┤│
+│  │ IIR face smoothing, drift correction, boundary blend        ││
+│  └─────────────────────────────────────────────────────────────┘│
+│  Input:  export.py output (9:16 cropped video)                  │
+│  Output: enhanced 9:16 video (replaces export output)           │
+│  Toggle: enhancement.selective in config.yaml                   │
 ├──────────────────────────────────────────────────────────────────┤
 │  PHASE 4.5: SEO + THUMBNAILS                                    │
 │  Model chain: MinMax → Groq → NVIDIA (quality-gated)            │
@@ -50,7 +71,36 @@ The codebase maintains TWO complete analysis paths:
 
 Selected via `premium.enabled` in config.yaml. `export.py` auto-detects which path to use at import time.
 
-### 2. Pre-Generation Test Guard
+### 2. Selective Enhancement Pipeline (Phase 4.25)
+
+When `enhancement.selective: true` in config.yaml, a 3-pass enhancement runs on each exported 9:16 clip:
+
+```
+export.py output (9:16)
+    │
+    ├─ Pass 1: state_analyzer.py
+    │   Per-frame classification → heavy/light/skip
+    │   Factors: mouth state, eye state, pose, lighting, sharpness, artifacts
+    │   Output: analysis JSON with per-frame enhancement map
+    │
+    ├─ Pass 2: selective_enhancer.py
+    │   heavy frames → GFPGAN face restore + sharpen
+    │   light frames → conservative sharpen + color boost
+    │   skip frames → propagate from nearest enhanced frame
+    │   Background → global grade (brightness/contrast/color temp)
+    │
+    └─ Pass 3: temporal_consistency.py
+        IIR face smoothing (alpha=0.7) → no flicker between frames
+        Global frame smoothing (alpha=0.85) → no background flicker
+        Drift detection → re-sync if face identity changes
+        Segment boundary blending → smooth transitions
+```
+
+**Critical: This operates on 9:16 cropped video, NOT raw 16:9 source.**
+
+When selective enhancement is ON, the FFmpeg filters in `export.py` are disabled to prevent double processing.
+
+### 3. Pre-Generation Test Guard
 Controlled by `testing.enabled` in config.yaml (default: `false` on Colab for speed).
 When enabled, `pytest tests/ -x --timeout=120` runs before any expensive operation.
 Use `--skip-tests` to bypass. Set `testing.enabled: true` for local development.
@@ -129,9 +179,13 @@ Gaussian-smoothed per-frame speed multiplier (1.0-1.25x):
 | ByteTrack matching | CPU | 0 |
 | FILM/RIFE interpolation | GPU | ~3 GB |
 | GFPGAN enhancement | GPU | ~2.5 GB |
+| Real-ESRGAN 4x upscale | GPU | ~3 GB |
 | FFmpeg NVENC encode | GPU | ~0.5 GB |
 | Whisper transcription | CPU (parallel) | 0 |
-| Total peak | GPU | ~6.5 GB |
+| State analysis (Pass 1) | CPU | 0 |
+| Selective enhancement (Pass 2) | GPU (GFPGAN) | ~2.5 GB |
+| Temporal consistency (Pass 3) | CPU | 0 |
+| Peak total (with selective) | GPU | ~8.5 GB |
 
 ## Config Reference
 
@@ -143,6 +197,7 @@ highlight:       # scoring thresholds, clip sizes
 premium:         # premium toggle + feature flags
 layout:          # facecam position, chat overlay config
 export:          # resolution, fps, bitrate, encoder, transitions
+enhancement:     # 3-pass selective enhancement (Phase 4.25)
 youtube:         # upload privacy, scheduling, category
 ai:              # LLM provider (groq/nvidia/openrouter)
 thumbnail:       # AI thumbnail generation
@@ -173,7 +228,9 @@ tests/
 ├── test_synthetic_quality.py # Synthetic image/video quality tests (14)
 ├── test_integration.py      # End-to-end integration tests (14)
 ├── test_tdd_regression.py   # Regression guard tests (9)
-└── test_fuzz.py             # Fuzz testing — random inputs (20)
+├── test_fuzz.py             # Fuzz testing — random inputs (20)
+├── test_state_analyzer.py   # State analyzer integration tests (standalone)
+└── test_full_pipeline.py    # 3-pass enhancement end-to-end test (standalone)
 ```
 
 ## Dependencies
@@ -192,3 +249,4 @@ tests/
 - ultralytics (YOLOv8-face), torch
 - filterpy (Kalman filter), scipy (Hungarian matching)
 - gfpgan, basicsr (face enhancement)
+- realesrgan (super-resolution)
