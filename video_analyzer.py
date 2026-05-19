@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -181,34 +182,84 @@ def _match_face_to_references(
 def _sample_frames(
     video_path: str,
     interval_sec: float = 2.0,
-) -> List[Tuple[float, np.ndarray]]:
-    """Extract frames at regular intervals. Returns [(timestamp, frame_bgr), ...]."""
+):
+    """Extract frames at regular intervals using ffmpeg GPU (fallback CPU).
+    
+    Yields (timestamp, frame_bgr) one at a time — no memory accumulation.
+    """
+    probe = _probe_video(video_path)
+    fps = probe.get("fps", 30)
+    width = probe.get("width", 0)
+    height = probe.get("height", 0)
+    duration = probe.get("duration", 0)
+    step = max(1, int(fps * interval_sec))
+
+    log.info("Sampling frames every %.1fs from %.0fs video (%.0f fps, %d frames, %dx%d)",
+             interval_sec, duration, fps, int(duration * fps), width, height)
+
+    if width and height and shutil.which("ffmpeg"):
+        yield from _sample_frames_gpu(video_path, fps, width, height, step, interval_sec, duration)
+    else:
+        yield from _sample_frames_cpu(video_path, fps, step, interval_sec)
+
+
+def _sample_frames_gpu(video_path, fps, width, height, step, interval_sec, duration=0):
+    """GPU-accelerated frame sampling via ffmpeg CUDA. Yields (ts, frame)."""
+    frame_size = width * height * 3
+    cmd = [
+        "ffmpeg",
+        "-hwaccel", "cuda",
+        "-i", video_path,
+        "-vf", f"select=not(mod(n\\,{step}))",
+        "-vsync", "0",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "pipe:1",
+    ]
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8
+    )
+    idx = 0
+    log_every = max(1, 300 // interval_sec)  # log every ~5 min of video
+    try:
+        while True:
+            raw = proc.stdout.read(frame_size)
+            if not raw or len(raw) < frame_size:
+                break
+            frame = np.frombuffer(raw, np.uint8).reshape((height, width, 3))
+            yield (idx * interval_sec, frame)
+            idx += 1
+            if idx % log_every == 0:
+                log.info("GPU progress: %.1fs / %.0fs (%.0f%%)",
+                         idx * interval_sec, duration,
+                         idx * interval_sec / duration * 100)
+    finally:
+        proc.kill()
+        proc.wait()
+    log.info("GPU: sampled %d frames in %.1fs of video",
+             idx, idx * interval_sec)
+
+
+def _sample_frames_cpu(video_path, fps, step, interval_sec):
+    """CPU fallback via OpenCV. Yields (ts, frame)."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         log.error("Cannot open video: %s", video_path)
-        return []
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration = total / fps if fps > 0 else 0
-    step = max(1, int(fps * interval_sec))
-
-    log.info("Sampling frames every %.1fs from %.0fs video (%.0f fps, %d frames)",
-             interval_sec, duration, fps, total)
-
-    frames = []
+        return
     idx = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        if idx % step == 0:
-            ts = idx / fps if fps > 0 else 0
-            frames.append((ts, frame))
-        idx += 1
-    cap.release()
-    log.info("Sampled %d frames", len(frames))
-    return frames
+    count = 0
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if idx % step == 0:
+                yield (idx / fps if fps > 0 else 0, frame)
+                count += 1
+            idx += 1
+    finally:
+        cap.release()
+    log.info("CPU: sampled %d frames", count)
 
 
 # ─── Quality scoring ───────────────────────────────────────────────────────
@@ -233,10 +284,11 @@ def _score_frame(
     """
     score = 0.0
 
-    # 1. Face presence (20 pts)
+    # 1. Face presence (20 pts) — reduced penalty for sports/low-face content
     if not face_detected:
-        return 0.05  # Almost no value without a face
-    score += 0.20
+        score += 0.05  # Reduced penalty: allows sports clips without close-ups
+    else:
+        score += 0.20
 
     # 2. Reference face match (30 pts)
     score += ref_match * 0.30
@@ -315,16 +367,9 @@ def analyze_video(
         except Exception:
             pass
 
-    # Sample frames
-    frames = _sample_frames(video_path, interval_sec=sample_interval)
-    if not frames:
-        log.error("No frames extracted — aborting")
-        return {"summary": {"frames_sampled": 0, "duration_sec": 0, "error": "no frames"},
-                "per_second": [], "best_segments": [], "per_frame": []}
-
-    # Analyze each frame
+    # Sample frames (streaming, GPU-accelerated — no memory accumulation)
     per_frame = []
-    for ts, frame in frames:
+    for ts, frame in _sample_frames(video_path, interval_sec=sample_interval):
         lighting = _analyze_lighting(frame)
         face_detected = lighting["face_count"] > 0
 
@@ -345,6 +390,11 @@ def analyze_video(
             "ref_match": ref_match,
             "quality": quality,
         })
+
+    if not per_frame:
+        log.error("No frames extracted — aborting")
+        return {"summary": {"frames_sampled": 0, "duration_sec": 0, "error": "no frames"},
+                "per_second": [], "best_segments": [], "per_frame": []}
 
     # Aggregate to per-second scores
     per_second = _aggregate_to_seconds(per_frame)

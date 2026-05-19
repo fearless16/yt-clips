@@ -1,37 +1,23 @@
 """
 analytics.py — YouTube Performance Analytics + SEO Feedback Loop.
-Fetches shorts performance → Rich terminal dashboard → feeds SEOLearner.
+Fetches videos, shorts, and lives separately → feeds SEOLearner.
 Run standalone:  python analytics.py
-Pipeline hook:  auto-runs after upload
+Worker hook:     auto-runs from worker.py
 """
 
 import os
 import json
-import time
-import math
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 import re
-import httplib2
-import google_auth_httplib2
 
 from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.text import Text
-from rich import box
-from rich.columns import Columns
-from rich.layout import Layout
-
 from utils.config import load_config
-from utils.logger import get_logger, phase_tracker
-from utils.ai_client import AIClient
+from utils.logger import get_logger
 from seo_learner import SEOLearner
 
 def _parse_iso8601_duration(dur: str) -> int:
@@ -45,72 +31,72 @@ def _parse_iso8601_duration(dur: str) -> int:
     return int(h or 0) * 3600 + int(m or 0) * 60 + int(s or 0)
 
 
-console = Console()
 cfg = load_config()
 log = get_logger("analytics", cfg["logging"]["log_file"], cfg["logging"]["level"])
-ai = AIClient()
-seo_learner = SEOLearner()
-
-SCOPES = [
-    "https://www.googleapis.com/auth/youtube.readonly",
-    "https://www.googleapis.com/auth/yt-analytics.readonly",
-]
 
 
-def _auth() -> Tuple[Optional[any], Optional[any]]:
-    creds = None
-    tf = "yt_analytics_token.json"
-    if os.path.exists(tf):
-        try:
-            creds = Credentials.from_authorized_user_file(tf, SCOPES)
-        except Exception:
-            creds = None
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception:
-                creds = None
-        if not creds:
-            if not os.path.exists("client_secrets.json"):
-                log.error("client_secrets.json missing — run OAuth setup first")
-                return None, None
-            flow = InstalledAppFlow.from_client_secrets_file("client_secrets.json", SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(tf, "w") as f:
-            f.write(creds.to_json())
-    base_http = httplib2.Http(timeout=60)
-    auth_http = google_auth_httplib2.AuthorizedHttp(creds, http=base_http)
-    yt = build("youtube", "v3", http=auth_http)
-    ya = build("youtubeAnalytics", "v2", http=auth_http)
-    return yt, ya
+def _auth() -> Optional[any]:
+    """Authenticate using yt_token.json (shared with upload)."""
+    tf = "yt_token.json"
+    if not os.path.exists(tf):
+        log.error("yt_token.json missing — run OAuth setup first")
+        return None
+
+    try:
+        token_data = json.loads(open(tf).read())
+        creds = Credentials(
+            token=token_data.get("token"),
+            refresh_token=token_data.get("refresh_token"),
+            token_uri=token_data.get("token_uri"),
+            client_id=token_data.get("client_id"),
+            client_secret=token_data.get("client_secret"),
+            scopes=token_data.get("scopes", []),
+        )
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            # Save refreshed token
+            token_data["token"] = creds.token
+            json.dump(token_data, open(tf, "w"), indent=2)
+            log.info("Token refreshed and saved")
+        yt = build("youtube", "v3", credentials=creds)
+        return yt
+    except Exception as e:
+        log.error(f"Auth failed: {e}")
+        return None
 
 
-def fetch_shorts(days: int = 30) -> List[Dict]:
-    yt, ya = _auth()
+def _fetch_all_recent(days: int = 30) -> Dict[str, List[Dict]]:
+    """Fetch all recent content, split by type: videos, shorts, lives."""
+    yt = _auth()
     if not yt:
-        return []
-    # Get uploads
+        return {"videos": [], "shorts": [], "lives": []}
+
     ch = yt.channels().list(part="contentDetails", mine=True).execute()["items"][0]
     pid = ch["contentDetails"]["relatedPlaylists"]["uploads"]
     items = yt.playlistItems().list(part="snippet", playlistId=pid, maxResults=50).execute()["items"]
     ids = [i["snippet"]["resourceId"]["videoId"] for i in items]
 
     cutoff = datetime.now() - timedelta(days=days)
-    shorts = []
+    videos, shorts, lives = [], [], []
+
     for i in range(0, len(ids), 20):
         batch = ids[i:i+20]
-        vids = yt.videos().list(part="snippet,statistics,contentDetails", id=",".join(batch)).execute()
+        vids = yt.videos().list(
+            part="snippet,statistics,contentDetails,liveStreamingDetails",
+            id=",".join(batch)
+        ).execute()
+
         for v in vids.get("items", []):
             pub = datetime.strptime(v["snippet"]["publishedAt"], "%Y-%m-%dT%H:%M:%SZ")
             if pub < cutoff:
                 continue
-            dur = v["contentDetails"]["duration"]  # ISO 8601
-            seconds = _parse_iso8601_duration(dur)
-            if seconds > 180:
-                continue  # Not a short (>3 min)
+
             stats = v.get("statistics", {})
-            shorts.append({
+            dur = v["contentDetails"]["duration"]
+            seconds = _parse_iso8601_duration(dur)
+            is_live = v.get("liveStreamingDetails") is not None
+
+            entry = {
                 "id": v["id"],
                 "title": v["snippet"]["title"],
                 "published": pub,
@@ -118,103 +104,80 @@ def fetch_shorts(days: int = 30) -> List[Dict]:
                 "likes": int(stats.get("likeCount", 0)),
                 "comments": int(stats.get("commentCount", 0)),
                 "tags": v["snippet"].get("tags", []),
-            })
+                "duration_sec": seconds,
+                "is_live": is_live,
+            }
+
+            if is_live:
+                lives.append(entry)
+            elif seconds <= 180:
+                shorts.append(entry)
+            else:
+                videos.append(entry)
+
+    videos.sort(key=lambda x: x["views"], reverse=True)
     shorts.sort(key=lambda x: x["views"], reverse=True)
-    return shorts
+    lives.sort(key=lambda x: x["views"], reverse=True)
+
+    return {"videos": videos, "shorts": shorts, "lives": lives}
 
 
-def print_performance_dashboard(shorts: List[Dict]):
-    if not shorts:
-        console.print("[yellow]No shorts data to show[/]")
-        return
-
-    total_views = sum(s["views"] for s in shorts)
-    total_likes = sum(s["likes"] for s in shorts)
-    avg_views = total_views / max(1, len(shorts))
-    avg_like_rate = sum(s["likes"] / max(1, s["views"]) for s in shorts) / max(1, len(shorts))
-
-    # ─── HEADER ────────────────────────────────────────────────────────────
-    console.print()
-    console.print(Panel(
-        Text("📈 SHORTS PERFORMANCE ANALYTICS", style="bold green", justify="center"),
-        border_style="green", width=80,
-    ))
-
-    # ─── METRICS ───────────────────────────────────────────────────────────
-    m = Table(title="Channel Summary (Last 30 Days)", box=box.ROUNDED, header_style="bold cyan")
-    m.add_column("Metric", style="cyan")
-    m.add_column("Value", justify="right")
-    m.add_row("Shorts Analyzed", f"[bold]{len(shorts)}[/]")
-    m.add_row("Total Views", f"[bold]{total_views:,}[/]")
-    m.add_row("Avg Views/Short", f"{avg_views:,.0f}")
-    m.add_row("Total Likes", f"{total_likes:,}")
-    m.add_row("Avg Like Rate", f"{avg_like_rate*100:.1f}%")
-    m.add_row("Top Short", f"'{shorts[0]['title'][:40]}' — {shorts[0]['views']:,} views")
-    console.print(m)
-
-    # ─── PER-SHORT TABLE ──────────────────────────────────────────────────
-    t = Table(title="📊 Per-Short Breakdown", box=box.SIMPLE, header_style="bold magenta")
-    t.add_column("#", justify="right", style="dim")
-    t.add_column("Title", style="cyan", max_width=42)
-    t.add_column("Views", justify="right")
-    t.add_column("Likes", justify="right")
-    t.add_column("Like %", justify="right")
-    t.add_column("Engagement", justify="right")
-    t.add_column("Published", style="dim")
-
-    for i, s in enumerate(shorts, 1):
-        lr = s["likes"] / max(1, s["views"]) * 100
-        eng = (s["likes"] + s["comments"]) / max(1, s["views"]) * 100
-        vc = "green" if s["views"] > avg_views * 1.5 else "yellow" if s["views"] > avg_views * 0.5 else "white"
-        lc = "green" if lr > 5 else "yellow" if lr > 2 else "white"
-        t.add_row(
-            str(i),
-            s["title"][:42],
-            f"[{vc}]{s['views']:,}[/]",
-            f"{s['likes']:,}",
-            f"[{lc}]{lr:.1f}%[/]",
-            f"{eng:.1f}%",
-            s["published"].strftime("%d %b"),
-        )
-    console.print()
-    console.print(t)
+def fetch_shorts(days: int = 30) -> List[Dict]:
+    """Fetch only shorts (< 3 min)."""
+    return _fetch_all_recent(days)["shorts"]
 
 
-def ai_analyze(shorts: List[Dict]) -> Optional[str]:
-    if len(shorts) < 4:
-        return None
-    top3 = shorts[:3]
-    bot3 = shorts[-3:]
-    prompt = f"""You are a YouTube Shorts performance analyst. Analyze these shorts and give 3-5 bullet points of what's working and what's not. Use Hinglish. Be specific — mention actual titles.
-
-TOP PERFORMING (highest views):
-{chr(10).join(f"- '{s['title']}' — {s['views']} views, {s['likes']} likes" for s in top3)}
-
-BOTTOM PERFORMING (lowest views):
-{chr(10).join(f"- '{s['title']}' — {s['views']} views, {s['likes']} likes" for s in bot3)}
-
-Return ONLY 3-5 bullet points, no preamble:
-- What patterns do the top shorts share?
-- What's different about bottom shorts?
-- Specific recommendations for next shorts."""
-    try:
-        return ai.generate_text(prompt, "You are a YouTube analytics expert. Return only bullet points. Use Hinglish.")
-    except Exception as e:
-        log.warning(f"AI analysis failed: {e}")
-        return None
+def fetch_videos(days: int = 30) -> List[Dict]:
+    """Fetch only full videos (> 3 min, not live)."""
+    return _fetch_all_recent(days)["videos"]
 
 
-def feed_seo_learner(shorts: List[Dict]):
-    for s in shorts:
-        # Try to load local SEO metadata for model/provider tracking
+def fetch_lives(days: int = 30) -> List[Dict]:
+    """Fetch only live streams."""
+    return _fetch_all_recent(days)["lives"]
+
+
+def print_performance_dashboard(shorts: List[Dict], videos: List[Dict] = None, lives: List[Dict] = None):
+    """Log performance summary (works headless — no rich console needed)."""
+    for label, items in [("Shorts", shorts), ("Videos", videos or []), ("Lives", lives or [])]:
+        if not items:
+            continue
+        total_v = sum(x["views"] for x in items)
+        total_l = sum(x["likes"] for x in items)
+        avg_v = total_v / max(1, len(items))
+        top = items[0]
+        log.info(f"📊 {label}: {len(items)} items, {total_v:,} total views, avg {avg_v:,.0f}, "
+                 f"top: '{top['title'][:50]}' ({top['views']:,} views)")
+
+    if shorts:
+        for i, s in enumerate(shorts[:10], 1):
+            lr = s["likes"] / max(1, s["views"]) * 100
+            log.info(f"  #{i} {s['title'][:50]} — {s['views']:,} views, {lr:.1f}% like rate")
+
+
+def feed_seo_learner(shorts: List[Dict], videos: List[Dict] = None, lives: List[Dict] = None):
+    """Feed all content types into the SEO learner for pattern recognition."""
+    learner = SEOLearner()
+    all_items = []
+    for label, items in [("short", shorts), ("video", videos or []), ("live", lives or [])]:
+        for item in items:
+            item["_content_type"] = label
+            all_items.append(item)
+
+    for s in all_items:
         provider = None
         model = None
         desc = ""
         tags = s.get("tags", [])
+
+        # Search for local metadata in shorts directories
         meta_paths = [
             Path("shorts") / s["id"] / f"{s['id']}_metadata.json",
             Path("shorts") / f"{s['id']}_metadata.json",
         ]
+        for d in Path("shorts").glob("*/"):
+            meta_paths.append(d / f"{s['id']}_metadata.json")
+
         for mp in meta_paths:
             if mp.exists():
                 try:
@@ -228,7 +191,7 @@ def feed_seo_learner(shorts: List[Dict]):
                     pass
                 break
 
-        seo_learner.record_performance(
+        learner.record_performance(
             clip_id=s["id"],
             title=s["title"],
             description=desc,
@@ -237,58 +200,52 @@ def feed_seo_learner(shorts: List[Dict]):
                 "viewCount": s["views"],
                 "likeCount": s["likes"],
                 "commentCount": s["comments"],
+                "content_type": s.get("_content_type", "short"),
             },
             provider=provider,
             model=model,
         )
-    log.info(f"Fed {len(shorts)} shorts into SEO learner")
+    log.info(f"🧠 Fed {len(all_items)} items into SEO learner "
+             f"({len(shorts)} shorts, {len(videos or [])} videos, {len(lives or [])} lives)")
 
 
 def print_seo_learnings():
-    suggestions = seo_learner.get_seo_improvement_suggestions()
-    if suggestions:
-        console.print(Panel(
-            Text("🧠 SEO LEARNINGS", style="bold yellow", justify="center"),
-            border_style="yellow", width=80,
-        ))
-        for s in suggestions:
-            emoji = "✅" if "perform" in s.lower() or "use more" in s.lower() else "⚠️"
-            console.print(f"  {emoji} {s}")
-        console.print()
+    learner = SEOLearner()
+    suggestions = learner.get_seo_improvement_suggestions()
+    for s in suggestions:
+        log.info(f"  💡 {s}")
 
 
 def generate_daily_insights(output_dir: str = "logs"):
-    phase_tracker.begin("Analytics — Fetching Shorts Performance")
-    console.print()
+    """Fetch all content types, feed learner, save report."""
+    log.info("📊 Starting daily analytics fetch...")
 
-    shorts = fetch_shorts(days=30)
-    if not shorts:
-        console.print("[yellow]No shorts found in last 30 days[/]")
-        phase_tracker.end("done")
+    all_data = _fetch_all_recent(days=30)
+    shorts = all_data["shorts"]
+    videos = all_data["videos"]
+    lives = all_data["lives"]
+
+    total = len(shorts) + len(videos) + len(lives)
+    if total == 0:
+        log.warning("No content found in last 30 days")
         return None
 
-    print_performance_dashboard(shorts)
-    feed_seo_learner(shorts)
+    print_performance_dashboard(shorts, videos, lives)
+    feed_seo_learner(shorts, videos, lives)
     print_seo_learnings()
 
-    analysis = ai_analyze(shorts)
-    if analysis:
-        console.print(Panel(
-            Text("🤖 AI PERFORMANCE ANALYSIS", style="bold magenta", justify="center"),
-            border_style="magenta", width=80,
-        ))
-        for line in analysis.strip().split("\n"):
-            if line.strip():
-                console.print(f"  {line.strip()}")
-        console.print()
-
-    # Save to file
+    # Save report
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "shorts": shorts,
+        "videos": videos,
+        "lives": lives,
+    }
     rp = Path(output_dir) / f"analytics_{datetime.now():%Y%m%d_%H%M%S}.json"
-    rp.write_text(json.dumps(shorts, indent=2, default=str), encoding="utf-8")
-    console.print(f"[dim]📄 Data saved: {rp}[/]")
+    rp.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+    log.info(f"📄 Analytics saved: {rp}")
 
-    phase_tracker.end("done")
     return rp
 
 

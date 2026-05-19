@@ -247,24 +247,35 @@ class SEOLearner:
     def run_auto_benchmark(self):
         """
         Auto-discover best models by running a benchmark across all available
-        providers. Uses the AIClient to test each model and score results.
-        Called on-the-fly to dynamically select best model.
+        providers. Tests JSON parsing, content grounding, and SEO quality.
         """
+        import re
         log.info("🔬 Running auto-benchmark to discover best model...")
         from utils.ai_client import AIClient
+        from seo import _parse_json_response
         ai = AIClient()
         available = ai.get_available_providers()
+
+        # Use a real cricket clip transcript to test grounding
         benchmark_prompt = (
-            "Generate YouTube SEO for this cricket clip:\n"
-            "Title: RCB vs CSK IPL 2026 - Kohli hits 67 off 34\n"
-            "Description: Virat Kohli smashed 67 runs off 34 balls with 8 fours and 3 sixes "
-            "at M Chinnaswamy Stadium. RCB posted 198/4 in 20 overs. Match situation: "
-            "CSK needs 199 to win. CRR: 9.9, RRR: 9.95.\n\n"
-            "Return ONLY JSON with title, description, hashtags, search_terms."
+            "CONTEXT:\n"
+            "  Match: RCB vs CSK IPL 2026\n"
+            "  Scorecard: RCB 198/4 (Kohli 67(34), Faf 45(29)) | CSK 175/9 (Jadeja 42(28))\n\n"
+            "CLIP TRANSCRIPT: 'Kohli ne maara six! M Chinnaswamy mein crowd pagal ho gaya! "
+            "Faf du Plessis ne bhi acchi opening ki thi. Kohli ne 34 ball mein 67 banaye, "
+            "8 fours aur 3 sixes. CSK ke bowlers ko koi chance nahi mila.'\n\n"
+            "Generate YouTube SEO metadata for this clip.\n"
+            "RULES: Only use players mentioned in transcript (Kohli, Faf). "
+            "Description must be PLAIN TEXT, not a Python dict.\n"
+            "Return ONLY valid JSON with fields: title, description, hashtags, search_terms."
         )
+
+        # Players actually mentioned in transcript (for grounding check)
+        grounded_players = {"kohli", "faf", "du plessis"}
+
         results = []
         for provider, models in available.items():
-            for model in models[:2]:  # Test top 2 models per provider
+            for model in models[:2]:
                 log.info(f"  Benchmarking {provider}/{model}...")
                 try:
                     old_provider = ai._provider
@@ -272,38 +283,86 @@ class SEOLearner:
                     ai._provider = provider
                     ai._model = model
                     t0 = time.time()
-                    resp = ai.generate_text(benchmark_prompt, system_instruction="You are a cricket SEO expert. Return only valid JSON.")
+                    resp = ai.generate_text(
+                        benchmark_prompt,
+                        system_instruction=(
+                            "You are an elite YouTube Shorts SEO expert for Indian cricket. "
+                            "Only use player names from the transcript. "
+                            "Return ONLY valid JSON — no markdown, no explanation."
+                        ),
+                    )
                     latency = time.time() - t0
                     ai._provider = old_provider
                     ai._model = old_model
-                    # Score: check for valid JSON and required fields
+
                     score = 0
-                    try:
-                        data = json.loads(resp)
-                        if "title" in data: score += 20
-                        if "description" in data and len(data["description"]) > 200: score += 20
-                        if "hashtags" in data and len(data["hashtags"]) >= 4: score += 20
-                        if "search_terms" in data and len(data["search_terms"]) >= 10: score += 20
-                        if any(p in data.get("title","").lower() for p in ["kohli", "rcb", "csk", "ipl"]): score += 20
-                    except json.JSONDecodeError:
-                        score = 10  # At least returned something
+                    title = ""
+                    description = ""
+
+                    # Parse JSON (handles markdown wrapping)
+                    data = _parse_json_response(resp)
+
+                    if data is None:
+                        score = 5  # Returned something but not parseable
+                    else:
+                        # STRUCTURE (40 points)
+                        if "title" in data and isinstance(data["title"], str) and len(data["title"]) > 10:
+                            score += 10
+                            title = data["title"]
+                        if "description" in data and isinstance(data["description"], str) and len(data["description"]) > 100:
+                            score += 10
+                            description = data["description"]
+                        if "hashtags" in data and isinstance(data["hashtags"], list) and len(data["hashtags"]) >= 3:
+                            score += 10
+                        if "search_terms" in data and isinstance(data["search_terms"], list) and len(data["search_terms"]) >= 5:
+                            score += 10
+
+                        # GROUNDING (30 points) - title uses players from transcript
+                        title_lower = title.lower()
+                        if any(p in title_lower for p in ["kohli", "virat"]):
+                            score += 15
+                        if "ipl" in title_lower or "2026" in title_lower:
+                            score += 5
+                        if "rcb" in title_lower or "csk" in title_lower or "virat" in title_lower:
+                            score += 10
+
+                        # QUALITY (30 points) - no dict syntax, unique title, proper format
+                        has_dict_syntax = bool(re.search(r"\{[^}]{5,}\}", description))
+                        if not has_dict_syntax and description:
+                            score += 15  # Clean description
+                        if title and not title.startswith("{"):
+                            score += 5  # Title is not a dict
+                        if any(p in title_lower for p in ["smash", "six", "fire", "brilliant", "clutch", "incredible"]):
+                            score += 5  # Has power words
+                        if title and ("|" in title or ":" in title):
+                            score += 5  # Has pipe/colon format
+
+                    # LATENCY PENALTY - more than 30s gets a penalty
+                    if latency > 30:
+                        score = max(0, score - 20)
+                    elif latency > 15:
+                        score = max(0, score - 10)
+
                     results.append({
                         "provider": provider,
                         "model": model,
                         "score": score,
                         "latency": round(latency, 2),
                         "timestamp": datetime.now().isoformat(),
+                        "has_json": data is not None,
+                        "title_preview": title[:60] if title else "N/A",
                     })
-                    log.info(f"    Score: {score}/100, Latency: {latency:.1f}s")
+                    log.info(f"    Score: {score}/100, Latency: {latency:.1f}s, Title: {title[:60]}")
                 except Exception as e:
                     log.warning(f"    Failed: {e}")
+
         results.sort(key=lambda x: x["score"], reverse=True)
         self.learned_insights["benchmark_history"].append({
             "timestamp": datetime.now().isoformat(),
             "results": results,
             "top_result": results[0] if results else None,
         })
-        # Update best model from benchmark
+
         if results and results[0]["score"] >= 40:
             best = results[0]
             self.learned_insights["current_best_provider"] = best["provider"]

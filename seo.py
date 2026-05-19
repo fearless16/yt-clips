@@ -5,6 +5,7 @@ One AI call per clip with retry + backoff. No batching = no 429 storms.
 import json
 import re
 import time
+import traceback
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -76,6 +77,8 @@ ENGAGING_CTAS = [
 _SYSTEM = (
     "You are an elite YouTube Shorts SEO expert for Indian cricket. "
     "Your goal: Maximize CTR (Click-Through Rate) and watch time. "
+    "CRITICAL: Only use player names, teams, and events that appear in the transcript. "
+    "NEVER invent or hallucinate player names or match events. "
     "Return ONLY valid JSON — no markdown, no explanation."
 )
 
@@ -91,88 +94,92 @@ CLIP CONTENT:
   Raw Transcript (may have misspellings): {transcript}
   Key moments: {local_kw}
 
-══ STEP 1: TRANSCRIPTION CORRECTION ════════════════════════════════════════
-  First, fix any misspelled cricket names in the Raw Transcript:
+CRITICAL: This clip is one of several highlights from the same match. Each clip
+MUST have a COMPLETELY UNIQUE title describing THIS SPECIFIC MOMENT. Never reuse
+a title. Never reference "Target 234" unless this clip is actually about the chase.
+
+══ STEP 1: GROUND YOUR RESPONSE IN THE TRANSCRIPT ═══════════════════════════
+  BEFORE writing any output, do this:
+  1. Read the Raw Transcript carefully
+  2. List every cricket player name mentioned in the transcript
+  3. List every team name mentioned in the transcript
+  4. Describe in one sentence what happens in this clip based ONLY on the transcript
+
+  RULES — NEVER VIOLATE THESE:
+  - ONLY use player names that appear in the transcript or scorecard
+  - If a player is NOT mentioned in the transcript, DO NOT put them in the title
+  - If a team is NOT mentioned in the transcript, DO NOT put them in the title
+  - NEVER invent events, controversies, or moments not supported by the transcript
+  - The scorecard shows this match is GT vs SRH — do NOT mention other teams
+  - Match teams are Gujarat Titans (GT) and Sunrisers Hyderabad (SRH) ONLY
+
+══ STEP 2: TRANSCRIPTION CORRECTION ══════════════════════════════════════════
+  Fix misspelled cricket names:
   - Cross-reference against the Scorecard above (has correct player/venue names)
-  - Fix mistakes e.g. "Sunder" → "Sundar", "Kohli" → "Kohli" (if correct), "Sirage" → "Siraj"
-  - If Scorecard shows correct names, ALWAYS prefer them
-  - For names not in Scorecard, use your cricket knowledge
+  - Fix mistakes e.g. "Sunder" → "Sundar", "Sirage" → "Siraj"
+  - For Hindi names transliterated wrong, use your cricket knowledge
   - Use CORRECTED names in ALL output fields below
 
-══ STEP 2: GENERATE SEO METADATA ═══════════════════════════════════════════
+══ STEP 3: GENERATE SEO METADATA ════════════════════════════════════════════
 
 TITLE (max 100 chars, MAX 1 emoji):
-  Pick ONE proven formula:
-    1. SHOCK: "cricket live: <unexpected moment> | IPL 2026"
-    2. STAR: "IPL 2026: <star player> <action> <result>"
-    3. CLOSE: "cricket live: <close call> - did they?! | IPL 2026"
-    4. NUMBERS: "IPL 2026: <score> runs in <overs> - game changer!"
-    5. EMOTION: "Ye toh <emotion> hai bhai! <moment> | IPL 2026"
+  Must describe what ACTUALLY happens in this clip based on the transcript.
+  Format: "cricket live: <what happens> | IPL 2026"  OR  "IPL 2026: <player> <action> | <teams>"
   RULES:
     - MUST start with "cricket live:" or "IPL 2026"
-    - Inject 1-2 trending topics naturally
-    - Include individual player name + action (e.g. "Kohli smashes 67 off 34")
-    - Mention venue if notable (e.g. "at Wankhede", "in Chennai")
-    - NEVER generic like "Cricket Amazing!"
+    - Include the actual player name from the transcript (corrected spelling)
+    - Describe the specific moment, not a generic summary
+    - NEVER invent player names not in the transcript
+    - NEVER mention teams not in this match (only GT and SRH)
 
-DESCRIPTION (600-900 chars total, structured):
-  Section 1 — Hook + Context (120-150 chars):
-    "{{viral hook}} | <what happened> | <venue> | IPL 2026"
-    Include the key moment that makes this clip viral
+DESCRIPTION (600-900 chars total, PLAIN TEXT ONLY — no JSON, no dicts, no templates):
+  Write a flowing paragraph of Hinglish (Hindi + English mixed naturally).
+  Include:
+  - What happens in this specific clip (based ONLY on transcript)
+  - Player names from the transcript with corrected spelling
+  - Match context (teams from scorecard)
+  - An emotional reaction
+  - A CTA asking viewers to like/subscribe
+  IMPORTANT: PLAIN TEXT only. Do NOT wrap in dicts or JSON.
+  IMPORTANT: Use the SAME player names, team names, and cricket action words
+  that will appear in your search_terms below. SEO consistency is critical.
 
-  Section 2 — Match Situation & Individual Performances (200-300 chars):
-    "Match: <team1> vs <team2> at <venue>"
-    "Key batting: <player> scored <runs> off <balls> with <fours> fours & <sixes> sixes"
-    "Key bowling: <player> took <wickets>/<runs> in <overs> overs"
-    "Match phase: <innings>, target <runs>, required rate <rrr>"
-    Use Hinglish naturally — mix of Hindi emotion + English facts
-
-  Section 3 — Emotional Reaction (150-200 chars):
-    Hindi/English mix — "Arre wah! Kya shot tha ye! Fans going crazy..."
-    Describe crowd reaction, commentator excitement, tension in the moment
-
-  Section 4 — CTA (100-150 chars):
-    "{{cta}}"
-    MUST include subscribe/like/share prompt
-    Add "Aaj ka poora match dekho channel pe!" variant
-
-  Section 5 — Hashtags (exactly 4-5):
-    1. Tournament (#IPL2026 / #T20WorldCup / #Cricket)
-    2. Winning team (e.g. #RCB)
-    3. Losing team OR star player (e.g. #ViratKohli)
-    4. #Shorts (ALWAYS)
-    5. Optional: venue hashtag (e.g. #Wankhede)
-
-  Section 6 — Divider: "---" then search terms line
+HASHTAGS (exactly 4-5):
+  1. Tournament (#IPL2026)
+  2. Team from the match (e.g. #GT or #SRH)
+  3. Star player mentioned in transcript (e.g. #KrunalPandya)
+  4. #Shorts (ALWAYS include)
+  5. Optional: venue
 
 SEARCH TERMS (25-35 terms — maximize the 500 char budget):
+  These are the MOST IMPORTANT field for discoverability.
   CRITICAL: Use the "Actual YouTube Search Suggestions" above — these are REAL
   queries people type. Prioritize them over invented terms.
-  
-  Structure your tags in this priority order:
-    Tier 1 — Player + action + tournament (highest search intent):
-      e.g. "virat kohli six ipl 2026", "bumrah yorker mi"
-    Tier 2 — Team matchup phrases:
-      e.g. "csk vs srh ipl", "rcb vs mi highlights"
-    Tier 3 — Hindi search patterns (massive Indian search volume):
-      e.g. "kohli ka six", "dhoni finish", "ipl ka best moment"
-    Tier 4 — Moment-specific:
-      e.g. "last over six ipl", "hat trick ipl 2026", "catch of the match"
-    Tier 5 — Broad but relevant:
-      e.g. "ipl highlights", "cricket live", "t20 cricket"
-  
+
+  Include ALL of these categories:
+  Tier 1 — Player + action + tournament:
+    e.g. "ishan kishan batting ipl", "rabada yorker gt", "kohli six rcb"
+  Tier 2 — Match + team phrases:
+    e.g. "gt vs srh highlights", "csk vs srh live", "ipl 2026 live"
+  Tier 3 — Hindi search patterns (massive Indian search volume):
+    e.g. "kohli ka six", "dhoni finish", "ipl ka best moment", "cricket live hindi"
+  Tier 4 — Moment-specific:
+    e.g. "last over six ipl", "hat trick ipl 2026", "catch of the match"
+  Tier 5 — Broad but relevant:
+    e.g. "ipl highlights", "cricket live", "t20 cricket", "cricket shorts"
+
   RULES:
-    - Use EXACT phrases from YouTube suggestions when available
+    - Every term in search_terms MUST be something a real person would type on YouTube
     - Mix Hindi and English (Hinglish) — Indian users search in both
     - NO generic single words like "cricket" or "six" alone
-    - Each tag must be a SEARCH PHRASE (2-5 words), not a hashtag
-    - Aim for 25-35 tags to maximize the 500 char limit
+    - Each term must be 2-5 words (search phrase, not hashtag)
+    - Aim for 25-35 terms to maximize the 500 char budget
 
 Return ONLY valid JSON — no markdown, no explanation:
 {{
   "clip_id": "{clip_id}",
-  "title": "<corrected title>",
-  "description": "<full structured description>",
+  "title": "<title based on actual transcript content>",
+  "description": "<plain text description>",
   "hashtags": ["#...", "#...", "#...", "#..."],
   "search_terms": ["<term1>", "<term2>", "..."]
 }}
@@ -242,16 +249,21 @@ def _inject_viral_elements(title: str, description: str, hashtags: List[str]) ->
     hook = random.choice(VIRAL_HOOKS)
     cta = random.choice(ENGAGING_CTAS)
 
-    # Ensure description has hook and CTA
-    if hook not in description and len(description) > 50:
-        # Insert hook near beginning
+    # Check if AI already generated hook/CTA in description
+    hook_phrases = [h.split("!")[0].strip().lower() for h in VIRAL_HOOKS if "!" in h]
+    has_hook = any(hp in description.lower() for hp in hook_phrases)
+    has_cta = any(phrase in description.lower() for phrase in
+                  ["like", "subscribe", "share", "bell icon", "notification", "stay tuned"])
+
+    # Only add hook if AI didn't already include one
+    if not has_hook and len(description) > 50:
         desc_parts = description.split("\n\n")
         if desc_parts:
             desc_parts[0] = f"{hook} {desc_parts[0][:100]}"
         description = "\n\n".join(desc_parts)
 
-    # Ensure CTA at end
-    if cta not in description:
+    # Only add CTA if AI didn't already include one
+    if not has_cta:
         if len(description) > 100:
             description = f"{description}\n\n{cta}"
         else:
@@ -510,9 +522,107 @@ def _rank_and_optimize_tags(
     return final
 
 
+def _clean_dict_from_description(raw: str) -> str:
+    """If AI returns a Python dict literal as description, extract the text values."""
+    if not raw or not raw.strip():
+        return raw
+    # Find dict literal blocks (may have prefix hook text before them)
+    match = re.search(r"\{(?:'[^']+'|\"[^\"]+\"):", raw)
+    if not match:
+        return raw
+    try:
+        import ast
+        dict_str = raw[match.start():]
+        parsed = ast.literal_eval(dict_str)
+        if isinstance(parsed, dict):
+            # Concatenate all string values into plain text
+            parts = []
+            for v in parsed.values():
+                if isinstance(v, str):
+                    parts.append(v.strip())
+                elif isinstance(v, dict):
+                    parts.extend(str(val) for val in v.values() if isinstance(val, str))
+            plain = " | ".join(parts)
+            # Grab any prefix text (hook) that precedes the dict
+            prefix = raw[:match.start()].strip()
+            if prefix:
+                return f"{prefix} {plain}".strip()
+            return plain.strip()
+    except Exception:
+        pass
+    # Fallback: strip dict-like patterns with regex
+    cleaned = re.sub(r"\{[^}]*\}", "", raw).strip()
+    return cleaned
+
+
+def _consolidate_seo(title: str, description: str, hashtags: List[str], search_terms: List[str]) -> Dict:
+    """
+    Ensure search terms, description, and hashtags are CONSISTENT.
+    Search terms are the source of truth — inject them everywhere.
+    """
+    if not search_terms:
+        return {"title": title, "description": description, "hashtags": hashtags, "search_terms": search_terms}
+
+    # Pick top 10 search terms for description embedding
+    top_terms = search_terms[:10]
+    terms_line = " | ".join(top_terms[:8])
+
+    # Generate hashtags from search terms (extract player/team names)
+    player_names = {"kohli", "dhoni", "rohit", "gill", "bumrah", "suryakumar",
+                    "pandya", "jadeja", "ashwin", "chahal", "bumrah", "rahul",
+                    "samson", "rashid", "warner", "buttler", "narine", "klassen",
+                    "stoinis", "maxwell", "faf", "sundar", "krunal", "arshad",
+                    "ishan", "abhishek", "travis", "head", "mukesh", "siraj",
+                    "rabada", "axar", "shardul", "hardik", "riyan", "parag",
+                    "sudharsan", "sai", "iqbal", "axel", "patel", "washington",
+                    "abhishek", "shahrukh", "rajat", "rehan"}
+    team_names = {"csk", "mi", "rcb", "srh", "dc", "kkr", "rr", "gt", "lsg", "pbks",
+                  "chennai", "mumbai", "bangalore", "hyderabad", "delhi", "kolkata",
+                  "rajasthan", "gujarat", "lucknow", "punjab"}
+
+    term_words = set()
+    for t in search_terms[:15]:
+        term_words.update(t.lower().replace("#", "").split())
+
+    new_hashtags = ["#IPL2026", "#Cricket", "#Shorts"]
+    for word in term_words:
+        if word in player_names and len(new_hashtags) < 5:
+            new_hashtags.append(f"#{word.capitalize()}")
+        elif word in team_names and len(new_hashtags) < 5:
+            new_hashtags.append(f"#{word.upper()}")
+    new_hashtags = list(dict.fromkeys(new_hashtags))[:5]
+    if not any(h.lower() == "#shorts" for h in new_hashtags):
+        new_hashtags.append("#Shorts")
+    new_hashtags = new_hashtags[:5]
+
+    # Inject top search terms into description if not already present
+    desc_lower = description.lower() if description else ""
+    missing_terms = [t for t in top_terms if t.lower() not in desc_lower]
+
+    if missing_terms and description:
+        # Add search terms as a natural "Related:" line at the end
+        inject_line = "\n\nSearch: " + ", ".join(missing_terms[:6])
+        description = description.rstrip() + inject_line
+    elif not description:
+        description = "Search: " + terms_line
+
+    # Truncate description to 5000 chars
+    description = description[:5000]
+
+    return {
+        "title": title,
+        "description": description,
+        "hashtags": new_hashtags,
+        "search_terms": search_terms,
+    }
+
+
 def _enforce_limits(item: Dict, fallback_terms: List[str] = None) -> Dict:
-    title = (item.get("title") or "")[:100]
-    description = (item.get("description") or "")[:5000]
+    title = str(item.get("title") or "")[:100]
+    description = str(item.get("description") or "")[:5000]
+
+    # Clean Python dict literals from AI description output
+    description = _clean_dict_from_description(description)
 
     hashtags = item.get("hashtags") or []
     hashtags = [h if h.startswith("#") else f"#{h}" for h in hashtags]
@@ -738,6 +848,12 @@ def _attempt_seo_generation(
                 "tags": optimized_tags,  # YouTube API tags field
             }, fallback_terms=trend_topics)
 
+            # Consolidate: search terms → description + hashtags (SEO consistency)
+            result = _consolidate_seo(
+                result["title"], result["description"],
+                result["hashtags"], result["search_terms"]
+            )
+
             # Inject viral hooks and CTAs
             result = _inject_viral_elements(
                 result["title"],
@@ -760,7 +876,7 @@ def _attempt_seo_generation(
             if "429" in msg or "593" in msg:
                 log.warning("[%s] Rate limited (attempt %d): %s", clip_id, attempt + 1, msg)
                 continue
-            log.error("[%s] SEO error (attempt %d): %s", clip_id, attempt + 1, msg)
+            log.error("[%s] SEO error (attempt %d): %s\n%s", clip_id, attempt + 1, msg, traceback.format_exc())
             if attempt < len(backoff) - 1:
                 continue
 

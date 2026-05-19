@@ -17,8 +17,8 @@ _cfg = load_config()
 
 class AIClient:
     PROVIDER_MODELS = {
-        "groq": ["llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"],
-        "openrouter": ["google/gemini-2.0-flash-001", "anthropic/claude-3.5-haiku", "deepseek/deepseek-v4-flash:free"],
+        "groq": ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"],
+        "openrouter": ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro", "qwen/qwen3.5-122b-a10b", "google/gemini-2.0-flash-001"],
         "nvidia": ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.1-8b-instruct", "nvidia/nemotron-3-super-120b-a12b"],
         "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro"],
         "xai": ["grok-2"],
@@ -58,7 +58,7 @@ class AIClient:
         self.ollama_url = "http://localhost:11434/api/generate"
         ai_cfg = _cfg.get("ai", {})
         self._provider = ai_cfg.get("provider", "groq")
-        self._model = ai_cfg.get("model", "llama-4-scout-17b-16e-instruct")
+        self._model = ai_cfg.get("model", "meta-llama/llama-4-scout-17b-16e-instruct")
         self._last_provider = None
         self._last_model = None
 

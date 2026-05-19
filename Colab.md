@@ -18,6 +18,27 @@ Since Google Colab provides free high-end GPUs (T4) and ultra-fast internet, it 
 - Starts `watcher.py` (job listener) + localtunnel
 - Shows tunnel URL for bridge communication
 
+## Selective Enhancement (Phase 4.25)
+
+When `enhancement.selective: true` in config.yaml, a 3-pass enhancement runs on each exported 9:16 clip:
+
+| Pass | Module | What It Does | Device |
+|---|---|---|---|
+| Pass 1 | `state_analyzer.py` | Per-frame classification: heavy/light/skip | CPU |
+| Pass 2 | `selective_enhancer.py` | GFPGAN (heavy), sharpen (light), propagate (skip) | GPU |
+| Pass 3 | `temporal_consistency.py` | IIR smoothing, drift correction, boundary blend | CPU |
+
+**Key design:** Operates on 9:16 cropped video from export.py, NOT raw 16:9 source. When enabled, FFmpeg filters in export.py are disabled to prevent double processing.
+
+Enable in config.yaml:
+```yaml
+enhancement:
+  selective: true           # Enable 3-pass selective enhancement
+  gfpgan_strength: 0.7      # Face restoration strength
+  temporal_alpha: 0.7       # Face temporal smoothing
+  drift_threshold: 65       # Identity drift detection threshold
+```
+
 ## Premium Mode (Colab T4 Only)
 
 Set `premium.enabled: true` in `config.yaml` on Colab for studio-grade quality:
@@ -49,6 +70,7 @@ Use `--skip-tests` to bypass even when enabled.
 | `transcription.compute_type` | `int8` | `float16` |
 | `export.encoder` | `h264_videotoolbox` | `h264_nvenc` or `libx264` |
 | `premium.enabled` | `false` | `true` |
+| `enhancement.selective` | `false` (CPU too slow) | `true` (GPU for GFPGAN) |
 
 ## Why Colab is Better for Heavy Workloads
 
@@ -56,6 +78,7 @@ Use `--skip-tests` to bypass even when enabled.
 - **Fast Transcription**: Whisper runs on a GPU (CUDA), taking seconds instead of minutes.
 - **Fast Download**: Colab has gigabit internet — use aria2c for 2-3x faster downloads
 - **Premium Pipeline**: YOLOv8-face + ByteTrack + FILM + GFPGAN = studio-grade shorts
+- **Selective Enhancement**: 3-pass enhancement with GPU-accelerated GFPGAN face restoration
 - **Auto-Sync**: Once finished, your Shorts will be in the `shorts/` folder or synced to Google Drive with `--sync`.
 
 ## Colab Code Snippets

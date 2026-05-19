@@ -1,15 +1,27 @@
 """colab_setup.py — One-shot Colab setup: deps + worker + tunnel.
 
 Usage:
-    Runtime → Change runtime type → T4 GPU
+    Runtime -> T4 GPU
     !python colab_setup.py
+
+Uses serveo.net for tunnel (reliable, no npm needed).
 """
 import os, subprocess, sys, time
 from pathlib import Path
 
-def install(cmd, desc):
-    print(f"  -> {desc}...")
-    subprocess.run(cmd, shell=True, capture_output=True)
+def run(cmd, timeout=120):
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        err = r.stderr.strip()[-200:] if r.stderr else r.stdout.strip()[-200:]
+        print(f"  \u26a0 {cmd[:50]}... ({err})")
+    return r
+
+def kill_old():
+    run("pkill -f 'python watcher.py' 2>/dev/null || true")
+    run("pkill -f 'lt --port' 2>/dev/null || true")
+    run("pkill -f serveo 2>/dev/null || true")
+    run("fuser -k 5000/tcp 2>/dev/null || true")
+    time.sleep(2)
 
 print("=" * 55)
 print("  yt-clips — Colab Setup")
@@ -26,67 +38,106 @@ for p in ["/content/drive/MyDrive/yt-clips", "/content/drive/My Drive/yt-clips"]
 else:
     os.chdir("/content")
 
-# Install deps
-install("apt-get install -y -qq aria2 ffmpeg > /dev/null 2>&1", "aria2 + ffmpeg")
-install("npm install -g localtunnel > /dev/null 2>&1", "localtunnel")
-install("curl -fsSL https://deno.land/x/install/install.sh | sh > /dev/null 2>&1", "Deno")
-os.environ["PATH"] += ":/root/.deno/bin"
-install("pip install -q yt-dlp faster-whisper rich PyYAML opencv-python-headless numpy "
-        "filterpy scipy google-genai google-generativeai openai python-dotenv "
-        "ultralytics torch face_recognition 'realesrgan>=0.3.0' 'basicsr>=1.4.2' "
-        "--extra-index-url https://download.pytorch.org/whl/cu121",
-        "Python + PyTorch + YOLO + FaceRec + RealESRGAN")
+# Load .env from Drive
+if Path(".env").exists():
+    for line in open(".env"):
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ[k.strip()] = v.strip()
+    print("  .env loaded from Drive")
 
-# ── torchvision compat shim ──────────────────────────────────────────
-import utils.torchvision_compat  # noqa: F401
-print("  ✅ torchvision compat shim applied")
+# Load Colab secrets (override .env)
+try:
+    from google.colab import userdata
+    for key in ["OPENROUTER_API_KEY", "GROQ_API_KEY", "GOOGLE_API_KEY"]:
+        val = userdata.get(key)
+        if val:
+            os.environ[key] = val
+            print(f"  {key} loaded from secrets")
+except:
+    pass
+
+# Pull latest code
+print("  Pulling latest code...")
+run("git pull origin main 2>&1", timeout=30)
+
+# Install system deps
+print("  System deps (aria2, ffmpeg, ssh)...")
+run("apt-get install -y -qq aria2 ffmpeg openssh-client > /dev/null 2>&1")
+
+# Install Python deps
+print("  Python deps...")
+run("pip install -q yt-dlp faster-whisper rich PyYAML opencv-python-headless numpy "
+    "filterpy scipy google-genai google-generativeai openai python-dotenv "
+    "ultralytics torch --extra-index-url https://download.pytorch.org/whl/cu121")
+
+# torchvision compat
+try:
+    import utils.torchvision_compat  # noqa: F401
+    print("  torchvision compat applied")
+except:
+    pass
 
 gpu = subprocess.run("nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null",
                      shell=True, capture_output=True, text=True).stdout.strip()
 print(f"  GPU: {gpu or 'NONE! Use T4 GPU runtime'}")
-
-# Load API key
-try:
-    from google.colab import userdata
-    key = userdata.get("GOOGLE_API_KEY") or userdata.get("AI_API_KEY")
-    if key:
-        os.environ["GOOGLE_API_KEY"] = key
-        os.environ["AI_API_KEY"] = key
-        print("  ✅ API key loaded from Colab secrets")
-except:
-    print("  ⚠️  No API key in secrets. Gemini will have low rate limits.")
-    print("     Add GOOGLE_API_KEY via 🔑 tab (left sidebar)")
 
 # Create folders
 for folder in ["input", "temp", "transcripts", "highlights", "shorts", "logs", "photos"]:
     Path(folder).mkdir(exist_ok=True)
 
 # Start watcher + tunnel
-subprocess.run("pkill -f 'python watcher.py' 2>/dev/null || true", shell=True)
-subprocess.run("pkill -f 'lt --port' 2>/dev/null || true", shell=True)
-time.sleep(1)
-subprocess.Popen([sys.executable, "watcher.py"], stdout=open("watcher.log","w"), stderr=subprocess.STDOUT)
-time.sleep(2)
-subprocess.Popen(["lt", "--port", "5000"], stdout=open("tunnel.log","w"), stderr=subprocess.STDOUT)
-time.sleep(5)
+kill_old()
 
-with open("tunnel.log") as f:
-    for line in f:
-        if "://" in line.strip():
-            with open("colab_url.txt", "w") as out:
-                out.write(line.strip())
-            print(f"\n  🔗 Tunnel: {line.strip()}")
-            break
+subprocess.Popen([sys.executable, "watcher.py"], stdout=open("watcher.log","w"), stderr=subprocess.STDOUT)
+time.sleep(3)
+
+pid = subprocess.run("pgrep -f 'python watcher.py'", shell=True, capture_output=True, text=True).stdout.strip()
+if pid:
+    print(f"  Watcher OK (PID: {pid.split()[0]})")
+else:
+    print("  Watcher FAILED!")
+    print(open("watcher.log").read().strip()[-300:])
+
+# Use serveo (reliable, no npm needed)
+print("  Starting tunnel (serveo.net)...")
+subprocess.Popen(
+    ["ssh", "-o", "StrictHostKeyChecking=no", "-R", "80:localhost:5000", "serveo.net"],
+    stdout=open("tunnel.log","w"), stderr=subprocess.STDOUT,
+)
+time.sleep(8)
+
+# Extract URL
+url = None
+for i in range(20):
+    time.sleep(2)
+    for line in open("tunnel.log").read().splitlines():
+        if "serveousercontent.com" in line or "https://" in line:
+            for word in line.split():
+                if "https://" in word:
+                    url = word.strip().rstrip(",.")
+                    break
+    if url:
+        break
+
+if url:
+    Path("colab_url.txt").write_text(url)
+    print(f"  Tunnel URL: {url}")
+else:
+    print("  No tunnel URL found. tunnel.log:")
+    for l in open("tunnel.log").read().strip().splitlines()[-5:]:
+        print(f"    {l}")
 
 print()
 print("=" * 55)
 print("  WORKER IS ONLINE!")
 print("=" * 55)
 print("\nOn your Mac, run:")
-print('  ./automate.sh "https://youtu.be/VIDEO_ID"')
-print("  -> Select option 2 (Remote Run)")
-print("\nMonitoring watcher.log...")
+print('  python bridge.py "https://youtu.be/VIDEO_ID"')
 
+# Monitor mode
+print("\nMonitoring watcher.log...")
 try:
     last_pos = 0
     last_inode = None
