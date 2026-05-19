@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import shutil
 import subprocess
 import sys
 import time
@@ -190,63 +191,35 @@ def run(
         exported = export_all(highlights_path, video_path, transcript_path=transcript_path)
         log.info("Phase 4 complete in %.1f s — %d clips exported", time.perf_counter() - t0, len(exported))
 
-    # ── Phase 4.25: Selective Enhancement (optional) ─────────────────────────
-    if exported and cfg.get("enhancement", {}).get("selective", False):
-        _banner("PHASE 4.25 — SELECTIVE ENHANCEMENT")
+    # ── Phase 4.25: Reference-Derived Color Grade (optional) ────────────────
+    # Enrollment-once, apply-always paradigm.  Zero flicker by construction.
+    # Operates on already-cropped 9:16 export output.
+    if exported and cfg.get("enhancement", {}).get("ref_grade", False):
+        _banner("PHASE 4.25 — REFERENCE COLOR GRADE")
         t0 = time.perf_counter()
         try:
-            from state_analyzer import analyze_clip as analyze_states
-            from selective_enhancer import enhance_clip as selective_enhance
-            from temporal_consistency import apply_temporal_consistency
+            ref_path = cfg.get("enhancement", {}).get("reference", "expectation.png")
+            from ref_grade import grade_video
 
             enhanced_exported = []
             for clip_path in exported:
                 clip_str = str(clip_path)
-                clip_id = clip_path.stem
+                graded_path = str(Path(cfg["paths"]["temp"]) / f"{clip_path.stem}_graded.mp4")
 
-                # Pass 1: State analysis
-                log.info("[%s] Pass 1: State analysis...", clip_id)
-                analysis_path = str(Path(cfg["paths"]["temp"]) / f"{clip_id}_state_analysis.json")
-                analysis = analyze_states(
-                    video_path=clip_str,
-                    sample_rate=2,
-                    segment_size_sec=2.0,
-                    output_path=analysis_path,
-                )
-                if "error" in analysis:
-                    log.warning("[%s] State analysis failed — skipping enhancement", clip_id)
+                result = grade_video(clip_str, ref_path, graded_path)
+                if result == graded_path and Path(graded_path).exists():
+                    shutil.move(graded_path, clip_str)
                     enhanced_exported.append(clip_path)
-                    continue
-
-                # Pass 2: Selective enhancement
-                log.info("[%s] Pass 2: Selective enhancement...", clip_id)
-                enhanced_path = str(Path(cfg["paths"]["temp"]) / f"{clip_id}_enhanced.mp4")
-                enhanced = selective_enhance(
-                    video_path=clip_str,
-                    analysis_path=analysis_path,
-                    output_path=enhanced_path,
-                )
-
-                # Pass 3: Temporal consistency
-                log.info("[%s] Pass 3: Temporal consistency...", clip_id)
-                final_path = str(Path(cfg["paths"]["temp"]) / f"{clip_id}_final.mp4")
-                final = apply_temporal_consistency(
-                    video_path=enhanced,
-                    analysis_path=analysis_path,
-                    output_path=final_path,
-                )
-
-                # Replace original with enhanced version
-                import shutil
-                shutil.move(final, clip_str)
-                enhanced_exported.append(clip_path)
-                log.info("[%s] Enhancement complete", clip_id)
+                    log.info("[%s] Color grade applied", clip_path.stem)
+                else:
+                    log.warning("[%s] Color grade failed — keeping original", clip_path.stem)
+                    enhanced_exported.append(clip_path)
 
             exported = enhanced_exported
-            log.info("Phase 4.25 complete in %.1f s — %d clips enhanced",
+            log.info("Phase 4.25 complete in %.1f s — %d clips graded",
                      time.perf_counter() - t0, len(exported))
         except Exception as e:
-            log.warning("Selective enhancement failed (non-fatal): %s", e)
+            log.warning("Reference color grade failed (non-fatal): %s", e)
 
     # ── Phase 4.5: SEO & Thumbnails ──────────────────────────────────────────
     if exported:

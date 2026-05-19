@@ -59,14 +59,14 @@ premium:
   frame_interpolation: true          # FILM 30→60fps (GPU only)
   host_ref_photos: ""                # Path to reference photos for host ID (optional)
 
-# ─── Selective Enhancement (Phase 4.25) ───────────────────────────────────────
-# 3-pass enhancement on 9:16 cropped output from export.
-# Operates on cropped video, NOT raw 16:9 source.
+# ─── Reference-Derived Color Grade (Phase 4.25) ───────────────────────────────
+# Enrollment-once, apply-always paradigm (Apple Face ID style).
+# Extracts ALL color params from reference, applies same fixed grade to every
+# frame with zero face detection at inference time = zero flicker by construction.
+# Optimized for T4 GPU on Colab (ffmpeg pipe, no intermediate JPEG writes).
 enhancement:
-  selective: false                   # Enable 3-pass selective enhancement
-  gfpgan_strength: 0.7               # Face restoration strength (0-1)
-  temporal_alpha: 0.7                # Face temporal smoothing (0=smooth, 1=raw)
-  drift_threshold: 65                # Identity drift detection threshold (mean pixel diff)
+  ref_grade: false                   # Enable reference-derived color grading
+  reference: "expectation.png"       # Reference photo for color model enrollment
 
 # ─── Layout ──────────────────────────────────────────────────────────────────
 # Describes where the facecam lives in the SOURCE 16:9 frame (pixels).
