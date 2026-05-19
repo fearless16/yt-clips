@@ -19,6 +19,7 @@ Architecture:
   from face_mapper.py, but as pure 1D LUTs and fixed multipliers.
 """
 
+import os
 import cv2
 import numpy as np
 from pathlib import Path
@@ -146,6 +147,9 @@ def apply_grade(frame: np.ndarray, params: Dict) -> np.ndarray:
     Pure math — no face detection, no per-frame analysis.
     Same transform applied to every pixel of every frame.
     """
+    if "_contrast_ratio" not in params:
+        return frame
+
     f32 = frame.astype(np.float32)
 
     # ── 1. Contrast (linear stretch around mean) ────────────────────────
@@ -214,7 +218,11 @@ class ReferenceGrade:
 
 
 def grade_video(source_path: str, reference_path: str, output_path: str) -> str:
-    """Full pipeline: enroll once, apply to all frames."""
+    """Full pipeline: enroll once, pipe graded frames to ffmpeg.
+
+    Uses ffmpeg stdin pipe (rawvideo) — no intermediate JPEG writes.
+    Optimized for T4 GPU: /tmp/ temp file for output, then atomic rename.
+    """
     t_start = time.perf_counter()
     grade = ReferenceGrade(reference_path)
     if not grade.valid:
@@ -224,15 +232,30 @@ def grade_video(source_path: str, reference_path: str, output_path: str) -> str:
     if not cap.isOpened():
         return source_path
 
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    log.info("Video: %dx%d @ %.1ffps (%d frames)", int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-             int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), fps, total)
+    log.info("Video: %dx%d @ %.1ffps (%d frames)", w, h, fps, total)
 
-    import tempfile
-    td = Path(tempfile.mkdtemp())
-    fd = td / "frames"
-    fd.mkdir()
+    import subprocess
+    import shutil
+    tmp_out = f"/tmp/yt_clips_grade_{os.getpid()}.mp4"
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24",
+        "-s", f"{w}x{h}", "-r", str(fps),
+        "-i", "-",
+        "-i", source_path,
+        "-map", "0:v", "-map", "1:a?",
+        "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+        "-shortest", "-movflags", "+faststart",
+        tmp_out,
+    ]
+
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
     fi = 0
     tp = time.perf_counter()
@@ -242,28 +265,31 @@ def grade_video(source_path: str, reference_path: str, output_path: str) -> str:
             if not ret:
                 break
             g = grade.apply(f)
-            cv2.imwrite(str(fd / f"{fi:06d}.jpg"), g, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            proc.stdin.write(g.tobytes())
             fi += 1
-            if fi % 50 == 0:
-                log.info("  %d/%d (%.0f fps)", fi, total, fi / max(time.perf_counter() - tp, 0.001))
+            if fi % 100 == 0:
+                elapsed = max(time.perf_counter() - tp, 0.001)
+                log.info("  %d/%d (%.0f fps)", fi, total, fi / elapsed)
+    except BrokenPipeError:
+        log.error("ffmpeg pipe broken — check output path and codec support")
+    except Exception:
+        raise
     finally:
         cap.release()
+        proc.stdin.close()
+        proc.wait()
 
-    import subprocess
-    subprocess.run([
-        "ffmpeg", "-y", "-framerate", str(fps),
-        "-i", str(fd / "%06d.jpg"), "-i", source_path,
-        "-map", "0:v", "-map", "1:a?",
-        "-c:v", "libx264", "-crf", "16", "-preset", "slow",
-        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
-        "-shortest", "-movflags", "+faststart", output_path,
-    ], capture_output=True, text=True)
+    if proc.returncode != 0:
+        log.error("ffmpeg failed (code %d)", proc.returncode)
+        if os.path.exists(tmp_out):
+            os.remove(tmp_out)
+        return source_path
+
+    shutil.move(tmp_out, output_path)
 
     if Path(output_path).exists():
         log.info("Done: %s (%.1f MB, %.1fs)", output_path,
                  Path(output_path).stat().st_size / 1e6, time.perf_counter() - t_start)
-    import shutil
-    shutil.rmtree(td, ignore_errors=True)
     return output_path
 
 
