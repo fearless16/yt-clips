@@ -56,6 +56,8 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
 
     Returns a dict of CONSTANTS (not frame-dependent).
     These constants encode the reference's COLOR STYLE as mathematical values.
+
+    Approach: TARGET-BASED BLENDING — moves source TOWARD reference, not beyond it.
     """
     img = cv2.imread(reference_path)
     if img is None:
@@ -76,28 +78,23 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
     full_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     full_lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
 
-    # ── 1. Contrast ratio ───────────────────────────────────────────────
-    # Reference face contrast / typical face contrast (~50 std)
-    ref_contrast = float(np.std(face_gray))
-    contrast_ratio = max(1.0, min(ref_contrast / 50.0, 1.5))
-    log.info("  Contrast: ref=%.1f ratio=%.2f", ref_contrast, contrast_ratio)
+    # ── 1. Reference brightness (L mean of face) ────────────────────────
+    ref_L = float(np.mean(face_lab[:, :, 0]))
+    log.info("  Brightness: L=%.1f", ref_L)
 
     # ── 2. Skin tone target (a, b means of face) ────────────────────────
     a_target = float(np.mean(face_lab[:, :, 1]))
     b_target = float(np.mean(face_lab[:, :, 2]))
     log.info("  Skin: a=%.1f b=%.1f", a_target, b_target)
 
-    # ── 3. Color temperature (R/B ratio of face) ────────────────────────
-    b_face = float(np.mean(face[:, :, 0]))
-    r_face = float(np.mean(face[:, :, 2]))
-    color_temp = r_face / max(b_face, 0.1)
-    log.info("  Color temp: R/B=%.2f", color_temp)
+    # ── 3. Contrast (face std) ──────────────────────────────────────────
+    ref_contrast = float(np.std(face_gray))
+    log.info("  Contrast: std=%.1f", ref_contrast)
 
-    # ── 4. Saturation multiplier ────────────────────────────────────────
+    # ── 4. Saturation (face HSV) ────────────────────────────────────────
     face_hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
     ref_sat = float(np.mean(face_hsv[:, :, 1]))
-    sat_mult = max(0.8, min(ref_sat / 100.0, 1.5))
-    log.info("  Saturation: ref=%.1f mult=%.2f", ref_sat, sat_mult)
+    log.info("  Saturation: ref=%.1f", ref_sat)
 
     # ── 5. Split tone (shadow/highlight colors from full frame) ─────────
     low = full_gray < 51
@@ -116,34 +113,39 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
     log.info("  Vignette: %.2f", vignette_ratio)
 
     params = {
-        "contrast_ratio": contrast_ratio,
+        "ref_L": ref_L,
         "a_target": a_target,
         "b_target": b_target,
-        "color_temp": color_temp,
-        "sat_mult": sat_mult,
+        "ref_contrast": ref_contrast,
+        "ref_sat": ref_sat,
         "shadow_color": shadow_color.tolist(),
         "highlight_color": highlight_color.tolist(),
         "vignette_ratio": vignette_ratio,
     }
 
     # ── Pre-build LUTs (computed once during enrollment) ────────────────
-    params["_contrast_ratio"] = contrast_ratio
-    ss = 0.08
-    hs = 0.05
+    # TARGET-BASED: blend toward reference, don't multiply
+
+    # Brightness shift: moves L toward reference mean (stored per-frame)
+    params["_ref_L"] = ref_L
+    params["_L_blend"] = 0.25  # 25% toward reference brightness
+
+    # Contrast: stretch around per-frame mean, moderate boost
+    # ref_contrast=58 → ratio=1.2 (gentle stretch)
+    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 48.0, 1.35))
+
+    # a,b LUTs: blend toward reference target (not amplify from neutral)
+    # a_out = a + (a_target - a) * 0.25 = a * 0.75 + a_target * 0.25
+    blend = 0.25
+    x = np.arange(256, dtype=np.float32)
+    params["_lut_a"] = np.clip(x * (1.0 - blend) + a_target * blend, 0, 255).astype(np.uint8)
+    params["_lut_b"] = np.clip(x * (1.0 - blend) + b_target * blend, 0, 255).astype(np.uint8)
+
+    # Split tone: gentle
+    ss = 0.06
+    hs = 0.04
     params["_shadow_strength"] = ss
     params["_highlight_strength"] = hs
-    sa = sat_mult
-    ao = (a_target - 128.0) * 0.15
-    bo = (b_target - 128.0) * 0.15
-    ta = (color_temp - 1.0) * 3.2
-    tb = (color_temp - 1.0) * 1.8
-
-    # LUTs for a,b transform: maps 0..255 → transformed value (no float32 math)
-    x = np.arange(256, dtype=np.float32)
-    params["_lut_a"] = np.clip((x - 128.0) * sa + 128.0 + ao + ta, 0, 255).astype(np.uint8)
-    params["_lut_b"] = np.clip((x - 128.0) * sa + 128.0 + bo + tb, 0, 255).astype(np.uint8)
-
-    # Split-tone LUT: 3 separate (256,) uint8 LUTs for B, G, R offsets
     lut_shadow = np.clip((128.0 - x) / 128.0, 0, 1).astype(np.float32)
     lut_highlight = np.clip((x - 128.0) / 128.0, 0, 1).astype(np.float32)
     params["_split_lut"] = (
@@ -176,6 +178,7 @@ def _get_vignette(h: int, w: int, ratio: float) -> np.ndarray:
 def apply_grade(frame: np.ndarray, params: Dict) -> np.ndarray:
     """Apply the reference grade to a single BGR frame.
 
+    TARGET-BASED BLENDING: moves source TOWARD reference, not beyond it.
     2 cvtColor calls (BGR→LAB, LAB→BGR).  No HSV conversion.
     Split tone applied via pre-computed 256x3 LUT (no per-frame clip/div).
     Vignette mask cached by resolution.
@@ -186,25 +189,31 @@ def apply_grade(frame: np.ndarray, params: Dict) -> np.ndarray:
     # ── 1. BGR → LAB ────────────────────────────────────────────────────
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
 
-    # ── 2. Contrast on L (linear stretch around mean) ───────────────────
+    # ── 2. Contrast on L (stretch around per-frame mean) ────────────────
     L = lab[:, :, 0].astype(np.float32)
     r = params["_contrast_ratio"]
     if r > 1.0:
         ml = float(np.mean(L))
         L = np.clip((L - ml) * r + ml, 0, 255)
 
-    # ── 3. Combined a,b transform via LUT (no float32 math) ────────────
+    # ── 3. Brightness blend toward reference ────────────────────────────
+    ref_L = params["_ref_L"]
+    blend = params["_L_blend"]
+    current_L = float(np.mean(L))
+    L = np.clip(L + (ref_L - current_L) * blend, 0, 255)
+
+    # ── 4. a,b transform via LUT (blend toward target) ──────────────────
     lab[:, :, 1] = cv2.LUT(lab[:, :, 1], params["_lut_a"])
     lab[:, :, 2] = cv2.LUT(lab[:, :, 2], params["_lut_b"])
     lab[:, :, 0] = np.clip(L, 0, 255).astype(np.uint8)
 
-    # ── 4. LAB → BGR ────────────────────────────────────────────────────
+    # ── 5. LAB → BGR ────────────────────────────────────────────────────
     result = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR).astype(np.float32)
 
-    # ── 5. Split tone via L-indexed LUT ────────────────────────────────
+    # ── 6. Split tone via L-indexed LUT ────────────────────────────────
     result += params["_split_lut"][L.astype(np.int32)]
 
-    # ── 6. Vignette (cached) ────────────────────────────────────────────
+    # ── 7. Vignette (cached) ────────────────────────────────────────────
     h, w = frame.shape[:2]
     vig = _get_vignette(h, w, params["vignette_ratio"])
     result *= vig[:, :, None]
