@@ -99,18 +99,19 @@ class TestEnroll:
         params = enroll(REFERENCE)
         assert isinstance(params, dict)
         assert len(params) >= 12
-        assert "contrast_ratio" in params
+        assert "ref_L" in params
         assert "a_target" in params
         assert "b_target" in params
-        assert "sat_mult" in params
+        assert "ref_contrast" in params
+        assert "ref_sat" in params
         assert "vignette_ratio" in params
         assert "shadow_color" in params
         assert "highlight_color" in params
-        assert params["contrast_ratio"] >= 1.0
-        assert params["contrast_ratio"] <= 1.5
+        assert params["_contrast_ratio"] >= 1.0
+        assert params["_contrast_ratio"] <= 1.5
         assert 100 <= params["a_target"] <= 160
         assert 100 <= params["b_target"] <= 160
-        assert 0.5 <= params["sat_mult"] <= 2.0
+        assert 80 <= params["ref_L"] <= 140
 
     def test_enroll_from_p1(self):
         params = enroll(P1)
@@ -125,7 +126,7 @@ class TestEnroll:
     def test_enroll_deterministic(self):
         p1 = enroll(REFERENCE)
         p2 = enroll(REFERENCE)
-        for key in ["contrast_ratio", "a_target", "b_target", "sat_mult", "vignette_ratio"]:
+        for key in ["ref_L", "a_target", "b_target", "ref_contrast", "ref_sat", "vignette_ratio"]:
             assert abs(p1[key] - p2[key]) < 0.001, f"{key} differs across runs"
 
     def test_enroll_fails_on_black_frame(self, tmp_dir):
@@ -377,10 +378,10 @@ class TestEdgeCases:
 
     def test_ref_params_contain_all_keys(self, ref_params):
         required = [
-            "contrast_ratio", "a_target", "b_target",
-            "color_temp", "sat_mult", "vignette_ratio",
+            "ref_L", "a_target", "b_target",
+            "ref_contrast", "ref_sat", "vignette_ratio",
             "shadow_color", "highlight_color",
-            "_contrast_ratio",
+            "_contrast_ratio", "_ref_L", "_L_blend",
             "_shadow_strength", "_highlight_strength",
             "_lut_a", "_lut_b", "_split_lut",
         ]
@@ -489,5 +490,5 @@ class TestPerformance:
         p1 = enroll(REFERENCE)
         p2 = enroll(REFERENCE)
         p3 = enroll(REFERENCE)
-        for key in ["contrast_ratio", "a_target", "b_target"]:
+        for key in ["ref_L", "a_target", "b_target"]:
             assert p1[key] == p2[key] == p3[key], f"{key} differs"
