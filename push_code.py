@@ -6,6 +6,7 @@ import sys
 import json
 import hashlib
 from pathlib import Path
+from typing import Optional
 
 from utils.config import load_config
 from utils.logger import get_logger
@@ -100,11 +101,29 @@ def _batch_list_all_folders(service, folder_id: str, subfolders: dict) -> dict:
     return result
 
 
+def _find_file_by_name(service, name: str, parent_id: str) -> Optional[str]:
+    """Search Drive for a file by name in the given folder. Returns file ID or None."""
+    try:
+        q = f"name='{name}' and '{parent_id}' in parents and trashed=false"
+        resp = service.files().list(q=q, fields="files(id)", pageSize=10).execute()
+        files = resp.get("files", [])
+        if files:
+            return files[0]["id"]
+    except Exception:
+        pass
+    return None
+
+
 def _upload_one(service, file_path: Path, target_folder_id: str,
                 drive_file_id: str = None) -> bool:
-    """Upload a single file (create or update)."""
+    """Upload a single file (create or update). Prevents Drive (1) duplicates."""
     mimetype = _get_mime_type(file_path)
     media = MediaFileUpload(str(file_path), mimetype=mimetype, resumable=True)
+
+    # If no file_id provided, search by name as fallback (prevents Drive (1) duplicates)
+    if not drive_file_id:
+        drive_file_id = _find_file_by_name(service, file_path.name, target_folder_id)
+
     if drive_file_id:
         service.files().update(fileId=drive_file_id, media_body=media).execute()
     else:
