@@ -145,6 +145,7 @@ def push(include_data: bool = False) -> bool:
             + list(root.glob("photos/*.png"))
             + list(root.glob("photos/*.jpg"))
             + list(root.glob("photos/*.jpeg"))
+            + list(root.glob("tests/*.py"))
         )
 
         if include_data:
