@@ -16,6 +16,7 @@ The codebase has a **working pipeline** (download → transcribe → highlight �
 - SEO generation with 3-tier fallback + self-improving loop
 - Colab/Kaggle bridge architecture (tunnel + watcher + job queue)
 - 219+ tests
+- **Reference-derived color grading** (`ref_grade.py`): enrollment-once, apply-always Apple Face ID paradigm — extracts ALL color parameters as constants from reference photo, applies same fixed grade to every frame (zero flicker by construction)
 
 ### What's Broken / Not Integrated
 
@@ -249,8 +250,9 @@ automate.sh → bridge.py ───→ job file ──────────�
 |---|---|---|
 | `premium_render.py` | 397 | Premium: RIFE + GFPGAN + two-pass VBR |
 | `utils/super_res.py` | 439 | Real-ESRGAN 4x + GFPGAN + reference |
-| `selective_enhancer.py` | 627 | **NEW**: Conditional enhancement (Pass 2) |
-| `temporal_consistency.py` | 489 | **NEW**: Flicker removal (Pass 3) |
+| `selective_enhancer.py` | 627 | **ABANDONED**: 3-pass conditional enhancement (flicker, wrong input order) |
+| `temporal_consistency.py` | 489 | **ABANDONED**: part of abandoned 3-pass pipeline |
+| `ref_grade.py` | 277 | **NEW**: Reference-derived color grade — enrollment-once, apply-always paradigm, zero flicker |
 
 ### Infrastructure
 | File | Lines | Purpose |
@@ -273,12 +275,10 @@ automate.sh → bridge.py ───→ job file ──────────�
 
 ## Next Steps (Ordered)
 
-1. **Fix selective_enhancer.py input** — accept 9:16 video, not raw 16:9
-2. **Add config toggle** — `enhancement.selective: false` in config.yaml
-3. **Integrate into pipeline.py** — Phase 4.25 after export
-4. **Fix double enhancement** — conditional FFmpeg filters in export.py
-5. **Fix GFPGAN loading** — use auto-download or share with SuperResEnhancer
-6. **Extract shared face detection** — common utility module
-7. **Add temp cleanup** — finally blocks in all 3 modules
-8. **Add integration tests** — test selective enhancement with export output
-9. **Update docs** — ARCHITECTURE.md, README.md, Colab.md
+1. **Integrate ref_grade into pipeline.py** — add `--mode face_mapper|ref_grade` flag to pipeline for switching between per-frame global corrections (face_mapper) and enrolled fixed grade (ref_grade)
+2. **Verify ref_grade on more test videos** — test on 3+ different clips with different lighting to confirm zero-flicker guarantee holds
+3. **Add config toggle** — `enhancement.ref_grade: false` in config.yaml
+4. **Optionally add `ref_grade` to Phase 4.25** — as alternative enhancement path after export crop
+5. **Add ref_grade tests** — unit tests for enrollment (does it extract same params from same reference?), inference (does same grade applied to same frame give same result?), and flicker (do 100 consecutive graded frames have <1.0 std in face a/b?)
+6. **Add colab bridge ref_grade support** — ensure `grade_video()` works in colab headless mode (no display)
+7. **Update docs** — ARCHITECTURE.md, README.md with ref_grade approach
