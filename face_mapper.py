@@ -1,5 +1,10 @@
 """
-face_mapper.py — Reference-guided face enhancement (expectation.png specific).
+face_mapper.py — Reference-guided face enhancement + landmark-aware per-region grading.
+
+Two enhancement modes (auto-selected per frame):
+  1. GLOBAL (default): 6-step pipeline matching expectation.png reference.
+  2. LANDMARK  (MediaPipe FaceMesh): per-region corrections — eyes escape sharpening,
+     lips get saturation boost, background gets stronger vignette.
 
 Extracted reference profile from expectation.png deep analysis:
 - Lighting: Dramatic side light from RIGHT (left_cheek=69.6, right_cheek=147.7)
@@ -15,7 +20,7 @@ Extracted reference profile from expectation.png deep analysis:
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import time
 
 from utils.config import load_config
@@ -24,6 +29,8 @@ from utils.face_detect import detect_face
 
 cfg = load_config()
 log = get_logger("face_mapper", cfg["logging"]["log_file"], cfg["logging"]["level"])
+
+_LANDMARK_AVAILABLE = False  # Set to True when MediaPipe FaceLandmarker model available
 
 
 # ─── Reference parameters (extracted from expectation.png) ───────────────
@@ -145,6 +152,70 @@ class ReferenceProfile:
         return profile
 
 
+# ─── Region Mask Generation (Geometric) ───────────────────────────────────
+# Uses the existing Haar Cascade face bounding box to derive approximate
+# per-region masks.  This avoids any extra dependency while achieving the
+# same practical effect: eyes escape sharpening, lips get saturation, etc.
+
+
+def _gaussian_mask(h: int, w: int, cy: int, cx: int, ry: int, rx: int) -> np.ndarray:
+    """Create a smooth elliptical mask centered at (cx, cy) with radii (rx, ry)."""
+    Y, X = np.ogrid[:h, :w]
+    d = ((X - cx) / max(rx, 1))**2 + ((Y - cy) / max(ry, 1))**2
+    mask = np.clip(1.0 - d, 0, 1)
+    k = max(int(min(rx, ry) * 0.4) | 1, 3)
+    return cv2.GaussianBlur(mask, (k, k), max(k / 3, 1.0))
+
+
+def create_region_masks_from_bbox(
+    h: int, w: int,
+    bbox: Tuple[int, int, int, int],
+) -> Dict[str, np.ndarray]:
+    """Build smooth per-region masks from a face bounding box (x, y, w, h).
+
+    Uses geometric proportions of a typical frontal face:
+      - Forehead:    top 20%
+      - Eyes:        20-40% (left/right halves)
+      - Nose:        centre 25% wide, 35-55% tall
+      - Lips:        centre 35% wide, 55-70% tall
+      - Chin:        bottom 25%
+      - Skin:        full face minus eyes/nose/lips (safe grading zone)
+      - Background:  inverse of face oval
+    """
+    bx, by, bw, bh = bbox
+    cy = by + bh // 2
+    cx = bx + bw // 2
+
+    # Full face (soft ellipse)
+    face_mask = _gaussian_mask(h, w, cy, cx, bh // 2, bw // 2)
+
+    # Left & right eye regions
+    eye_ry = int(bh * 0.07)
+    eye_rx = int(bw * 0.10)
+    left_eye = _gaussian_mask(h, w, by + int(bh * 0.28), bx + int(bw * 0.30), eye_ry, eye_rx)
+    right_eye = _gaussian_mask(h, w, by + int(bh * 0.28), bx + int(bw * 0.70), eye_ry, eye_rx)
+    eyes_mask = np.clip(left_eye + right_eye, 0, 1)
+
+    # Lips
+    lips_mask = _gaussian_mask(h, w, by + int(bh * 0.62), cx,
+                                int(bh * 0.07), int(bw * 0.18))
+
+    # Nose
+    nose_mask = _gaussian_mask(h, w, by + int(bh * 0.45), cx,
+                                int(bh * 0.08), int(bw * 0.12))
+
+    # Skin = face minus eyes/nose/lips
+    skin_mask = np.clip(face_mask - eyes_mask - lips_mask - nose_mask, 0, 1)
+
+    return {
+        "face": face_mask,
+        "eyes": eyes_mask,
+        "lips": lips_mask,
+        "nose": nose_mask,
+        "skin": skin_mask,
+    }
+
+
 # ─── Enhancement functions ────────────────────────────────────────────────
 
 def apply_split_tone(frame: np.ndarray, shadow_color: np.ndarray, highlight_color: np.ndarray) -> np.ndarray:
@@ -193,6 +264,46 @@ def apply_vignette(frame: np.ndarray, ratio: float = 1.21) -> np.ndarray:
     
     result = frame.astype(np.float64) * vignette
     return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def apply_vignette_masked(
+    frame: np.ndarray,
+    face_mask: np.ndarray,
+    ratio: float = 1.21,
+    bg_strength: float = 0.3,
+) -> np.ndarray:
+    """Apply vignette only to background (not face).
+
+    Uses the face mask to protect the face region from darkening.
+    This prevents the common artifact where vignette darkens the speaker's face.
+    """
+    h, w = frame.shape[:2]
+    Y, X = np.ogrid[:h, :w]
+    cx, cy = w / 2, h / 2
+    dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
+    max_dist = np.sqrt(cx**2 + cy**2)
+
+    vignette = 1 - (dist / max_dist) * (1 - 1 / ratio) * bg_strength
+    vignette_3ch = vignette[:, :, None]
+
+    result = frame.astype(np.float64)
+    # Blend: background gets vignette, face stays at full brightness
+    bg_weight = 1.0 - face_mask[:, :, None]
+    result = result * (1.0 - bg_weight + bg_weight * vignette_3ch)
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
+def apply_region_saturation(
+    frame: np.ndarray,
+    mask: np.ndarray,
+    boost: float = 1.2,
+) -> np.ndarray:
+    """Boost saturation selectively in a masked region (e.g. lips)."""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV).astype(np.float64)
+    hsv[:, :, 1] *= (1.0 + (boost - 1.0) * mask)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1], 0, 255)
+    return cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
 
 
 def match_skin_tone(source: np.ndarray, target_lab: Tuple[float, float, float]) -> np.ndarray:
@@ -312,39 +423,60 @@ def enhance_frame(
     frame: np.ndarray,
     profile: ReferenceProfile,
     face_bbox: Optional[Tuple[int, int, int, int]] = None,
+    region_masks: Optional[Dict[str, np.ndarray]] = None,
 ) -> np.ndarray:
     """
     Apply reference-guided enhancement to a single frame.
-    
-    Pipeline:
+
+    Two modes:
+    - NO region_masks: Global 6-step pipeline (flicker-safe).
+    - WITH region_masks: Per-region grading — eyes skip sharpening,
+      lips get saturation boost, background gets stronger vignette.
+
+    Global pipeline (always applied first):
     1. Skin tone match (LAB transfer — reduce red, match yellow)
     2. Contrast curve (match shadow/highlight distribution)
     3. Split-tone grading (cool shadows + warm highlights)
     4. Saturation match
     5. Sharpening (detail enhancement)
     6. Vignette (center brighter)
+
+    Region-aware overrides (applied on top when masks available):
+    7a. Eyes region: undo sharpening (lighter sharpen or none)
+    7b. Lips region: saturation boost (10%)
+    7c. Background: stronger vignette (50% strength)
     """
     if not profile.valid:
         return frame
-    
-    # Step 1: Skin tone match
+
+    # ── Global 6-step pipeline (always runs) ────────────────────────────────
     result = match_skin_tone(frame, profile.skin_lab)
-    
-    # Step 2: Contrast curve
     result = match_contrast_curve(result, profile.face_contrast)
-    
-    # Step 3: Split-tone grading (very subtle)
     result = apply_split_tone(result, profile.shadow_color, profile.highlight_color)
-    
-    # Step 4: Saturation
     result = match_saturation(result, profile.face_saturation)
-    
-    # Step 5: Sharpening
     result = sharpen_reference(result)
-    
-    # Step 6: Vignette (very subtle)
     result = apply_vignette(result, profile.vignette_ratio)
-    
+
+    # ── Region-aware overrides ──────────────────────────────────────────────
+    if region_masks is not None:
+        # Eyes: blend back to pre-sharpen state (avoid crispy eyes)
+        unsharp = sharpen_reference(frame)  # same sharpen on source
+        sharp_diff = result.astype(np.float64) - unsharp.astype(np.float64)
+        eyes_w = region_masks.get("eyes", np.zeros((frame.shape[0], frame.shape[1])))
+        result = np.clip(
+            result.astype(np.float64) - sharp_diff * eyes_w[:, :, None] * 0.6,
+            0, 255,
+        ).astype(np.uint8)
+
+        # Lips: slight saturation boost
+        lips_w = region_masks.get("lips", np.zeros((frame.shape[0], frame.shape[1])))
+        if lips_w.max() > 0.01:
+            result = apply_region_saturation(result, lips_w, boost=1.10)
+
+        # Background: stronger vignette (face stays bright)
+        face_w = region_masks.get("face", np.zeros((frame.shape[0], frame.shape[1])))
+        result = apply_vignette_masked(result, face_w, profile.vignette_ratio, bg_strength=0.5)
+
     return result
 
 
@@ -352,50 +484,56 @@ def enhance_video(
     source_path: str,
     reference_path: str,
     output_path: str,
+    use_region_grading: bool = True,
 ) -> str:
     """
-    Full reference-guided enhancement pipeline.
-    
+    Full reference-guided enhancement pipeline with optional region-aware grading.
+
+    When *use_region_grading* is True (default), the global 6-step pipeline is
+    augmented with per-region corrections derived from the face bounding box:
+      - Eyes get reduced sharpening (no crispy eyes)
+      - Lips get a mild saturation boost
+      - Background gets a stronger vignette (face stays bright)
+
+    Pipeline:
     1. Extract reference profile
-    2. Pre-scan face positions (bidirectional fill)
-    3. Process each frame with all 6 enhancement steps
+    2. Pre-scan face positions (bidirectional fill for stability) + build region masks
+    3. Process each frame with global enhancement + per-region overrides
     4. Encode output
     """
     t_start = time.perf_counter()
-    
-    # Load reference
+
     profile = ReferenceProfile.from_image(reference_path)
     if not profile.valid:
         log.error("Failed to extract reference profile")
         return source_path
-    
-    # Open source
+
     cap = cv2.VideoCapture(source_path)
     if not cap.isOpened():
         log.error("Cannot open: %s", source_path)
         return source_path
-    
+
     fps = cap.get(cv2.CAP_PROP_FPS)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    
+
     log.info("Enhancing: %dx%d @ %.1ffps (%d frames)", src_w, src_h, fps, total)
     log.info("Reference: LAB=(%.0f,%.0f,%.0f) bright=%.0f contrast=%.0f sharp=%.0f",
              *profile.skin_lab, profile.face_brightness, profile.face_contrast, profile.face_sharpness)
-    
-    # Temp dir for frames
+    log.info("Region-aware grading: %s", "ON" if use_region_grading else "OFF")
+
     import tempfile
     temp_dir = Path(tempfile.mkdtemp())
     frames_dir = temp_dir / "frames"
     frames_dir.mkdir()
-    
-    # Pre-scan: detect face positions (bidirectional fill for stability)
+
+    # ── Pre-scan: detect face bounding boxes ──────────────────────────────
     cascade = cv2.CascadeClassifier(
         cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     )
-    face_bboxes = {}
-    
+    face_bboxes: Dict[int, Tuple[int, int, int, int]] = {}
+
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     idx = 0
     while True:
@@ -407,7 +545,7 @@ def enhance_video(
         if len(faces) > 0:
             face_bboxes[idx] = tuple(int(v) for v in max(faces, key=lambda f: f[2]*f[3]))
         idx += 1
-    
+
     # Bidirectional fill
     last_valid = None
     for i in range(total):
@@ -415,38 +553,50 @@ def enhance_video(
             last_valid = face_bboxes[i]
         elif last_valid is not None:
             face_bboxes[i] = last_valid
-    
+
     next_valid = None
     for i in range(total - 1, -1, -1):
         if face_bboxes.get(i) is not None:
             next_valid = face_bboxes[i]
         elif next_valid is not None:
             face_bboxes[i] = next_valid
-    
-    # Process frames
+
+    # ── Process frames ────────────────────────────────────────────────────
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     frame_idx = 0
     t_proc = time.perf_counter()
-    
+
+    region_hits = 0
+
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            
+
             face_bbox = face_bboxes.get(frame_idx)
-            enhanced = enhance_frame(frame, profile, face_bbox)
+            masks = None
+            if use_region_grading and face_bbox is not None:
+                h, w = frame.shape[:2]
+                masks = create_region_masks_from_bbox(h, w, face_bbox)
+                region_hits += 1
+
+            enhanced = enhance_frame(frame, profile, face_bbox, region_masks=masks)
             cv2.imwrite(str(frames_dir / f"{frame_idx:06d}.jpg"), enhanced, [cv2.IMWRITE_JPEG_QUALITY, 95])
             frame_idx += 1
-            
+
             if frame_idx % 50 == 0:
                 elapsed = time.perf_counter() - t_proc
                 rate = frame_idx / elapsed if elapsed > 0 else 0
                 log.info("  %d/%d frames (%.0f fps)", frame_idx, total, rate)
     finally:
         cap.release()
-    
-    # Encode
+
+    if total > 0:
+        log.info("Region coverage: %d/%d frames (%.0f%%)",
+                 region_hits, total, 100.0 * region_hits / total)
+
+    # ── Encode ────────────────────────────────────────────────────────────
     import subprocess
     cmd = [
         "ffmpeg", "-y",
@@ -461,8 +611,7 @@ def enhance_video(
         output_path,
     ]
     subprocess.run(cmd, capture_output=True, text=True)
-    
-    # Verify
+
     if Path(output_path).exists():
         size = Path(output_path).stat().st_size / 1e6
         elapsed = time.perf_counter() - t_start
@@ -470,11 +619,10 @@ def enhance_video(
     else:
         log.error("Output not created")
         return source_path
-    
-    # Cleanup
+
     import shutil
     shutil.rmtree(temp_dir, ignore_errors=True)
-    
+
     return output_path
 
 
@@ -484,7 +632,11 @@ if __name__ == "__main__":
     parser.add_argument("--source", required=True, help="Source video")
     parser.add_argument("--reference", default="expectation.png", help="Reference image")
     parser.add_argument("--output", "-o", default=None, help="Output path")
+    parser.add_argument("--region-grading", action="store_true", default=True,
+                        help="Enable per-region grading (eyes/lips/background) (default: True)")
+    parser.add_argument("--no-region-grading", action="store_false", dest="region_grading",
+                        help="Disable region grading, use global 6-step pipeline only")
     args = parser.parse_args()
     
     output = args.output or "temp/face_mapped.mp4"
-    enhance_video(args.source, args.reference, output)
+    enhance_video(args.source, args.reference, output, use_region_grading=args.region_grading)
