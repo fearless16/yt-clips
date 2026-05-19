@@ -127,20 +127,29 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
     }
 
     # ── Pre-build LUTs (computed once during enrollment) ────────────────
-    # 1. Contrast LUT: linear stretch, but since we center on actual mean
-    #    (computed per-frame as single float mean, NOT face detection),
-    #    we store the ratio only — applied as multiply in .apply()
     params["_contrast_ratio"] = contrast_ratio
+    ss = 0.08
+    hs = 0.05
+    params["_shadow_strength"] = ss
+    params["_highlight_strength"] = hs
+    sa = sat_mult
+    ao = (a_target - 128.0) * 0.15
+    bo = (b_target - 128.0) * 0.15
+    ta = (color_temp - 1.0) * 3.2
+    tb = (color_temp - 1.0) * 1.8
 
-    # 2. a/b fixed offset: nudge toward reference from neutral
-    #    Applied as: out = in + nudge  (fixed, no per-frame stats)
-    params["_a_offset"] = (a_target - 128.0) * 0.15
-    params["_b_offset"] = (b_target - 128.0) * 0.15
-
-    # 3. Saturation LUT
+    # LUTs for a,b transform: maps 0..255 → transformed value (no float32 math)
     x = np.arange(256, dtype=np.float32)
-    sat_lut = np.clip(sat_mult * x, 0, 255).astype(np.uint8)
-    params["_sat_lut"] = sat_lut
+    params["_lut_a"] = np.clip((x - 128.0) * sa + 128.0 + ao + ta, 0, 255).astype(np.uint8)
+    params["_lut_b"] = np.clip((x - 128.0) * sa + 128.0 + bo + tb, 0, 255).astype(np.uint8)
+
+    # Split-tone LUT: 3 separate (256,) uint8 LUTs for B, G, R offsets
+    lut_shadow = np.clip((128.0 - x) / 128.0, 0, 1).astype(np.float32)
+    lut_highlight = np.clip((x - 128.0) / 128.0, 0, 1).astype(np.float32)
+    params["_split_lut"] = (
+        np.array(shadow_color)[:, None] * lut_shadow * ss
+        + np.array(highlight_color)[:, None] * lut_highlight * hs
+    ).T.astype(np.float32)  # (256, 3) — indexed by L value
 
     log.info("Enrollment complete: %d params extracted", len(params))
     return params
@@ -148,51 +157,57 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
 
 # ─── Phase 2: INFERENCE — Apply grade to any frame ──────────────────────
 
+# Cache for vignette masks: keyed by (h, w, vr_int)
+_vignette_cache: Dict[tuple, np.ndarray] = {}
+
+
+def _get_vignette(h: int, w: int, ratio: float) -> np.ndarray:
+    """Cached vignette mask — computed once per resolution."""
+    key = (h, w, round(ratio * 100))
+    if key not in _vignette_cache:
+        Y, X = np.ogrid[:h, :w]
+        cx, cy = w / 2.0, h / 2.0
+        d = np.sqrt((X - cx)**2 + (Y - cy)**2)
+        vig = 1.0 - (d / np.sqrt(cx**2 + cy**2)) * (1.0 - 1.0 / ratio) * 0.5
+        _vignette_cache[key] = vig
+    return _vignette_cache[key]
+
+
 def apply_grade(frame: np.ndarray, params: Dict) -> np.ndarray:
     """Apply the reference grade to a single BGR frame.
 
-    Pure math — no face detection, no per-frame analysis.
-    Same transform applied to every pixel of every frame.
+    2 cvtColor calls (BGR→LAB, LAB→BGR).  No HSV conversion.
+    Split tone applied via pre-computed 256x3 LUT (no per-frame clip/div).
+    Vignette mask cached by resolution.
     """
     if "_contrast_ratio" not in params:
         return frame
 
-    f32 = frame.astype(np.float32)
+    # ── 1. BGR → LAB ────────────────────────────────────────────────────
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
 
-    # ── 1. Contrast (linear stretch around mean) ────────────────────────
-    lab = cv2.cvtColor(f32.astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
-    L = lab[:, :, 0]
+    # ── 2. Contrast on L (linear stretch around mean) ───────────────────
+    L = lab[:, :, 0].astype(np.float32)
     r = params["_contrast_ratio"]
     if r > 1.0:
-        mean_L = float(np.mean(L))
-        lab[:, :, 0] = np.clip((L - mean_L) * r + mean_L, 0, 255)
+        ml = float(np.mean(L))
+        L = np.clip((L - ml) * r + ml, 0, 255)
 
-    # ── 2. Fixed a/b offset toward reference skin tone ──────────────────
-    lab[:, :, 1] = np.clip(lab[:, :, 1] + params["_a_offset"], 0, 255)
-    lab[:, :, 2] = np.clip(lab[:, :, 2] + params["_b_offset"], 0, 255)
+    # ── 3. Combined a,b transform via LUT (no float32 math) ────────────
+    lab[:, :, 1] = cv2.LUT(lab[:, :, 1], params["_lut_a"])
+    lab[:, :, 2] = cv2.LUT(lab[:, :, 2], params["_lut_b"])
+    lab[:, :, 0] = np.clip(L, 0, 255).astype(np.uint8)
 
-    result = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR).astype(np.float32)
+    # ── 4. LAB → BGR ────────────────────────────────────────────────────
+    result = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR).astype(np.float32)
 
-    # ── 4. Saturation ───────────────────────────────────────────────────
-    hsv = cv2.cvtColor(result.astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
-    hsv[:, :, 1] = cv2.LUT(hsv[:, :, 1].astype(np.uint8), params["_sat_lut"]).astype(np.float32)
-    result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+    # ── 5. Split tone via L-indexed LUT ────────────────────────────────
+    result += params["_split_lut"][L.astype(np.int32)]
 
-    # ── 5. Split tone ───────────────────────────────────────────────────
-    gray = cv2.cvtColor(result.astype(np.uint8), cv2.COLOR_BGR2GRAY).astype(np.float32)
-    sc = np.array(params["shadow_color"])
-    hc = np.array(params["highlight_color"])
-    sa = np.clip((128 - gray) / 128, 0, 1)[:, :, None]
-    ha = np.clip((gray - 128) / 128, 0, 1)[:, :, None]
-    result = result + sc * sa * 0.08 + hc * ha * 0.05
-
-    # ── 6. Vignette ─────────────────────────────────────────────────────
+    # ── 6. Vignette (cached) ────────────────────────────────────────────
     h, w = frame.shape[:2]
-    Y, X = np.ogrid[:h, :w]
-    cx, cy = w / 2, h / 2
-    d = np.sqrt((X - cx)**2 + (Y - cy)**2)
-    vig = 1 - (d / np.sqrt(cx**2 + cy**2)) * (1 - 1 / params["vignette_ratio"]) * 0.5
-    result = result * vig[:, :, None]
+    vig = _get_vignette(h, w, params["vignette_ratio"])
+    result *= vig[:, :, None]
 
     return np.clip(result, 0, 255).astype(np.uint8)
 

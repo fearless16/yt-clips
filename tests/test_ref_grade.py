@@ -380,7 +380,9 @@ class TestEdgeCases:
             "contrast_ratio", "a_target", "b_target",
             "color_temp", "sat_mult", "vignette_ratio",
             "shadow_color", "highlight_color",
-            "_contrast_ratio", "_a_offset", "_b_offset", "_sat_lut",
+            "_contrast_ratio",
+            "_shadow_strength", "_highlight_strength",
+            "_lut_a", "_lut_b", "_split_lut",
         ]
         for key in required:
             assert key in ref_params, f"Missing key: {key}"

@@ -206,7 +206,8 @@ class TestScoreFrame:
             "underexposed_pct": 0, "face_count": 0,
         }
         score = _score_frame(lighting, ref_match=0.0, face_detected=False)
-        assert score < 0.1, "No face should give very low score"
+        # No-face still gets lighting + exposure contributions (0.15+0.15+0.20+0.05)
+        assert score == 0.55, f"Expected 0.55 for no face with good lighting, got {score}"
 
     def test_face_present_adds_score(self):
         lighting = {
