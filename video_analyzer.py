@@ -204,11 +204,24 @@ def _sample_frames(
 
 
 def _sample_frames_gpu(video_path, fps, width, height, step, interval_sec, duration=0):
-    """GPU-accelerated frame sampling via ffmpeg CUDA. Yields (ts, frame)."""
+    """GPU-accelerated frame sampling via ffmpeg (auto-detect hwaccel). Falls back to CPU."""
     frame_size = width * height * 3
+    import subprocess
+    # Detect if CUDA is available
+    has_cuda = False
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-hwaccels"],
+            capture_output=True, text=True, timeout=5,
+        )
+        has_cuda = "cuda" in r.stdout.lower()
+    except Exception:
+        pass
+
+    hwaccel = "cuda" if has_cuda else "none"
     cmd = [
         "ffmpeg",
-        "-hwaccel", "cuda",
+        "-hwaccel", hwaccel,
         "-i", video_path,
         "-vf", f"select=not(mod(n\\,{step}))",
         "-vsync", "0",

@@ -8,6 +8,8 @@ Usage:
     python pipeline.py <youtube_url> --sync             # auto-sync to Google Drive after export
     python pipeline.py <youtube_url> --upload           # auto-upload Shorts to YouTube
     python pipeline.py <youtube_url> --schedule         # auto-schedule uploads (2-hour intervals)
+    python pipeline.py <youtube_url> --mode ref_grade   # enable reference-derived color grade
+    python pipeline.py <youtube_url> --mode face_mapper # enable 6-step per-frame face enhancement
 """
 
 import argparse
@@ -64,6 +66,7 @@ def run(
     skip_tests: bool = False,
     sample_minutes: Optional[int] = None,
     sync_from_drive: bool = False,
+    mode: Optional[str] = None,
 ) -> None:
     cfg = load_config()
     if not skip_tests and not cfg.get("testing", {}).get("enabled", False):
@@ -191,35 +194,53 @@ def run(
         exported = export_all(highlights_path, video_path, transcript_path=transcript_path)
         log.info("Phase 4 complete in %.1f s — %d clips exported", time.perf_counter() - t0, len(exported))
 
-    # ── Phase 4.25: Reference-Derived Color Grade (optional) ────────────────
-    # Enrollment-once, apply-always paradigm.  Zero flicker by construction.
-    # Operates on already-cropped 9:16 export output.
-    if exported and cfg.get("enhancement", {}).get("ref_grade", False):
-        _banner("PHASE 4.25 — REFERENCE COLOR GRADE")
+    # ── Phase 4.25: Selective Enhancement (optional, config- or mode-driven) ──
+    # Mode precedence: --mode CLI flag > config toggle
+    enhancement_mode = mode
+    if enhancement_mode is None:
+        # Fall back to config toggle
+        if cfg.get("enhancement", {}).get("ref_grade", False):
+            enhancement_mode = "ref_grade"
+
+    if exported and enhancement_mode:
+        _banner(f"PHASE 4.25 — ENHANCEMENT ({enhancement_mode})")
         t0 = time.perf_counter()
         try:
             ref_path = cfg.get("enhancement", {}).get("reference", "expectation.png")
-            from ref_grade import grade_video
-
             enhanced_exported = []
-            for clip_path in exported:
-                clip_str = str(clip_path)
-                graded_path = str(Path(cfg["paths"]["temp"]) / f"{clip_path.stem}_graded.mp4")
 
-                result = grade_video(clip_str, ref_path, graded_path)
-                if result == graded_path and Path(graded_path).exists():
-                    shutil.move(graded_path, clip_str)
-                    enhanced_exported.append(clip_path)
-                    log.info("[%s] Color grade applied", clip_path.stem)
-                else:
-                    log.warning("[%s] Color grade failed — keeping original", clip_path.stem)
-                    enhanced_exported.append(clip_path)
+            if enhancement_mode == "ref_grade":
+                from ref_grade import grade_video
+                for clip_path in exported:
+                    graded_path = str(Path(cfg["paths"]["temp"]) / f"{clip_path.stem}_graded.mp4")
+                    result = grade_video(str(clip_path), ref_path, graded_path)
+                    if result == graded_path and Path(graded_path).exists():
+                        shutil.move(graded_path, str(clip_path))
+                        enhanced_exported.append(clip_path)
+                        log.info("[%s] Color grade applied", clip_path.stem)
+                    else:
+                        log.warning("[%s] Color grade failed — keeping original", clip_path.stem)
+                        enhanced_exported.append(clip_path)
+
+            elif enhancement_mode == "face_mapper":
+                from face_mapper import enhance_video
+                for clip_path in exported:
+                    enhanced_path = str(Path(cfg["paths"]["temp"]) / f"{clip_path.stem}_enhanced.mp4")
+                    result = enhance_video(str(clip_path), ref_path, enhanced_path,
+                                           use_region_grading=True)
+                    if result == enhanced_path and Path(enhanced_path).exists():
+                        shutil.move(enhanced_path, str(clip_path))
+                        enhanced_exported.append(clip_path)
+                        log.info("[%s] Face-mapper enhancement applied", clip_path.stem)
+                    else:
+                        log.warning("[%s] Face-mapper enhancement failed — keeping original", clip_path.stem)
+                        enhanced_exported.append(clip_path)
 
             exported = enhanced_exported
-            log.info("Phase 4.25 complete in %.1f s — %d clips graded",
+            log.info("Phase 4.25 complete in %.1f s — %d clips enhanced",
                      time.perf_counter() - t0, len(exported))
         except Exception as e:
-            log.warning("Reference color grade failed (non-fatal): %s", e)
+            log.warning("Enhancement failed (non-fatal): %s", e)
 
     # ── Phase 4.5: SEO & Thumbnails ──────────────────────────────────────────
     if exported:
@@ -405,6 +426,8 @@ Examples:
     parser.add_argument("-skip-tests", "--skip-tests",    action="store_true", help="Skip pre-generation pytest guard")
     parser.add_argument("--sample-minutes", type=int, default=None, help="Download only a random N-minute sample of the video")
     parser.add_argument("--sync-from-drive", action="store_true", help="Pull video + transcript from Google Drive instead of downloading")
+    parser.add_argument("--mode", choices=["face_mapper", "ref_grade"], default=None,
+                        help='Enhancement mode: "face_mapper" (per-frame 6-step pipeline) or "ref_grade" (enrollment-once color grade). Overrides config toggle.')
     args = parser.parse_args()
 
     run(
@@ -421,6 +444,7 @@ Examples:
         skip_tests=args.skip_tests,
         sample_minutes=args.sample_minutes,
         sync_from_drive=args.sync_from_drive,
+        mode=args.mode,
     )
 
 
