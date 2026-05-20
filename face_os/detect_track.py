@@ -190,6 +190,9 @@ class FaceTracker:
         """Process a frame and return the target face track (if found).
 
         This is the main entry point — called for every frame.
+
+        FIX: Add occupancy gate — reject tracks where face is too small
+        relative to bbox (poster/background detection).
         """
         self.frame_count += 1
 
@@ -206,7 +209,23 @@ class FaceTracker:
         self._update_states()
 
         # Return the target identity track (best match)
-        return self._get_target_track()
+        track = self._get_target_track()
+
+        # OCCUPANCY GATE: reject if face is too small relative to bbox
+        if track is not None and track.smooth_bbox is not None:
+            x, y, w, h = track.smooth_bbox
+            bbox_area = w * h
+            # Estimate face occupancy from detection confidence
+            # Low confidence + large bbox = likely poster/background
+            detection_conf = track.detection.confidence if track.detection else 0.0
+            if bbox_area > 0:
+                # Heuristic: high-confidence faces have occupancy > 0.3
+                # Posters/backgrounds have low confidence + large bbox
+                if detection_conf < 0.3 and bbox_area > (frame.shape[0] * frame.shape[1] * 0.1):
+                    # Likely a poster — reject
+                    return None
+
+        return track
 
     def _detect_and_match(self, frame: np.ndarray, frame_idx: int) -> None:
         """Run face detection and match to identity."""
@@ -324,7 +343,11 @@ class FaceTracker:
             del self.tracks[tid]
 
     def _get_target_track(self) -> Optional[FaceTrack]:
-        """Get the best target identity track."""
+        """Get the best target identity track.
+
+        FIX: Do NOT fall back to non-target tracks.
+        If no target is found, return None — let pipeline handle LOST state.
+        """
         target_tracks = [
             t for t in self.tracks.values()
             if t.detection and t.detection.is_target and t.state in (
@@ -333,13 +356,7 @@ class FaceTracker:
         ]
 
         if not target_tracks:
-            # Fall back to any active track with lowest distance
-            active = [
-                t for t in self.tracks.values()
-                if t.state in (FaceState.DETECTED, FaceState.TRACKED)
-            ]
-            if active:
-                return min(active, key=lambda t: t.detection.distance if t.detection else 1.0)
+            # NO FALLBACK — return None to signal LOST state
             return None
 
         # Prefer most recently detected, then most frames visible
