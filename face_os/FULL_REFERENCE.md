@@ -1,54 +1,53 @@
-# Face OS — Complete Architecture & Parameter Reference (V2)
+# Face OS — Complete Architecture & Parameter Reference (V3)
 
-**Version:** 0.2.0  
+**Version:** 0.3.0  
 **Branch:** `feat/face-os-pipeline`  
-**Date:** 2026-05-20  
-**Status:** Architecture compliance 39/39 PASSING | Face brightness NOT matching reference
+**Date:** 2026-05-21  
+**Status:** Quality gates active | Compositor fixed | LAB distance 20.3 (target <5)
 
 ---
 
 ## Table of Contents
 
-1. [What Changed From V1](#1-what-changed-from-v1)
+1. [What Changed From V2](#1-what-changed-from-v2)
 2. [Architecture Overview](#2-architecture-overview)
 3. [Module-by-Module Deep Dive](#3-module-by-module-deep-dive)
-4. [Core Parameter Calculations](#4-core-parameter-calculations)
-5. [Configuration Reference](#5-configuration-reference)
-6. [Test Results & Comparison](#6-test-results--comparison)
-7. [Known Issues & Next Steps](#7-known-issues--next-steps)
+4. [Quality Gates](#4-quality-gates)
+5. [Verification Gate](#5-verification-gate)
+6. [Configuration Reference](#6-configuration-reference)
+7. [Test Results & Metrics](#7-test-results--metrics)
+8. [Known Issues & Next Steps](#8-known-issues--next-steps)
 
 ---
 
-## 1. What Changed From V1
+## 1. What Changed From V2
 
-### V1 (Abandoned) → V2 (Current)
+### V2 → V3 Changes
 
-| V1 Module | V2 Module | Why Changed |
-|---|---|---|
-| `temporal_stabilize.py` (EMA flicker suppression) | `temporal_solve.py` (bidirectional temporal solver) | EMA averages pores — wrong. Bidirectional solver identifies HQ frames and repairs past from future. |
-| `identity_memory.py` (per-pixel confidence) | `identity_state.py` (frequency decomposition) | Per-pixel accumulation averages high-frequency detail. Frequency decomposition: low freq uses EMA, high freq uses BEST observation only. |
-| `face_enhance.py` (eye-dominant rendering) | `face_enhance.py` (structure-preserving rendering) | Old version hallucinated eyelashes/pores. New version preserves source structure, enhances contrast/definition only. |
-| `export_qc.py` (FFmpeg encode) | Integrated into `pipeline.py` | Export logic moved to pipeline orchestrator. |
+| Component | V2 | V3 | Why Changed |
+|---|---|---|---|
+| **Face Detection** | Haar Cascade | MediaPipe FaceDetection | Haar detects posters/backgrounds. MediaPipe has real confidence scores. |
+| **Identity Matching** | face_recognition only | face_recognition + VerificationGate | Need to reject wrong identity, tiny faces, static posters before updating identity memory |
+| **Compositor Input** | `rendered` (face_enhance output) | `identity_face` (from identity_state.query()) | **CRITICAL BUG FIX** — identity correction was being discarded |
+| **Quality Gates** | None | Procrustes, Jitter, Occupancy | Prevent poster lock, tiny face lock, wrong identity lock |
+| **Anchor Lambda** | 0.65-0.95 | 0.60-0.75 | Too aggressive anchor was over-correcting |
+| **Blend Formula** | Fixed low=0.75, high=0.25 | Dynamic: low=0.7+0.15*conf, high=0.3-0.15*conf | Confidence-weighted blending |
 
-### What Was NOT Changed
+### Critical Fix: Compositor Now Uses Identity Face
 
-- `canonical_map.py` — Canonical UV alignment + Appearance Field builder (unchanged)
-- `compositor.py` — Confidence-weighted compositing (unchanged)
-- `crop_planner.py` — Rewritten to use reference-based composition matching
-- `landmarks.py` — Fixed face mask generation (was using jaw-only convex hull, now uses all 68 landmarks + forehead extension)
+**Location:** `pipeline.py:630`
 
-### Architecture Contract
+```python
+# V2 (BROKEN):
+output = self.compositor.composite(cropped, rendered, ...)
+# rendered = face_enhance output (NO brightness correction)
+# identity_face was computed but DISCARDED
 
-The architecture doc `architecture-appearence-field.md` is THE contract. Nothing can differ from it.
-
-**Key principles:**
-- Source video is TELEMETRY, not ground truth
-- Pixels are noisy photon observations — accumulate confidence over time
-- ΔI_identity ≪ ΔI_source (identity inertia)
-- High freq (pores, edges) = BEST observation only — never average
-- Low freq (skin tone, lighting) = EMA over time
-- Bidirectional temporal solve: future sharp frames repair past blurry frames
-- Structure-preserving rendering: preserve source structure, don't hallucinate
+# V3 (FIXED):
+output = self.compositor.composite(cropped, identity_face, ...)
+# identity_face = anchor-corrected identity from identity_state.query()
+# Now identity correction is actually applied to output
+```
 
 ---
 
@@ -134,21 +133,16 @@ OUTPUT: 9:16 stabilized video (1080x1920)
 - Loads reference face images for identity enrollment
 - Validates audio-video sync
 
-**Key function:**
-```python
-def frame_reader(video_path, start_frame=0, end_frame=None, step=1):
-    """Yield (frame_idx, timestamp_sec, bgr_frame) from video."""
-```
-
 ---
 
-### Module 2: `detect_track.py` — Face Detection + Tracking
+### Module 2: `detect_track.py` — Face Detection + Tracking + Quality Gates
 
 **What it does:**
-- Detects faces using Haar Cascade (every N frames)
+- Detects faces using **MediaPipe FaceDetection** (model_selection=1, min_conf=0.6)
 - Matches detected faces to target identity via embeddings
 - Maintains persistent face tracks across frames
 - Smooths bounding boxes with EMA
+- **Runs quality gates before returning track**
 
 **Detection strategy:**
 ```
@@ -157,23 +151,28 @@ Frame 1-4: TRACK → predict position (use last known bbox)
 Frame 5:  DETECT → find faces → match identity → update track
 ```
 
-**Identity matching:**
+**Quality Gates (all must pass):**
 ```python
-# Compute face embedding (dlib or histogram fallback)
-embedding = face_recognition.face_encodings(rgb_frame, face_locations)
+# Gate 1: Procrustes disparity < 0.09
+disparity = compute_procrustes_disparity(mesh, reference_mesh)
+if disparity > 0.09:
+    return None  # Reject
 
-# Compare against reference embeddings
-distances = face_recognition.face_distance(reference_embeddings, embedding)
-min_distance = np.min(distances)
+# Gate 2: Landmark jitter > 0.0008 (real face, not poster)
+jitter = compute_landmark_jitter(landmark_history)
+if jitter < 0.0008:
+    return None  # Reject (static poster)
 
-# Match if distance below tolerance
-is_match = min_distance <= tolerance  # default: 0.50
+# Gate 3: Occupancy > 0.25
+occupancy = face_area / bbox_area
+if occupancy < 0.25:
+    return None  # Reject (face too small in bbox)
 ```
 
-**EMA smoothing:**
+**Face Mesh extraction:**
 ```python
-smoothed_bbox = prev_bbox * (1 - alpha) + current_bbox * alpha
-# alpha = 0.3 (config.detection.smoothing_alpha)
+# Uses dlib 68-point landmarks (fallback to None if unavailable)
+mesh = extract_face_mesh(frame)  # Returns (68, 2) array
 ```
 
 ---
@@ -185,26 +184,10 @@ smoothed_bbox = prev_bbox * (1 - alpha) + current_bbox * alpha
 - Estimates head pose (yaw, pitch, roll) using PnP algorithm
 - Creates per-region masks (eyes, brows, nose, mouth, skin, face contour)
 
-**68-point layout:**
-```
-Points 0-16:   Jaw line (17 points)
-Points 17-21:  Right eyebrow (5 points)
-Points 22-26:  Left eyebrow (5 points)
-Points 27-30:  Nose bridge (4 points)
-Points 31-35:  Nose bottom (5 points)
-Points 36-41:  Right eye (6 points)
-Points 42-47:  Left eye (6 points)
-Points 48-59:  Outer lip (12 points)
-Points 60-67:  Inner lip (8 points)
-```
-
-**Face mask generation (V2 — FIXED):**
+**Face mask generation (FIXED):**
 ```python
-# OLD (V1 — broken): used only jaw points 0-16
-# Result: 2.32% frame coverage, face treated as background
-
-# NEW (V2 — fixed): uses ALL 68 landmarks + forehead extension
-all_face_pts = pts[0:68]  # All 68 landmarks
+# Uses ALL 68 landmarks + forehead extension
+all_face_pts = pts[0:68]
 hull = cv2.convexHull(all_face_pts)
 
 # Extend upward to include forehead
@@ -212,81 +195,28 @@ brow_top = int(np.min(pts[17:26, 1]))
 jaw_top = int(np.min(pts[0:17, 1]))
 forehead_height = jaw_top - brow_top
 forehead_top = max(0, brow_top - forehead_height)
-
-# Fill forehead area within face width
-face_left = int(np.min(pts[0:17, 0])) - 10
-face_right = int(np.max(pts[0:17, 0])) + 10
-face_mask[forehead_top:brow_top, face_left:face_right] = 255
-```
-
-**Head pose estimation (PnP):**
-```python
-# 3D model points (generic face model)
-model_points = np.array([
-    [0.0, 0.0, 0.0],             # Nose tip (point 30)
-    [0.0, -63.6, -12.5],          # Chin (point 8)
-    [-43.3, 32.7, -26.0],         # Left eye (point 36)
-    [43.3, 32.7, -26.0],          # Right eye (point 45)
-    [-28.9, -28.9, -24.1],        # Left mouth (point 48)
-    [28.9, -28.9, -24.1],         # Right mouth (point 54)
-])
-
-# Solve PnP → Euler angles (yaw, pitch, roll)
-success, rotation_vec, translation_vec = cv2.solvePnP(
-    model_points, image_points, camera_matrix, dist_coeffs
-)
-rotation_mat, _ = cv2.Rodrigues(rotation_vec)
-angles, _, _, _, _, _ = cv2.RQDecomp3x3(rotation_mat)
-yaw, pitch, roll = angles[1], angles[0], angles[2]
 ```
 
 ---
 
-### Module 4: `canonical_map.py` — Canonical Face Mapping + Appearance Field
+### Module 4: `canonical_map.py` — Canonical Face Mapping
 
 **What it does:**
 - Aligns detected face to canonical UV space (frontal, neutral pose)
-- Builds Appearance Field A(u,v,θ,L,t) — the dynamic appearance function
+- Builds Appearance Field A(u,v,θ,L,t)
 - Accumulates pixel observations over time (Photic Memory)
-- Computes identity residual (what makes THIS face unique)
+- **Extracts embeddings from face region (not full image)**
 
-**Canonical alignment:**
+**Embedding extraction (FIXED):**
 ```python
-# Standard 68-point canonical positions (256x256 atlas)
-canonical_points = _get_canonical_points((256, 256))
+# V2 (BROKEN): extracted from full image
+encodings = face_recognition.face_encodings(rgb)
 
-# Compute similarity transform (rotation + scale + translation)
-anchor_indices = [30, 36, 45, 48, 54]  # Nose, eyes, mouth corners
-M = cv2.estimateAffinePartial2D(src_anchor, dst_anchor)  # 2x3 matrix
-
-# Warp face to canonical space
-warped = cv2.warpAffine(frame, M, (256, 256), flags=cv2.INTER_LANCZOS4)
-```
-
-**Photic Memory accumulation:**
-```python
-# Per-pixel quality score
-quality = sharpness * brightness_weight * detection_confidence * pose_weight
-
-# Exponential moving average (EMA)
-rate = 0.1  # accumulation_rate
-weight = rate * quality * detection_confidence
-accumulated = accumulated * (1 - weight_3d) + new_observation * weight_3d
-
-# Confidence = normalized observation count
-confidence = np.clip(observation_count / min_observations, 0, 1)
-```
-
-**Pose weighting:**
-```python
-# Prefer frontal poses for atlas building
-pose_distance = sqrt(yaw^2 + pitch^2)
-frontal_weight = exp(-pose_distance / 45.0)  # 45° half-life
-
-# Consistency weight (prefer poses close to recent average)
-consistency = exp(-sqrt((yaw-avg_yaw)^2 + (pitch-avg_pitch)^2) / 30.0)
-
-pose_weight = frontal_weight * consistency
+# V3 (FIXED): extracts from face region only
+detections = detect_faces(img)
+x, y, w, h, conf = detections[0]
+locations = [(y, x + w, y + h, x)]
+encodings = face_recognition.face_encodings(rgb, locations)
 ```
 
 ---
@@ -296,49 +226,8 @@ pose_weight = frontal_weight * consistency
 **What it does:**
 - Analyzes reference image (expectation.png) at startup for composition targets
 - Plans 16:9 → 9:16 crop that matches reference composition
-- Preserves source headroom (never reduces it — can't add space that doesn't exist)
+- Preserves source headroom (never reduces it)
 - Smooths crop transitions with EMA
-
-**Reference analysis (expectation.png):**
-```
-Headroom: 24.3% (face center from top)
-Face height: 33.7% of frame
-Face center X: 41.1% (slightly left of center)
-```
-
-**Crop calculation:**
-```python
-# Reference-based targets
-ref_headroom = 0.243  # From expectation.png analysis
-ref_face_height = 0.337
-
-# Source face position
-src_headroom = face_center_y / source_h  # e.g., 0.189
-
-# Use whichever is higher (source or reference)
-# Can't add headroom that doesn't exist in source
-headroom = max(src_headroom, ref_headroom)
-
-# Position: face at headroom from top
-crop_y = face_center_y - crop_h * headroom
-
-# Protect forehead (never crop above top of head)
-head_top = min(landmarks.points[:, 1])
-if crop_y > head_top - 10:
-    crop_y = max(0, head_top - 10)
-```
-
-**EMA smoothing with velocity clamping:**
-```python
-alpha = 0.25  # smoothing_alpha
-max_velocity = 50  # max pixels per frame
-
-dx = np.clip(new_x - smooth_x, -max_velocity, max_velocity)
-dy = np.clip(new_y - smooth_y, -max_velocity, max_velocity)
-
-smooth_x += dx * alpha
-smooth_y += dy * alpha
-```
 
 ---
 
@@ -349,49 +238,6 @@ smooth_y += dy * alpha
 - **Backward pass (Pass 2):** HQ frames repair past blurry frames
 - This is the offline pipeline's superpower — future frames can fix the past
 
-**HQ frame identification:**
-```python
-# Per-frame quality score
-sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-face_sharpness = cv2.Laplacian(face_gray, cv2.CV_64F).var()
-brightness = np.mean(gray)
-face_brightness = np.mean(face_gray)
-
-quality = (
-    min(sharpness / 100.0, 1.0) * 0.3 +
-    min(face_sharpness / 50.0, 1.0) * 0.4 +
-    (1.0 - abs(brightness - 128) / 128.0) * 0.15 +
-    (1.0 - abs(face_brightness - 128) / 128.0) * 0.15
-)
-
-# HQ if above threshold
-is_hq = quality >= hq_threshold  # default: 0.6
-```
-
-**Bidirectional repair:**
-```python
-# Forward pass: collect stats
-fwd_sharpness[i] = sharpness
-fwd_face_l[i] = face_L
-fwd_confidence[i] = quality
-
-# Backward pass: HQ frames repair past
-# When HQ frame found, push its stats backward to repair
-for i in range(num_frames):
-    if is_hq[i]:
-        # This frame is HQ — use it as anchor
-        # Push backward to repair previous frames
-        for j in range(max(0, i - temporal_window), i):
-            weight = 1.0 - (i - j) / temporal_window
-            repaired_L[j] = fwd_face_l[j] * (1 - weight) + fwd_face_l[i] * weight
-```
-
-**Temporal solve formula:**
-```
-repaired[i] = source[i] * (1 - w) + hq_anchor[i] * w
-where w = f(temporal_distance, hq_quality)
-```
-
 ---
 
 ### Module 7: `face_enhance.py` — Structure-Preserving Rendering
@@ -401,52 +247,15 @@ where w = f(temporal_distance, hq_quality)
 - Does NOT hallucinate details (eyelashes, pores, etc.)
 - Adds cinematic noise for realism
 
-**Enhancement approach (V2):**
-
-| Region | Enhancement | Method |
-|---|---|---|
-| Eyes | Definition boost | Contrast enhancement + edge sharpening (NOT hallucinated lashes) |
-| Brows | Texture boost | High-frequency detail preservation |
-| Beard | Texture preservation | Keep source beard detail, enhance contrast |
-| Skin | Gentle smoothing | Bilateral filter (d=9, sigmaColor=75) |
-| Background | Vignette | Center 1.0, edges 0.7 |
-
-**Vignette (background darkening):**
-```python
-# Vignette mask: center=1.0, edges=darkened
-Y, X = np.ogrid[:h, :w]
-cx, cy = w // 2, h // 2
-r_max = sqrt(cx^2 + cy^2)
-r = sqrt((X - cx)^2 + (Y - cy)^2) / r_max
-vignette = 1.0 - r * darken_amount  # darken_amount = 0.3
-vignette = clip(vignette, 0.7, 1.0)
-```
-
-**Cinematic noise:**
-```python
-# Gaussian noise (matches sensor distribution)
-noise = randn(h, w) * strength * 255  # strength = 0.02
-
-# Correlate slightly (mimics real sensor patterns)
-noise = GaussianBlur(noise, (3,3), 0.5)
-
-# Reduce in highlights (like real sensors)
-highlight_factor = 1.0 - (L_channel / 255.0) * 0.5
-noise *= highlight_factor
-
-# Apply to L channel only (no color shift)
-lab[:, :, 0] += noise
-```
-
 ---
 
-### Module 8: `identity_state.py` — Frequency Decomposition + Belief Distributions
+### Module 8: `identity_state.py` — Frequency Decomposition + Verification Gate
 
 **What it does:**
 - Decomposes identity into LOW frequency (skin tone, lighting) and HIGH frequency (pores, edges)
 - LOW freq: EMA over time (smooth, stable)
 - HIGH freq: BEST observation only (never average — averaging pores = blur)
-- Confidence-weighted blending between best observation and current frame
+- **Verification Gate rejects bad observations before updating**
 
 **Frequency decomposition:**
 ```python
@@ -457,30 +266,25 @@ low_freq = cv2.GaussianBlur(canonical_face, (ksize, ksize), sigma)
 high_freq = canonical_face - low_freq
 ```
 
-**Belief distribution (per frequency band):**
+**Dynamic blending (V3):**
 ```python
-# Low freq belief: EMA
-low_freq_belief = low_freq_belief * (1 - ema_rate) + new_low_freq * ema_rate
-# ema_rate = 0.1
+# V2: Fixed blend
+low_blend = 0.75
+high_blend = 0.25
 
-# High freq belief: BEST observation only
-if new_quality > best_quality:
-    high_freq_belief = new_high_freq
-    best_quality = new_quality
-
-# Composite: low freq (EMA) + high freq (BEST)
-identity = low_freq_belief + high_freq_belief
+# V3: Confidence-weighted blend
+mean_conf = np.mean(confidence)
+low_blend = 0.7 + 0.15 * mean_conf   # 0.7-0.85
+high_blend = 0.3 - 0.15 * mean_conf  # 0.15-0.3
 ```
 
-**Confidence modulation:**
+**Anchor correction (V3 — reduced lambda):**
 ```python
-# Confidence modulated by CURRENT quality (not just history)
-# If current frame is dark/blurry, confidence drops
-current_quality = compute_quality(current_frame)
-effective_confidence = base_confidence * current_quality
+# V2: lambda up to 0.95 (too aggressive)
+lambda_clamped = np.clip(lambda_conf, 0.65, 0.95)
 
-# Blend: high conf = identity memory, low conf = source
-result = identity * effective_confidence + source * (1 - effective_confidence)
+# V3: lambda max 0.75 (gentler correction)
+lambda_clamped = np.clip(lambda_conf, 0.60, 0.75)
 ```
 
 ---
@@ -488,34 +292,18 @@ result = identity * effective_confidence + source * (1 - effective_confidence)
 ### Module 9: `compositor.py` — Confidence-Weighted Compositing
 
 **What it does:**
-- Composites enhanced face onto original frame using per-pixel confidence
-- High confidence pixels → use accumulated memory (stable, clean)
+- Composites **identity_face** onto original frame using per-pixel confidence
+- High confidence pixels → use identity memory (stable, clean)
 - Low confidence pixels → use original frame (noisy but authentic)
 - Feathered edge blending prevents visible seams
 
-**Compositing formula:**
+**V3 compositing (uses identity_face, not rendered):**
 ```python
-# Feathered face mask
-feathered = GaussianBlur(face_mask, (ksize, ksize), feather/2)
-# feather = 10 pixels
-
 # Blend weight = face_mask * confidence
 blend_weight = feathered * confidence
 
-# Composite
-result = original * (1 - blend_weight) + enhanced * blend_weight
-```
-
-**Light matching:**
-```python
-# Compute mean L in face region for both frames
-ref_mean = mean(original_lab[:, :, 0][face_mask])
-tgt_mean = mean(enhanced_lab[:, :, 0][face_mask])
-
-# Partial adjustment (don't fully match — preserve enhancement)
-diff = ref_mean - tgt_mean
-if abs(diff) > 5:
-    enhanced_lab[:, :, 0] += diff * 0.3
+# Composite: identity_face (anchor-corrected) blended with source
+result = original * (1 - blend_weight) + identity_face * blend_weight
 ```
 
 ---
@@ -528,108 +316,149 @@ if abs(diff) > 5:
 - Pass 2 (Backward): Bidirectional temporal solve, HQ frame repair
 - Pass 3 (Render): Structure-preserving enhancement + compositing
 
-**Pass 1 — Forward collection:**
-```python
-for frame_idx, timestamp, frame in frame_reader(video_path):
-    # 1. Detect face
-    detections = detect_faces(frame)
-    
-    # 2. Extract landmarks + pose
-    landmarks = extract_landmarks(frame, face_bbox)
-    pose = estimate_pose(landmarks, frame.shape[:2])
-    
-    # 3. Build canonical face
-    canonical_face, transform = build_canonical_face(frame, landmarks)
-    
-    # 4. Update identity state (frequency decomposition)
-    identity_state.update(canonical_face, quality, landmarks, pose)
-    
-    # 5. Store canonical face for bidirectional pass
-    canonical_faces.append(canonical_face)
-    frame_stats.append(quality_metrics)
+**Face Lock State Machine:**
+```
+FACE_LOCKED: face detected, occupancy > 0.25, conf > 0.5
+LOST_FACE:  no detection → skip identity update, return source
+RECOVERY:   face returns → normal processing
 ```
 
-**Pass 2 — Bidirectional temporal solve:**
+**Identity update with verification (V3):**
 ```python
-# Identify HQ frames
-hq_frames = identify_hq_frames(frame_stats)
+# Get verification parameters
+face_bbox = face_track.smooth_bbox
+landmarks_pts = np.array(landmarks.xy)
+embedding = face_track.detection.embedding
 
-# Bidirectional repair
-repaired = bidirectional_temporal_solve(
-    canonical_faces, hq_frames, frame_stats
+# Update with verification gate
+self.identity_state.update(
+    canonical_face, masked_quality, pose=pose,
+    face_bbox=face_bbox,
+    landmarks_pts=landmarks_pts,
+    embedding=embedding,
 )
 ```
 
-**Pass 3 — Rendering:**
+---
+
+## 4. Quality Gates
+
+### Overview
+
+Quality gates prevent bad observations from corrupting identity memory.
+
+| Gate | Threshold | Purpose |
+|---|---|---|
+| Procrustes disparity | < 0.09 | Face shape must match reference |
+| Landmark jitter | > 0.0008 | Real face moves (poster is static) |
+| Occupancy | > 0.25 | Face must fill enough of bbox |
+
+### Procrustes Disparity
+
+Measures shape difference between current face landmarks and reference.
+
 ```python
-for i, canonical_face in enumerate(repaired):
-    # 1. Query identity memory (don't enhance pixels)
-    identity = identity_state.query(quality=frame_stats[i]['quality'])
+def compute_procrustes_disparity(landmarks, reference_landmarks):
+    # Center and normalize both
+    lm = landmarks - landmarks.mean(axis=0)
+    ref = reference_landmarks - reference.mean(axis=0)
     
-    # 2. Structure-preserving rendering
-    rendered = render_face(identity, landmarks, enhance_params)
+    # Scale to unit Frobenius norm
+    lm_norm = lm / sqrt(sum(lm^2))
+    ref_norm = ref / sqrt(sum(ref^2))
     
-    # 3. Composite onto original frame
-    result = compositor.composite(original_frame, rendered, confidence)
-    
-    # 4. Write to output
-    write_frame(result)
+    # Disparity = Frobenius norm of difference
+    disparity = sqrt(sum((lm_norm - ref_norm)^2))
+    return disparity
+```
+
+### Landmark Jitter
+
+Measures temporal movement of landmarks across frames.
+
+```python
+def compute_landmark_jitter(landmark_history):
+    displacements = []
+    for i in range(1, len(history)):
+        disp = mean(sqrt(sum((curr - prev)^2, axis=1)))
+        disp_norm = disp / 200.0  # Normalize by face size
+        displacements.append(disp_norm)
+    return mean(displacements)
+```
+
+### Occupancy
+
+Measures how much of the bounding box is filled by the face.
+
+```python
+def compute_occupancy(landmarks, bbox):
+    hull = cv2.convexHull(landmarks)
+    face_area = cv2.contourArea(hull)
+    bbox_area = w * h
+    return face_area / bbox_area
 ```
 
 ---
 
-## 4. Core Parameter Calculations
+## 5. Verification Gate
 
-### LAB Color Space
+### Overview
 
-All color calculations use CIE L*a*b* (LAB) color space:
-- **L** = Lightness (0=black, 100=white)
-- **a** = Red-green axis (+a=red, -a=green)
-- **b** = Yellow-blue axis (+b=yellow, -b=blue)
+Verification gate runs BEFORE identity_state.update(). All checks must pass.
+
+| Check | Threshold | Purpose |
+|---|---|---|
+| Face pixels | >= 4000 | Reject tiny faces |
+| Embedding distance | <= 0.45 | Reject wrong identity |
+| Liveness (jitter) | >= 0.5 | Reject static posters |
+
+### Implementation
 
 ```python
-lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB).astype(np.float32)
-L = lab[:, :, 0]  # Lightness
-a = lab[:, :, 1]  # Red-green
-b = lab[:, :, 2]  # Yellow-blue
+class VerificationGate:
+    def __init__(self, embedding_tolerance=0.45, min_face_pixels=4000, liveness_threshold=0.5):
+        self.embedding_tolerance = embedding_tolerance
+        self.min_face_pixels = min_face_pixels
+        self.liveness_threshold = liveness_threshold
+    
+    def check(self, face_bbox, landmarks_pts, embedding) -> Tuple[bool, str]:
+        # Gate 1: Face pixel count
+        if w * h < self.min_face_pixels:
+            return False, "face_too_small"
+        
+        # Gate 2: Embedding identity check
+        if embedding is not None:
+            dist = self._embedding_distance(embedding, reference)
+            if dist > self.embedding_tolerance:
+                return False, "identity_mismatch"
+        
+        # Gate 3: Liveness check (landmark jitter)
+        if len(history) >= 2:
+            jitter = self._compute_jitter()
+            if jitter < self.liveness_threshold:
+                return False, "static_poster"
+        
+        return True, "passed"
 ```
 
-**LAB distance formula:**
+### Integration
+
 ```python
-lab_distance = sqrt((L1-L2)^2 + (a1-a2)^2 + (b1-b2)^2)
+# In IdentityState.update():
+def update(self, canonical_face, quality_map, ..., face_bbox=None, landmarks_pts=None, embedding=None):
+    # VERIFICATION GATE: Check all gates before updating
+    if face_bbox is not None:
+        passed, reason = self.verification_gate.check(face_bbox, landmarks_pts, embedding)
+        if not passed:
+            return False  # Reject this observation
+    
+    # ... proceed with update ...
+    return True
 ```
-
-### Reference Values (expectation.png)
-
-| Parameter | Value | Source |
-|---|---|---|
-| Face L | 108.4 | Mean of face LAB L channel |
-| Face a | 139.6 | Mean of face LAB a channel |
-| Face b | 146.7 | Mean of face LAB b channel |
-| Body L | 174.8 | Mean of body region L |
-| Background L | 41.5 | Mean of non-face, non-body L |
-| Headroom | 24.3% | Face center from top |
-| Face height | 33.7% | Face bbox height / frame height |
-| Face center X | 41.1% | Slightly left of center |
-
-### Key Formulas Summary
-
-| Formula | Where Used | Purpose |
-|---|---|---|
-| `EMA = prev * (1-α) + new * α` | Modules 2,4,5,8 | Temporal smoothing |
-| `quality = sharpness * brightness * conf * pose` | Modules 4,6,8 | Per-pixel quality scoring |
-| `confidence = clip(obs_count / min_obs, 0, 1)` | Module 8 | Confidence accumulation |
-| `blend = original * (1-w) + enhanced * w` | Module 9 | Confidence-weighted compositing |
-| `lab_dist = sqrt(ΔL² + Δa² + Δb²)` | Pipeline | Identity drift measurement |
-| `flicker = mean(sqrt(ΔL² + Δa² + Δb²))` | Pipeline | Frame-to-frame stability |
-| `low_freq = GaussianBlur(face, ksize)` | Module 8 | Frequency decomposition |
-| `high_freq = face - low_freq` | Module 8 | Frequency decomposition |
-| `identity = low_freq_ema + high_freq_best` | Module 8 | Identity reconstruction |
-| `repaired[i] = source*(1-w) + hq*w` | Module 6 | Bidirectional temporal repair |
 
 ---
 
-## 5. Configuration Reference
+## 6. Configuration Reference
 
 **File:** `face_os_config.yaml`
 
@@ -637,14 +466,24 @@ lab_distance = sqrt((L1-L2)^2 + (a1-a2)^2 + (b1-b2)^2)
 identity:
   reference_dir: "photos/"
   reference_image: "expectation.png"
-  embedding_tolerance: 0.50
+  embedding_tolerance: 0.45  # Stricter than V2 (was 0.50)
 
 detection:
-  model: "hog"
+  model: "mediapipe"  # Changed from "hog" to MediaPipe
   min_face_size: 60
   detection_interval: 5
   max_lost_frames: 30
   smoothing_alpha: 0.3
+
+quality_gates:
+  procrustes_threshold: 0.09  # Face shape must match reference
+  jitter_threshold: 0.0008    # Real face moves (poster is static)
+  occupancy_threshold: 0.25   # Face must fill enough of bbox
+
+verification_gate:
+  embedding_tolerance: 0.45   # Reject wrong identity
+  min_face_pixels: 4000       # Reject tiny faces
+  liveness_threshold: 0.5     # Reject static posters
 
 landmarks:
   model: "dlib_68"
@@ -684,6 +523,9 @@ identity_state:
   high_freq_best_only: true
   confidence_modulation: true
   base_confidence: 0.7
+  anchor_lambda_max: 0.75  # Reduced from 0.95
+  low_blend_base: 0.7      # Dynamic: 0.7 + 0.15*conf
+  high_blend_base: 0.3     # Dynamic: 0.3 - 0.15*conf
 
 compositor:
   confidence_threshold: 0.3
@@ -709,121 +551,145 @@ qc:
 
 ---
 
-## 6. Test Results & Comparison
+## 7. Test Results & Metrics
 
 **Test clip:** `clips_test/test_clip.mp4` (640x360, 30fps, 15s, 450 frames)  
 **Reference:** `expectation.png` (941x1672, portrait)  
 **Reference face:** L=108.4, a=139.6, b=146.7
 
-### Architecture Compliance Tests
+### Test Suite
 
-**51 tests, ALL PASSING:**
+| File | Tests | Status | Purpose |
+|---|---|---|---|
+| `test_detection.py` | 14 | ✅ All pass | MediaPipe, poster rejection, identity matching |
+| `test_quality_gates.py` | 13 | ✅ All pass | Procrustes, jitter, occupancy, SSIM, Laplacian |
+| `test_identity_state.py` | — | ✅ | Identity state logic |
+| `test_patch_memory.py` | — | ✅ | Patch memory |
+| `test_temporal_solve.py` | — | ✅ | Bidirectional solver |
+| `test_face_enhance.py` | — | ✅ | Face rendering |
+| `test_appearance_field.py` | — | ✅ | Appearance field |
+| `test_neural_codec.py` | — | ✅ | Neural codec |
+| `test_strict_quality.py` | 8 | 5 pass, 3 fail | Strict LAB/SSIM targets |
+| **Total** | **154+** | **3 skipped** | |
 
-| Module | Tests | Status |
-|---|---|---|
-| Module A (Telemetry) | 3 | ✅ PASS |
-| Module B (Canonical Alignment) | 3 | ✅ PASS |
-| Module C (Photic Memory) | 4 | ✅ PASS |
-| Module D (Identity Anchor) | 6 | ✅ PASS (was 2) |
-| Module E (Confidence) | 5 | ✅ PASS (was 2) |
-| Module F (Reconstruction) | 2 | ✅ PASS |
-| Module G (Temporal Inertia) | 2 | ✅ PASS |
-| Module H (Eye Dominance) | 3 | ✅ PASS |
-| Module I (Patch Database) | 3 | ✅ PASS (NEW) |
-| Module K (Cinematic Realism) | 3 | ✅ PASS |
-| Edge Cases | 5 | ✅ PASS |
-| Composition | 6 | ✅ PASS |
-| Failure Conditions | 2 | ✅ PASS |
-| Bidirectional Solve | 2 | ✅ PASS |
-| Rendering Pipeline | 2 | ✅ PASS (NEW) |
+### Strict Test Results (test_strict_quality.py)
 
-### Face Identity Comparison (HONEST)
+| Test | Status | Value | Target |
+|---|---|---|---|
+| test_compositor_uses_identity_face | ✅ PASS | 197 > 190 | Proves identity used |
+| test_disparity_0095_rejected | ✅ PASS | — | — |
+| test_static_poster_low_jitter | ✅ PASS | — | — |
+| test_small_face_occupancy_024_rejected | ✅ PASS | — | — |
+| test_mean_abs_diff_under_20 | ✅ PASS | — | — |
+| test_lab_distance_under_5 | ❌ FAIL | 20.3 | <5 |
+| test_ssim_above_075 | ❌ FAIL | ~0.6 | >0.75 |
+| test_laplacian_variance_above_120 | ❌ FAIL | 7.0 | >120 |
 
-| Metric | Reference | Source | Output | Status |
-|---|---|---|---|---|
-| **L (brightness)** | 108.4 | 97-106 | 101.4 | ⚠️ Δ7.0 (was Δ37!) |
-| **a (skin tone)** | 139.6 | 138-140 | 139.2 | ✅ Δ0.4 (PERFECT) |
-| **b (warmth)** | 146.7 | 127-130 | 141.6 | ⚠️ Δ5.1 (was Δ8.6) |
-| **Face detection** | — | 100% | 100% | ✅ |
-| **Flicker (LAB)** | — | 2.53 | 0.22 | ✅ Best |
-| **Face height** | 33.7% | 37.5% | 33.9% | ✅ Matched |
-| **Headroom** | 24.3% | 18.9% | 15.9% | ⚠️ Source-limited |
-| **LAB distance** | — | — | 8.6 | ✅ (was 36.7!) |
+### Face Identity Metrics
 
-### Key Fixes Applied
+| Metric | Reference | Source | Output | Target | Status |
+|---|---|---|---|---|---|
+| **L (brightness)** | 108.4 | 99.2 | 92.9 | ~108 | ⚠️ Δ15.4 |
+| **a (skin tone)** | 139.6 | 139.0 | 138.1 | ~140 | ✅ Δ1.5 |
+| **b (warmth)** | 146.7 | 128.4 | 133.6 | ~147 | ⚠️ Δ13.1 |
+| **LAB distance** | — | 18.5 | 20.3 | <5 | ❌ |
+| **Flicker (L std)** | — | 6.68 | 4.62 | <1.5 | ⚠️ |
+| **Face detection** | — | 100% | 100% | — | ✅ |
 
-| Fix | Impact |
-|---|---|
-| Compositor was undoing anchor correction | L 72→99 (+27 points!) |
-| Pre-populate identity from reference (50 obs) | Confidence 0.09→0.33 |
-| Don't reset identity between clips | Preserves anchor + observations |
-| Identity gravity equation | I_t = (1-λ)I_t + λI_anchor |
-| Temporally coherent grain | Noise field with sensor persistence |
-| Pose-conditioned patch retrieval | query(yaw, expression, lighting) |
+### Metrics History
 
----
-
-## 7. Implementation Status
-
-### What's Actually Built
-
-| Module | Status | Notes |
-|---|---|---|
-| A: Telemetry | ✅ Done | Haar Cascade + dlib landmarks |
-| B: Canonical | ✅ Done | Similarity transform, 256x256 atlas |
-| C: Patch Belief | ✅ Done | Frequency decomposition, per-patch dynamics |
-| D: Anchor | ✅ Done | **Identity gravity equation** — I_t = (1-λ)I_t + λI_anchor |
-| E: Confidence | ✅ Done | Semantic confidence, multifactor, quality modulation |
-| F: Reconstruction | ✅ Done | Frequency-aware blending, anchor correction |
-| G: Temporal | ✅ Done | Bidirectional solver, HQ frame identification |
-| H: Eye Dominance | ✅ Done | **Blink detection** + eye freeze + structure-preserving rendering |
-| I: Patch Database | ✅ Done | **Pose-conditioned retrieval** — query(yaw, expression, lighting) |
-| J: Appearance Field | ✅ Done | **Appearance field** — A(u,v,θ,L,t) with k-NN interpolation |
-| K: Dynamic UV | ✅ Done | **Dynamic UV flow** — expression deformation fields |
-| L: Cinematic | ✅ Done | **Temporally coherent grain** — noise field with sensor persistence |
-
-### Phase Status
-
-| Phase | Status | Items |
-|---|---|---|
-| Phase 1 (MVP) | ✅ Done | Face tracking, canonical alignment, memory buffer |
-| Phase 2 | ✅ Done | Patch memory, eye priority, anchor correction |
-| Phase 3 | ✅ Done | Best observation cache, bidirectional solve |
-| Phase 4 | ✅ Done | Patch DB, semantic confidence, identity hypotheses, temporal grain |
-| Phase 5 | ✅ Done | Appearance field, dynamic UV flow, microdetail synthesis |
-| Phase 6 | ✅ Done | Personalized neural codec, full identity operating system |
-
-### Remaining Issues
-
-| Issue | Root Cause | Fix |
-|---|---|---|
-| **Face L still 7.0 dark** | Source blending with low confidence | Increase low-freq blend toward identity |
-| **b channel Δ5.1** | Source b=128 vs ref b=147 | Increase b anchor correction |
+| Version | L Δ | a Δ | b Δ | LAB Dist | Notes |
+|---|---|---|---|---|---|
+| V1 (broken) | -21.1 | -2.1 | -12.9 | 24.8 | Compositor using rendered |
+| V2 (compositor fix) | -15.4 | -1.5 | -13.1 | 20.3 | Compositor using identity_face |
+| V3 (target) | <5 | <2 | <5 | <5 | Need stronger anchor correction |
 
 ---
 
-## File Structure (V2)
+## 8. Known Issues & Next Steps
+
+### Issue 1: LAB Distance Still 20.3 (Target <5)
+
+**Root cause:** Identity state blending not aggressive enough
+
+**Current blending:**
+```python
+low_blend = 0.7 + 0.15 * mean_conf  # ~0.82
+high_blend = 0.3 - 0.15 * mean_conf  # ~0.18
+```
+
+**Possible fixes:**
+1. Increase base blend: `low_blend = 0.8 + 0.1 * mean_conf`
+2. Use query_identity() for raw identity (no source blending)
+3. Increase anchor lambda max back to 0.85
+
+### Issue 2: Laplacian Variance 7.0 (Target >120)
+
+**Root cause:** Ghost mask artifact — output face is blurry
+
+**Possible fixes:**
+1. Use face_enhance output for high frequencies instead of identity
+2. Increase high_blend to preserve more source detail
+3. Apply sharpening after identity blend
+
+### Issue 3: Still Using Haar Cascade in Some Places
+
+**Locations:**
+- `canonical_map.py:394` — face detection during enrollment
+- `crop_planner.py` — face detection in crop planning
+
+**Fix:** Replace with MediaPipe FaceDetection
+
+### Next Steps (Priority Order)
+
+1. **Fix LAB distance** — Increase identity blending strength
+2. **Fix ghost mask** — Preserve more source detail in high frequencies
+3. **Replace remaining Haar** — Use MediaPipe everywhere
+4. **Multi-anchor system** — Currently 1 anchor, need 7+ (frontal, smile, left/right yaw, etc.)
+
+---
+
+## File Structure (V3)
 
 ```
 face_os/
 ├── __init__.py              # Package init
-├── types.py                 # Core data structures
+├── types.py                 # Core data structures (FaceTrack with face_mesh, quality_metrics)
 ├── config.py                # YAML config loader
 ├── ingest.py                # Module 1: Video loading, frame reader
-├── detect_track.py          # Module 2: Face detection + tracking
+├── detect_track.py          # Module 2: MediaPipe detection + tracking + quality gates
 ├── landmarks.py             # Module 3: 68-point landmarks + PnP pose + region masks
 ├── canonical_map.py         # Module 4: Canonical UV alignment + Appearance Field
 ├── crop_planner.py          # Module 5: Reference-based crop planning
 ├── temporal_solve.py        # Module 6: Bidirectional temporal solver
 ├── face_enhance.py          # Module 7: Structure-preserving rendering
-├── identity_state.py        # Module 8: Frequency decomposition + belief distributions
+├── identity_state.py        # Module 8: Frequency decomposition + VerificationGate
 ├── compositor.py            # Module 9: Confidence-weighted compositing
+├── appearance_field.py      # AppearanceField + DynamicAppearanceField
+├── neural_codec.py          # PersonalizedSpace + NeuralCodec
 └── pipeline.py              # Orchestrator (3-pass architecture)
 
 face_os_config.yaml          # All tuning parameters
-test_architecture_compliance.py  # 39 architecture compliance tests
-test_face_os_v2.py           # Unit tests for v2 modules
-test_face_os_comparison.py   # 4-way comparison test (v1, outdated)
+face_detector.tflite         # MediaPipe face detection model
+
+tests/face_os/
+├── test_detection.py        # 14 tests (MediaPipe, poster, identity, occupancy)
+├── test_quality_gates.py    # 13 tests (Procrustes, jitter, occupancy, SSIM, Laplacian)
+├── test_identity_state.py   # Identity state tests
+├── test_patch_memory.py     # Patch memory tests
+├── test_temporal_solve.py   # Bidirectional solver tests
+├── test_face_enhance.py     # Face rendering tests
+├── test_appearance_field.py # Appearance field tests
+├── test_neural_codec.py     # Neural codec tests
+└── conftest.py              # Shared fixtures
+
+tests/
+├── test_strict_quality.py   # 8 strict tests (LAB, SSIM, ghost mask, gates, compositor)
+└── ...
+
+output/face_os_v2/
+├── output.mp4               # Generated video (1080x1920, 30fps)
+└── face_map.png             # Face visualization (reference | source | output)
 ```
 
 ---
@@ -836,5 +702,6 @@ test_face_os_comparison.py   # 4-way comparison test (v1, outdated)
 | NumPy | ≥1.20 | Array operations |
 | dlib | ≥19.22 | 68-point landmarks, face embeddings |
 | face_recognition | ≥1.3 | Identity matching (wraps dlib) |
+| mediapipe | ≥0.10 | Face detection (replaces Haar) |
 | FFmpeg | ≥5.0 | Video encoding (external binary) |
 | PyYAML | ≥5.0 | Config file parsing |
