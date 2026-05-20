@@ -447,18 +447,18 @@ class IdentityState:
         drift = _lab_distance(anchor_mean, current_mean)
 
         if drift > 30:
-            lambda_base = 0.95
-        elif drift > 15:
-            lambda_base = 0.85
-        elif drift > 5:
             lambda_base = 0.75
-        else:
+        elif drift > 15:
+            lambda_base = 0.70
+        elif drift > 5:
             lambda_base = 0.65
+        else:
+            lambda_base = 0.60
 
         obs_count = np.mean(self.belief.observation_count)
         confidence_factor = 1.0 / (1.0 + obs_count * 0.01)
         lambda_conf = lambda_base * (0.9 + 0.1 * confidence_factor)
-        lambda_clamped = np.clip(lambda_conf, 0.65, 0.95)
+        lambda_clamped = np.clip(lambda_conf, 0.60, 0.75)
 
         self.belief.best_low = (
             (1 - lambda_clamped) * self.belief.best_low
@@ -564,8 +564,12 @@ class IdentityState:
         low_curr, high_curr = self.freq.decompose(canonical_face)
         low_id, high_id = self.freq.decompose(identity)
 
-        low_blend = 0.75
-        high_blend = 0.25
+        # Dynamic blend based on confidence
+        # High confidence → more identity, less source
+        # Low confidence → less identity, more source
+        mean_conf = float(np.mean(confidence))
+        low_blend = 0.3 + 0.4 * mean_conf
+        high_blend = 0.7 - 0.4 * mean_conf
 
         conf_3d = confidence[:, :, np.newaxis]
         effective_low_blend = low_blend * conf_3d
@@ -585,15 +589,15 @@ class IdentityState:
             drift = _lab_distance(anchor_mean, result_mean)
 
             if drift > 30:
-                lambda_base = 0.95
+                lambda_base = 0.75
             elif drift > 15:
-                lambda_base = 0.80
-            elif drift > 5:
                 lambda_base = 0.70
-            else:
+            elif drift > 5:
                 lambda_base = 0.65
+            else:
+                lambda_base = 0.60
 
-            lambda_clamped = np.clip(lambda_base, 0.65, 0.95)
+            lambda_clamped = np.clip(lambda_base, 0.60, 0.75)
 
             low_final = (1 - lambda_clamped) * low_final + lambda_clamped * self._anchor_low
             high_final = (1 - lambda_clamped * 0.2) * high_final + (

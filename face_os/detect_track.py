@@ -226,7 +226,7 @@ def pass_quality_gates(
     if reference_landmarks is not None:
         disparity = compute_procrustes_disparity(landmarks, reference_landmarks)
         metrics["procrustes_disparity"] = disparity
-        if disparity > 0.1:
+        if disparity > 0.09:  # Strict threshold
             return False, metrics
     else:
         metrics["procrustes_disparity"] = 0.0

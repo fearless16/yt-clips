@@ -617,7 +617,7 @@ class FaceOSPipeline:
             eye_confidence=eye_confidence,
         )
 
-        # 11. Composite
+        # 11. Composite — USE IDENTITY FACE, NOT RENDERED
         if identity_face is not None and face_mask is not None:
             # Warp identity face back to cropped space
             # (simplified — use confidence-weighted blend)
@@ -626,9 +626,11 @@ class FaceOSPipeline:
             if conf.shape[:2] != cropped.shape[:2]:
                 conf = cv2.resize(conf, (cropped.shape[1], cropped.shape[0]))
 
-            # The compositor handles the final blend
+            # CRITICAL FIX: Use identity_face (anchor-corrected) instead of rendered
+            # identity_face comes from identity_state.query() which applies anchor correction
+            # rendered comes from face_enhance.render_frame() which has NO brightness correction
             output = self.compositor.composite(
-                cropped, rendered,
+                cropped, identity_face,
                 confidence=ConfidenceMap(combined=conf),
                 face_mask=face_mask,
             )
