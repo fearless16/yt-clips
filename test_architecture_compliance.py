@@ -47,6 +47,7 @@ from face_os.patch_memory import PatchMemory, RegionPatch, REGION_DEFS
 from face_os.temporal_solve import BidirectionalSolver, TemporalRepairEngine, FrameQuality
 from face_os.crop_planner import CropPlanner, CompositionReference
 from face_os import face_enhance, canonical_map, landmarks as lm_module
+from face_os.detect_track import extract_face_mesh
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -77,7 +78,8 @@ class TestModuleA_Telemetry:
         assert len(faces) > 0, "Must detect face in expectation.png"
 
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        lm = lm_module.extract_landmarks(frame, (x, y, fw, fh))
+        mesh = extract_face_mesh(frame)
+        lm = lm_module.extract_landmarks(frame, mesh) if mesh is not None else None
         assert lm is not None, "Must extract landmarks"
 
         # Architecture requires yaw, pitch, roll
@@ -103,7 +105,8 @@ class TestModuleA_Telemetry:
             pytest.skip("No face detected")
 
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        lm = lm_module.extract_landmarks(frame, (x, y, fw, fh))
+        mesh = extract_face_mesh(frame)
+        lm = lm_module.extract_landmarks(frame, mesh) if mesh is not None else None
         assert lm is not None
 
         # Must have 68 landmarks (dlib standard)
@@ -135,7 +138,8 @@ class TestModuleA_Telemetry:
             pytest.skip("No face detected")
 
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        lm = lm_module.extract_landmarks(frame, (x, y, fw, fh))
+        mesh = extract_face_mesh(frame)
+        lm = lm_module.extract_landmarks(frame, mesh) if mesh is not None else None
 
         # Landmarks should NOT contain identity information
         # (no embeddings, no face encoding)
@@ -171,7 +175,8 @@ class TestModuleB_CanonicalAlignment:
             pytest.skip("No face detected")
 
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        lm = lm_module.extract_landmarks(frame, (x, y, fw, fh))
+        mesh = extract_face_mesh(frame)
+        lm = lm_module.extract_landmarks(frame, mesh) if mesh is not None else None
         assert lm is not None
 
         # Warp to canonical
@@ -195,7 +200,8 @@ class TestModuleB_CanonicalAlignment:
             pytest.skip("No face detected")
 
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        lm = lm_module.extract_landmarks(frame, (x, y, fw, fh))
+        mesh = extract_face_mesh(frame)
+        lm = lm_module.extract_landmarks(frame, mesh) if mesh is not None else None
         assert lm is not None
 
         warped_rgb, _, _ = canonical_map.warp_to_canonical(frame, lm)
@@ -224,7 +230,8 @@ class TestModuleB_CanonicalAlignment:
             pytest.skip("No face detected")
 
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        lm = lm_module.extract_landmarks(frame, (x, y, fw, fh))
+        mesh = extract_face_mesh(frame)
+        lm = lm_module.extract_landmarks(frame, mesh) if mesh is not None else None
         assert lm is not None
 
         warped_rgb, _, M = canonical_map.warp_to_canonical(frame, lm)

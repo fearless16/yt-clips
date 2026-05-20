@@ -68,6 +68,11 @@ from face_os.temporal_solve import TemporalRepairEngine, FrameQuality
 
 cfg = get_config()
 
+# ─── Feature flags ──────────────────────────────────────────────────────────
+# Set USE_IDENTITY=False to disable identity memory and get simple enhancement
+# (crop + sharpen + denoise). No ghosting, no background bleed, no plastic skin.
+USE_IDENTITY = True
+
 
 class FaceOSPipeline:
     """The Face OS processing pipeline v2.
@@ -121,6 +126,9 @@ class FaceOSPipeline:
         self._lost_frame_count = 0
         self._recovery_frame_count = 0
 
+        # M_inv smoothing for floating mask fix
+        self._last_M_inv: Optional[np.ndarray] = None
+
     def enroll(
         self,
         reference_image: str = "expectation.png",
@@ -169,11 +177,16 @@ class FaceOSPipeline:
             print("  WARNING: Could not extract reference mesh — quality gates will be relaxed")
 
         # NEW: Initialize identity belief state
-        self.identity_state = IdentityState()
-        self.patch_memory = PatchMemory()
+        if USE_IDENTITY:
+            self.identity_state = IdentityState()
+            self.patch_memory = PatchMemory()
+        else:
+            self.identity_state = None
+            self.patch_memory = None
+            print("  Identity: DISABLED (simple enhancement mode)")
 
         # Set reference embedding on verification gate
-        if self.identity.embeddings:
+        if USE_IDENTITY and self.identity.embeddings:
             self.identity_state._gate.set_reference_embedding(
                 self.identity.embeddings[0]
             )
@@ -181,7 +194,7 @@ class FaceOSPipeline:
             print(f"  Verification gate: embedding_tolerance={cfg.identity.embedding_tolerance}, min_face_pixels={cfg.verification_gate.min_face_pixels}, liveness_threshold={cfg.verification_gate.liveness_threshold}")
 
         # Pre-populate from reference
-        if self.identity.enrolled and self.identity.appearance.atlas_rgb is not None:
+        if USE_IDENTITY and self.identity.enrolled and self.identity.appearance.atlas_rgb is not None:
             self.appearance_builder.atlas = self.identity.appearance
 
             # Initialize identity state from reference
@@ -238,6 +251,11 @@ class FaceOSPipeline:
 
         # Reset per-clip state
         self._reset_state()
+
+        # Simple enhancement mode: skip bidirectional solve (needs identity_state)
+        if not USE_IDENTITY:
+            print("  Mode: SIMPLE ENHANCEMENT (no identity, no bidirectional)")
+            return self._process_forward(video_path, output_path, max_frames, meta)
 
         if self.use_bidirectional:
             return self._process_bidirectional(video_path, output_path, max_frames, meta)
@@ -333,7 +351,7 @@ class FaceOSPipeline:
             face_track = self.tracker.process_frame(source_frame, frame_idx)
             landmarks = None
             if face_track and face_track.smooth_bbox:
-                landmarks = lm_module.extract_landmarks(source_frame, face_track.smooth_bbox)
+                landmarks = lm_module.extract_landmarks(source_frame, face_track.mesh_478)
                 face_track.landmarks = landmarks
 
             crop_plan = self.crop.plan_crop(source_frame.shape[:2], face_track, landmarks)
@@ -480,7 +498,7 @@ class FaceOSPipeline:
         # 2. Landmarks + pose
         landmarks = None
         if face_track and face_track.smooth_bbox:
-            landmarks = lm_module.extract_landmarks(frame, face_track.smooth_bbox)
+            landmarks = lm_module.extract_landmarks(frame, face_track.mesh_478)
             face_track.landmarks = landmarks
 
         # ═══════════════════════════════════════════════════════════════════
@@ -528,8 +546,9 @@ class FaceOSPipeline:
         # GATE: Skip identity update if face is lost
         # ═══════════════════════════════════════════════════════════════════
         if self._face_state == "LOST_FACE":
-            # Return source frame unchanged — no identity processing
-            return frame
+            # FIX: Apply last good crop instead of returning full frame (prevents dimension jump)
+            crop_plan = self.crop.plan_crop(frame.shape[:2], None, None)
+            return crop_planner.apply_crop(frame, crop_plan)
 
         # 3. Canonical alignment
         pose = None  # FIX: Initialize pose to prevent UnboundLocalError
@@ -561,8 +580,8 @@ class FaceOSPipeline:
             except Exception:
                 pass
 
-        # 4. Identity state update
-        if canonical_face is not None and quality_map is not None and face_track is not None:
+        # 4. Identity state update (skip if USE_IDENTITY=False)
+        if USE_IDENTITY and canonical_face is not None and quality_map is not None and face_track is not None:
             pose = (landmarks.yaw, landmarks.pitch, landmarks.roll) if landmarks else None
             # Mask quality_map to face region only — prevent background learning
             masked_quality = quality_map * canonical_face_mask if canonical_face_mask is not None else quality_map
@@ -576,7 +595,7 @@ class FaceOSPipeline:
                 face_bbox = face_track.smooth_bbox
                 
                 # FIX: Robustly check for 478 (V4) or 468 (legacy) mesh attributes
-                mesh = getattr(face_track, 'mesh_478', getattr(face_track, 'mesh_468', None))
+                mesh = getattr(face_track, 'mesh_478', None)
                 landmarks_pts = mesh[:, :2] if mesh is not None else (landmarks.points[:, :2] if landmarks and hasattr(landmarks, 'points') else None)
                 
                 embedding = face_track.detection.embedding if face_track.detection else None
@@ -589,17 +608,17 @@ class FaceOSPipeline:
                     embedding=embedding,
                 )
 
-        # 5. Patch memory update
-        if canonical_face is not None and quality_map is not None and landmarks:
+        # 5. Patch memory update (skip if USE_IDENTITY=False)
+        if USE_IDENTITY and canonical_face is not None and quality_map is not None and landmarks:
             pose = (landmarks.yaw, landmarks.pitch, landmarks.roll)
             # Detect blink for eye freeze
             is_blink = self._detect_blink(landmarks) if landmarks else False
             self.patch_memory.update(canonical_face, quality_map, pose=pose, is_blink=is_blink, frame_idx=frame_idx)
 
-        # 6. Query identity (THE MENTAL SHIFT)
+        # 6. Query identity (skip if USE_IDENTITY=False)
         identity_face = None
         identity_confidence = None
-        if canonical_face is not None and quality_map is not None:
+        if USE_IDENTITY and canonical_face is not None and quality_map is not None:
             identity_face, identity_confidence = self.identity_state.query(canonical_face, quality_map, pose=pose)
             # Mask confidence to face region only — prevent background reconstruction
             if canonical_face_mask is not None and identity_confidence is not None:
@@ -618,10 +637,10 @@ class FaceOSPipeline:
                 region_masks = lm_module.create_region_masks(adjusted_lm, cropped.shape[:2])
                 face_mask = region_masks.get("face")
 
-        # 9. Get identity eyes for structure-preserving rendering
+        # 9. Get identity eyes for structure-preserving rendering (skip if USE_IDENTITY=False)
         identity_eyes = None
         eye_confidence = 0.0
-        if self.patch_memory and self.patch_memory._initialized and landmarks:
+        if USE_IDENTITY and self.patch_memory and self.patch_memory._initialized and landmarks:
             pose = (landmarks.yaw, landmarks.pitch, landmarks.roll)
             left_eye, left_conf = self.patch_memory.query_region('left_eye', pose)
             right_eye, right_conf = self.patch_memory.query_region('right_eye', pose)
@@ -649,12 +668,30 @@ class FaceOSPipeline:
                 if adjusted_lm:
                     _, _, M = canonical_map.warp_to_canonical(cropped, adjusted_lm)
                     M_inv = np.linalg.inv(M)[:2]
+
+                    # FIX: EMA smooth the transform to prevent floating mask jitter
+                    if self._last_M_inv is not None and self._last_M_inv.shape == M_inv.shape:
+                        M_inv = 0.7 * self._last_M_inv + 0.3 * M_inv
+                    self._last_M_inv = M_inv.copy()
+
                     identity_in_crop = cv2.warpAffine(
                         identity_face, M_inv, (cropped.shape[1], cropped.shape[0]),
                         flags=cv2.INTER_LANCZOS4,
                         borderMode=cv2.BORDER_REFLECT,
                     )
                     
+                    # FIX: Derive mask from canonical face, warp with SAME transform
+                    canonical_mask = np.ones(identity_face.shape[:2], dtype=np.float32)
+                    gray_canon = cv2.cvtColor(identity_face, cv2.COLOR_BGR2GRAY)
+                    canonical_mask[gray_canon < 5] = 0.0
+                    aligned_mask = cv2.warpAffine(
+                        canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
+                        flags=cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=0,
+                    )
+                    aligned_mask = np.clip(aligned_mask, 0, 1)
+
                     # Warp confidence to crop space
                     conf = identity_confidence if identity_confidence is not None else np.ones((256, 256), dtype=np.float32) * 0.3
                     if conf.shape[:2] != cropped.shape[:2]:
@@ -664,7 +701,7 @@ class FaceOSPipeline:
                     output = self.compositor.composite(
                         cropped, identity_in_crop,
                         confidence=ConfidenceMap(combined=conf),
-                        face_mask=face_mask,
+                        face_mask=aligned_mask,
                     )
                 else:
                     output = rendered
@@ -685,14 +722,10 @@ class FaceOSPipeline:
         solved_face: Optional[np.ndarray] = None,
         solved_conf: Optional[np.ndarray] = None,
     ) -> Optional[np.ndarray]:
-        """Render a frame using solved identity data.
+        """Render a frame.
 
-        THE KEY INSIGHT: The solved canonical face IS the identity belief.
-        Warp it back to source space and composite with confidence.
-
-        MODULE D: Apply anchor correction AFTER blending with source.
-        This ensures the output identity stays close to reference,
-        even when confidence is low.
+        When USE_IDENTITY=True: identity reconstruction with anchor correction.
+        When USE_IDENTITY=False: simple enhancement (crop + sharpen + denoise).
         """
         # Apply crop
         cropped = crop_planner.apply_crop(source_frame, crop_plan)
@@ -706,6 +739,19 @@ class FaceOSPipeline:
                 region_masks = lm_module.create_region_masks(adjusted_lm, cropped.shape[:2])
                 face_mask = region_masks.get("face")
 
+        # ─── SIMPLE ENHANCEMENT MODE (no identity) ───────────────────────
+        if not USE_IDENTITY:
+            enhancement_mask = None
+            if region_masks:
+                enhancement_mask = face_enhance._create_enhancement_mask(region_masks, cropped.shape)
+
+            rendered = face_enhance.render_frame(
+                cropped, enhancement_mask, region_masks,
+                identity_eyes=None, eye_confidence=0.0,
+            )
+            return rendered
+
+        # ─── IDENTITY RECONSTRUCTION MODE ────────────────────────────────
         # If we have a solved canonical face, warp it back to source space
         if solved_face is not None and landmarks is not None:
             try:
@@ -721,11 +767,36 @@ class FaceOSPipeline:
                 # Warp solved face back to source crop space
                 _, _, M = canonical_map.warp_to_canonical(cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks)
                 M_inv = np.linalg.inv(M)[:2]
+
+                # FIX: EMA smooth the transform to prevent floating mask jitter
+                if self._last_M_inv is not None and self._last_M_inv.shape == M_inv.shape:
+                    M_inv = 0.7 * self._last_M_inv + 0.3 * M_inv
+                self._last_M_inv = M_inv.copy()
+
                 solved_in_crop = cv2.warpAffine(
                     solved_face, M_inv, (cropped.shape[1], cropped.shape[0]),
                     flags=cv2.INTER_LANCZOS4,
                     borderMode=cv2.BORDER_REFLECT,
                 )
+
+                # FIX: Derive face mask from canonical face, warp back with SAME transform.
+                # Old approach used source landmarks → mask spatially misaligned with warped content.
+                canonical_h, canonical_w = solved_face.shape[:2]
+                canonical_mask = np.ones((canonical_h, canonical_w), dtype=np.float32)
+                # Zero out borders (canonical face has black padding outside face region)
+                gray_canon = cv2.cvtColor(solved_face, cv2.COLOR_BGR2GRAY)
+                canonical_mask[gray_canon < 5] = 0.0
+                # Warp mask back to crop space using SAME M_inv as content
+                aligned_mask = cv2.warpAffine(
+                    canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
+                    flags=cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=0,
+                )
+                aligned_mask = np.clip(aligned_mask, 0, 1)
+                # Feather the aligned mask
+                feather_ksize = max(3, cfg.compositor.feather_pixels * 2 + 1)
+                feathered_mask = cv2.GaussianBlur(aligned_mask, (feather_ksize, feather_ksize), cfg.compositor.feather_pixels / 2)
 
                 # Blend solved identity with source using confidence
                 if solved_conf is not None:
@@ -733,15 +804,13 @@ class FaceOSPipeline:
                 else:
                     conf = np.ones(cropped.shape[:2], dtype=np.float32) * 0.5
 
-                # Higher confidence = more identity (solved), less source
-                conf_3d = conf[:, :, np.newaxis]
+                # Blend weight = aligned_mask * confidence (mask spatially aligned with content)
+                blend_weight = feathered_mask * conf
+                conf_3d = blend_weight[:, :, np.newaxis]
                 blended = cropped.astype(np.float32) * (1 - conf_3d) + solved_in_crop.astype(np.float32) * conf_3d
                 blended = np.clip(blended, 0, 255).astype(np.uint8)
 
-                # Module D: Apply anchor correction AFTER blending
-                # query() corrects in canonical space, this corrects in source space
-                if self.identity_state.is_initialized() and face_mask is not None:
-                    blended = self._apply_anchor_to_frame(blended, face_mask)
+                # Anchor correction already applied in query_identity() — do NOT apply again
 
                 # Apply structure-preserving rendering on top
                 enhancement_mask = None
@@ -875,28 +944,29 @@ class FaceOSPipeline:
         return sharpness * brightness_weight * detection_confidence
 
     def _detect_blink(self, landmarks: Landmarks) -> bool:
-        """Detect if eyes are blinking."""
+        """Detect if eyes are blinking using MediaPipe 478-point EAR."""
         if landmarks is None:
             return False
 
         pts = landmarks.points
-        if len(pts) < 48:
+        if len(pts) < 468:
             return False
 
-        # Eye aspect ratio for left eye (points 36-41)
-        left_eye = pts[36:42]
+        # V4: MediaPipe 478-point eye indices
+        # Left eye: inner(33), top(159), top-mid(158), outer(133), bottom-mid(153), bottom(145)
+        left_eye = pts[[33, 159, 158, 133, 153, 145]]
         left_h = abs(left_eye[1][1] - left_eye[5][1]) + abs(left_eye[2][1] - left_eye[4][1])
         left_w = abs(left_eye[0][0] - left_eye[3][0])
         left_ear = left_h / (2.0 * left_w + 1e-6)
 
-        # Eye aspect ratio for right eye (points 42-47)
-        right_eye = pts[42:48]
+        # Right eye: inner(362), top(386), top-mid(385), outer(263), bottom-mid(380), bottom(374)
+        right_eye = pts[[362, 386, 385, 263, 380, 374]]
         right_h = abs(right_eye[1][1] - right_eye[5][1]) + abs(right_eye[2][1] - right_eye[4][1])
         right_w = abs(right_eye[0][0] - right_eye[3][0])
         right_ear = right_h / (2.0 * right_w + 1e-6)
 
         avg_ear = (left_ear + right_ear) / 2
-        return avg_ear < 0.15  # Threshold for blink
+        return avg_ear < 0.15
 
     def _adjust_landmarks_to_crop(
         self,
@@ -1003,6 +1073,7 @@ class FaceOSPipeline:
         if self.compositor:
             self.compositor.reset()
         self._frame_count = 0
+        self._last_M_inv = None
 
 
 # ─── CLI ────────────────────────────────────────────────────────────────────
@@ -1018,8 +1089,14 @@ def main():
     parser.add_argument("--output", "-o", default=None, help="Output video path")
     parser.add_argument("--max-frames", type=int, default=None, help="Max frames to process")
     parser.add_argument("--no-bidirectional", action="store_true", help="Disable bidirectional solve")
+    parser.add_argument("--no-identity", action="store_true", help="Disable identity memory (simple enhancement mode)")
 
     args = parser.parse_args()
+
+    # Apply feature flags from CLI
+    global USE_IDENTITY
+    if args.no_identity:
+        USE_IDENTITY = False
 
     output = args.output or "output/face_os/output.mp4"
 

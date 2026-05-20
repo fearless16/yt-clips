@@ -59,9 +59,12 @@ class TestBlinkDetector:
         """Must detect open eyes."""
         detector = BlinkDetector(ear_threshold=0.20)
 
-        landmarks = np.zeros((68, 2), dtype=np.float32)
-        landmarks[36:42] = [[100, 100], [110, 90], [120, 90], [130, 100], [120, 110], [110, 110]]
-        landmarks[42:48] = [[200, 100], [210, 90], [220, 90], [230, 100], [220, 110], [210, 110]]
+        # V4: MediaPipe 478-point landmarks
+        landmarks = np.zeros((478, 2), dtype=np.float32)
+        # Left eye: inner(33), top(159), top-mid(158), outer(133), bottom-mid(153), bottom(145)
+        landmarks[[33, 159, 158, 133, 153, 145]] = [[100, 100], [110, 90], [120, 90], [130, 100], [120, 110], [110, 110]]
+        # Right eye: inner(362), top(386), top-mid(385), outer(263), bottom-mid(380), bottom(374)
+        landmarks[[362, 386, 385, 263, 380, 374]] = [[200, 100], [210, 90], [220, 90], [230, 100], [220, 110], [210, 110]]
 
         is_blinking, ear = detector.detect(landmarks, frame_idx=0)
 
@@ -72,9 +75,12 @@ class TestBlinkDetector:
         """Must detect closed eyes."""
         detector = BlinkDetector(ear_threshold=0.20, consecutive_frames=1)
 
-        landmarks = np.zeros((68, 2), dtype=np.float32)
-        landmarks[36:42] = [[100, 100], [110, 100], [120, 100], [130, 100], [120, 100], [110, 100]]
-        landmarks[42:48] = [[200, 100], [210, 100], [220, 100], [230, 100], [220, 100], [210, 100]]
+        # V4: MediaPipe 478-point landmarks
+        landmarks = np.zeros((478, 2), dtype=np.float32)
+        # Left eye: all at same y = closed
+        landmarks[[33, 159, 158, 133, 153, 145]] = [[100, 100], [110, 100], [120, 100], [130, 100], [120, 100], [110, 100]]
+        # Right eye: all at same y = closed
+        landmarks[[362, 386, 385, 263, 380, 374]] = [[200, 100], [210, 100], [220, 100], [230, 100], [220, 100], [210, 100]]
 
         is_blinking, ear = detector.detect(landmarks, frame_idx=0)
 
@@ -85,9 +91,10 @@ class TestBlinkDetector:
         """Must track history."""
         detector = BlinkDetector()
 
-        landmarks = np.zeros((68, 2), dtype=np.float32)
-        landmarks[36:42] = [[100, 100], [110, 90], [120, 90], [130, 100], [120, 110], [110, 110]]
-        landmarks[42:48] = [[200, 100], [210, 90], [220, 90], [230, 100], [220, 110], [210, 110]]
+        # V4: MediaPipe 478-point landmarks
+        landmarks = np.zeros((478, 2), dtype=np.float32)
+        landmarks[[33, 159, 158, 133, 153, 145]] = [[100, 100], [110, 90], [120, 90], [130, 100], [120, 110], [110, 110]]
+        landmarks[[362, 386, 385, 263, 380, 374]] = [[200, 100], [210, 90], [220, 90], [230, 100], [220, 110], [210, 110]]
 
         for i in range(10):
             detector.detect(landmarks, frame_idx=i)
@@ -102,9 +109,10 @@ class TestBlinkDetector:
 
         frame = np.ones((480, 640, 3), dtype=np.uint8) * 128
 
-        landmarks = np.zeros((68, 2), dtype=np.float32)
-        landmarks[36:42] = [[100, 100], [110, 90], [120, 90], [130, 100], [120, 110], [110, 110]]
-        landmarks[42:48] = [[200, 100], [210, 90], [220, 90], [230, 100], [220, 110], [210, 110]]
+        # V4: MediaPipe 478-point landmarks
+        landmarks = np.zeros((478, 2), dtype=np.float32)
+        landmarks[[33, 159, 158, 133, 153, 145]] = [[100, 100], [110, 90], [120, 90], [130, 100], [120, 110], [110, 110]]
+        landmarks[[362, 386, 385, 263, 380, 374]] = [[200, 100], [210, 90], [220, 90], [230, 100], [220, 110], [210, 110]]
 
         # Open eyes
         result = detector.freeze_eyes(frame, landmarks, frame_idx=0)
@@ -112,8 +120,8 @@ class TestBlinkDetector:
 
         # Closed eyes
         landmarks_closed = landmarks.copy()
-        landmarks_closed[36:42] = [[100, 100], [110, 100], [120, 100], [130, 100], [120, 100], [110, 100]]
-        landmarks_closed[42:48] = [[200, 100], [210, 100], [220, 100], [230, 100], [220, 100], [210, 100]]
+        landmarks_closed[[33, 159, 158, 133, 153, 145]] = [[100, 100], [110, 100], [120, 100], [130, 100], [120, 100], [110, 100]]
+        landmarks_closed[[362, 386, 385, 263, 380, 374]] = [[200, 100], [210, 100], [220, 100], [230, 100], [220, 100], [210, 100]]
 
         result = detector.freeze_eyes(frame, landmarks_closed, frame_idx=1)
         assert result is not None

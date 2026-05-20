@@ -423,14 +423,16 @@ def build_identity_profile(
         best_img = reference_images[0]  # Primary reference
         
         # Use MediaPipe instead of Haar cascade
-        from face_os.detect_track import detect_faces
+        from face_os.detect_track import detect_faces, extract_face_mesh
         detections = detect_faces(best_img)
         
         if detections:
             track = detections[0]
-            x, y, fw, fh = track.smooth_bbox
+            mesh = extract_face_mesh(best_img)
+            if mesh is not None:
+                track.mesh_478 = mesh
             from face_os.landmarks import extract_landmarks
-            lm = extract_landmarks(best_img, (x, y, fw, fh))
+            lm = extract_landmarks(best_img, mesh) if mesh is not None else None
             if lm is not None:
                 builder.initialize(best_img, lm)
                 profile.appearance = builder.get_atlas()

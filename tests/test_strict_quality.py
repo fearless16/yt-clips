@@ -41,7 +41,7 @@ def _get_output_face_lab(frame_idx):
     """Get output face LAB mean at given frame."""
     from face_os.detect_track import detect_faces
     
-    cap = cv2.VideoCapture("output/face_os_v2/output.mp4")
+    cap = cv2.VideoCapture("output/face_os/output_v4.mp4")
     if not cap.isOpened():
         pytest.skip("Output video not found")
     

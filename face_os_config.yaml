@@ -35,13 +35,13 @@ canonical:
   min_confidence_for_update: 0.7
 
 identity_state:
-  low_freq_ema_rate: 0.1
+  low_freq_ema_rate: 0.05          # Slower EMA prevents source lighting from corrupting memory
   high_freq_best_only: true
   confidence_modulation: true
   base_confidence: 0.7
-  anchor_lambda_max: 0.95
-  low_blend_base: 0.95
-  high_blend_base: 0.05
+  anchor_lambda_max: 0.95          # Strong pull to reference LAB
+  low_blend_base: 0.95             # Trust identity memory 95%+ for low freq
+  high_blend_base: 0.05            # Trust source 5% for high freq
 
 crop:
   output_size: [1080, 1920]

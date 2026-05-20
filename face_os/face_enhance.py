@@ -88,17 +88,17 @@ class BlinkDetector:
         """Detect if eyes are blinking.
 
         Args:
-            landmarks: 68-point facial landmarks (68, 2)
+            landmarks: 478-point facial landmarks (478, 2) from MediaPipe
             frame_idx: Current frame index
 
         Returns:
             (is_blinking, ear_value)
         """
-        # Extract eye landmarks
-        # Left eye: points 36-41
-        # Right eye: points 42-47
-        left_eye = landmarks[36:42]
-        right_eye = landmarks[42:48]
+        # V4: MediaPipe 478-point eye indices for EAR calculation
+        # Left eye: inner corner(33), top(159), top-mid(158), outer corner(133), bottom-mid(153), bottom(145)
+        # Right eye: inner corner(362), top(386), top-mid(385), outer corner(263), bottom-mid(380), bottom(374)
+        left_eye = landmarks[[33, 159, 158, 133, 153, 145]]
+        right_eye = landmarks[[362, 386, 385, 263, 380, 374]]
 
         # Compute EAR for both eyes
         left_ear = self._compute_ear(left_eye)
@@ -174,7 +174,7 @@ class BlinkDetector:
 
         Args:
             frame: Current frame (BGR)
-            landmarks: 68-point facial landmarks
+            landmarks: 478-point facial landmarks (MediaPipe)
             frame_idx: Current frame index
 
         Returns:
@@ -214,9 +214,9 @@ class BlinkDetector:
         frame_idx: int,
     ) -> None:
         """Update last known good eye state."""
-        # Extract eye regions
-        left_eye = landmarks[36:42]
-        right_eye = landmarks[42:48]
+        # V4: Extract eye regions using MediaPipe 478-point indices
+        left_eye = landmarks[[33, 159, 158, 133, 153, 145]]
+        right_eye = landmarks[[362, 386, 385, 263, 380, 374]]
 
         # Get bounding boxes
         left_bbox = self._eye_bbox(left_eye, frame.shape)
@@ -241,9 +241,9 @@ class BlinkDetector:
     ) -> np.ndarray:
         """Freeze one eye region using frozen state."""
         if side == 'left':
-            eye_points = landmarks[36:42]
+            eye_points = landmarks[[33, 159, 158, 133, 153, 145]]
         else:
-            eye_points = landmarks[42:48]
+            eye_points = landmarks[[362, 386, 385, 263, 380, 374]]
 
         bbox = self._eye_bbox(eye_points, frame.shape)
         if bbox is None:

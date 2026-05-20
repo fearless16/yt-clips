@@ -189,19 +189,66 @@ def compute_occupancy(landmarks: np.ndarray, bbox: Tuple[int, int, int, int]) ->
     return face_area / bbox_area
 
 
+def _estimate_pose_from_landmarks(landmarks: np.ndarray) -> Tuple[float, float, float]:
+    """Quick pose estimate from 478-point mesh (yaw, pitch, roll in degrees)."""
+    if landmarks is None or len(landmarks) < 468:
+        return (0.0, 0.0, 0.0)
+
+    pts = landmarks[:, :2] if landmarks.shape[1] > 2 else landmarks
+
+    # Nose tip (1), chin (152), left eye inner (33), right eye inner (263)
+    nose = pts[1]
+    chin = pts[152]
+    left_eye = pts[33]
+    right_eye = pts[263]
+
+    # Yaw: nose offset from eye midpoint (horizontal asymmetry)
+    eye_mid = (left_eye + right_eye) / 2.0
+    nose_offset = nose[0] - eye_mid[0]
+    eye_dist = np.linalg.norm(right_eye - left_eye)
+    yaw = float(np.degrees(np.arctan2(nose_offset, max(eye_dist, 1e-6)))) * 2.5
+
+    # Pitch: nose-to-chin vertical ratio
+    nc_dist = np.linalg.norm(chin - nose)
+    face_height = nc_dist * 2.5  # approximate full face height
+    pitch = float(np.degrees(np.arctan2(chin[1] - nose[1], max(nc_dist, 1e-6)))) - 70.0
+
+    # Roll: eye tilt
+    roll = float(np.degrees(np.arctan2(
+        right_eye[1] - left_eye[1],
+        right_eye[0] - left_eye[0],
+    )))
+
+    return (yaw, pitch, roll)
+
+
 def pass_quality_gates(
     landmarks: np.ndarray,
     reference_landmarks: Optional[np.ndarray],
     landmark_history: List[np.ndarray],
     bbox: Tuple[int, int, int, int],
 ) -> Tuple[bool, Dict[str, float]]:
-    """Check all quality gates for identity update."""
+    """Check all quality gates for identity update.
+
+    V4: Pose-aware Procrustes — relaxes threshold for extreme head poses.
+    """
     metrics = {}
 
     if reference_landmarks is not None:
         disparity = compute_procrustes_disparity(landmarks, reference_landmarks)
         metrics["procrustes_disparity"] = disparity
-        if disparity > 0.2:  # Relaxed threshold for different image sizes
+
+        # V4: Pose-aware threshold — side/tilted views naturally differ from frontal
+        pose = _estimate_pose_from_landmarks(landmarks)
+        metrics["yaw"] = pose[0]
+        metrics["pitch"] = pose[1]
+        threshold = 0.2
+        if abs(pose[0]) > 20 or abs(pose[1]) > 15:
+            threshold = 0.35  # Relax for extreme poses
+        elif abs(pose[0]) > 10 or abs(pose[1]) > 10:
+            threshold = 0.28  # Moderate relaxation
+
+        if disparity > threshold:
             return False, metrics
     else:
         metrics["procrustes_disparity"] = 0.0
@@ -333,7 +380,7 @@ class FaceTracker:
                     track.state = FaceState.LOST
                     return None
 
-                track.mesh_468 = mesh
+                track.mesh_478 = mesh
                 track.quality_metrics = metrics
             else:
                 track.state = FaceState.LOST
@@ -388,10 +435,10 @@ class FaceTracker:
 
         for track, det in unmatched_dets:
             if det.is_target:
-                mesh_468 = track.mesh_468 if hasattr(track, 'mesh_468') else None
-                self._create_track(det, frame_idx, mesh_468)
+                mesh_478 = track.mesh_478 if hasattr(track, 'mesh_478') else None
+                self._create_track(det, frame_idx, mesh_478)
 
-    def _create_track(self, detection: FaceDetection, frame_idx: int, mesh_468: Optional[np.ndarray] = None) -> int:
+    def _create_track(self, detection: FaceDetection, frame_idx: int, mesh_478: Optional[np.ndarray] = None) -> int:
         """Create a new face track."""
         track_id = self.next_track_id
         self.next_track_id += 1
@@ -405,8 +452,8 @@ class FaceTracker:
             smooth_bbox=detection.bbox,
             bbox_history=[detection.bbox],
         )
-        if mesh_468 is not None:
-            track.mesh_468 = mesh_468
+        if mesh_478 is not None:
+            track.mesh_478 = mesh_478
         self.tracks[track_id] = track
         return track_id
 
