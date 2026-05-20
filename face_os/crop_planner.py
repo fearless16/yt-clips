@@ -70,7 +70,8 @@ class CompositionReference:
         if not detections:
             return cls()
 
-        x, y, fw, fh, conf = detections[0]  # Use first detection
+        track = detections[0]
+        x, y, fw, fh = track.smooth_bbox
 
         face_top_pct = y / h
         face_height_pct = fh / h
