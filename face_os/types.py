@@ -81,6 +81,10 @@ class FaceTrack:
     # History
     bbox_history: List[Tuple[int, int, int, int]] = field(default_factory=list)
     landmark_history: List[np.ndarray] = field(default_factory=list)
+    # Face mesh (468 points) from MediaPipe
+    face_mesh: Optional[np.ndarray] = None            # (468, 2) pixel coords
+    # Quality gate metrics
+    quality_metrics: Dict[str, float] = field(default_factory=dict)
 
 
 # ─── Appearance field structures ────────────────────────────────────────────
