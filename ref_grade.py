@@ -159,9 +159,12 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
     # ── Pre-build LUTs (computed once during enrollment) ────────────────
     # TARGET-BASED: blend toward reference, don't multiply
 
-    # Brightness: blend toward face reference L
+    # Brightness: per-pixel blend toward ref_L (tolerant of side-screen flicker)
     params["_ref_L"] = ref_L
-    params["_L_blend"] = 0.75
+    params["_L_blend"] = 0.45
+
+    # Contrast: moderate (don't amplify source flicker too much)
+    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 42.0, 1.45))
 
     # Body boost: how much brighter body should be (capped at 40 L)
     params["_body_boost"] = min(max(body_boost, 0), 40)
@@ -171,8 +174,8 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
     params["_face_y_norm"] = face_y_norm
     params["_face_h_norm"] = face_h_norm
 
-    # Contrast: stronger to match high-contrast scene
-    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 38.0, 1.55))
+    # Contrast: strong enough to overcome blend compression
+    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 32.0, 1.85))
 
     # a,b LUTs: blend toward reference target + full-frame warm shift
     blend = 0.35  # Stronger blend for better skin matching
@@ -268,18 +271,23 @@ def apply_grade(frame: np.ndarray, params: Dict) -> np.ndarray:
     # ── 1. BGR → LAB ────────────────────────────────────────────────────
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
 
-    # ── 2. Contrast on L (stretch around per-frame mean) ────────────────
+    # ── 2. Extract L channel ────────────────────────────────────────────
     L = lab[:, :, 0].astype(np.float32)
-    r = params["_contrast_ratio"]
-    if r > 1.0:
-        ml = float(np.mean(L))
-        L = np.clip((L - ml) * r + ml, 0, 255)
 
-    # ── 3. Brightness blend toward reference ────────────────────────────
+    # ── 3. Brightness shift toward reference (clamped, flicker-safe) ────
     ref_L = params["_ref_L"]
     blend = params["_L_blend"]
-    current_L = float(np.mean(L))
-    L = np.clip(L + (ref_L - current_L) * blend, 0, 255)
+    # Per-pixel blend with clamping: max shift per frame to prevent flicker
+    shift = (ref_L - L) * blend
+    max_shift = 15.0  # Max L shift per frame (prevents flash)
+    shift = np.clip(shift, -max_shift, max_shift)
+    L = np.clip(L + shift, 0, 255)
+
+    # ── 4. Contrast on L (centered on reference L, not per-frame mean) ──
+    r = params["_contrast_ratio"]
+    if r > 1.0:
+        # Center on ref_L: flicker-free because ref_L is constant
+        L = np.clip((L - ref_L) * r + ref_L, 0, 255)
 
     # ── 4. Body lighting: spatial L adjustment ──────────────────────────
     body_boost = params.get("_body_boost", 0)

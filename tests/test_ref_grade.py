@@ -108,7 +108,7 @@ class TestEnroll:
         assert "shadow_color" in params
         assert "highlight_color" in params
         assert params["_contrast_ratio"] >= 1.0
-        assert params["_contrast_ratio"] <= 1.6
+        assert params["_contrast_ratio"] <= 2.0
         assert 100 <= params["a_target"] <= 160
         assert 100 <= params["b_target"] <= 160
         assert 80 <= params["ref_L"] <= 140
