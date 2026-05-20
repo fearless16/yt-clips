@@ -717,23 +717,25 @@ qc:
 
 ### Architecture Compliance Tests
 
-**39 tests, ALL PASSING:**
+**51 tests, ALL PASSING:**
 
 | Module | Tests | Status |
 |---|---|---|
 | Module A (Telemetry) | 3 | ✅ PASS |
 | Module B (Canonical Alignment) | 3 | ✅ PASS |
 | Module C (Photic Memory) | 4 | ✅ PASS |
-| Module D (Identity Anchor) | 2 | ✅ PASS |
-| Module E (Confidence) | 2 | ✅ PASS |
+| Module D (Identity Anchor) | 6 | ✅ PASS (was 2) |
+| Module E (Confidence) | 5 | ✅ PASS (was 2) |
 | Module F (Reconstruction) | 2 | ✅ PASS |
 | Module G (Temporal Inertia) | 2 | ✅ PASS |
 | Module H (Eye Dominance) | 3 | ✅ PASS |
+| Module I (Patch Database) | 3 | ✅ PASS (NEW) |
 | Module K (Cinematic Realism) | 3 | ✅ PASS |
 | Edge Cases | 5 | ✅ PASS |
 | Composition | 6 | ✅ PASS |
 | Failure Conditions | 2 | ✅ PASS |
 | Bidirectional Solve | 2 | ✅ PASS |
+| Rendering Pipeline | 2 | ✅ PASS (NEW) |
 
 ### Face Identity Comparison (HONEST)
 
