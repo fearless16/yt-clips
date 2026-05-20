@@ -152,7 +152,7 @@ class FaceOSPipeline:
         # Initialize modules
         self.tracker = detect_track.FaceTracker(self.identity.embeddings)
         self.appearance_builder = canonical_map.AppearanceFieldBuilder()
-        self.crop = crop_planner.CropPlanner()
+        self.crop = crop_planner.CropPlanner(reference_image=reference_image)
         self.compositor = compositor.Compositor()
 
         # NEW: Initialize identity belief state
