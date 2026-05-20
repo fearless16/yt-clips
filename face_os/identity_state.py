@@ -225,6 +225,273 @@ class BeliefPixel:
         return (age_conf * quality_conf).astype(np.float32)
 
 
+class IdentityHypothesis:
+    """A hypothesis about what the face looks like.
+
+    Instead of just storing observations, we maintain hypotheses about
+    the face's appearance. Each hypothesis represents a possible state
+    of the face (e.g., frontal neutral, smiling, different lighting).
+
+    The system selects the best hypothesis based on evidence (observations).
+
+    This is the bridge between:
+    - Current: pixel accumulation (raster thinking)
+    - Future: latent appearance manifold (generative thinking)
+    """
+
+    def __init__(
+        self,
+        name: str,
+        canonical_face: np.ndarray,
+        quality: float,
+        pose: Optional[Tuple[float, float, float]] = None,
+        expression: Optional[str] = None,
+        lighting: Optional[str] = None,
+    ):
+        self.name = name
+        self.canonical_face = canonical_face.copy()
+        self.quality = quality
+        self.pose = pose
+        self.expression = expression
+        self.lighting = lighting
+
+        # Frequency decomposition
+        self.low_freq: Optional[np.ndarray] = None
+        self.high_freq: Optional[np.ndarray] = None
+
+        # Evidence tracking
+        self.support_count: int = 1  # How many observations support this hypothesis
+        self.contradiction_count: int = 0  # How many observations contradict it
+        self.last_support_frame: int = 0
+
+        # Confidence
+        self.confidence: float = quality
+
+    def decompose(self, freq: FrequencyDecomposition) -> None:
+        """Decompose hypothesis into frequency components."""
+        self.low_freq, self.high_freq = freq.decompose(self.canonical_face)
+
+    def update_support(
+        self,
+        observation: np.ndarray,
+        quality: float,
+        frame_idx: int,
+        similarity_threshold: float = 0.8,
+    ) -> bool:
+        """Update hypothesis with new observation.
+
+        If observation is similar → increase support
+        If observation is different → increase contradiction
+
+        Returns:
+            True if observation supports this hypothesis
+        """
+        # Compute similarity between hypothesis and observation
+        if self.canonical_face.shape != observation.shape:
+            return False
+
+        # LAB distance
+        hyp_lab = cv2.cvtColor(self.canonical_face, cv2.COLOR_BGR2LAB).astype(np.float32)
+        obs_lab = cv2.cvtColor(observation, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        hyp_mean = np.mean(hyp_lab, axis=(0, 1))
+        obs_mean = np.mean(obs_lab, axis=(0, 1))
+
+        distance = np.sqrt(np.sum((hyp_mean - obs_mean) ** 2))
+
+        # If distance is small, observation supports this hypothesis
+        if distance < 20:  # LAB distance threshold
+            self.support_count += 1
+            self.last_support_frame = frame_idx
+
+            # Update hypothesis with better observation if quality is higher
+            if quality > self.quality:
+                self.canonical_face = observation.copy()
+                self.quality = quality
+                self.decompose(FrequencyDecomposition())
+
+            # Update confidence
+            self.confidence = min(1.0, self.support_count / (self.support_count + self.contradiction_count))
+
+            return True
+        else:
+            self.contradiction_count += 1
+            self.confidence = min(1.0, self.support_count / (self.support_count + self.contradiction_count))
+            return False
+
+    def get_age_penalty(self, current_frame: int, half_life: int = 300) -> float:
+        """Get age penalty for this hypothesis.
+
+        Older hypotheses that haven't been supported recently get penalized.
+        """
+        age = current_frame - self.last_support_frame
+        return float(np.exp(-age / half_life))
+
+    def get_effective_confidence(self, current_frame: int) -> float:
+        """Get effective confidence considering age."""
+        age_penalty = self.get_age_penalty(current_frame)
+        return self.confidence * age_penalty
+
+
+class IdentityHypothesisSpace:
+    """Maintains multiple hypotheses about the face's appearance.
+
+    Instead of a single identity state, we maintain a SPACE of hypotheses:
+    - frontal neutral hypothesis
+    - smiling hypothesis
+    - different lighting hypotheses
+    - etc.
+
+    When reconstructing, we select the best hypothesis for current conditions.
+    """
+
+    def __init__(self, max_hypotheses: int = 10):
+        self.max_hypotheses = max_hypotheses
+        self.hypotheses: Dict[str, IdentityHypothesis] = {}
+        self.frame_count: int = 0
+
+    def update(
+        self,
+        canonical_face: np.ndarray,
+        quality: float,
+        pose: Optional[Tuple[float, float, float]] = None,
+        expression: Optional[str] = None,
+        lighting: Optional[str] = None,
+    ) -> None:
+        """Update hypothesis space with new observation.
+
+        1. Try to match existing hypothesis
+        2. If no match → create new hypothesis
+        3. If too many hypotheses → prune weakest
+        """
+        self.frame_count += 1
+
+        # Create hypothesis key
+        key = self._make_key(pose, expression, lighting)
+
+        # Try to match existing hypothesis
+        matched = False
+        for name, hyp in self.hypotheses.items():
+            if hyp.update_support(canonical_face, quality, self.frame_count):
+                matched = True
+                break
+
+        # If no match, create new hypothesis
+        if not matched:
+            self._create_hypothesis(key, canonical_face, quality, pose, expression, lighting)
+
+        # Prune if too many
+        self._prune()
+
+    def query(
+        self,
+        pose: Optional[Tuple[float, float, float]] = None,
+        expression: Optional[str] = None,
+        lighting: Optional[str] = None,
+    ) -> Tuple[Optional[np.ndarray], float]:
+        """Query best hypothesis for current conditions.
+
+        Returns:
+            (canonical_face, confidence) or (None, 0.0)
+        """
+        if not self.hypotheses:
+            return None, 0.0
+
+        # Find best matching hypothesis
+        best_hyp = None
+        best_score = 0.0
+
+        for name, hyp in self.hypotheses.items():
+            # Compute match score
+            score = hyp.get_effective_confidence(self.frame_count)
+
+            # Bonus for matching conditions
+            if pose is not None and hyp.pose is not None:
+                pose_sim = self._pose_similarity(pose, hyp.pose)
+                score *= (0.5 + 0.5 * pose_sim)
+
+            if expression is not None and hyp.expression is not None:
+                if expression == hyp.expression:
+                    score *= 1.2
+
+            if lighting is not None and hyp.lighting is not None:
+                if lighting == hyp.lighting:
+                    score *= 1.1
+
+            if score > best_score:
+                best_score = score
+                best_hyp = hyp
+
+        if best_hyp is not None:
+            return best_hyp.canonical_face, best_score
+
+        return None, 0.0
+
+    def _make_key(
+        self,
+        pose: Optional[Tuple[float, float, float]] = None,
+        expression: Optional[str] = None,
+        lighting: Optional[str] = None,
+    ) -> str:
+        """Create hypothesis key."""
+        parts = []
+        if pose is not None:
+            parts.append(f'p{int(pose[0])}')
+        if expression:
+            parts.append(expression)
+        if lighting:
+            parts.append(lighting)
+        return '_'.join(parts) if parts else f'hyp_{len(self.hypotheses)}'
+
+    def _create_hypothesis(
+        self,
+        key: str,
+        canonical_face: np.ndarray,
+        quality: float,
+        pose: Optional[Tuple[float, float, float]],
+        expression: Optional[str],
+        lighting: Optional[str],
+    ) -> None:
+        """Create new hypothesis."""
+        hyp = IdentityHypothesis(
+            name=key,
+            canonical_face=canonical_face,
+            quality=quality,
+            pose=pose,
+            expression=expression,
+            lighting=lighting,
+        )
+        hyp.decompose(FrequencyDecomposition())
+        self.hypotheses[key] = hyp
+
+    def _prune(self) -> None:
+        """Remove weakest hypotheses if too many."""
+        if len(self.hypotheses) <= self.max_hypotheses:
+            return
+
+        # Sort by effective confidence
+        sorted_hyps = sorted(
+            self.hypotheses.items(),
+            key=lambda x: x[1].get_effective_confidence(self.frame_count),
+        )
+
+        # Remove weakest
+        while len(self.hypotheses) > self.max_hypotheses:
+            key, _ = sorted_hyps.pop(0)
+            del self.hypotheses[key]
+
+    def _pose_similarity(
+        self,
+        pose1: Tuple[float, float, float],
+        pose2: Tuple[float, float, float],
+    ) -> float:
+        """Compute pose similarity (0-1)."""
+        yaw_diff = abs(pose1[0] - pose2[0])
+        pitch_diff = abs(pose1[1] - pose2[1])
+        dist = np.sqrt(yaw_diff ** 2 + pitch_diff ** 2)
+        return float(np.exp(-dist / 30.0))
+
+
 class IdentityState:
     """The complete identity belief state.
 
@@ -234,6 +501,7 @@ class IdentityState:
     - Per-patch memory (regions with independent dynamics)
     - Canonical UV-space state (stabilized here, not in image space)
     - **Identity Anchor** (Module D): prevents identity drift
+    - **Identity Hypotheses** (Phase 4): multiple hypotheses about face appearance
 
     THE MENTAL SHIFT:
       OLD: "how do I enhance this frame?"
@@ -245,6 +513,11 @@ class IdentityState:
 
       The anchor is the reference face's LAB values.
       After each update, identity is pulled toward anchor to prevent drift.
+
+    IDENTITY HYPOTHESES (Phase 4):
+      Instead of storing observations, maintain hypotheses about face appearance.
+      Each hypothesis represents a possible state (frontal, smiling, different lighting).
+      The system selects the best hypothesis based on evidence.
     """
 
     def __init__(self, atlas_size: Tuple[int, int] = (256, 256)):
@@ -259,6 +532,9 @@ class IdentityState:
         self._anchor_lab: Optional[np.ndarray] = None   # Reference LAB for distance check
         self._anchor_strength = 0.35  # How much to pull toward anchor per update
         self._anchor_threshold = 25.0  # Max LAB distance before forced correction
+
+        # Phase 4: Identity Hypotheses
+        self.hypotheses = IdentityHypothesisSpace(max_hypotheses=10)
 
     def is_initialized(self) -> bool:
         return self.belief is not None and self.belief._initialized
@@ -403,6 +679,13 @@ class IdentityState:
 
         # Module D: Apply anchor correction to prevent identity drift
         self._apply_anchor_correction()
+
+        # Phase 4: Update hypothesis space
+        quality_mean = float(np.mean(quality_map))
+        self.hypotheses.update(
+            canonical_face, quality_mean, pose,
+            expression=None, lighting=None,
+        )
 
         # Track pose
         if pose is not None:
