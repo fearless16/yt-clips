@@ -778,9 +778,20 @@ qc:
 | G: Temporal | ✅ Done | Bidirectional solver, HQ frame identification |
 | H: Eye Dominance | ⚠️ Partial | Structure-preserving rendering, blink detection TODO |
 | I: Patch Database | ✅ Done | **Pose-conditioned retrieval** — query(yaw, expression, lighting) |
-| J: Appearance Field | ❌ Future | — |
-| K: Dynamic UV | ❌ Future | — |
+| J: Appearance Field | 🔄 Phase 5 | Hybrid system |
+| K: Dynamic UV | 🔄 Phase 5 | Skin stretch model |
 | L: Cinematic | ✅ Done | **Temporally coherent grain** — noise field with sensor persistence |
+
+### Phase Status
+
+| Phase | Status | Items |
+|---|---|---|
+| Phase 1 (MVP) | ✅ Done | Face tracking, canonical alignment, memory buffer |
+| Phase 2 | ✅ Done | Patch memory, eye priority, anchor correction |
+| Phase 3 | ✅ Done | Best observation cache, bidirectional solve |
+| Phase 4 | ✅ Done | Patch DB, semantic confidence, identity hypotheses, temporal grain |
+| Phase 5 | 🔄 Current | Appearance field, dynamic UV flow, microdetail synthesis |
+| Phase 6 | ❌ Future | Personalized neural codec |
 
 ### Remaining Issues
 
