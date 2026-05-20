@@ -1,180 +1,177 @@
 #!/usr/bin/env python3
-"""Benchmark DeepSeek V4, MiniMax M2.5 Pro, Xiaomi Mimo 2.5 Pro, and Alibaba Qwen."""
-
-import subprocess
+"""Benchmark models via direct API calls. Faster than opencode CLI."""
 import json
 import time
-import sys
+import urllib.request
+import urllib.error
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys
 
-MODELS = {
-    "DeepSeek V4 Pro":     "deepseek/deepseek-v4-pro",
-    "DeepSeek V4 Flash":   "deepseek/deepseek-v4-flash",
-    "MiniMax M2.5 Pro":    "openrouter/minimax/minimax-m2.5:free",
-    "Xiaomi Mimo 2.5 Pro": "xiaomi/mimo-v2.5-pro",
-    "Alibaba Qwen Max":    "alibaba/qwen-max",
-    "Alibaba Qwen Plus":   "alibaba/qwen-plus",
+# API configs
+PROVIDERS = {
+    "DeepSeek V4 Pro": {
+        "url": "https://api.deepseek.com/v1/chat/completions",
+        "key": os.environ.get("DEEPSEEK_API_KEY", ""),
+        "model": "deepseek-v4-pro",
+    },
+    "DeepSeek V4 Flash": {
+        "url": "https://api.deepseek.com/v1/chat/completions",
+        "key": os.environ.get("DEEPSEEK_API_KEY", ""),
+        "model": "deepseek-v4-flash",
+    },
+    "MiniMax M2.5 Pro": {
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "key": os.environ.get("OPENROUTER_API_KEY", ""),
+        "model": "minimax/minimax-m2.5:free",
+    },
+    "Xiaomi Mimo 2.5 Pro": {
+        "url": "https://opengateway.gitlawb.com/v1/xiaomi-mimo/chat/completions",
+        "key": os.environ.get("XIAOMI_API_KEY", "sk-d2baf638bcfe4313a909538f27886f84"),
+        "model": "mimo-v2.5-pro",
+    },
+    "Alibaba Qwen Max": {
+        "url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "key": os.environ.get("DASHSCOPE_API_KEY", ""),
+        "model": "qwen-max",
+    },
+    "Alibaba Qwen Plus": {
+        "url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        "key": os.environ.get("DASHSCOPE_API_KEY", ""),
+        "model": "qwen-plus",
+    },
 }
 
 PROMPTS = [
-    # Coding
-    ("coding_easy",
-     "Write a Python function to find the longest palindromic substring in O(n^2). Return only code."),
-    ("coding_medium",
-     "Write a Python async web scraper that fetches 10 pages concurrently, parses all <a> hrefs, "
-     "and saves unique URLs to a file. Include error handling and rate limiting."),
-    ("coding_hard",
-     "Write a Python implementation of a thread-safe LRU cache with TTL support. "
-     "Must support get, put, and delete operations. Include type hints and a unit test."),
-
-    # Reasoning
-    ("logic",
-     "A bat and a ball cost $1.10. The bat costs $1.00 more than the ball. "
-     "How much does the ball cost? Explain step by step."),
-    ("math",
-     "If 3x + 7 = 22, and 2y - 5 = 3x, what is x + y? Show your work."),
-
-    # General knowledge / writing
-    ("explain",
-     "Explain quantum entanglement in 3 sentences as if to a 12-year-old."),
-    ("creative",
-     "Write a 4-line poem about debugging in the style of Edgar Allan Poe."),
-
-    # Instruction following
-    ("structured",
-     "Return a JSON object with keys: name, version, features (array of 3 strings). "
-     "Use the name 'BenchmarkTest' and version '1.0.0'. No other text."),
+    ("coding_easy", "Write a Python function to find the longest palindromic substring in O(n^2). Return only code."),
+    ("coding_medium", "Write a Python async web scraper that fetches 10 pages concurrently, parses all <a> hrefs, and saves unique URLs to a file. Include error handling and rate limiting."),
+    ("logic", "A bat and a ball cost $1.10. The bat costs $1.00 more than the ball. How much does the ball cost? Explain step by step."),
+    ("math", "If 3x + 7 = 22, and 2y - 5 = 3x, what is x + y? Show your work."),
+    ("explain", "Explain quantum entanglement in 3 sentences as if to a 12-year-old."),
+    ("creative", "Write a 4-line poem about debugging in the style of Edgar Allan Poe."),
+    ("structured", "Return a JSON object with keys: name, version, features (array of 3 strings). Use the name 'BenchmarkTest' and version '1.0.0'. No other text."),
 ]
 
-def run_model(model_id: str, prompt: str, timeout: int = 60) -> dict:
-    """Run a single model with a prompt and return timing/response."""
+def call_model(name, cfg, prompt, timeout=30):
     start = time.time()
+    body = json.dumps({
+        "model": cfg["model"],
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 1024,
+        "temperature": 0.3,
+    }).encode()
+    req = urllib.request.Request(
+        cfg["url"],
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {cfg['key']}",
+            "HTTP-Referer": "https://github.com/anomalyco/opencode",
+        },
+        method="POST",
+    )
     try:
-        result = subprocess.run(
-            ["opencode", "run", "--model", model_id, prompt],
-            capture_output=True, text=True, timeout=timeout,
-            env={**os.environ, "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_PURE": "1"}
-        )
+        resp = urllib.request.urlopen(req, timeout=timeout)
+        data = json.loads(resp.read())
         elapsed = time.time() - start
-        output = result.stdout.strip()
-        # opencode output typically has a header line then the response
-        lines = output.split("\n")
-        # Filter out header/banner lines
-        response_lines = [l for l in lines if l.strip() and not l.startswith(">")]
-        response = "\n".join(response_lines).strip() if response_lines else output
-        return {
-            "success": result.returncode == 0,
-            "response": response[:500],
-            "latency": round(elapsed, 2),
-            "error": result.stderr[:200] if result.stderr else None,
-            "returncode": result.returncode,
-        }
-    except subprocess.TimeoutExpired:
-        return {"success": False, "response": "", "latency": timeout, "error": "Timeout", "returncode": -1}
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return {"success": True, "response": content[:500], "latency": round(elapsed, 2)}
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode()[:200]
+        return {"success": False, "response": "", "latency": round(time.time() - start, 2), "error": f"HTTP {e.code}: {err_body}"}
     except Exception as e:
-        return {"success": False, "response": "", "latency": 0, "error": str(e), "returncode": -1}
+        return {"success": False, "response": "", "latency": round(time.time() - start, 2), "error": str(e)}
 
-
-def score_response(prompt_name: str, response: str) -> int:
-    """Simple heuristic scoring of response quality (0-100)."""
+def score(pname, response):
     if not response:
         return 0
-    score = 50  # base
-    # Length bonus (up to 20)
-    score += min(len(response) / 10, 20)
-    # Code-specific scoring
-    if "coding" in prompt_name:
+    s = 50
+    s += min(len(response) / 10, 20)
+    if "coding" in pname:
         if any(kw in response for kw in ["def ", "class ", "import "]):
-            score += 15
+            s += 15
         if "```" in response:
-            score += 5
+            s += 10
         if "return" in response:
-            score += 5
-    # JSON scoring
-    if prompt_name == "structured":
+            s += 5
+    if pname == "structured":
         try:
             json.loads(response)
-            score += 30
-        except (json.JSONDecodeError, ValueError):
-            pass
-    # Penalty for errors/refusals
-    if any(kw in response.lower() for kw in ["i cannot", "i can't", "i am not able", "i'm sorry"]):
-        score -= 30
-    return max(0, min(100, int(score)))
-
+            s += 30
+        except: pass
+    if any(kw in response.lower() for kw in ["i cannot", "i can't", "i'm sorry"]):
+        s -= 30
+    return max(0, min(100, s))
 
 def main():
-    print("=" * 80)
+    print("=" * 100)
     print("  MODEL BENCHMARK: DeepSeek V4 / MiniMax M2.5 Pro / Xiaomi Mimo 2.5 Pro / Alibaba Qwen")
-    print("=" * 80)
-    print(f"\n{'Model':<22} {'Prompt':<16} {'Latency':>8} {'Score':>6} {'Response':>8}")
-    print("-" * 80)
+    print("  Testing", len(list(PROVIDERS.keys())), "models x", len(PROMPTS), "prompts")
+    print("=" * 100)
 
-    results = {}
+    all_results = {}
 
-    for model_name, model_id in MODELS.items():
-        print(f"\n>>> Testing: {model_name} ({model_id})")
-        results[model_name] = {"total_latency": 0, "total_score": 0, "count": 0, "details": []}
-
+    for mname, mcfg in PROVIDERS.items():
+        if not mcfg["key"]:
+            print(f"\n  SKIPPING {mname} (no API key)")
+            continue
+        print(f"\n  >>> {mname} ({mcfg['model']})")
+        all_results[mname] = {"total_latency": 0, "total_score": 0, "n": 0, "details": []}
         for pname, prompt in PROMPTS:
-            r = run_model(model_id, prompt)
-            score = score_response(pname, r["response"]) if r["success"] else 0
-            results[model_name]["details"].append({**r, "prompt": pname, "score": score})
-            results[model_name]["total_latency"] += r["latency"]
-            results[model_name]["total_score"] += score
-            results[model_name]["count"] += 1
-
-            resp_preview = r["response"][:60].replace("\n", " ") if r["response"] else "FAILED"
+            r = call_model(mname, mcfg, prompt)
+            s = score(pname, r["response"]) if r["success"] else 0
+            all_results[mname]["details"].append({**r, "prompt": pname, "score": s})
+            all_results[mname]["total_latency"] += r["latency"]
+            all_results[mname]["total_score"] += s
+            all_results[mname]["n"] += 1
             status = "OK" if r["success"] else "ERR"
-            print(f"  {pname:<16} {r['latency']:>6.1f}s  {score:>4}/100  [{status}] {resp_preview}")
+            preview = r["response"][:70].replace("\n", " ") if r["response"] else r.get("error", "FAILED")[:70]
+            print(f"    {pname:<18} {r['latency']:>5.1f}s  {s:>3}/100  [{status}] {preview}")
 
-        avg_lat = results[model_name]["total_latency"] / results[model_name]["count"]
-        avg_score = results[model_name]["total_score"] / results[model_name]["count"]
-        print(f"  {'':->62}")
-        print(f"  {'AVERAGE':<16} {avg_lat:>6.1f}s  {avg_score:>4.0f}/100")
+        avg_l = all_results[mname]["total_latency"] / all_results[mname]["n"]
+        avg_s = all_results[mname]["total_score"] / all_results[mname]["n"]
+        print(f"    {'─'*65}")
+        print(f"    {'AVERAGE':<18} {avg_l:>5.1f}s  {avg_s:>3.0f}/100")
 
-    print("\n" + "=" * 80)
-    print("  FINAL RANKING (by avg score)")
-    print("=" * 80)
-    sorted_models = sorted(results.items(), key=lambda x: x[1]["total_score"] / x[1]["count"], reverse=True)
-    print(f"\n{'Rank':<6} {'Model':<22} {'Avg Score':>10} {'Avg Latency':>12}")
-    print("-" * 50)
-    for i, (name, data) in enumerate(sorted_models, 1):
-        avg_s = data["total_score"] / data["count"]
-        avg_l = data["total_latency"] / data["count"]
-        print(f"  {i:<4}  {name:<22} {avg_s:>6.0f}/100    {avg_l:>6.1f}s")
+    print("\n" + "=" * 100)
+    print("  RANKING")
+    print("=" * 100)
+    ranked = sorted(all_results.items(), key=lambda x: x[1]["total_score"]/x[1]["n"], reverse=True)
+    print(f"\n  {'Rank':<5} {'Model':<24} {'Avg Score':>10} {'Avg Latency':>12}")
+    print("  " + "-" * 55)
+    for i, (name, d) in enumerate(ranked, 1):
+        avg_s = d["total_score"] / d["n"]
+        avg_l = d["total_latency"] / d["n"]
+        bar = "█" * int(avg_s / 5)
+        print(f"  {i:<5} {name:<24} {avg_s:>6.0f}/100    {avg_l:>5.1f}s   {bar}")
 
-    print("\n" + "=" * 80)
-    print("  DETAILED RESULTS TABLE")
-    print("=" * 80)
-    header = f"{'Prompt':<16}"
-    for name, _ in sorted_models:
-        header += f"  {name[:20]:<22}"
-    print(f"\n{header}")
-    print("-" * len(header))
+    print("\n" + "=" * 100)
+    print("  PER-PROMPT COMPARISON")
+    print("=" * 100)
+    headers = ["Prompt"] + [n[:18] for n, _ in ranked]
+    print(f"\n  {'Prompt':<18}", end="")
+    for h in headers[1:]:
+        print(f"  {h:<20}", end="")
+    print()
+    print("  " + "-" * (18 + 22 * len(ranked)))
     for pname, _ in PROMPTS:
-        row = f"{pname:<16}"
-        for name, _ in sorted_models:
-            dets = [d for d in results[name]["details"] if d["prompt"] == pname]
+        print(f"  {pname:<18}", end="")
+        for mname, _ in ranked:
+            dets = [d for d in all_results[mname]["details"] if d["prompt"] == pname]
             if dets and dets[0]["success"]:
                 d = dets[0]
-                row += f"  {d['latency']:>4.1f}s/{d['score']:>3}/100{'':>4}"
+                print(f"  {d['latency']:>4.1f}s/{d['score']:>3}", end="")
             else:
-                row += f"  {'FAILED':>15}"
-        print(row)
+                print(f"  {'FAILED':>9}", end="")
+        print()
 
-    # Summary JSON
+    # JSON output
     summary = {}
-    for name, data in results.items():
+    for name, d in all_results.items():
         summary[name] = {
-            "avg_score": round(data["total_score"] / data["count"], 1),
-            "avg_latency": round(data["total_latency"] / data["count"], 2),
-            "total_score": data["total_score"],
-            "total_latency": round(data["total_latency"], 2),
+            "avg_score": round(d["total_score"] / d["n"], 1),
+            "avg_latency": round(d["total_latency"] / d["n"], 2),
         }
-    print(f"\n\nJSON Summary:\n{json.dumps(summary, indent=2)}")
-
+    print(f"\n\n  JSON: {json.dumps(summary, indent=2)}")
 
 if __name__ == "__main__":
     main()
