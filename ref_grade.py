@@ -58,6 +58,7 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
     These constants encode the reference's COLOR STYLE as mathematical values.
 
     Approach: TARGET-BASED BLENDING — moves source TOWARD reference, not beyond it.
+    Includes full-body lighting: body brightness boost + background darkening.
     """
     img = cv2.imread(reference_path)
     if img is None:
@@ -71,38 +72,61 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
         log.error("No face detected")
         raise ValueError("No face detected in reference")
 
-    x, y, fw, fh = bbox
-    face = img[y:y+fh, x:x+fw]
+    fx, fy, fw, fh = bbox
+    face = img[fy:fy+fh, fx:fx+fw]
     face_lab = cv2.cvtColor(face, cv2.COLOR_BGR2LAB)
     face_gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
     full_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     full_lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
 
-    # ── 1. Reference brightness (L mean of face) ────────────────────────
+    # ── 1. Face brightness ──────────────────────────────────────────────
     ref_L = float(np.mean(face_lab[:, :, 0]))
-    log.info("  Brightness: L=%.1f", ref_L)
+    log.info("  Face brightness: L=%.1f", ref_L)
 
-    # ── 2. Skin tone target (a, b means of face) ────────────────────────
+    # ── 2. Body brightness (below face) ─────────────────────────────────
+    body_y1 = fy + fh
+    body_y2 = min(h, int(body_y1 + fh * 1.5))
+    body_x1 = max(0, fx - fw // 2)
+    body_x2 = min(w, fx + fw + fw // 2)
+    body = img[body_y1:body_y2, body_x1:body_x2]
+    body_L = float(np.mean(cv2.cvtColor(body, cv2.COLOR_BGR2LAB)[:, :, 0])) if body.size > 0 else ref_L
+    body_boost = body_L - ref_L  # How much brighter body is than face
+    log.info("  Body brightness: L=%.1f (boost=%+.1f)", body_L, body_boost)
+
+    # ── 3. Background darkness ──────────────────────────────────────────
+    bg_mask = np.ones((h, w), dtype=np.uint8) * 255
+    bg_mask[fy:fy+fh, fx:fx+fw] = 0
+    bg_mask[body_y1:body_y2, body_x1:body_x2] = 0
+    bg_pixels = img[bg_mask > 0]
+    if bg_pixels.size > 0:
+        bg_lab = cv2.cvtColor(bg_pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2LAB).astype(np.float32)
+        bg_L = float(np.mean(bg_lab[:, 0]))
+    else:
+        bg_L = 40.0
+    bg_darken = ref_L - bg_L  # How much darker background is than face
+    log.info("  Background brightness: L=%.1f (darken=%.1f)", bg_L, bg_darken)
+
+    # ── 4. Skin tone target (a, b means of face) ────────────────────────
     a_target = float(np.mean(face_lab[:, :, 1]))
     b_target = float(np.mean(face_lab[:, :, 2]))
     log.info("  Skin: a=%.1f b=%.1f", a_target, b_target)
 
-    # ── 3. Contrast (face std) ──────────────────────────────────────────
+    # ── 5. Contrast (face std) ──────────────────────────────────────────
     ref_contrast = float(np.std(face_gray))
     log.info("  Contrast: std=%.1f", ref_contrast)
 
-    # ── 4. Saturation (face HSV) ────────────────────────────────────────
+    # ── 6. Saturation (face HSV) ────────────────────────────────────────
     face_hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV)
     ref_sat = float(np.mean(face_hsv[:, :, 1]))
     log.info("  Saturation: ref=%.1f", ref_sat)
 
-    # ── 5. Split tone (shadow/highlight colors from full frame) ─────────
+    # ── 7. Split tone (shadow/highlight colors from full frame) ─────────
     low = full_gray < 51
     high = full_gray > 204
     shadow_color = np.mean(img[low], axis=0) if low.any() else np.zeros(3)
     highlight_color = np.mean(img[high], axis=0) if high.any() else np.full(3, 255)
 
-    # ── 6. Vignette (center/edge ratio) ─────────────────────────────────
+    # ── 8. Vignette (center/edge ratio) ─────────────────────────────────
     Y, X = np.ogrid[:h, :w]
     cx, cy = w / 2, h / 2
     dist = np.sqrt((X - cx)**2 + (Y - cy)**2)
@@ -112,8 +136,15 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
     vignette_ratio = float(np.clip(center / max(edge, 1), 1.0, 2.0))
     log.info("  Vignette: %.2f", vignette_ratio)
 
+    # ── 9. Face position (normalized) ───────────────────────────────────
+    face_y_norm = fy / h  # Where face starts (0=top, 1=bottom)
+    face_h_norm = fh / h  # Face height as fraction of frame
+    log.info("  Face position: y=%.2f h=%.2f", face_y_norm, face_h_norm)
+
     params = {
         "ref_L": ref_L,
+        "body_L": body_L,
+        "bg_L": bg_L,
         "a_target": a_target,
         "b_target": b_target,
         "ref_contrast": ref_contrast,
@@ -121,27 +152,35 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
         "shadow_color": shadow_color.tolist(),
         "highlight_color": highlight_color.tolist(),
         "vignette_ratio": vignette_ratio,
+        "face_y_norm": face_y_norm,
+        "face_h_norm": face_h_norm,
     }
 
     # ── Pre-build LUTs (computed once during enrollment) ────────────────
     # TARGET-BASED: blend toward reference, don't multiply
 
-    # Brightness shift: moves L toward reference mean (stored per-frame)
+    # Brightness: blend toward face reference L
     params["_ref_L"] = ref_L
-    params["_L_blend"] = 0.75  # 75% toward reference brightness
+    params["_L_blend"] = 0.75
 
-    # Contrast: stretch around per-frame mean, moderate boost
-    # ref_contrast=58 → ratio=1.35
-    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 40.0, 1.50))
+    # Body boost: how much brighter body should be (capped at 40 L)
+    params["_body_boost"] = min(max(body_boost, 0), 40)
+    params["_bg_darken"] = min(max(bg_darken, 0), 40)
 
-    # a,b LUTs: blend toward reference target (not amplify from neutral)
-    # a_out = a + (a_target - a) * 0.30 = a * 0.70 + a_target * 0.30
-    blend = 0.30
+    # Face position for spatial mask
+    params["_face_y_norm"] = face_y_norm
+    params["_face_h_norm"] = face_h_norm
+
+    # Contrast: stronger to match high-contrast scene
+    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 38.0, 1.55))
+
+    # a,b LUTs: blend toward reference target + full-frame warm shift
+    blend = 0.35  # Stronger blend for better skin matching
     x = np.arange(256, dtype=np.float32)
     params["_lut_a"] = np.clip(x * (1.0 - blend) + a_target * blend, 0, 255).astype(np.uint8)
     params["_lut_b"] = np.clip(x * (1.0 - blend) + b_target * blend, 0, 255).astype(np.uint8)
 
-    # Split tone: gentle
+    # Split tone: moderate
     ss = 0.06
     hs = 0.04
     params["_shadow_strength"] = ss
@@ -151,7 +190,7 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
     params["_split_lut"] = (
         np.array(shadow_color)[:, None] * lut_shadow * ss
         + np.array(highlight_color)[:, None] * lut_highlight * hs
-    ).T.astype(np.float32)  # (256, 3) — indexed by L value
+    ).T.astype(np.float32)
 
     log.info("Enrollment complete: %d params extracted", len(params))
     return params
@@ -161,6 +200,9 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
 
 # Cache for vignette masks: keyed by (h, w, vr_int)
 _vignette_cache: Dict[tuple, np.ndarray] = {}
+
+# Cache for body lighting masks: keyed by (h, w, face_y, face_h, body_boost, bg_darken)
+_body_mask_cache: Dict[tuple, np.ndarray] = {}
 
 
 def _get_vignette(h: int, w: int, ratio: float) -> np.ndarray:
@@ -175,13 +217,50 @@ def _get_vignette(h: int, w: int, ratio: float) -> np.ndarray:
     return _vignette_cache[key]
 
 
+def _get_body_mask(h: int, w: int, face_y_norm: float, face_h_norm: float,
+                   body_boost: float, bg_darken: float) -> np.ndarray:
+    """Cached body brightness / background darkening mask.
+
+    Returns a float32 mask of shape (h, w) with L offsets:
+    - Top region (background): negative (darken)
+    - Middle region (face): near zero (neutral)
+    - Bottom region (body): positive (brighten)
+    """
+    key = (h, w, round(face_y_norm * 100), round(face_h_norm * 100),
+           round(body_boost), round(bg_darken))
+    if key not in _body_mask_cache:
+        mask = np.zeros((h, w), dtype=np.float32)
+
+        # Face region: y from face_y_norm to face_y_norm + face_h_norm
+        face_top = int(face_y_norm * h)
+        face_bot = int((face_y_norm + face_h_norm) * h)
+
+        # Background (top): darken gradient from top to face
+        if face_top > 0 and bg_darken > 0:
+            for y in range(face_top):
+                # Stronger darken at top, fading toward face
+                t = y / face_top  # 0 at top, 1 at face
+                mask[y, :] = -bg_darken * (1.0 - t) * 0.7
+
+        # Body (bottom): boost gradient from face to bottom
+        if face_bot < h and body_boost > 0:
+            for y in range(face_bot, h):
+                t = (y - face_bot) / max(h - face_bot, 1)  # 0 at face, 1 at bottom
+                mask[y, :] = body_boost * t * 0.6
+
+        # Smooth the mask to avoid harsh transitions
+        mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=w * 0.05, sigmaY=h * 0.03)
+
+        _body_mask_cache[key] = mask
+    return _body_mask_cache[key]
+
+
 def apply_grade(frame: np.ndarray, params: Dict) -> np.ndarray:
     """Apply the reference grade to a single BGR frame.
 
     TARGET-BASED BLENDING: moves source TOWARD reference, not beyond it.
+    Full-body lighting: spatial L adjustment for body boost + background darken.
     2 cvtColor calls (BGR→LAB, LAB→BGR).  No HSV conversion.
-    Split tone applied via pre-computed 256x3 LUT (no per-frame clip/div).
-    Vignette mask cached by resolution.
     """
     if "_contrast_ratio" not in params:
         return frame
@@ -202,18 +281,31 @@ def apply_grade(frame: np.ndarray, params: Dict) -> np.ndarray:
     current_L = float(np.mean(L))
     L = np.clip(L + (ref_L - current_L) * blend, 0, 255)
 
-    # ── 4. a,b transform via LUT (blend toward target) ──────────────────
+    # ── 4. Body lighting: spatial L adjustment ──────────────────────────
+    body_boost = params.get("_body_boost", 0)
+    bg_darken = params.get("_bg_darken", 0)
+    if body_boost > 0 or bg_darken > 0:
+        h, w = frame.shape[:2]
+        body_mask = _get_body_mask(
+            h, w,
+            params.get("_face_y_norm", 0.25),
+            params.get("_face_h_norm", 0.35),
+            body_boost, bg_darken,
+        )
+        L = np.clip(L + body_mask, 0, 255)
+
+    # ── 5. a,b transform via LUT (blend toward target) ──────────────────
     lab[:, :, 1] = cv2.LUT(lab[:, :, 1], params["_lut_a"])
     lab[:, :, 2] = cv2.LUT(lab[:, :, 2], params["_lut_b"])
     lab[:, :, 0] = np.clip(L, 0, 255).astype(np.uint8)
 
-    # ── 5. LAB → BGR ────────────────────────────────────────────────────
+    # ── 6. LAB → BGR ────────────────────────────────────────────────────
     result = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR).astype(np.float32)
 
-    # ── 6. Split tone via L-indexed LUT ────────────────────────────────
+    # ── 7. Split tone via L-indexed LUT ────────────────────────────────
     result += params["_split_lut"][L.astype(np.int32)]
 
-    # ── 7. Vignette (cached) ────────────────────────────────────────────
+    # ── 8. Vignette (cached) ────────────────────────────────────────────
     h, w = frame.shape[:2]
     vig = _get_vignette(h, w, params["vignette_ratio"])
     result *= vig[:, :, None]

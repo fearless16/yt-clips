@@ -108,7 +108,7 @@ class TestEnroll:
         assert "shadow_color" in params
         assert "highlight_color" in params
         assert params["_contrast_ratio"] >= 1.0
-        assert params["_contrast_ratio"] <= 1.5
+        assert params["_contrast_ratio"] <= 1.6
         assert 100 <= params["a_target"] <= 160
         assert 100 <= params["b_target"] <= 160
         assert 80 <= params["ref_L"] <= 140
@@ -378,10 +378,11 @@ class TestEdgeCases:
 
     def test_ref_params_contain_all_keys(self, ref_params):
         required = [
-            "ref_L", "a_target", "b_target",
+            "ref_L", "body_L", "bg_L", "a_target", "b_target",
             "ref_contrast", "ref_sat", "vignette_ratio",
             "shadow_color", "highlight_color",
             "_contrast_ratio", "_ref_L", "_L_blend",
+            "_body_boost", "_bg_darken",
             "_shadow_strength", "_highlight_strength",
             "_lut_a", "_lut_b", "_split_lut",
         ]
