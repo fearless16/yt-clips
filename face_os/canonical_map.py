@@ -125,6 +125,8 @@ def compute_alignment(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Compute transform from source face to canonical atlas.
 
+    V4 ROBUST: Dynamically handles both MediaPipe 478-point and dlib 68-point landmarks.
+
     Args:
         source_landmarks: Detected landmarks in source frame
         canonical_size: (width, height) of canonical atlas
@@ -135,14 +137,24 @@ def compute_alignment(
     """
     src_pts = source_landmarks.points.astype(np.float32)
     dst_pts = _get_canonical_points(canonical_size)
+    num_points = len(src_pts)
+
+    # V4: Map MediaPipe 478 indices to the 68-point canonical template anchors
+    if num_points >= 468:
+        # MediaPipe 478 key indices: Nose tip(1), Left eye inner(33), Right eye inner(263), Mouth left(61), Mouth right(291)
+        anchor_indices_src = [1, 33, 263, 61, 291]
+        # Map them to the corresponding 68-point canonical template indices: Nose(30), Left eye(36), Right eye(45), Mouth left(48), Mouth right(54)
+        anchor_indices_dst = [30, 36, 45, 48, 54]
+    else:
+        # Legacy dlib 68 indices
+        anchor_indices_src = [30, 36, 45, 48, 54]
+        anchor_indices_dst = [30, 36, 45, 48, 54]
+
+    src_anchor = src_pts[anchor_indices_src]
+    dst_anchor = dst_pts[anchor_indices_dst]
 
     if mode == "similarity":
         # Similarity transform (rotation + scale + translation)
-        # Uses eyes, nose, mouth as anchor points
-        anchor_indices = [30, 36, 45, 48, 54]  # Nose, eyes, mouth corners
-        src_anchor = src_pts[anchor_indices]
-        dst_anchor = dst_pts[anchor_indices]
-
         M = cv2.estimateAffinePartial2D(src_anchor, dst_anchor)[0]
         if M is None:
             M = np.eye(2, 3, dtype=np.float32)
@@ -151,10 +163,14 @@ def compute_alignment(
         M_inv_3x3 = np.vstack([M_inv, [0, 0, 1]]).astype(np.float32)
 
     elif mode == "affine":
-        # Full affine (6 DOF)
-        anchor_indices = [30, 36, 45, 48, 54, 8]
-        src_anchor = src_pts[anchor_indices]
-        dst_anchor = dst_pts[anchor_indices]
+        # Full affine (6 DOF) - add chin for 6 points
+        if num_points >= 468:
+            # Add chin (152) to map to dlib chin (8)
+            src_anchor = np.vstack([src_anchor, src_pts[152]])
+            dst_anchor = np.vstack([dst_anchor, dst_pts[8]])
+        else:
+            src_anchor = np.vstack([src_anchor, src_pts[8]])
+            dst_anchor = np.vstack([dst_anchor, dst_pts[8]])
 
         M = cv2.estimateAffine2D(src_anchor, dst_anchor)[0]
         if M is None:
@@ -164,8 +180,15 @@ def compute_alignment(
         M_inv_3x3 = np.vstack([M_inv, [0, 0, 1]]).astype(np.float32)
 
     else:
-        # Perspective (8 DOF) — uses all 68 points
-        M_3x3, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        # Perspective (8 DOF) — uses all available points
+        # Note: For perspective, we ideally need matching point counts.
+        # If 478 points are passed, findHomography will use RANSAC to find the best fit to the 68 dst_pts.
+        # To prevent shape mismatch errors, we fallback to the anchor points for perspective if counts differ.
+        if num_points == len(dst_pts):
+            M_3x3, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+        else:
+            M_3x3, _ = cv2.findHomography(src_anchor, dst_anchor, cv2.RANSAC, 5.0)
+
         if M_3x3 is None:
             M_3x3 = np.eye(3, dtype=np.float32)
         M_inv_3x3 = np.linalg.inv(M_3x3).astype(np.float32)
