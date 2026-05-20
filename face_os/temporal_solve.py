@@ -115,7 +115,7 @@ class BidirectionalSolver:
         if frame_quality.pose is not None:
             self._poses[frame_idx] = frame_quality.pose
 
-    def identify_hq_frames(self, quality_threshold: float = 0.6) -> List[int]:
+    def identify_hq_frames(self, quality_threshold: float = 0.3) -> List[int]:
         """Identify high-quality frames for propagation.
 
         A frame is high-quality if:
