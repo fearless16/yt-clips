@@ -267,8 +267,8 @@ class BeliefPixel:
             self.initialize(low, high, quality)
             return
 
-        # LOW FREQUENCY: EMA update
-        base_rate = 0.15
+        # LOW FREQUENCY: EMA update (config-driven rate)
+        base_rate = cfg.identity_state.low_freq_ema_rate
         obs_factor = 1.0 / (1.0 + self.observation_count * 0.005)
         low_rate = base_rate * obs_factor * quality
 
@@ -713,11 +713,13 @@ class IdentityState:
         # Low confidence → less identity, more source
         mean_conf = float(np.mean(confidence))
         low_blend = cfg.identity_state.low_blend_base + (1 - cfg.identity_state.low_blend_base) * mean_conf
-        high_blend = cfg.identity_state.high_blend_base - cfg.identity_state.high_blend_base * mean_conf
+        # High freq: use floor to preserve texture (beard, pores, skin grain)
+        high_blend = max(cfg.identity_state.high_blend_base, 0.15)
 
         conf_3d = confidence[:, :, np.newaxis]
         effective_low_blend = low_blend * conf_3d
-        effective_high_blend = high_blend * conf_3d
+        # High freq: do NOT multiply by conf again — it's already low, double-dampening kills texture
+        effective_high_blend = np.full_like(conf_3d, high_blend)
 
         low_final = low_id * effective_low_blend + low_curr * (1 - effective_low_blend)
         high_final = high_id * effective_high_blend + high_curr * (1 - effective_high_blend)

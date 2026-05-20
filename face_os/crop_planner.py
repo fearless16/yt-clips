@@ -147,8 +147,8 @@ class CropPlanner:
             )
         else:
             self._frames_without_face += 1
-            # FIX: Limit last_known to 5 frames, then fall back to center
-            if self._prev_crop and self._frames_without_face < 5:
+            # FIX: Always reuse last good crop dimensions — never jump to full frame
+            if self._prev_crop:
                 plan = self._plan_last_known(src_w, src_h, dst_w, dst_h)
             else:
                 plan = self._plan_center(src_w, src_h, dst_w, dst_h)

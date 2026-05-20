@@ -14,7 +14,7 @@ Core philosophy:
 Modules:
   1. ingest            — Video ingestion + audio sync
   2. detect_track      — Face detection + temporal tracking
-  3. landmarks         — 68-point landmarks + head pose estimation
+  3. landmarks         — 478-point landmarks (MediaPipe) + head pose estimation
   4. canonical_map     — Per-identity UV atlas + appearance field
   5. crop_planner      — 9:16 crop with face-aware headroom
   6. temporal_stabilize — Identity inertia + flicker suppression

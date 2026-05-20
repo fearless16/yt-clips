@@ -30,7 +30,7 @@ _DEFAULTS: Dict[str, Any] = {
 
     # ─── Landmarks ─────────────────────────────────────────────────────────
     "landmarks": {
-        "model": "dlib_68",                   # dlib_68 | mediapipe_468
+        "model": "mediapipe_478",                 # mediapipe_478 (V4, no dlib)
         "pose_smoothing": 0.4,                # EMA for head pose angles
     },
 

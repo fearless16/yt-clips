@@ -57,8 +57,11 @@ def face_detection(cascade, reference_image):
 def landmarks(reference_image, face_detection):
     """Extract landmarks from reference image."""
     from face_os import landmarks as lm_module
-    x, y, w, h = face_detection
-    return lm_module.extract_landmarks(reference_image, (x, y, w, h))
+    from face_os.detect_track import extract_face_mesh
+    mesh = extract_face_mesh(reference_image)
+    if mesh is None:
+        return None
+    return lm_module.extract_landmarks(reference_image, mesh)
 
 
 @pytest.fixture

@@ -120,7 +120,9 @@ class TestExpressionVector:
             pytest.skip("No face detected")
 
         x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
-        lm = lm_module.extract_landmarks(frame, (x, y, fw, fh))
+        from face_os.detect_track import extract_face_mesh
+        mesh = extract_face_mesh(frame)
+        lm = lm_module.extract_landmarks(frame, mesh) if mesh is not None else None
 
         # Extract expression-relevant landmarks
         # Mouth: points 48-67

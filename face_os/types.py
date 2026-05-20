@@ -51,8 +51,8 @@ class FaceDetection:
 
 @dataclass
 class Landmarks:
-    """68-point facial landmarks + derived measurements."""
-    points: np.ndarray                        # Shape (68, 2) — pixel coords
+    """Facial landmarks + derived measurements (V4: MediaPipe 478-point)."""
+    points: np.ndarray                        # Shape (N, 2) — pixel coords
     # Derived pose
     yaw: float = 0.0                          # Head rotation left/right (degrees)
     pitch: float = 0.0                        # Head rotation up/down (degrees)
@@ -81,8 +81,8 @@ class FaceTrack:
     # History
     bbox_history: List[Tuple[int, int, int, int]] = field(default_factory=list)
     landmark_history: List[np.ndarray] = field(default_factory=list)
-    # Face mesh (468 points) from MediaPipe
-    face_mesh: Optional[np.ndarray] = None            # (468, 2) pixel coords
+    # V4: Face mesh (478 points) from MediaPipe FaceLandmarker
+    mesh_478: Optional[np.ndarray] = None     # (478, 3) pixel coords (x, y, z)
     # Quality gate metrics
     quality_metrics: Dict[str, float] = field(default_factory=dict)
 
