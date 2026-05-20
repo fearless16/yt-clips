@@ -60,14 +60,14 @@ def _detect_face_at_timestamp(video_path: str, timestamp: float, frame_w: int, f
 
 def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int) -> Optional[Dict]:
     # ── 0. Face-centered crop for YouTube Shorts style ───────────────────────
-    # Reference (expectation.png): face at 40% from top, 20% of frame area.
-    # Crop region = face + 70% headroom above + 180% body below.
-    # This positions face at ~20% from top of crop, which after fill-crop
-    # puts face at ~35-40% from top of final 1080x1920 frame.
+    # Reference (expectation.png): face at 30% from top, 30% headroom.
+    # Crop region = face + 70% headroom above + body below.
+    # This positions face at ~30% from top of crop, which after fill-crop
+    # puts face at ~30% from top of final 1080x1920 frame.
 
     def _apply_top_padding(face_top_y: int, face_height: int, face_width: int = 0):
         """Return (crop_y, crop_h, crop_w) with face-centered positioning.
-        Target: face at ~20% of output width, face at ~30% from top.
+        Target: face at ~30% of output height from top (matching expectation.png).
         Crop is calculated from FACE SIZE, not height, to prevent oversized faces."""
         # Target: face should be ~25% of output width (1080px) = 270px
         target_face_w = 270
@@ -88,8 +88,9 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         crop_h = min(crop_h, frame_height)
         crop_w = min(crop_w, frame_width)
         
-        # Center crop vertically on face
-        crop_y = max(0, min(frame_height - crop_h, face_top_y - crop_h // 3))
+        # Position face at ~30% from top (matching expectation.png composition)
+        # face_top_y - crop_h * 0.70 puts face at 30% from top
+        crop_y = max(0, min(frame_height - crop_h, face_top_y - int(crop_h * 0.70)))
         
         return crop_y, crop_h, crop_w
 
@@ -590,20 +591,20 @@ def analyze_clip(
 
     # ── Screen-share priority rule ────────────────────────────────────────────
     # Screen-share detection takes priority OVER face detection.
-    # Only override screen-share back to solo if the face is dominant (>35% of
+    # Only override screen-share back to solo if the face is dominant (>25% of
     # frame height) — meaning it's clearly a facecam-only shot misclassified as
     # screen-share, NOT a genuine presentation with a small facecam overlay.
     if is_screen_share and face_crop:
         face_dominance = face_crop.get("face_h", 0) / max(info["height"], 1)
-        if face_dominance > 0.35:
-            # Face is so large it occupies >35% height — definitely not screen-share
+        if face_dominance > 0.25:
+            # Face is so large it occupies >25% height — definitely not screen-share
             log.debug("[%s] Screen-share overridden: face dominance=%.2f", clip_id, face_dominance)
             is_screen_share = False
             layout_type = "solo"
             layout["prefer_solo"] = True
         else:
             # Keep screen-share classification regardless of face presence
-            log.debug("[%s] Screen-share kept (face dominance=%.2f < 0.35)", clip_id, face_dominance)
+            log.debug("[%s] Screen-share kept (face dominance=%.2f < 0.25)", clip_id, face_dominance)
 
     should_drop = False
     use_vertical_stack = False

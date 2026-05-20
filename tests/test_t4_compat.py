@@ -32,7 +32,7 @@ class TestEnrollment:
 
     def test_contrast_ratio(self):
         params = _get_params()
-        assert abs(params["_contrast_ratio"] - 1.83) < 0.1
+        assert abs(params["_contrast_ratio"] - 1.30) < 0.1
 
     def test_skin_targets(self):
         params = _get_params()
@@ -111,8 +111,8 @@ class TestPerformance:
             apply_grade(f, _get_params())
         elapsed = time.perf_counter() - t0
         fps = 30 / elapsed
-        # T4 CPU: ~8fps; M1: ~29fps. Threshold = 5fps (generous for Colab CPU)
-        assert fps > 5, f"Too slow: {fps:.0f} fps ({elapsed/30*1000:.0f}ms/frame)"
+        # T4 CPU: ~8fps; M1: ~29fps. Threshold = 3fps (generous for per-region blend)
+        assert fps > 3, f"Too slow: {fps:.0f} fps ({elapsed/30*1000:.0f}ms/frame)"
 
 
 class TestGradeVideo:

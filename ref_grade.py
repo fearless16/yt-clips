@@ -159,26 +159,26 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
     # ── Pre-build LUTs (computed once during enrollment) ────────────────
     # TARGET-BASED: blend toward reference, don't multiply
 
-    # Brightness: per-pixel blend toward ref_L (tolerant of side-screen flicker)
+    # Brightness: uniform per-pixel blend toward ref_L
+    # 70% blend + max_shift=30 allows dark frames to catch up to reference
     params["_ref_L"] = ref_L
-    params["_L_blend"] = 0.45
+    params["_L_blend"] = 0.70
 
-    # Contrast: moderate (don't amplify source flicker too much)
-    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 42.0, 1.45))
-
-    # Body boost: how much brighter body should be (capped at 40 L)
-    params["_body_boost"] = min(max(body_boost, 0), 40)
-    params["_bg_darken"] = min(max(bg_darken, 0), 40)
+    # Body boost: how much brighter body should be (capped at 50 L)
+    # Reference has +66.3 body boost; 50 is aggressive but safe
+    params["_body_boost"] = min(max(body_boost, 0), 50)
+    params["_bg_darken"] = min(max(bg_darken, 0), 50)
 
     # Face position for spatial mask
     params["_face_y_norm"] = face_y_norm
     params["_face_h_norm"] = face_h_norm
 
-    # Contrast: strong enough to overcome blend compression
-    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 32.0, 1.85))
+    # Contrast: light — preserve L gains from blend step
+    # ref_contrast / 45.0 with cap 1.30
+    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 45.0, 1.30))
 
-    # a,b LUTs: blend toward reference target + full-frame warm shift
-    blend = 0.35  # Stronger blend for better skin matching
+    # a,b LUTs: blend toward reference target
+    blend = 0.45  # Stronger blend for better skin matching
     x = np.arange(256, dtype=np.float32)
     params["_lut_a"] = np.clip(x * (1.0 - blend) + a_target * blend, 0, 255).astype(np.uint8)
     params["_lut_b"] = np.clip(x * (1.0 - blend) + b_target * blend, 0, 255).astype(np.uint8)
@@ -243,13 +243,13 @@ def _get_body_mask(h: int, w: int, face_y_norm: float, face_h_norm: float,
             for y in range(face_top):
                 # Stronger darken at top, fading toward face
                 t = y / face_top  # 0 at top, 1 at face
-                mask[y, :] = -bg_darken * (1.0 - t) * 0.7
+                mask[y, :] = -bg_darken * (1.0 - t) * 0.80
 
         # Body (bottom): boost gradient from face to bottom
         if face_bot < h and body_boost > 0:
             for y in range(face_bot, h):
                 t = (y - face_bot) / max(h - face_bot, 1)  # 0 at face, 1 at bottom
-                mask[y, :] = body_boost * t * 0.6
+                mask[y, :] = body_boost * t * 0.75
 
         # Smooth the mask to avoid harsh transitions
         mask = cv2.GaussianBlur(mask, (0, 0), sigmaX=w * 0.05, sigmaY=h * 0.03)
@@ -258,15 +258,68 @@ def _get_body_mask(h: int, w: int, face_y_norm: float, face_h_norm: float,
     return _body_mask_cache[key]
 
 
+def _detect_logo_regions(frame: np.ndarray) -> np.ndarray | None:
+    """Detect logo region using known export.py position.
+
+    export.py places the logo at a fixed position:
+      overlay=W-w-30:H-h-280, scaled to 200px wide
+    For 1080x1920 output: x=850, y=1440, size=200x200
+
+    For other resolutions, scale proportionally.
+    Returns a boolean mask (True = logo pixel) or None if no logo.
+    """
+    h, w = frame.shape[:2]
+
+    # Only detect logos on portrait frames (exported shorts)
+    # Landscape frames (raw clips) don't have logos yet
+    if w > h:
+        return None
+
+    # Scale logo position proportionally from 1080x1920 reference (LEFT side)
+    logo_w = int(200 * w / 1080)
+    logo_h = int(200 * h / 1920)
+    logo_x = int(30 * w / 1080)
+    logo_y = h - logo_h - int(280 * h / 1920)
+
+    # Clamp to frame bounds
+    logo_x = max(0, logo_x)
+    logo_y = max(0, logo_y)
+    logo_w = min(logo_w, w - logo_x)
+    logo_h = min(logo_h, h - logo_y)
+
+    if logo_w < 10 or logo_h < 10:
+        return None
+
+    logo_mask = np.zeros((h, w), dtype=bool)
+    logo_mask[logo_y:logo_y+logo_h, logo_x:logo_x+logo_w] = True
+    return logo_mask
+
+
 def apply_grade(frame: np.ndarray, params: Dict) -> np.ndarray:
     """Apply the reference grade to a single BGR frame.
 
     TARGET-BASED BLENDING: moves source TOWARD reference, not beyond it.
     Full-body lighting: spatial L adjustment for body boost + background darken.
+    Logo preservation: high-contrast rectangular regions (logos) are excluded.
     2 cvtColor calls (BGR→LAB, LAB→BGR).  No HSV conversion.
     """
     if "_contrast_ratio" not in params:
         return frame
+
+    # ── 0. Detect & preserve logo regions ───────────────────────────────
+    # Logos are high-contrast, saturated rectangular overlays that don't
+    # belong to the video content. Grading them changes their appearance.
+    # Strategy: detect logo-like regions, grade the frame, then restore.
+    logo_mask = _detect_logo_regions(frame)
+
+    # Detect fade frames BEFORE any processing — check BGR directly
+    # LAB conversion of near-black BGR produces L≈15-20, too high for detection
+    # Use percentile-based check: fade frames have >95% pixels below threshold
+    src_bgr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    dark_pct = float(np.mean(src_bgr_gray < 15)) * 100
+    is_fade_frame = dark_pct > 95.0
+    if is_fade_frame:
+        return frame  # Preserve black fade frames unchanged
 
     # ── 1. BGR → LAB ────────────────────────────────────────────────────
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
@@ -274,22 +327,25 @@ def apply_grade(frame: np.ndarray, params: Dict) -> np.ndarray:
     # ── 2. Extract L channel ────────────────────────────────────────────
     L = lab[:, :, 0].astype(np.float32)
 
-    # ── 3. Brightness shift toward reference (clamped, flicker-safe) ────
+    # ── 3. Brightness shift toward reference (uniform, clamped) ─────────
     ref_L = params["_ref_L"]
     blend = params["_L_blend"]
     # Per-pixel blend with clamping: max shift per frame to prevent flicker
     shift = (ref_L - L) * blend
-    max_shift = 15.0  # Max L shift per frame (prevents flash)
+    max_shift = 30.0  # Max L shift per frame (allows dark frames to catch up)
     shift = np.clip(shift, -max_shift, max_shift)
     L = np.clip(L + shift, 0, 255)
 
-    # ── 4. Contrast on L (centered on reference L, not per-frame mean) ──
+    # ── 4. Contrast on L (centered on post-blend frame mean, not ref_L) ─
     r = params["_contrast_ratio"]
     if r > 1.0:
-        # Center on ref_L: flicker-free because ref_L is constant
-        L = np.clip((L - ref_L) * r + ref_L, 0, 255)
+        # Center on post-blend mean to avoid shifting brightness
+        # (ref_L centering was wrong: frame hasn't reached ref_L yet,
+        #  so centering on it pushes everything darker)
+        frame_mean = float(np.mean(L))
+        L = np.clip((L - frame_mean) * r + frame_mean, 0, 255)
 
-    # ── 4. Body lighting: spatial L adjustment ──────────────────────────
+    # ── 4b. Body lighting: spatial L adjustment ─────────────────────────
     body_boost = params.get("_body_boost", 0)
     bg_darken = params.get("_bg_darken", 0)
     if body_boost > 0 or bg_darken > 0:
@@ -317,6 +373,10 @@ def apply_grade(frame: np.ndarray, params: Dict) -> np.ndarray:
     h, w = frame.shape[:2]
     vig = _get_vignette(h, w, params["vignette_ratio"])
     result *= vig[:, :, None]
+
+    # ── 9. Restore logo regions (preserve original pixels) ──────────────
+    if logo_mask is not None:
+        result = np.where(logo_mask[:, :, None], frame.astype(np.float32), result)
 
     return np.clip(result, 0, 255).astype(np.uint8)
 
