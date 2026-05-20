@@ -1652,6 +1652,152 @@ class TestModuleK_DynamicUV:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# MODULE H — EYE DOMINANCE (Blink Detection)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestModuleH_BlinkDetection:
+    """Test blink detection and eye freeze.
+
+    Architecture says:
+    - During blinks, eye patches must FREEZE
+    - Don't update eye memory during blink
+    - Use last known good eye state
+    - Even tiny eye artifact = uncanny valley
+    """
+
+    def test_blink_detector_initializes(self):
+        """BlinkDetector must initialize correctly."""
+        from face_os.face_enhance import BlinkDetector
+
+        detector = BlinkDetector(ear_threshold=0.20, consecutive_frames=2)
+        assert detector.ear_threshold == 0.20
+        assert detector.consecutive_frames == 2
+        assert not detector.is_blinking
+
+    def test_blink_detector_computes_ear(self):
+        """BlinkDetector must compute Eye Aspect Ratio."""
+        from face_os.face_enhance import BlinkDetector
+
+        detector = BlinkDetector()
+
+        # Create mock eye landmarks (open eye)
+        # Left eye: points 36-41
+        eye_points = np.array([
+            [100, 100],  # p1 (outer corner)
+            [110, 95],   # p2 (top)
+            [120, 95],   # p3 (top)
+            [130, 100],  # p4 (inner corner)
+            [120, 105],  # p5 (bottom)
+            [110, 105],  # p6 (bottom)
+        ], dtype=np.float32)
+
+        ear = detector._compute_ear(eye_points)
+        assert 0.0 < ear < 1.0, f"EAR {ear} should be between 0 and 1"
+
+    def test_blink_detector_detects_open_eyes(self):
+        """BlinkDetector must detect open eyes (not blinking)."""
+        from face_os.face_enhance import BlinkDetector
+
+        detector = BlinkDetector(ear_threshold=0.20)
+
+        # Create mock landmarks with open eyes
+        landmarks = np.zeros((68, 2), dtype=np.float32)
+
+        # Left eye (points 36-41) - open
+        landmarks[36] = [100, 100]
+        landmarks[37] = [110, 90]
+        landmarks[38] = [120, 90]
+        landmarks[39] = [130, 100]
+        landmarks[40] = [120, 110]
+        landmarks[41] = [110, 110]
+
+        # Right eye (points 42-47) - open
+        landmarks[42] = [200, 100]
+        landmarks[43] = [210, 90]
+        landmarks[44] = [220, 90]
+        landmarks[45] = [230, 100]
+        landmarks[46] = [220, 110]
+        landmarks[47] = [210, 110]
+
+        is_blinking, ear = detector.detect(landmarks, frame_idx=0)
+        assert not is_blinking, "Open eyes should not be detected as blink"
+        assert ear > 0.20, f"EAR {ear} should be > 0.20 for open eyes"
+
+    def test_blink_detector_detects_closed_eyes(self):
+        """BlinkDetector must detect closed eyes (blinking)."""
+        from face_os.face_enhance import BlinkDetector
+
+        detector = BlinkDetector(ear_threshold=0.20, consecutive_frames=1)
+
+        # Create mock landmarks with closed eyes
+        landmarks = np.zeros((68, 2), dtype=np.float32)
+
+        # Left eye (points 36-41) - closed (all points at same Y)
+        landmarks[36] = [100, 100]
+        landmarks[37] = [110, 100]
+        landmarks[38] = [120, 100]
+        landmarks[39] = [130, 100]
+        landmarks[40] = [120, 100]
+        landmarks[41] = [110, 100]
+
+        # Right eye (points 42-47) - closed
+        landmarks[42] = [200, 100]
+        landmarks[43] = [210, 100]
+        landmarks[44] = [220, 100]
+        landmarks[45] = [230, 100]
+        landmarks[46] = [220, 100]
+        landmarks[47] = [210, 100]
+
+        is_blinking, ear = detector.detect(landmarks, frame_idx=0)
+        assert is_blinking, "Closed eyes should be detected as blink"
+        assert ear < 0.20, f"EAR {ear} should be < 0.20 for closed eyes"
+
+    def test_blink_detector_tracks_history(self):
+        """BlinkDetector must track blink history."""
+        from face_os.face_enhance import BlinkDetector
+
+        detector = BlinkDetector()
+
+        # Create mock landmarks
+        landmarks = np.zeros((68, 2), dtype=np.float32)
+        landmarks[36:42] = [[100, 100], [110, 90], [120, 90], [130, 100], [120, 110], [110, 110]]
+        landmarks[42:48] = [[200, 100], [210, 90], [220, 90], [230, 100], [220, 110], [210, 110]]
+
+        # Detect several frames
+        for i in range(10):
+            detector.detect(landmarks, frame_idx=i)
+
+        stats = detector.get_stats()
+        assert stats['total_frames'] == 10, f"Should have 10 frames, got {stats['total_frames']}"
+
+    def test_blink_detector_freezes_eyes(self):
+        """BlinkDetector must freeze eye regions during blink."""
+        from face_os.face_enhance import BlinkDetector
+
+        detector = BlinkDetector(ear_threshold=0.20, consecutive_frames=1)
+
+        # Create mock frame
+        frame = np.ones((480, 640, 3), dtype=np.uint8) * 128
+
+        # Create mock landmarks with open eyes
+        landmarks = np.zeros((68, 2), dtype=np.float32)
+        landmarks[36:42] = [[100, 100], [110, 90], [120, 90], [130, 100], [120, 110], [110, 110]]
+        landmarks[42:48] = [[200, 100], [210, 90], [220, 90], [230, 100], [220, 110], [210, 110]]
+
+        # First frame: open eyes (update last good state)
+        result = detector.freeze_eyes(frame, landmarks, frame_idx=0)
+        assert result is not None, "Must return frame"
+
+        # Second frame: closed eyes (should freeze)
+        landmarks_closed = landmarks.copy()
+        landmarks_closed[36:42] = [[100, 100], [110, 100], [120, 100], [130, 100], [120, 100], [110, 100]]
+        landmarks_closed[42:48] = [[200, 100], [210, 100], [220, 100], [230, 100], [220, 100], [210, 100]]
+
+        result = detector.freeze_eyes(frame, landmarks_closed, frame_idx=1)
+        assert result is not None, "Must return frame with frozen eyes"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════════════════════
 

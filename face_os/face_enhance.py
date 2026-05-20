@@ -17,13 +17,18 @@ PRIORITY MAP (perceptual importance, NOT area):
 
 RULE: Allocate quality based on perceptual importance, NOT area size.
 
+BLINK DETECTION (Module H):
+  During blinks, eye patches must FREEZE.
+  Don't update eye memory during blink.
+  Use last known good eye state.
+
 CINEMATIC NOISE:
   Perfect clean output = FAKE.
   Need subtle grain, sensor noise, micro shimmer.
   Noise must vary spatially, stay statistically consistent.
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -32,6 +37,304 @@ from face_os.config import get_config
 from face_os.types import EnhancementMask
 
 cfg = get_config()
+
+
+# ─── Blink Detection ────────────────────────────────────────────────────────
+
+class BlinkDetector:
+    """Detect eye blinks using Eye Aspect Ratio (EAR).
+
+    Module H: Eye Dominance System
+    - During blinks, eye patches must FREEZE
+    - Don't update eye memory during blink
+    - Use last known good eye state
+
+    EAR Formula:
+      EAR = (||p2-p6|| + ||p3-p5||) / (2 * ||p1-p4||)
+
+    Where p1-p6 are the 6 eye landmark points.
+    EAR drops below threshold during blink.
+    """
+
+    def __init__(
+        self,
+        ear_threshold: float = 0.20,
+        consecutive_frames: int = 2,
+    ):
+        """Initialize blink detector.
+
+        Args:
+            ear_threshold: EAR below this = blink
+            consecutive_frames: Number of consecutive frames below threshold to confirm blink
+        """
+        self.ear_threshold = ear_threshold
+        self.consecutive_frames = consecutive_frames
+
+        # State tracking
+        self._blink_counter: int = 0
+        self._is_blinking: bool = False
+        self._blink_history: list = []
+
+        # Last known good eye state (frozen during blink)
+        self._last_good_left_eye: Optional[np.ndarray] = None
+        self._last_good_right_eye: Optional[np.ndarray] = None
+        self._last_good_frame_idx: int = -1
+
+    def detect(
+        self,
+        landmarks: np.ndarray,
+        frame_idx: int = 0,
+    ) -> Tuple[bool, float]:
+        """Detect if eyes are blinking.
+
+        Args:
+            landmarks: 68-point facial landmarks (68, 2)
+            frame_idx: Current frame index
+
+        Returns:
+            (is_blinking, ear_value)
+        """
+        # Extract eye landmarks
+        # Left eye: points 36-41
+        # Right eye: points 42-47
+        left_eye = landmarks[36:42]
+        right_eye = landmarks[42:48]
+
+        # Compute EAR for both eyes
+        left_ear = self._compute_ear(left_eye)
+        right_ear = self._compute_ear(right_eye)
+
+        # Average EAR
+        ear = (left_ear + right_ear) / 2.0
+
+        # Detect blink
+        if ear < self.ear_threshold:
+            self._blink_counter += 1
+        else:
+            self._blink_counter = 0
+
+        # Update blink state
+        was_blinking = self._is_blinking
+        self._is_blinking = self._blink_counter >= self.consecutive_frames
+
+        # Track history
+        self._blink_history.append({
+            'frame_idx': frame_idx,
+            'ear': ear,
+            'is_blinking': self._is_blinking,
+        })
+
+        # Keep history bounded
+        if len(self._blink_history) > 100:
+            self._blink_history = self._blink_history[-100:]
+
+        return self._is_blinking, ear
+
+    def _compute_ear(self, eye_points: np.ndarray) -> float:
+        """Compute Eye Aspect Ratio for one eye.
+
+        EAR = (||p2-p6|| + ||p3-p5||) / (2 * ||p1-p4||)
+
+        Args:
+            eye_points: (6, 2) array of eye landmark points
+
+        Returns:
+            EAR value (float)
+        """
+        if len(eye_points) < 6:
+            return 0.3  # Default to open eye
+
+        # Vertical distances
+        p2_p6 = np.linalg.norm(eye_points[1] - eye_points[5])
+        p3_p5 = np.linalg.norm(eye_points[2] - eye_points[4])
+
+        # Horizontal distance
+        p1_p4 = np.linalg.norm(eye_points[0] - eye_points[3])
+
+        # Avoid division by zero
+        if p1_p4 < 1e-6:
+            return 0.3
+
+        # EAR
+        ear = (p2_p6 + p3_p5) / (2.0 * p1_p4)
+
+        return float(ear)
+
+    def freeze_eyes(
+        self,
+        frame: np.ndarray,
+        landmarks: np.ndarray,
+        frame_idx: int,
+    ) -> np.ndarray:
+        """Freeze eye regions during blink.
+
+        During blink, use last known good eye state to prevent:
+        - Eye artifacts from closed eyes
+        - Temporal instability during blink
+
+        Args:
+            frame: Current frame (BGR)
+            landmarks: 68-point facial landmarks
+            frame_idx: Current frame index
+
+        Returns:
+            Frame with frozen eyes (if blinking)
+        """
+        is_blinking, ear = self.detect(landmarks, frame_idx)
+
+        if not is_blinking:
+            # Not blinking - update last good state
+            self._update_last_good(frame, landmarks, frame_idx)
+            return frame
+
+        # Blinking - freeze eyes using last good state
+        if self._last_good_left_eye is None or self._last_good_right_eye is None:
+            return frame  # No good state available
+
+        result = frame.copy()
+
+        # Freeze left eye
+        result = self._freeze_eye_region(
+            result, landmarks, 'left',
+            self._last_good_left_eye,
+        )
+
+        # Freeze right eye
+        result = self._freeze_eye_region(
+            result, landmarks, 'right',
+            self._last_good_right_eye,
+        )
+
+        return result
+
+    def _update_last_good(
+        self,
+        frame: np.ndarray,
+        landmarks: np.ndarray,
+        frame_idx: int,
+    ) -> None:
+        """Update last known good eye state."""
+        # Extract eye regions
+        left_eye = landmarks[36:42]
+        right_eye = landmarks[42:48]
+
+        # Get bounding boxes
+        left_bbox = self._eye_bbox(left_eye, frame.shape)
+        right_bbox = self._eye_bbox(right_eye, frame.shape)
+
+        if left_bbox is not None:
+            x1, y1, x2, y2 = left_bbox
+            self._last_good_left_eye = frame[y1:y2, x1:x2].copy()
+
+        if right_bbox is not None:
+            x1, y1, x2, y2 = right_bbox
+            self._last_good_right_eye = frame[y1:y2, x1:x2].copy()
+
+        self._last_good_frame_idx = frame_idx
+
+    def _freeze_eye_region(
+        self,
+        frame: np.ndarray,
+        landmarks: np.ndarray,
+        side: str,
+        frozen_eye: np.ndarray,
+    ) -> np.ndarray:
+        """Freeze one eye region using frozen state."""
+        if side == 'left':
+            eye_points = landmarks[36:42]
+        else:
+            eye_points = landmarks[42:48]
+
+        bbox = self._eye_bbox(eye_points, frame.shape)
+        if bbox is None:
+            return frame
+
+        x1, y1, x2, y2 = bbox
+
+        # Resize frozen eye to fit
+        if frozen_eye.shape[0] != (y2 - y1) or frozen_eye.shape[1] != (x2 - x1):
+            frozen_eye = cv2.resize(frozen_eye, (x2 - x1, y2 - y1))
+
+        # Blend frozen eye with current frame (feathered edges)
+        h, w = y2 - y1, x2 - x1
+        if h <= 0 or w <= 0:
+            return frame
+
+        # Create feathered mask
+        mask = np.ones((h, w), dtype=np.float32)
+        feather = min(5, h // 4, w // 4)
+        if feather > 0:
+            mask[:feather, :] *= np.linspace(0, 1, feather)[:, np.newaxis]
+            mask[-feather:, :] *= np.linspace(1, 0, feather)[:, np.newaxis]
+            mask[:, :feather] *= np.linspace(0, 1, feather)[np.newaxis, :]
+            mask[:, -feather:] *= np.linspace(1, 0, feather)[np.newaxis, :]
+
+        # Apply frozen eye
+        mask_3ch = mask[:, :, np.newaxis]
+        frame[y1:y2, x1:x2] = (
+            frame[y1:y2, x1:x2].astype(np.float32) * (1 - mask_3ch) +
+            frozen_eye.astype(np.float32) * mask_3ch
+        ).astype(np.uint8)
+
+        return frame
+
+    def _eye_bbox(
+        self,
+        eye_points: np.ndarray,
+        frame_shape: Tuple[int, int],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        """Get bounding box for eye region with padding."""
+        if len(eye_points) < 6:
+            return None
+
+        h, w = frame_shape[:2]
+
+        # Get bounds
+        x_min = int(np.min(eye_points[:, 0]))
+        x_max = int(np.max(eye_points[:, 0]))
+        y_min = int(np.min(eye_points[:, 1]))
+        y_max = int(np.max(eye_points[:, 1]))
+
+        # Add padding
+        pad_x = max(5, (x_max - x_min) // 2)
+        pad_y = max(5, (y_max - y_min) // 2)
+
+        x1 = max(0, x_min - pad_x)
+        y1 = max(0, y_min - pad_y)
+        x2 = min(w, x_max + pad_x)
+        y2 = min(h, y_max + pad_y)
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        return (x1, y1, x2, y2)
+
+    @property
+    def is_blinking(self) -> bool:
+        """Check if currently blinking."""
+        return self._is_blinking
+
+    @property
+    def last_ear(self) -> float:
+        """Get last computed EAR value."""
+        if self._blink_history:
+            return self._blink_history[-1]['ear']
+        return 0.3
+
+    def get_stats(self) -> dict:
+        """Get blink detection statistics."""
+        if not self._blink_history:
+            return {'total_frames': 0, 'blink_frames': 0, 'blink_rate': 0.0}
+
+        total = len(self._blink_history)
+        blinks = sum(1 for h in self._blink_history if h['is_blinking'])
+
+        return {
+            'total_frames': total,
+            'blink_frames': blinks,
+            'blink_rate': blinks / max(1, total),
+            'last_ear': self.last_ear,
+        }
 
 
 # ─── Structure-preserving eye rendering ──────────────────────────────────────
