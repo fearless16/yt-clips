@@ -397,13 +397,13 @@ def build_identity_profile(
     if reference_images:
         builder = AppearanceFieldBuilder()
         best_img = reference_images[0]  # Primary reference
-        gray = cv2.cvtColor(best_img, cv2.COLOR_BGR2GRAY)
-        cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
-        if len(faces) > 0:
-            x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+        
+        # Use MediaPipe instead of Haar cascade
+        from face_os.detect_track import detect_faces
+        detections = detect_faces(best_img)
+        
+        if detections:
+            x, y, fw, fh, conf = detections[0]  # Use first detection
             from face_os.landmarks import extract_landmarks
             lm = extract_landmarks(best_img, (x, y, fw, fh))
             if lm is not None:

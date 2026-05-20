@@ -43,6 +43,110 @@ from face_os.config import get_config
 
 cfg = get_config()
 
+
+# ─── Verification Gate ──────────────────────────────────────────────────────
+
+class VerificationGate:
+    """Gates identity memory updates behind identity/liveness checks.
+
+    All checks must pass before identity_state.update() is called.
+    Rejects: wrong identity, tiny faces, static posters, low quality.
+    """
+
+    def __init__(
+        self,
+        embedding_tolerance: float = 0.45,
+        min_face_pixels: int = 4000,
+        liveness_threshold: float = 0.5,
+    ):
+        self.embedding_tolerance = embedding_tolerance
+        self.min_face_pixels = min_face_pixels
+        self.liveness_threshold = liveness_threshold
+
+        # Reference embedding for identity check
+        self._reference_embedding: Optional[np.ndarray] = None
+
+        # Landmark history for liveness check
+        self._landmark_history: List[np.ndarray] = []
+        self._max_history = 10
+
+    def set_reference_embedding(self, embedding: np.ndarray) -> None:
+        """Set reference embedding for identity matching."""
+        self._reference_embedding = embedding
+
+    def check(
+        self,
+        face_bbox: Tuple[int, int, int, int],
+        landmarks_pts: Optional[np.ndarray],
+        embedding: Optional[np.ndarray],
+    ) -> Tuple[bool, str]:
+        """Run all verification checks.
+
+        Args:
+            face_bbox: (x, y, w, h) bounding box
+            landmarks_pts: (N, 2) landmark coordinates
+            embedding: Face embedding vector
+
+        Returns:
+            (passed, reason) — True if all checks pass
+        """
+        x, y, w, h = face_bbox
+
+        # Gate 1: Face pixel count
+        face_pixels = w * h
+        if face_pixels < self.min_face_pixels:
+            return False, f"face_too_small: {face_pixels} < {self.min_face_pixels}"
+
+        # Gate 2: Embedding identity check
+        if self._reference_embedding is not None and embedding is not None:
+            dist = self._embedding_distance(embedding, self._reference_embedding)
+            if dist > self.embedding_tolerance:
+                return False, f"identity_mismatch: {dist:.3f} > {self.embedding_tolerance}"
+
+        # Gate 3: Liveness check (landmark jitter)
+        if landmarks_pts is not None:
+            self._landmark_history.append(landmarks_pts.copy())
+            if len(self._landmark_history) > self._max_history:
+                self._landmark_history = self._landmark_history[-self._max_history:]
+
+            if len(self._landmark_history) >= 2:
+                jitter = self._compute_jitter()
+                if jitter < self.liveness_threshold:
+                    return False, f"static_poster: jitter={jitter:.4f} < {self.liveness_threshold}"
+
+        return True, "passed"
+
+    def _embedding_distance(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
+        """Compute distance between two embeddings."""
+        try:
+            import face_recognition
+            return float(face_recognition.face_distance([emb2], emb1)[0])
+        except ImportError:
+            # Fallback: cosine distance
+            norm1 = emb1 / max(np.linalg.norm(emb1), 1e-6)
+            norm2 = emb2 / max(np.linalg.norm(emb2), 1e-6)
+            return float(1.0 - np.dot(norm1, norm2))
+
+    def _compute_jitter(self) -> float:
+        """Compute landmark jitter across history."""
+        if len(self._landmark_history) < 2:
+            return 1.0
+
+        displacements = []
+        for i in range(1, len(self._landmark_history)):
+            prev = self._landmark_history[i - 1]
+            curr = self._landmark_history[i]
+            if prev.shape == curr.shape:
+                disp = np.mean(np.sqrt(np.sum((curr - prev) ** 2, axis=1)))
+                # Normalize by face size (assume ~200px)
+                disp_norm = disp / 200.0
+                displacements.append(disp_norm)
+
+        if not displacements:
+            return 1.0
+
+        return float(np.mean(displacements))
+
 # Region definitions for region-specific confidence
 # These match the regions in patch_memory.py
 REGION_DEFS = {
@@ -426,6 +530,13 @@ class IdentityState:
         # Phase 4: Identity Hypotheses
         self.hypotheses = IdentityHypothesisSpace(max_hypotheses=10)
 
+        # Verification Gate
+        self.verification_gate = VerificationGate(
+            embedding_tolerance=0.45,
+            min_face_pixels=4000,
+            liveness_threshold=0.5,
+        )
+
     def is_initialized(self) -> bool:
         return self.belief is not None and self.belief.initialized
 
@@ -490,7 +601,35 @@ class IdentityState:
         expression: Optional[str] = None,
         lighting: Optional[str] = None,
         region_mask: Optional[np.ndarray] = None,
-    ) -> None:
+        face_bbox: Optional[Tuple[int, int, int, int]] = None,
+        landmarks_pts: Optional[np.ndarray] = None,
+        embedding: Optional[np.ndarray] = None,
+    ) -> bool:
+        """Update identity state with new observation.
+
+        Args:
+            canonical_face: Face in canonical space (256x256)
+            quality_map: Per-pixel quality map
+            pose: Head pose (yaw, pitch, roll)
+            expression: Expression label
+            lighting: Lighting label
+            region_mask: Region-specific learning rates
+            face_bbox: (x, y, w, h) bounding box for verification
+            landmarks_pts: (N, 2) landmark coordinates for liveness
+            embedding: Face embedding for identity check
+
+        Returns:
+            True if update was applied, False if rejected by verification gate
+        """
+        # VERIFICATION GATE: Check all gates before updating
+        if face_bbox is not None:
+            passed, reason = self.verification_gate.check(
+                face_bbox, landmarks_pts, embedding
+            )
+            if not passed:
+                # Reject this observation — do not update identity
+                return False
+
         h, w = canonical_face.shape[:2]
 
         if self.belief is None:
@@ -531,6 +670,8 @@ class IdentityState:
         if pose is not None:
             self._pose_history.append(pose)
 
+        return True
+
     def query(
         self,
         canonical_face: np.ndarray,
@@ -568,8 +709,8 @@ class IdentityState:
         # High confidence → more identity, less source
         # Low confidence → less identity, more source
         mean_conf = float(np.mean(confidence))
-        low_blend = 0.3 + 0.4 * mean_conf
-        high_blend = 0.7 - 0.4 * mean_conf
+        low_blend = 0.7 + 0.15 * mean_conf
+        high_blend = 0.3 - 0.15 * mean_conf
 
         conf_3d = confidence[:, :, np.newaxis]
         effective_low_blend = low_blend * conf_3d

@@ -172,6 +172,13 @@ class FaceOSPipeline:
         self.identity_state = IdentityState()
         self.patch_memory = PatchMemory()
 
+        # Set reference embedding on verification gate
+        if self.identity.embeddings:
+            self.identity_state.verification_gate.set_reference_embedding(
+                self.identity.embeddings[0]
+            )
+            print(f"  Verification gate: embedding_tolerance=0.45, min_face_pixels=4000, liveness_threshold=0.5")
+
         # Pre-populate from reference
         if self.identity.enrolled and self.identity.appearance.atlas_rgb is not None:
             self.appearance_builder.atlas = self.identity.appearance
@@ -563,7 +570,18 @@ class FaceOSPipeline:
                 # Face mask too small — skip update
                 pass
             else:
-                self.identity_state.update(canonical_face, masked_quality, pose=pose)
+                # Get verification parameters
+                face_bbox = face_track.smooth_bbox
+                landmarks_pts = np.array(landmarks.xy) if landmarks and hasattr(landmarks, 'xy') and landmarks.xy is not None else None
+                embedding = face_track.detection.embedding if face_track.detection else None
+
+                # Update with verification gate
+                self.identity_state.update(
+                    canonical_face, masked_quality, pose=pose,
+                    face_bbox=face_bbox,
+                    landmarks_pts=landmarks_pts,
+                    embedding=embedding,
+                )
 
         # 5. Patch memory update
         if canonical_face is not None and quality_map is not None and landmarks:
