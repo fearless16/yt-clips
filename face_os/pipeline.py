@@ -160,6 +160,14 @@ class FaceOSPipeline:
         self.crop = crop_planner.CropPlanner(reference_image=reference_image)
         self.compositor = compositor.Compositor()
 
+        # Extract reference mesh for quality gates
+        ref_mesh = detect_track.extract_face_mesh(primary)
+        if ref_mesh is not None:
+            self.tracker.set_reference_mesh(ref_mesh)
+            print(f"  Reference mesh: {ref_mesh.shape[0]} landmarks")
+        else:
+            print("  WARNING: Could not extract reference mesh — quality gates will be relaxed")
+
         # NEW: Initialize identity belief state
         self.identity_state = IdentityState()
         self.patch_memory = PatchMemory()
@@ -545,7 +553,7 @@ class FaceOSPipeline:
                 pass
 
         # 4. Identity state update
-        if canonical_face is not None and quality_map is not None:
+        if canonical_face is not None and quality_map is not None and face_track is not None:
             pose = (landmarks.yaw, landmarks.pitch, landmarks.roll) if landmarks else None
             # Mask quality_map to face region only — prevent background learning
             masked_quality = quality_map * canonical_face_mask if canonical_face_mask is not None else quality_map

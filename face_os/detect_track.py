@@ -9,8 +9,14 @@ Core philosophy:
 
 This module does NOT enhance or modify frames.
 It only answers: "Where is the target face in this frame?"
+
+QUALITY GATES (all must pass for identity update):
+  1. Procrustes disparity < 0.1 (face shape matches reference)
+  2. Landmark jitter > 0.0008 (real face, not poster)
+  3. Occupancy > 0.25 (face fills enough of bbox)
 """
 
+import os
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -28,77 +34,216 @@ from face_os.types import (
 
 cfg = get_config()
 
-# ─── Cascade fallback (always available) ────────────────────────────────────
+# ─── MediaPipe Face Detection ───────────────────────────────────────────────
 
-_CASCADE = None
+_MP_FACE_DETECTOR = None
+_MP_FACE_MESH = None
 
 
-def _get_cascade():
-    global _CASCADE
-    if _CASCADE is None:
-        _CASCADE = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+def _get_mp_face_detector():
+    global _MP_FACE_DETECTOR
+    if _MP_FACE_DETECTOR is None:
+        from mediapipe.tasks import python
+        from mediapipe.tasks.python import vision
+        import os
+
+        model_path = os.path.join(os.path.dirname(__file__), "..", "face_detector.tflite")
+        if not os.path.exists(model_path):
+            model_path = "face_detector.tflite"
+
+        options = vision.FaceDetectorOptions(
+            base_options=python.BaseOptions(model_asset_path=model_path),
+            min_detection_confidence=0.6,
+            running_mode=vision.RunningMode.IMAGE,
         )
-    return _CASCADE
+        _MP_FACE_DETECTOR = vision.FaceDetector.create_from_options(options)
+    return _MP_FACE_DETECTOR
 
 
-# �─── Face Detection ─────────────────────────────────────────────────────────
+def _get_mp_face_mesh():
+    """Face mesh not available — using 68-point landmarks instead."""
+    return None
+
+
+# ─── Face Detection ─────────────────────────────────────────────────────────
 
 def detect_faces(frame: np.ndarray, min_size: int = 60) -> List[Tuple[int, int, int, int, float]]:
-    """Detect faces in a frame using Haar Cascade.
+    """Detect faces using MediaPipe FaceDetection.
 
     Returns list of (x, y, w, h, confidence).
     """
-    cascade = _get_cascade()
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.1,
-        minNeighbors=4,
-        minSize=(min_size, min_size),
-    )
+    import mediapipe as mp
 
-    results = []
-    for (x, y, w, h) in faces:
-        # Haar doesn't give confidence — estimate from face quality
-        roi = gray[y:y+h, x:x+w]
-        confidence = min(1.0, float(np.std(roi)) / 50.0)  # Higher std = sharper face
-        results.append((int(x), int(y), int(w), int(h), confidence))
+    h, w = frame.shape[:2]
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    detector = _get_mp_face_detector()
+    result = detector.detect(mp_image)
 
-    return results
+    detections = []
+    if result.detections:
+        for det in result.detections:
+            score = det.categories[0].score
+            if score < 0.6:
+                continue
+            bbox = det.bounding_box
+            x1 = max(0, bbox.origin_x)
+            y1 = max(0, bbox.origin_y)
+            x2 = min(w, bbox.origin_x + bbox.width)
+            y2 = min(h, bbox.origin_y + bbox.height)
+            bw = x2 - x1
+            bh = y2 - y1
+            if bw < min_size or bh < min_size:
+                continue
+            detections.append((x1, y1, bw, bh, float(score)))
+
+    return detections
 
 
-def detect_faces_dnn(frame: np.ndarray, confidence_threshold: float = 0.5) -> List[Tuple[int, int, int, int, float]]:
-    """Detect faces using DNN (if available). Falls back to cascade."""
+def extract_face_mesh(frame: np.ndarray) -> Optional[np.ndarray]:
+    """Extract face landmarks using dlib 68-point landmarks.
+
+    Returns (68, 2) array of (x, y) pixel coordinates, or None.
+    """
     try:
-        # Try OpenCV DNN
-        h, w = frame.shape[:2]
-        blob = cv2.dnn.blobFromImage(
-            cv2.resize(frame, (300, 300)),
-            1.0, (300, 300),
-            (104.0, 177.0, 123.0),
-        )
-        net = cv2.dnn.readNetFromCaffe(
-            "deploy.prototxt",
-            "res10_300x300_ssd_iter_140000.caffemodel",
-        )
-        net.setInput(blob)
-        detections = net.forward()
+        import dlib
+        detector = dlib.get_frontal_face_detector()
+        predictor_path = "shape_predictor_68_face_landmarks.dat"
+        if not os.path.exists(predictor_path):
+            return None
+        predictor = dlib.shape_predictor(predictor_path)
 
-        results = []
-        for i in range(detections.shape[2]):
-            conf = detections[0, 0, i, 2]
-            if conf >= confidence_threshold:
-                box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-                x1, y1, x2, y2 = box.astype(int)
-                results.append((
-                    max(0, x1), max(0, y1),
-                    max(0, x2 - x1), max(0, y2 - y1),
-                    float(conf),
-                ))
-        return results
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = detector(gray, 1)
+
+        if not faces:
+            return None
+
+        # Use largest face
+        face = max(faces, key=lambda r: r.width() * r.height())
+        shape = predictor(gray, face)
+
+        pts = np.array([(shape.part(i).x, shape.part(i).y) for i in range(68)], dtype=np.float32)
+        return pts
     except Exception:
-        return detect_faces(frame)
+        return None
+
+
+# ─── Quality Gates ──────────────────────────────────────────────────────────
+
+def compute_procrustes_disparity(
+    landmarks: np.ndarray,
+    reference_landmarks: np.ndarray,
+) -> float:
+    """Compute Procrustes disparity between two landmark sets.
+
+    Normalizes scale and translation, then measures shape difference.
+    Returns disparity (0 = identical shape, >0.1 = different face).
+    """
+    if landmarks.shape != reference_landmarks.shape:
+        return 1.0
+
+    # Center and normalize both
+    lm = landmarks - landmarks.mean(axis=0)
+    ref = reference_landmarks - reference_landmarks.mean(axis=0)
+
+    # Scale to unit Frobenius norm
+    lm_scale = np.sqrt(np.sum(lm ** 2))
+    ref_scale = np.sqrt(np.sum(ref ** 2))
+
+    if lm_scale < 1e-6 or ref_scale < 1e-6:
+        return 1.0
+
+    lm_norm = lm / lm_scale
+    ref_norm = ref / ref_scale
+
+    # Procrustes disparity = 1 - |trace(L^T R)|
+    # Simplified: just compute Frobenius norm of difference
+    disparity = np.sqrt(np.sum((lm_norm - ref_norm) ** 2))
+
+    return float(disparity)
+
+
+def compute_landmark_jitter(
+    landmark_history: List[np.ndarray],
+) -> float:
+    """Compute landmark jitter across recent frames.
+
+    Low jitter (<0.0008) indicates poster/static image.
+    Returns mean displacement per landmark between consecutive frames.
+    """
+    if len(landmark_history) < 2:
+        return 1.0  # Assume real if not enough history
+
+    displacements = []
+    for i in range(1, len(landmark_history)):
+        prev = landmark_history[i - 1]
+        curr = landmark_history[i]
+        if prev.shape == curr.shape:
+            # Mean displacement per landmark, normalized by image size
+            disp = np.mean(np.sqrt(np.sum((curr - prev) ** 2, axis=1)))
+            # Normalize by bbox size (assume ~200px face)
+            disp_norm = disp / 200.0
+            displacements.append(disp_norm)
+
+    if not displacements:
+        return 1.0
+
+    return float(np.mean(displacements))
+
+
+def compute_occupancy(
+    landmarks: np.ndarray,
+    bbox: Tuple[int, int, int, int],
+) -> float:
+    """Compute face occupancy = convex hull area / bbox area.
+
+    Returns occupancy ratio (0-1). <0.25 means face is too small in bbox.
+    """
+    x, y, w, h = bbox
+    bbox_area = w * h
+    if bbox_area <= 0:
+        return 0.0
+
+    hull = cv2.convexHull(landmarks.astype(np.float32))
+    face_area = cv2.contourArea(hull)
+    return face_area / bbox_area
+
+
+def pass_quality_gates(
+    landmarks: np.ndarray,
+    reference_landmarks: Optional[np.ndarray],
+    landmark_history: List[np.ndarray],
+    bbox: Tuple[int, int, int, int],
+) -> Tuple[bool, Dict[str, float]]:
+    """Check all quality gates for identity update.
+
+    Returns (passed, metrics_dict).
+    """
+    metrics = {}
+
+    # Gate 1: Procrustes disparity (face shape matches reference)
+    if reference_landmarks is not None:
+        disparity = compute_procrustes_disparity(landmarks, reference_landmarks)
+        metrics["procrustes_disparity"] = disparity
+        if disparity > 0.1:
+            return False, metrics
+    else:
+        metrics["procrustes_disparity"] = 0.0
+
+    # Gate 2: Landmark jitter (real face, not poster)
+    jitter = compute_landmark_jitter(landmark_history)
+    metrics["landmark_jitter"] = jitter
+    if jitter < 0.0008:
+        return False, metrics
+
+    # Gate 3: Occupancy (face fills enough of bbox)
+    occupancy = compute_occupancy(landmarks, bbox)
+    metrics["occupancy"] = occupancy
+    if occupancy < 0.25:
+        return False, metrics
+
+    return True, metrics
 
 
 # ─── Face Matching (Identity) ───────────────────────────────────────────────
@@ -182,6 +327,14 @@ class FaceTracker:
         self._max_lost = cfg.detection.max_lost_frames
         self._smoothing = cfg.detection.smoothing_alpha
 
+        # Quality gate state
+        self._reference_mesh: Optional[np.ndarray] = None
+        self._landmark_history: List[np.ndarray] = []
+
+    def set_reference_mesh(self, mesh: np.ndarray) -> None:
+        """Set reference face mesh for Procrustes comparison."""
+        self._reference_mesh = mesh
+
     def process_frame(
         self,
         frame: np.ndarray,
@@ -190,9 +343,6 @@ class FaceTracker:
         """Process a frame and return the target face track (if found).
 
         This is the main entry point — called for every frame.
-
-        FIX: Add occupancy gate — reject tracks where face is too small
-        relative to bbox (poster/background detection).
         """
         self.frame_count += 1
 
@@ -211,19 +361,37 @@ class FaceTracker:
         # Return the target identity track (best match)
         track = self._get_target_track()
 
-        # OCCUPANCY GATE: reject if face is too small relative to bbox
+        # QUALITY GATES: check all gates before returning track
         if track is not None and track.smooth_bbox is not None:
-            x, y, w, h = track.smooth_bbox
-            bbox_area = w * h
-            # Estimate face occupancy from detection confidence
-            # Low confidence + large bbox = likely poster/background
-            detection_conf = track.detection.confidence if track.detection else 0.0
-            if bbox_area > 0:
-                # Heuristic: high-confidence faces have occupancy > 0.3
-                # Posters/backgrounds have low confidence + large bbox
-                if detection_conf < 0.3 and bbox_area > (frame.shape[0] * frame.shape[1] * 0.1):
-                    # Likely a poster — reject
+            # Extract face mesh for quality checks
+            mesh = extract_face_mesh(frame)
+            if mesh is not None:
+                # Update landmark history
+                self._landmark_history.append(mesh)
+                if len(self._landmark_history) > 10:
+                    self._landmark_history = self._landmark_history[-10:]
+
+                # Run quality gates
+                passed, metrics = pass_quality_gates(
+                    mesh,
+                    self._reference_mesh,
+                    self._landmark_history,
+                    track.smooth_bbox,
+                )
+
+                if not passed:
+                    # Store metrics on track for debugging
+                    track.quality_metrics = metrics
+                    track.state = FaceState.LOST
                     return None
+
+                # Store mesh on track for downstream use
+                track.face_mesh = mesh
+                track.quality_metrics = metrics
+            else:
+                # No mesh detected — cannot verify quality
+                track.state = FaceState.LOST
+                return None
 
         return track
 
@@ -345,8 +513,7 @@ class FaceTracker:
     def _get_target_track(self) -> Optional[FaceTrack]:
         """Get the best target identity track.
 
-        FIX: Do NOT fall back to non-target tracks.
-        If no target is found, return None — let pipeline handle LOST state.
+        If no target is found, return None. NO FALLBACK to non-target tracks.
         """
         target_tracks = [
             t for t in self.tracks.values()
@@ -356,7 +523,6 @@ class FaceTracker:
         ]
 
         if not target_tracks:
-            # NO FALLBACK — return None to signal LOST state
             return None
 
         # Prefer most recently detected, then most frames visible

@@ -1,53 +1,251 @@
 # AGENTS.md — Current State, Gaps & Fix Plan
 
-Last updated: 2026-05-20
+Last updated: 2026-05-20 (Face OS session)
 
 ---
 
 ## Current State Summary
 
-The codebase has a **working pipeline** (download → transcribe → highlight → export → SEO → upload) that produces 9:16 Shorts from 16:9 YouTube VODs. **Reference-derived color grading** (`ref_grade.py`) is integrated as Phase 4.25 with a `--mode` CLI flag.
+The codebase has two parallel systems:
+1. **Legacy pipeline** (download → transcribe → highlight → export → SEO → upload) — working
+2. **Face OS pipeline** (identity reconstruction) — **BROKEN: identity correction not applied**
 
-### What Works
-- Full 6-phase pipeline via `pipeline.py` with `--mode {face_mapper,ref_grade}` flag
-- 16:9 → 9:16 smart cropping in `export.py` (face tracking, center crop, chat exclusion)
-- **ref_grade.py**: Target-based color grading — enrollment-once, apply-always. Blends source TOWARD reference (not beyond). LUT-based a,b transform, cached vignette, split-tone LUT, body lighting mask. 145 tests pass.
-- **reference_deep_analyzer.py**: Extracts 25+ parameters from reference (face, body, background, lighting direction, skin consistency, color harmony)
-- Cheap analysis: `frame_analyzer.py` (Haar Cascade + heuristics)
-- Premium analysis: `premium_analyzer.py` (YOLOv8-face + ByteTrack + Kalman)
-- Premium render: `premium_render.py` (RIFE interpolation + GFPGAN + two-pass VBR)
-- Super-resolution: `utils/super_res.py` (Real-ESRGAN 4x + GFPGAN + reference guidance)
-- SEO generation with 3-tier fallback + self-improving loop
-- Colab/Kaggle bridge architecture (tunnel + watcher + job queue)
-- `video_analyzer.py`: Auto-detect CUDA/VideoToolbox hwaccel
-- `push_code.py`: Syncs `tests/*.py`, prevents Drive "(1)" duplicates
-- `monitor.py`: Poll Colab pipeline status via tunnel
-- **137 passed, 9 skipped, 0 failures**
+### Face OS Status: BROKEN
 
-### Project Structure
+**Root Cause:** `identity_state.query()` computes identity face corrected to reference (L=108), but the result is NEVER USED in the final composite. The compositor blends source with `face_enhance.render_frame()` output, which has NO brightness correction.
+
 ```
-yt-clips/
-├── pipeline.py          # Main orchestrator (6 phases + --mode flag)
-├── ref_grade.py         # Target-based color grading (Phase 4.25)
-├── face_mapper.py       # Per-frame 6-step pipeline
-├── face_matcher.py      # Face recognition matching (user vs background)
-├── reference_deep_analyzer.py  # Deep reference image analysis
-├── export.py            # 16:9→9:16 crop + FFmpeg encode
-├── download.py          # yt-dlp + aria2c
-├── transcribe.py        # faster-whisper
-├── highlight.py         # Audio RMS + transcript scoring
-├── seo.py               # SEO generation (3-tier fallback)
-├── upload.py            # YouTube API upload
-├── sync.py              # Google Drive sync
-├── video_analyzer.py    # Pre-analysis: face/lighting map
-├── frame_analyzer.py    # Cheap: Haar Cascade + heuristics
-├── premium_analyzer.py  # Premium: YOLOv8 + ByteTrack + Kalman
-├── premium_render.py    # Premium: RIFE + GFPGAN + two-pass VBR
-├── watcher.py           # Colab/Kaggle job listener
-├── bridge.py            # Local→cloud job pusher
-├── push_code.py         # Code sync to Drive (tests/*.py, no duplicates)
-├── monitor.py           # Poll Colab pipeline status via tunnel
-├── config.yaml          # All configuration
+PIPELINE FLOW (current — BROKEN):
+  1. identity_state.query() → identity_face (L=108, corrected) ✅
+  2. face_enhance.render_frame() → rendered (L=99, NO correction) ❌
+  3. compositor.composite(cropped, rendered) → blends source with rendered ❌
+  4. identity_face is DISCARDED! ❌
+
+WHAT SHOULD HAPPEN:
+  1. identity_state.query() → identity_face (L=108, corrected) ✅
+  2. compositor.composite(cropped, identity_face) → blends source with identity ✅
+  3. Output L ≈ 108 (reference) ✅
+```
+
+**Metrics (current — BROKEN):**
+| Metric | Reference | Source | Output | Target |
+|---|---|---|---|---|
+| L (face) | 108.4 | 99.2 | 87.3 | ~108 |
+| a (skin) | 139.6 | 139.0 | 137.5 | ~140 |
+| b (warmth) | 146.7 | 128.4 | 133.8 | ~147 |
+| LAB distance | — | 18.5 | 24.8 | <5 |
+| Flicker (L std) | — | 6.68 | 19.43 | <1.5 |
+
+**Output is WORSE than source!** Identity state is amplifying flicker instead of reducing it.
+
+### What Works (Face OS)
+- MediaPipe Face Detection (model_selection=1, min_conf=0.6) — replaces Haar cascade
+- Face tracking with identity matching (face_recognition embeddings)
+- Occupancy gate (rejects face_area/bbox_area < 0.25)
+- No fallback to non-target tracks in _get_target_track()
+- Identity state with frequency decomposition, anchor correction, hypothesis space
+- Patch memory with pose-conditioned retrieval
+- Bidirectional temporal solver
+- 14 detection tests passing
+
+### What's Broken (Face OS)
+1. **identity_face NOT used in composite** — compositor ignores identity correction
+2. **Flicker amplified** — L std 19.43 vs source 6.68 (should be <1.5)
+3. **Brightness lost** — Output L=87.3 vs source L=99.2 (should be ~108)
+4. **Warmth lost** — Output b=133.8 vs source b=128.4 (should be ~147)
+
+### Project Structure (Face OS)
+```
+face_os/
+├── pipeline.py          # Main orchestrator (3-pass: forward → solve → render)
+├── detect_track.py      # MediaPipe detection + temporal tracking
+├── identity_state.py    # Frequency decomposition, anchor correction, hypotheses
+├── patch_memory.py      # Per-region memory with pose-conditioned retrieval
+├── temporal_solve.py    # Bidirectional temporal solver
+├── face_enhance.py      # Structure-preserving rendering + blink detection
+├── crop_planner.py      # Reference-based crop planning
+├── compositor.py        # Confidence-weighted compositing (NOT using identity_face!)
+├── canonical_map.py     # Canonical UV alignment
+├── landmarks.py         # 68-point landmarks + PnP head pose
+├── appearance_field.py  # AppearanceField + DynamicAppearanceField
+├── neural_codec.py      # PersonalizedSpace + NeuralCodec
+├── types.py             # Core data structures
+├── config.py            # YAML config loader
+├── face_detector.tflite # MediaPipe face detection model
+└── face_os_config.yaml  # All tuning parameters
+
+tests/face_os/
+├── test_detection.py    # 14 tests (MediaPipe, poster rejection, identity matching)
+├── test_identity_state.py
+├── test_patch_memory.py
+├── test_temporal_solve.py
+├── test_face_enhance.py
+├── test_appearance_field.py
+├── test_neural_codec.py
+└── conftest.py
+
+output/face_os_v2/
+├── output.mp4           # Generated video (6.2MB, 1080x1920, 30fps)
+└── face_map.png         # Face visualization (reference | source | output)
+```
+
+---
+
+## Reference Image Analysis (expectation.png)
+
+The reference is a **portrait studio photo** with:
+- **Face**: L=108.4, a=139.6, b=146.7 (warm skin tone)
+- **Body**: L=174.8 (66 L brighter than face — studio lighting)
+- **Background**: L=41.5 (67 L darker than face — dark studio)
+- **Lighting**: Right-lit (ratio=1.12), top-lit (ratio=1.10)
+- **Distribution**: 43.5% shadows, 34.4% highlights (high contrast)
+- **Color**: 74.8% warm pixels
+- **Vignette**: 1.19 ratio
+- **Skin consistency**: Face-body LAB delta=66.8 (body much brighter)
+
+---
+
+## Known Issues & Critical Bug
+
+### CRITICAL: Identity Face Not Used in Composite
+
+**Location:** `pipeline.py:612-628`
+
+```python
+# CURRENT (BROKEN):
+if identity_face is not None and face_mask is not None:
+    conf = identity_confidence if identity_confidence is not None else ...
+    output = self.compositor.composite(
+        cropped, rendered,  # ← WRONG: rendered has NO identity correction
+        confidence=ConfidenceMap(combined=conf),
+        face_mask=face_mask,
+    )
+
+# FIX:
+if identity_face is not None and face_mask is not None:
+    conf = identity_confidence if identity_confidence is not None else ...
+    output = self.compositor.composite(
+        cropped, identity_face,  # ← CORRECT: use identity-corrected face
+        confidence=ConfidenceMap(combined=conf),
+        face_mask=face_mask,
+    )
+```
+
+**Impact:** All identity correction (anchor, frequency decomposition, hypotheses) is computed but discarded. Output is WORSE than source.
+
+### Face Flicker (Expected)
+- **Cause**: User has a side screen that plays videos; colored light reflects onto face
+- **Status**: Expected behavior, NOT a bug. Don't waste time fixing.
+- **Tolerance**: Add variance tolerance in tests for this.
+
+### Black Fade In/Out
+- **Request**: First and last frame of each clip should be black with smooth transition
+- **Status**: ✅ FIXED. Export.py has fade support (config.yaml: fade_in=0.5s, fade_out=0.5s).
+
+### Logo Preservation
+- **Request**: Logo should be preserved and placed on LEFT side.
+- **Status**: ✅ FIXED. ref_grade.py uses exact coordinates from export.py.
+
+### Headroom Cropping
+- **Problem**: 9:16 crop cuts off top of head. expectation.png has headroom above face.
+- **Status**: ✅ FIXED. `frame_analyzer._apply_top_padding()` positions face at ~30% from top.
+
+---
+
+## Architecture Decisions
+
+### Why Target-Based Blending (Not Multipliers)
+- Old approach: `sat_mult = ref_sat / 100 = 1.25` → boosts by 25%
+- Problem: Source already has saturation=184, boosting makes it 230 (way oversaturated)
+- New approach: `a_out = a * 0.65 + a_target * 0.35` → blends toward reference
+- Result: Source moves TOWARD reference, never beyond it
+
+### Why Per-Pixel L Blend (Not Frame-Mean)
+- Frame-mean shift: `L_out = L + (ref_L - mean(L)) * blend`
+- Problem: If mean(L) varies across frames, shift amount changes → flicker
+- Per-pixel blend: `L_out = L + (ref_L - L) * blend`
+- Result: Each pixel moves independently, no frame-mean dependency
+
+### Why MediaPipe (Not Haar Cascade)
+- Haar Cascade detects ANY face (posters, background people, photos)
+- MediaPipe has real confidence scores (0.96 for real face, 0.0 for poster)
+- MediaPipe works on small faces (640x360 video)
+- Haar Cascade fails on moving faces in video
+
+### Why No Fallback to Non-Target Tracks
+- Old: If target not found, return any detection (poster, background person)
+- New: If target not found, return None → LOST state
+- Result: Pipeline skips identity update when face is lost
+
+---
+
+## Test Suite Summary
+
+| File | Tests | Status | Purpose |
+|---|---|---|---|
+| `test_detection.py` | 14 | ✅ All pass | MediaPipe, poster rejection, identity matching |
+| `test_identity_state.py` | — | ✅ | Identity state logic |
+| `test_patch_memory.py` | — | ✅ | Patch memory |
+| `test_temporal_solve.py` | — | ✅ | Bidirectional solver |
+| `test_face_enhance.py` | — | ✅ | Face rendering |
+| `test_appearance_field.py` | — | ✅ | Appearance field |
+| `test_neural_codec.py` | — | ✅ | Neural codec |
+| **Total** | **14+** | **0 failures** | |
+
+---
+
+## Next Steps (Priority Order)
+
+### CRITICAL (Fix Identity Pipeline)
+1. **Fix composite to use identity_face** — Change `pipeline.py:622` to pass `identity_face` instead of `rendered` to compositor
+2. **Verify anchor correction works** — After fix, output L should be ~108 (not 87)
+3. **Verify flicker reduction** — After fix, L std should be <1.5 (not 19.43)
+
+### Short-term
+4. **Add face map comparison test** — Assert output L within 5 of reference
+5. **Add flicker test** — Assert L std < 1.5 across 100 frames
+6. **Update docs** — ARCHITECTURE.md, README.md with Face OS architecture
+
+### Medium-term
+7. **Prototype lasso cut** — MediaPipe Selfie Segmentation for person isolation + background composite
+8. **Multi-anchor system** — Currently 1 anchor, need 7+ (frontal, smile, left/right yaw, etc.)
+
+---
+
+## Files Modified This Session (Face OS)
+
+| File | Changes |
+|---|---|
+| `face_os/detect_track.py` | MediaPipe FaceDetection, occupancy gate, no fallback |
+| `face_os/pipeline.py` | State machine, face_track gate for identity update |
+| `face_os/canonical_map.py` | Fix embedding extraction from face region (not full image) |
+| `face_os/face_detector.tflite` | **NEW** — MediaPipe face detection model |
+| `tests/face_os/test_detection.py` | **NEW** — 14 tests (MediaPipe, poster, identity, occupancy) |
+| `AGENTS.md` | **This file** — updated with Face OS state |
+
+---
+
+## Git History (Face OS Session)
+
+```
+834fad1 fix: face lock state machine — prevent background memory bleed
+f51442f fix: region confidence + lower hypothesis threshold
+83a8e36 fix: face mask confinement
+d4dca2d clean identity_state.py rewrite
+a2d5564 wire hypotheses + tune anchor
+```
+
+---
+
+## User Context
+
+- **Content**: Portrait-mode studio videos (not cricket — cricket was a test video)
+- **Reference**: `expectation.png` — enhanced portrait of user in studio
+- **Side screen**: User has a side screen that plays videos; colored light reflects onto face → causes expected flicker
+- **Background**: Never changes throughout video — good candidate for lasso cut approach
+- **Logo**: Needs to be preserved (not impacted by grading) and placed on left side
+- **Fade**: First/last frame should be black with smooth transition
+- **Test video**: `clips_test/test_clip.mp4` (640x360, 30fps, 15s, 450 frames)
 ├── expectation.png      # Reference image for grading
 ├── tests/               # Test suite (145 tests)
 │   ├── test_ref_grade.py       # 37 tests
