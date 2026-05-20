@@ -218,23 +218,26 @@ class CropPlanner:
         else:
             crop_h = int(crop_w / target_aspect)
 
-        # ─── Step 2: Position face to match expectation composition ───
+        # ─── Step 2: Position face — preserve source headroom ───
 
-        # We want face center at expectation's position (41.1%)
-        # But source face may be higher — in that case, use source face position
-        target_center_in_crop = self.reference.face_center_y_pct  # 0.411
+        # Architecture: source is ground truth for POSITION
+        # We can't add headroom that doesn't exist in source
+        # So we PRESERVE the source's headroom ratio
 
-        # What's the face center if we use crop_y = 0?
-        default_center = face_cy / max(crop_h, 1)
+        source_headroom = fy / max(src_h, 1)  # e.g., 68/360 = 0.189
 
-        if default_center <= target_center_in_crop:
-            # Face is higher than target — we can shift crop down
-            # to position face at target center
-            crop_y = face_cy - int(crop_h * target_center_in_crop)
-            crop_y = max(0, crop_y)
-        else:
-            # Face is lower than target — use crop_y = 0
-            crop_y = 0
+        # Minimum headroom from reference set (p7.png has 21.6%)
+        min_headroom = 0.15  # Absolute minimum for hair preservation
+
+        # Use the BETTER of source headroom or minimum
+        target_headroom = max(source_headroom, min_headroom)
+
+        # Position crop so face top is at target_headroom of crop height
+        # face_top_in_crop = fy - crop_y
+        # target_headroom = (fy - crop_y) / crop_h
+        # crop_y = fy - target_headroom * crop_h
+        crop_y = int(fy - target_headroom * crop_h)
+        crop_y = max(0, crop_y)
 
         # Horizontal: center on face
         crop_x = face_cx - crop_w // 2

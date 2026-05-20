@@ -1019,6 +1019,42 @@ class TestComposition:
         assert ref.headroom_pct >= 0.15, \
             f"Reference headroom {ref.headroom_pct:.1%} < 15% minimum"
 
+    def test_crop_never_cuts_into_headroom(self):
+        """Crop must never start above face top (would cut hair).
+
+        User: 'hairs do not get cut off'
+        The crop must PRESERVE source headroom, never reduce it.
+        """
+        planner = CropPlanner(reference_image="expectation.png")
+
+        # Source with face at various positions
+        for face_y in [30, 68, 100, 150]:
+            src_h, src_w = 360, 640
+            from face_os.types import FaceTrack, FaceDetection
+            track = FaceTrack(track_id=0)
+            track.smooth_bbox = (200, face_y, 135, 135)
+            track.detection = FaceDetection(
+                bbox=(200, face_y, 135, 135), confidence=0.8, is_target=True
+            )
+            planner._smooth_x = None  # Reset smoothing
+            planner._smooth_y = None
+            planner._smooth_w = None
+            planner._smooth_h = None
+
+            plan = planner.plan_crop((src_h, src_w), track, None)
+
+            # Crop must not start above face top
+            face_top = face_y
+            assert plan.src_y <= face_top, \
+                f"Crop starts at {plan.src_y} but face top is at {face_top}"
+
+            # Headroom must be preserved (not reduced from source)
+            source_headroom = face_y / src_h
+            face_top_in_crop = face_top - plan.src_y
+            output_headroom = face_top_in_crop / max(plan.src_h, 1)
+            assert output_headroom >= source_headroom * 0.8, \
+                f"Headroom {output_headroom:.1%} reduced from source {source_headroom:.1%}"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # FAILURE CONDITIONS
