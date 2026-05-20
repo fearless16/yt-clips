@@ -174,7 +174,7 @@ class FaceOSPipeline:
 
         # Set reference embedding on verification gate
         if self.identity.embeddings:
-            self.identity_state.verification_gate.set_reference_embedding(
+            self.identity_state._gate.set_reference_embedding(
                 self.identity.embeddings[0]
             )
             print(f"  Verification gate: embedding_tolerance=0.45, min_face_pixels=4000, liveness_threshold=0.5")
@@ -570,9 +570,9 @@ class FaceOSPipeline:
                 # Face mask too small — skip update
                 pass
             else:
-                # Get verification parameters
+                # Get verification parameters from track
                 face_bbox = face_track.smooth_bbox
-                landmarks_pts = np.array(landmarks.xy) if landmarks and hasattr(landmarks, 'xy') and landmarks.xy is not None else None
+                landmarks_pts = face_track.mesh_468[:, :2] if hasattr(face_track, 'mesh_468') and face_track.mesh_468 is not None else None
                 embedding = face_track.detection.embedding if face_track.detection else None
 
                 # Update with verification gate

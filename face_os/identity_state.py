@@ -74,28 +74,30 @@ class VerificationGate:
         """Set reference embedding for identity matching."""
         self._reference_embedding = embedding
 
-    def check(
+    def verify(
         self,
-        face_bbox: Tuple[int, int, int, int],
+        canonical_face: np.ndarray,
+        face_bbox: Optional[Tuple[int, int, int, int]],
         landmarks_pts: Optional[np.ndarray],
-        embedding: Optional[np.ndarray],
+        embedding: Optional[np.ndarray] = None,
     ) -> Tuple[bool, str]:
         """Run all verification checks.
 
         Args:
+            canonical_face: Face image in canonical space
             face_bbox: (x, y, w, h) bounding box
-            landmarks_pts: (N, 2) landmark coordinates
+            landmarks_pts: (N, 2) or (N, 3) landmark coordinates
             embedding: Face embedding vector
 
         Returns:
             (passed, reason) — True if all checks pass
         """
-        x, y, w, h = face_bbox
-
         # Gate 1: Face pixel count
-        face_pixels = w * h
-        if face_pixels < self.min_face_pixels:
-            return False, f"face_too_small: {face_pixels} < {self.min_face_pixels}"
+        if face_bbox is not None:
+            x, y, w, h = face_bbox
+            face_pixels = w * h
+            if face_pixels < self.min_face_pixels:
+                return False, f"face_too_small: {face_pixels} < {self.min_face_pixels}"
 
         # Gate 2: Embedding identity check
         if self._reference_embedding is not None and embedding is not None:
@@ -105,7 +107,9 @@ class VerificationGate:
 
         # Gate 3: Liveness check (landmark jitter)
         if landmarks_pts is not None:
-            self._landmark_history.append(landmarks_pts.copy())
+            # Use only x,y for jitter calculation
+            pts_2d = landmarks_pts[:, :2] if landmarks_pts.shape[1] > 2 else landmarks_pts
+            self._landmark_history.append(pts_2d.copy())
             if len(self._landmark_history) > self._max_history:
                 self._landmark_history = self._landmark_history[-self._max_history:]
 
@@ -531,7 +535,7 @@ class IdentityState:
         self.hypotheses = IdentityHypothesisSpace(max_hypotheses=10)
 
         # Verification Gate
-        self.verification_gate = VerificationGate(
+        self._gate = VerificationGate(
             embedding_tolerance=0.45,
             min_face_pixels=4000,
             liveness_threshold=0.5,
@@ -615,19 +619,16 @@ class IdentityState:
             lighting: Lighting label
             region_mask: Region-specific learning rates
             face_bbox: (x, y, w, h) bounding box for verification
-            landmarks_pts: (N, 2) landmark coordinates for liveness
+            landmarks_pts: (N, 2) or (N, 3) landmark coordinates for liveness
             embedding: Face embedding for identity check
 
         Returns:
             True if update was applied, False if rejected by verification gate
         """
         # VERIFICATION GATE: Check all gates before updating
-        if face_bbox is not None:
-            passed, reason = self.verification_gate.check(
-                face_bbox, landmarks_pts, embedding
-            )
-            if not passed:
-                # Reject this observation — do not update identity
+        if face_bbox is not None or landmarks_pts is not None:
+            ok, _ = self._gate.verify(canonical_face, face_bbox, landmarks_pts, embedding)
+            if not ok:
                 return False
 
         h, w = canonical_face.shape[:2]
@@ -709,8 +710,8 @@ class IdentityState:
         # High confidence → more identity, less source
         # Low confidence → less identity, more source
         mean_conf = float(np.mean(confidence))
-        low_blend = 0.7 + 0.15 * mean_conf
-        high_blend = 0.3 - 0.15 * mean_conf
+        low_blend = 0.85 + 0.1 * mean_conf
+        high_blend = 0.15 - 0.1 * mean_conf
 
         conf_3d = confidence[:, :, np.newaxis]
         effective_low_blend = low_blend * conf_3d
