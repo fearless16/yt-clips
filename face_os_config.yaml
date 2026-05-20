@@ -1,0 +1,92 @@
+# Face OS Configuration
+# Personal Face Operating System — overfit mode for one face, one environment
+
+identity:
+  reference_dir: "photos/"
+  reference_image: "expectation.png"
+  embedding_tolerance: 0.50
+  max_embeddings: 50
+
+detection:
+  model: "hog"
+  min_face_size: 60
+  detection_interval: 5
+  max_lost_frames: 30
+  smoothing_alpha: 0.3
+
+landmarks:
+  model: "dlib_68"
+  pose_smoothing: 0.4
+
+canonical:
+  atlas_size: [256, 256]
+  alignment_mode: "similarity"
+  enrollment_frames: 30
+  min_confidence_for_update: 0.7
+
+crop:
+  output_size: [1080, 1920]
+  headroom_ratio: 0.30
+  face_target_width: 270
+  smoothing_alpha: 0.25
+  max_crop_velocity: 50
+  protect_forehead: true
+  allow_bottom_crop: true
+
+temporal:
+  identity_inertia: 0.85
+  flicker_threshold: 15.0
+  temporal_window: 5
+  use_motion_compensation: true
+
+enhance:
+  eye_boost: 1.5
+  brow_boost: 1.3
+  beard_boost: 1.2
+  contour_boost: 1.2
+  skin_smoothing: 0.3
+  sharpen_amount: 0.3
+  sharpen_radius: 1.0
+  use_cinematic_noise: true
+  noise_strength: 0.02
+
+memory:
+  accumulation_rate: 0.1
+  decay_rate: 0.01
+  min_observations: 5
+  max_age_frames: 300
+  use_pose_weighting: true
+
+compositor:
+  confidence_threshold: 0.3
+  blend_mode: "poisson"
+  feather_pixels: 10
+  use_light_matching: true
+
+export:
+  codec: "libx264"
+  crf: 18
+  preset: "slow"
+  bitrate: "25M"
+  audio_bitrate: "320k"
+  fps: 30
+  pixel_format: "yuv420p"
+  timeout_seconds: 900
+  fade_in: 0.5
+  fade_out: 0.5
+
+qc:
+  min_face_detection_rate: 0.80
+  max_identity_drift: 20.0
+  max_flicker_score: 5.0
+  min_sharpness: 10.0
+  check_av_sync: true
+
+paths:
+  temp: "temp/"
+  output: "output/face_os/"
+  logs: "logs/"
+
+logging:
+  level: "INFO"
+  log_file: "logs/face_os.log"
