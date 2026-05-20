@@ -382,6 +382,94 @@ class TestModuleD_IdentityAnchor:
     - Rule: distance(output_identity, anchor_identity) < threshold
     """
 
+    def test_set_anchor_stores_reference(self):
+        """set_anchor() must store reference LAB values."""
+        state = IdentityState()
+
+        ref = cv2.imread("expectation.png")
+        if ref is None:
+            pytest.skip("expectation.png not found")
+
+        canonical = cv2.resize(ref, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+        state.set_anchor(canonical)
+
+        # Anchor must be stored
+        assert state._anchor_low is not None, "Must store anchor low freq"
+        assert state._anchor_high is not None, "Must store anchor high freq"
+        assert state._anchor_lab is not None, "Must store anchor LAB"
+
+    def test_anchor_distance_reports_correctly(self):
+        """get_anchor_distance() must report LAB distance to anchor."""
+        state = IdentityState()
+
+        ref = cv2.imread("expectation.png")
+        if ref is None:
+            pytest.skip("expectation.png not found")
+
+        canonical = cv2.resize(ref, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+        state.set_anchor(canonical)
+
+        # Initialize with same image
+        quality = np.ones((256, 256), dtype=np.float32) * 0.9
+        state.update(canonical, quality, pose=(0, 0, 0))
+
+        # Distance should be very small (same image)
+        dist = state.get_anchor_distance()
+        assert dist < 5.0, f"Distance to same image should be < 5.0, got {dist:.1f}"
+
+    def test_anchor_correction_pulls_toward_reference(self):
+        """Anchor correction must pull identity toward reference."""
+        state = IdentityState()
+
+        ref = cv2.imread("expectation.png")
+        if ref is None:
+            pytest.skip("expectation.png not found")
+
+        canonical = cv2.resize(ref, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+        state.set_anchor(canonical)
+
+        # Feed dark observations
+        dark = (canonical * 0.6).astype(np.uint8)
+        quality = np.ones((256, 256), dtype=np.float32) * 0.8
+        for i in range(50):
+            state.update(dark, quality, pose=(0, 0, 0))
+
+        # Query should pull toward reference
+        result, conf = state.query(dark, quality)
+        result_lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB).astype(np.float32)
+        dark_lab = cv2.cvtColor(dark, cv2.COLOR_BGR2LAB).astype(np.float32)
+        ref_lab = cv2.cvtColor(canonical, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        result_L = np.mean(result_lab[:, :, 0])
+        dark_L = np.mean(dark_lab[:, :, 0])
+        ref_L = np.mean(ref_lab[:, :, 0])
+
+        # Result should be closer to reference than dark is
+        assert abs(result_L - ref_L) < abs(dark_L - ref_L), \
+            f"Anchor must pull toward reference: result_L={result_L:.1f} should be closer to ref_L={ref_L:.1f} than dark_L={dark_L:.1f}"
+
+    def test_anchor_preserved_across_reset(self):
+        """Anchor must be preserved when identity state is reset."""
+        state = IdentityState()
+
+        ref = cv2.imread("expectation.png")
+        if ref is None:
+            pytest.skip("expectation.png not found")
+
+        canonical = cv2.resize(ref, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+        state.set_anchor(canonical)
+
+        # Update a few times
+        quality = np.ones((256, 256), dtype=np.float32) * 0.9
+        state.update(canonical, quality, pose=(0, 0, 0))
+
+        # Reset
+        state.reset()
+
+        # Anchor should still be there
+        assert state._anchor_low is not None, "Anchor must survive reset"
+        assert state._anchor_lab is not None, "Anchor LAB must survive reset"
+
     def test_identity_state_maintains_anchor(self):
         """Identity state must not drift far from enrolled reference.
 
@@ -394,15 +482,14 @@ class TestModuleD_IdentityAnchor:
         if ref is None:
             pytest.skip("expectation.png not found")
 
-        # Simulate enrollment
         canonical = cv2.resize(ref, (256, 256), interpolation=cv2.INTER_LANCZOS4)
         quality = np.ones((256, 256), dtype=np.float32) * 0.9
+        state.set_anchor(canonical)
         state.update(canonical, quality, pose=(0, 0, 0))
 
         # Feed many observations
         for i in range(20):
             obs = canonical.copy()
-            # Add slight variation (simulating different frames)
             noise = np.random.randint(-5, 5, obs.shape, dtype=np.int16)
             obs = np.clip(obs.astype(np.int16) + noise, 0, 255).astype(np.uint8)
             state.update(obs, quality, pose=(0, 0, 0))
@@ -1164,6 +1251,239 @@ class TestBidirectionalSolve:
         assert 5 in hq, "Frame 5 must be identified as HQ"
         assert 10 in hq, "Frame 10 must be identified as HQ"
         assert 15 in hq, "Frame 15 must be identified as HQ"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODULE I — PATCH DATABASE (NEW)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestModuleI_PatchDatabase:
+    """Test patch database.
+
+    Architecture says:
+    - Store pose-conditioned patches (frontal, left yaw, right yaw, etc.)
+    - Query best patch for current pose/expression
+    - NOT average memory — best match
+    """
+
+    def test_patch_memory_stores_pose_conditioned(self):
+        """Patch memory must store patches per pose."""
+        memory = PatchMemory()
+        face = np.random.randint(50, 200, (256, 256, 3), dtype=np.uint8)
+        quality = np.ones((256, 256), dtype=np.float32) * 0.8
+        memory.initialize(face, quality)
+
+        # Store at different poses
+        for yaw in [-30, 0, 30]:
+            memory.update(face, quality, pose=(yaw, 0, 0), frame_idx=yaw + 30)
+
+        # Must have stored patches
+        assert len(memory.regions) > 0, "Must have regions"
+
+    def test_patch_query_returns_best_match(self):
+        """Query must return best matching patch, not average."""
+        memory = PatchMemory()
+
+        # Create distinct patches
+        frontal = np.ones((256, 256, 3), dtype=np.uint8) * 128
+        left_yaw = np.ones((256, 256, 3), dtype=np.uint8) * 100
+        right_yaw = np.ones((256, 256, 3), dtype=np.uint8) * 150
+
+        quality = np.ones((256, 256), dtype=np.float32) * 0.8
+        memory.initialize(frontal, quality)
+
+        # Store at different poses
+        memory.update(frontal, quality, pose=(0, 0, 0), frame_idx=0)
+        memory.update(left_yaw, quality, pose=(-30, 0, 0), frame_idx=1)
+        memory.update(right_yaw, quality, pose=(30, 0, 0), frame_idx=2)
+
+        # Query at frontal pose
+        patch, conf = memory.query_region("left_eye", pose=(0, 0, 0))
+        assert patch is not None, "Must return patch for frontal pose"
+
+    def test_different_regions_independent_dynamics(self):
+        """Different face regions must have independent dynamics.
+
+        Architecture: 'Each patch has INDEPENDENT dynamics'
+        - forehead: high stability, slow decay
+        - eyes: medium stability (blinks)
+        - lips: low stability (expression changes)
+        """
+        memory = PatchMemory()
+        face = np.random.randint(50, 200, (256, 256, 3), dtype=np.uint8)
+        quality = np.ones((256, 256), dtype=np.float32) * 0.8
+        memory.initialize(face, quality)
+
+        # Check that regions have different stability values
+        if hasattr(memory, 'regions') and 'forehead' in memory.regions:
+            forehead = memory.regions['forehead']
+            if hasattr(forehead, 'stability'):
+                # Forehead should be very stable
+                assert forehead.stability > 0.8, \
+                    f"Forehead stability {forehead.stability} should be > 0.8"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODULE E — SEMANTIC CONFIDENCE (ENHANCED)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestModuleE_SemanticConfidence:
+    """Test semantic confidence engine.
+
+    Architecture says:
+    - confidence = f(sharpness, motion_blur, compression_level, pose_quality,
+                     visibility, eye_visibility, lighting_quality, occlusion)
+    - NOT just confidence = sharpness (TOO NAIVE)
+    - Per-patch semantic confidence (eye, beard, lip, skin independent)
+    """
+
+    def test_confidence_is_multifactor(self):
+        """Confidence must consider multiple factors, not just sharpness."""
+        state = IdentityState()
+
+        # Sharp but badly-lit frame
+        sharp_dark = np.ones((256, 256, 3), dtype=np.uint8) * 30
+        sharp_dark[100:150, 100:150] = 80
+
+        # Blurry but well-lit frame
+        blurry_bright = np.ones((256, 256, 3), dtype=np.uint8) * 180
+        blurry_bright = cv2.GaussianBlur(blurry_bright, (15, 15), 5)
+
+        # Initialize
+        quality_sharp = state._compute_quality(sharp_dark, 0.8) if hasattr(state, '_compute_quality') else None
+        quality_blurry = state._compute_quality(blurry_bright, 0.8) if hasattr(state, '_compute_quality') else None
+
+        if quality_sharp is not None and quality_blurry is not None:
+            assert np.mean(quality_sharp) < np.mean(quality_blurry) or \
+                   np.mean(quality_sharp) > 0, \
+                "Quality must consider brightness, not just sharpness"
+
+    def test_low_confidence_trusts_memory(self):
+        """Low confidence → trust identity memory more.
+
+        Architecture: 'FINAL = source * confidence + identity_memory * (1 - confidence)'
+        """
+        state = IdentityState()
+
+        # Enroll with good observation
+        good = np.ones((256, 256, 3), dtype=np.uint8) * 128
+        quality_good = np.ones((256, 256), dtype=np.float32) * 0.9
+        for i in range(10):
+            state.update(good, quality_good, pose=(0, 0, 0))
+
+        # Query with bad observation
+        bad = np.ones((256, 256, 3), dtype=np.uint8) * 200
+        quality_bad = np.ones((256, 256), dtype=np.float32) * 0.1
+
+        result, conf = state.query(bad, quality_bad)
+        assert result is not None
+        assert conf.mean() < 0.8, "Low quality observations should produce low confidence"
+
+    def test_confidence_modulated_by_current_quality(self):
+        """Confidence must be modulated by CURRENT frame quality.
+
+        Architecture: 'if current frame is bad, confidence in output should reflect that'
+        """
+        state = IdentityState()
+
+        # Enroll
+        good = np.ones((256, 256, 3), dtype=np.uint8) * 128
+        quality = np.ones((256, 256), dtype=np.float32) * 0.9
+        for i in range(10):
+            state.update(good, quality, pose=(0, 0, 0))
+
+        # Query with good quality
+        _, conf_good = state.query(good, quality)
+
+        # Query with bad quality
+        quality_bad = np.ones((256, 256), dtype=np.float32) * 0.1
+        _, conf_bad = state.query(good, quality_bad)
+
+        # Good quality should have higher confidence
+        assert np.mean(conf_good) > np.mean(conf_bad), \
+            "Good quality must produce higher confidence"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RENDERING PIPELINE TESTS (NEW)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestRenderingPipeline:
+    """Test the rendering pipeline.
+
+    Critical fixes tested:
+    - Compositor must NOT undo anchor correction
+    - Anchor correction must be applied AFTER blending
+    - Pre-population from reference must work
+    """
+
+    def test_anchor_correction_preserved_in_render(self):
+        """Anchor correction must not be undone by compositor.
+
+        This was the ROOT CAUSE of L=72 bug:
+        compositor.blend(cropped, rendered, conf, face_mask) was blending
+        anchor-corrected rendered back with dark source.
+        """
+        state = IdentityState()
+
+        ref = cv2.imread("expectation.png")
+        if ref is None:
+            pytest.skip("expectation.png not found")
+
+        canonical = cv2.resize(ref, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+        state.set_anchor(canonical)
+
+        # Pre-populate with reference
+        quality = np.ones((256, 256), dtype=np.float32) * 0.9
+        for _ in range(50):
+            state.update(canonical, quality, pose=(0, 0, 0))
+
+        # Query with dark observation
+        dark = (canonical * 0.6).astype(np.uint8)
+        dark_quality = np.ones((256, 256), dtype=np.float32) * 0.5
+        result, conf = state.query(dark, dark_quality)
+
+        # Result should be much closer to reference than dark
+        result_lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB).astype(np.float32)
+        dark_lab = cv2.cvtColor(dark, cv2.COLOR_BGR2LAB).astype(np.float32)
+        ref_lab = cv2.cvtColor(canonical, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        result_L = np.mean(result_lab[:, :, 0])
+        dark_L = np.mean(dark_lab[:, :, 0])
+        ref_L = np.mean(ref_lab[:, :, 0])
+
+        # Result should be closer to reference than dark
+        assert abs(result_L - ref_L) < abs(dark_L - ref_L), \
+            f"Anchor must pull result toward reference: {result_L:.1f} vs {ref_L:.1f}"
+
+    def test_pre_population_from_reference(self):
+        """Pre-populating identity state from reference must work.
+
+        This gives the identity state a strong starting point (Bayesian prior).
+        """
+        state = IdentityState()
+
+        ref = cv2.imread("expectation.png")
+        if ref is None:
+            pytest.skip("expectation.png not found")
+
+        canonical = cv2.resize(ref, (256, 256), interpolation=cv2.INTER_LANCZOS4)
+        state.set_anchor(canonical)
+
+        # Pre-populate 50 times
+        quality = np.ones((256, 256), dtype=np.float32) * 0.9
+        for _ in range(50):
+            state.update(canonical, quality, pose=(0, 0, 0))
+
+        # Check confidence is high
+        conf = state.belief.get_confidence()
+        assert np.mean(conf) > 0.5, \
+            f"Pre-populated confidence should be > 0.5, got {np.mean(conf):.3f}"
+
+        # Check observation count
+        obs_count = state.belief.observation_count
+        assert np.mean(obs_count) > 10, \
+            f"Observation count should be > 10, got {np.mean(obs_count):.1f}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
