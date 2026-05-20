@@ -178,10 +178,10 @@ class FaceOSPipeline:
                 # Pre-populate identity state with MULTIPLE reference observations
                 # This gives the identity state a strong starting point
                 # Like a Bayesian prior — strong belief from reference
-                for _ in range(50):
+                for _ in range(100):
                     self.identity_state.update(ref_bgr, quality, pose=(0, 0, 0))
 
-                print(f"  Identity pre-populated with 50 reference observations")
+                print(f"  Identity pre-populated with 100 reference observations")
 
         self._enrolled = True
         print("  Enrollment complete.")
@@ -489,7 +489,7 @@ class FaceOSPipeline:
         identity_face = None
         identity_confidence = None
         if canonical_face is not None and quality_map is not None:
-            identity_face, identity_confidence = self.identity_state.query(canonical_face, quality_map)
+            identity_face, identity_confidence = self.identity_state.query(canonical_face, quality_map, pose=pose)
 
         # 7. Crop planning
         crop_plan = self.crop.plan_crop(frame.shape[:2], face_track, landmarks)
@@ -585,8 +585,8 @@ class FaceOSPipeline:
                 if self.identity_state.is_initialized():
                     # Compute quality map for current frame
                     quality_map = self._compute_quality_map(solved_face, face_track.detection.confidence if face_track and face_track.detection else 0.5)
-                    identity_face, identity_conf = self.identity_state.query(solved_face, quality_map)
-                    # Use anchor-corrected identity instead of raw solved face
+                    # Get raw identity (anchor-corrected) — compositor handles blending
+                    identity_face, identity_conf = self.identity_state.query_identity(quality_map)
                     solved_face = identity_face
                     solved_conf = identity_conf
 
@@ -611,8 +611,7 @@ class FaceOSPipeline:
                 blended = np.clip(blended, 0, 255).astype(np.uint8)
 
                 # Module D: Apply anchor correction AFTER blending
-                # This pulls the blended result toward reference, ensuring
-                # identity stays close to anchor even with low confidence
+                # query() corrects in canonical space, this corrects in source space
                 if self.identity_state.is_initialized() and face_mask is not None:
                     blended = self._apply_anchor_to_frame(blended, face_mask)
 
