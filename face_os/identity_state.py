@@ -305,8 +305,17 @@ class IdentityState:
         # Get identity's best appearance
         identity = self.belief.reconstruct()
 
-        # Get confidence
-        confidence = self.belief.get_confidence()
+        # Get confidence (based on accumulated observations)
+        base_confidence = self.belief.get_confidence()
+
+        # Modulate by CURRENT quality — if current frame is bad,
+        # confidence in the output should reflect that
+        # Architecture: 'trust source? or trust identity memory?'
+        current_quality = np.clip(quality_map, 0, 1)
+        # High current quality → trust source more (conf closer to 0.5)
+        # Low current quality → trust identity more (conf closer to 1.0)
+        # But we return confidence as "how much to trust identity"
+        confidence = base_confidence * (0.5 + 0.5 * current_quality)
 
         # Frequency-aware blending
         low_curr, high_curr = self.freq.decompose(canonical_face)
