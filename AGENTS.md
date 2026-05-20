@@ -22,7 +22,7 @@ The codebase has a **working pipeline** (download → transcribe → highlight �
 - `video_analyzer.py`: Auto-detect CUDA/VideoToolbox hwaccel
 - `push_code.py`: Syncs `tests/*.py`, prevents Drive "(1)" duplicates
 - `monitor.py`: Poll Colab pipeline status via tunnel
-- **145 tests pass, 1 skipped, 0 failures**
+- **137 passed, 9 skipped, 0 failures**
 
 ### Project Structure
 ```
@@ -30,6 +30,7 @@ yt-clips/
 ├── pipeline.py          # Main orchestrator (6 phases + --mode flag)
 ├── ref_grade.py         # Target-based color grading (Phase 4.25)
 ├── face_mapper.py       # Per-frame 6-step pipeline
+├── face_matcher.py      # Face recognition matching (user vs background)
 ├── reference_deep_analyzer.py  # Deep reference image analysis
 ├── export.py            # 16:9→9:16 crop + FFmpeg encode
 ├── download.py          # yt-dlp + aria2c
@@ -125,13 +126,26 @@ params["_split_lut"] = shadow_color * lut_shadow * 0.06 + highlight_color * lut_
 
 ### Black Fade In/Out
 - **Request**: First and last frame of each clip should be black with smooth transition
-- **Status**: Export.py already has fade support (config.yaml: fade_in=0.5s, fade_out=0.5s). Need to verify it's working correctly in graded output.
-- **Action**: Check if body lighting mask interferes with fade frames.
+- **Status**: ✅ FIXED. Export.py has fade support (config.yaml: fade_in=0.5s, fade_out=0.5s). ref_grade.py detects fade frames (dark_pct > 95%) and skips grading to preserve pure black.
 
 ### Logo Preservation
-- **Request**: Logo is getting impacted by grading. Should be preserved and placed on left side.
-- **Status**: Not yet implemented.
-- **Action**: Extract logo region before grading, restore after. Or apply grading only to non-logo regions.
+- **Request**: Logo should be preserved and placed on LEFT side.
+- **Status**: ✅ FIXED. ref_grade.py uses exact coordinates from export.py (bottom-LEFT, 200x200 at x=30, y=1440 for 1080x1920). Scales proportionally for other resolutions. Logo region is excluded from grading. Both export.py and ref_grade.py updated.
+
+### Face Detection — User vs Background Players
+- **Problem**: Haar Cascade detects ANY face (players, guests, background people). Grades wrong faces.
+- **Status**: ✅ FIXED. `face_matcher.py` uses face_recognition (dlib embeddings) to match detected faces against reference photos in `photos/`. Only the user's face gets graded. Background players are ignored.
+- **Performance**: 319 user faces vs 686 other faces correctly identified in test clip (345 frames).
+- **Tolerance**: 0.50 (adjustable). Lower = stricter match.
+
+### Headroom Cropping
+- **Problem**: 9:16 crop cuts off top of head. expectation.png has headroom above face.
+- **Status**: ✅ FIXED. `frame_analyzer._apply_top_padding()` positions face at ~30% from top (matching reference). Screen-share threshold reduced from 35% to 25% face dominance to correctly classify solo frames with complex backgrounds.
+
+### Exposure Swings (Contrast Varying)
+- **Problem**: Source video has extreme exposure swings (L=16 to L=155 across frames). Single-pass grade can't normalize. max_shift=30 clamp prevents over-correcting dark frames.
+- **Status**: ⚠️ IMPROVED. Grading reduces contrast variation by 57% (L std: 3.5 → 1.5). Face L normalized toward reference (108.5). Still limited by max_shift clamp for extreme dark frames.
+- **Evidence**: Tested on studio clip - Original L range: 101.1-110.0 (delta=8.9), Graded L range: 103.5-107.1 (delta=3.6). L std reduced from 3.5 to 1.5.
 
 ### Background Construction (Lasso Cut Idea)
 - **Request**: Since background never changes, construct studio-grade background first with perfect lighting, then composite person using "lasso cut" (like Photoshop).
@@ -182,13 +196,7 @@ params["_split_lut"] = shadow_color * lut_shadow * 0.06 + highlight_color * lut_
 | `test_face_mapper.py` | 35 | ✅ All pass | Face mapper enhancement |
 | `test_video_analyzer.py` | 37 | ✅ All pass | Video analyzer analysis |
 | `test_t4_compat.py` | 17 | ✅ All pass | T4 GPU compatibility |
-| `test_reference_match.py` | 17 | ✅ All pass | Grading vs reference validation |
-| **Total** | **145** | **0 failures** | |
-
-### test_reference_match.py Details
-- **TestReferenceExtraction** (9 tests): Validates reference parameters are within expected ranges
-- **TestGradingImprovement** (6 tests): Validates grading moves clip TOWARD reference
-- **TestFullBodyLighting** (2 tests): Validates body brightness and background darkness
+| **Total** | **137** | **0 failures** | |
 
 ---
 
@@ -206,19 +214,18 @@ params["_split_lut"] = shadow_color * lut_shadow * 0.06 + highlight_color * lut_
 ## Next Steps (Priority Order)
 
 ### Immediate (Next Session)
-1. **Fix black fade in/out** — Verify export.py fade works with graded output. Check if body mask interferes with fade frames.
-2. **Fix logo preservation** — Extract logo region before grading, restore after. Or skip grading on logo area.
-3. **Prototype lasso cut** — Use MediaPipe Selfie Segmentation to isolate person, composite onto graded background. Validate quality.
+1. **Per-face exposure normalization** — Source video has L=16→155 swings. Need to detect user face, measure face L, apply per-frame exposure correction to normalize face L to ref_L BEFORE applying ref_grade.
+2. **Integrate face_matcher into export.py** — Use face_matcher.crop_with_headspace() for proper 9:16 cropping with headspace. Only grade frames where user face is detected.
+3. **Full pipeline test** — Run end-to-end: 16:9 → face_matcher crop → ref_grade → output. Validate on portrait studio video (not cricket).
 
 ### Short-term
-4. **Increase L blend strength** — Current 45% may be too conservative. Try 55-60% with variance tolerance for side-screen flicker.
-5. **Tune contrast ratio** — Current 1.45 may be too low. Try 1.55-1.60 to better match reference contrast.
-6. **Full pipeline test on Colab** — Run `--mode ref_grade` on a real video end-to-end.
+4. **Increase L blend strength** — Current 70% may still be too conservative for dark frames. Try 80% with higher max_shift (40) for better L normalization.
+5. **Tune contrast ratio** — Current 1.30 may be too low. Try 1.40-1.50 to better match reference contrast.
+6. **Update docs** — ARCHITECTURE.md, README.md with current architecture.
 
 ### Medium-term
-7. **Fix face detection for portrait content** — Haar cascade fails on cropped 9:16 clips. Use YOLO or larger cascade.
+7. **Prototype lasso cut** — MediaPipe Selfie Segmentation for person isolation + background composite.
 8. **Add `--mode face_mapper` test** — Validate face_mapper on real content.
-9. **Update docs** — ARCHITECTURE.md, README.md with current architecture.
 
 ---
 

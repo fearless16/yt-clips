@@ -623,13 +623,13 @@ def _build_enhance_stack(
     scale_format = "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"
 
     if logo_enabled:
-        # Circular mask: scale to 200px, apply circular alpha, position bottom-right
-        # Bottom-right: 30px from right, 280px from bottom (above YouTube UI buttons)
+        # Circular mask: scale to 200px, apply circular alpha, position bottom-LEFT
+        # Bottom-left: 30px from left, 280px from bottom (above YouTube UI buttons)
         return (
             f"[v_src]{filter_base}[v_tmp];"
             f"[1:v]scale=200:-1,format=rgba,"
             f"geq=lum='p(X,Y)':a='if(lt(pow(X-W/2,2)+pow(Y-H/2,2),pow(W/2,2)),255,0)'[logo];"
-            f"[v_tmp][logo]overlay=W-w-30:H-h-280,{scale_format}[v_out]"
+            f"[v_tmp][logo]overlay=30:H-h-280,{scale_format}[v_out]"
         )
     else:
         if is_graph:
