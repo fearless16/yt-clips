@@ -141,7 +141,7 @@ class BeliefPixel:
         self.quality_max = quality.copy()
         self.quality_current = quality.copy()
         self.observation_count = np.ones_like(quality)
-        self.variance = np.ones_like(quality) * 5.0
+        self.variance = np.ones_like(quality) * 2.0
         self.last_update_frame[:] = 0
         self.initialized = True
 
@@ -443,16 +443,16 @@ class IdentityState:
         if drift > 30:
             lambda_base = 0.95
         elif drift > 15:
-            lambda_base = 0.80
+            lambda_base = 0.85
         elif drift > 5:
-            lambda_base = 0.60
+            lambda_base = 0.75
         else:
-            lambda_base = 0.40
+            lambda_base = 0.65
 
         obs_count = np.mean(self.belief.observation_count)
         confidence_factor = 1.0 / (1.0 + obs_count * 0.01)
-        lambda_conf = lambda_base * (0.7 + 0.3 * confidence_factor)
-        lambda_clamped = np.clip(lambda_conf, 0.4, 0.95)
+        lambda_conf = lambda_base * (0.9 + 0.1 * confidence_factor)
+        lambda_clamped = np.clip(lambda_conf, 0.65, 0.95)
 
         self.belief.best_low = (
             (1 - lambda_clamped) * self.belief.best_low
@@ -493,6 +493,7 @@ class IdentityState:
         low, high = self.freq.decompose(canonical_face)
         self.belief.update(low, high, quality_map, pose)
 
+        # Anchor correction in update — prevents drift during processing
         self._apply_anchor_correction()
 
         quality_mean = float(np.mean(quality_map))
@@ -511,6 +512,7 @@ class IdentityState:
         self,
         canonical_face: np.ndarray,
         quality_map: np.ndarray,
+        pose: Optional[Tuple[float, float, float]] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         if not self.is_initialized():
             return canonical_face, np.ones(canonical_face.shape[:2], dtype=np.float32) * 0.5
@@ -518,16 +520,24 @@ class IdentityState:
         identity = self.belief.reconstruct()
         base_confidence = self.belief.get_confidence()
 
+        # Phase 4: Check hypotheses for better pose-matched identity
+        if pose is not None:
+            hyp_face, hyp_score = self.hypotheses.query(pose=pose)
+            if hyp_face is not None and hyp_score > 0.6:
+                # Use hypothesis as identity — it's pose-matched
+                identity = hyp_face
+                base_confidence = base_confidence * (0.7 + 0.3 * hyp_score)
+
         current_quality = np.clip(quality_map, 0, 1).astype(np.float32)
 
         # Higher current quality -> slightly more trust in source; lower quality -> identity dominates
-        confidence = base_confidence * (0.7 + 0.3 * current_quality)
+        confidence = base_confidence * (0.9 + 0.1 * current_quality)
 
         low_curr, high_curr = self.freq.decompose(canonical_face)
         low_id, high_id = self.freq.decompose(identity)
 
-        low_blend = 0.5
-        high_blend = 0.15
+        low_blend = 0.75
+        high_blend = 0.25
 
         conf_3d = confidence[:, :, np.newaxis]
         effective_low_blend = low_blend * conf_3d
@@ -547,15 +557,15 @@ class IdentityState:
             drift = _lab_distance(anchor_mean, result_mean)
 
             if drift > 30:
-                lambda_base = 0.90
+                lambda_base = 0.95
             elif drift > 15:
-                lambda_base = 0.70
+                lambda_base = 0.80
             elif drift > 5:
-                lambda_base = 0.50
+                lambda_base = 0.65
             else:
-                lambda_base = 0.30
+                lambda_base = 0.60
 
-            lambda_clamped = np.clip(lambda_base, 0.1, 0.95)
+            lambda_clamped = np.clip(lambda_base, 0.6, 0.95)
 
             low_final = (1 - lambda_clamped) * low_final + lambda_clamped * self._anchor_low
             high_final = (1 - lambda_clamped * 0.2) * high_final + (
@@ -566,6 +576,58 @@ class IdentityState:
         result = np.clip(result, 0, 255).astype(np.uint8)
 
         return result, confidence
+
+    def query_identity(
+        self,
+        quality_map: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Query raw identity memory without blending with source.
+
+        Returns anchor-corrected identity + confidence.
+        The compositor handles blending in source space.
+
+        Args:
+            quality_map: Per-pixel quality (H, W) float32
+
+        Returns:
+            (identity_face, confidence_map) both in canonical space
+        """
+        if not self.is_initialized():
+            h, w = quality_map.shape[:2]
+            return np.zeros((h, w, 3), dtype=np.uint8), np.ones((h, w), dtype=np.float32) * 0.5
+
+        identity = self.belief.reconstruct()
+        base_confidence = self.belief.get_confidence()
+
+        current_quality = np.clip(quality_map, 0, 1).astype(np.float32)
+        confidence = base_confidence * (0.9 + 0.1 * current_quality)
+
+        # Apply anchor correction to raw identity
+        if self._anchor_low is not None and self._anchor_lab is not None:
+            id_lab = cv2.cvtColor(identity, cv2.COLOR_BGR2LAB).astype(np.float32)
+            anchor_mean = np.mean(self._anchor_lab, axis=(0, 1))
+            id_mean = np.mean(id_lab, axis=(0, 1))
+            drift = _lab_distance(anchor_mean, id_mean)
+
+            if drift > 30:
+                lambda_base = 0.95
+            elif drift > 15:
+                lambda_base = 0.85
+            elif drift > 5:
+                lambda_base = 0.75
+            else:
+                lambda_base = 0.65
+
+            lambda_clamped = np.clip(lambda_base, 0.65, 0.95)
+
+            # Pull identity toward anchor
+            id_lab[:, :, 0] = (1 - lambda_clamped) * id_lab[:, :, 0] + lambda_clamped * self._anchor_lab[:, :, 0]
+            id_lab[:, :, 1] = (1 - lambda_clamped) * id_lab[:, :, 1] + lambda_clamped * self._anchor_lab[:, :, 1]
+            id_lab[:, :, 2] = (1 - lambda_clamped) * id_lab[:, :, 2] + lambda_clamped * self._anchor_lab[:, :, 2]
+
+            identity = cv2.cvtColor(np.clip(id_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+        return identity, confidence
 
     def query_region(
         self,
