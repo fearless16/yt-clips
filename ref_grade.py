@@ -128,15 +128,15 @@ def enroll(reference_path: str = "expectation.png") -> Dict:
 
     # Brightness shift: moves L toward reference mean (stored per-frame)
     params["_ref_L"] = ref_L
-    params["_L_blend"] = 0.25  # 25% toward reference brightness
+    params["_L_blend"] = 0.45  # 45% toward reference brightness
 
     # Contrast: stretch around per-frame mean, moderate boost
-    # ref_contrast=58 → ratio=1.2 (gentle stretch)
-    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 48.0, 1.35))
+    # ref_contrast=58 → ratio=1.35
+    params["_contrast_ratio"] = max(1.0, min(ref_contrast / 43.0, 1.45))
 
     # a,b LUTs: blend toward reference target (not amplify from neutral)
-    # a_out = a + (a_target - a) * 0.25 = a * 0.75 + a_target * 0.25
-    blend = 0.25
+    # a_out = a + (a_target - a) * 0.30 = a * 0.70 + a_target * 0.30
+    blend = 0.30
     x = np.arange(256, dtype=np.float32)
     params["_lut_a"] = np.clip(x * (1.0 - blend) + a_target * blend, 0, 255).astype(np.uint8)
     params["_lut_b"] = np.clip(x * (1.0 - blend) + b_target * blend, 0, 255).astype(np.uint8)
