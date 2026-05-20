@@ -383,7 +383,8 @@ def build_identity_profile(
             # Detect face first, then compute embedding from face region
             detections = detect_faces(img)
             if detections:
-                x, y, w, h, conf = detections[0]
+                track = detections[0]
+                x, y, w, h = track.smooth_bbox
                 rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 # face_recognition expects (top, right, bottom, left) format
                 locations = [(y, x + w, y + h, x)]
@@ -403,7 +404,8 @@ def build_identity_profile(
         detections = detect_faces(best_img)
         
         if detections:
-            x, y, fw, fh, conf = detections[0]  # Use first detection
+            track = detections[0]
+            x, y, fw, fh = track.smooth_bbox
             from face_os.landmarks import extract_landmarks
             lm = extract_landmarks(best_img, (x, y, fw, fh))
             if lm is not None:
