@@ -62,16 +62,15 @@ class CompositionReference:
             return cls()  # Use defaults
 
         h, w = img.shape[:2]
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
+        
+        # Use MediaPipe instead of Haar cascade
+        from face_os.detect_track import detect_faces
+        detections = detect_faces(img)
 
-        if len(faces) == 0:
+        if not detections:
             return cls()
 
-        x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+        x, y, fw, fh, conf = detections[0]  # Use first detection
 
         face_top_pct = y / h
         face_height_pct = fh / h
