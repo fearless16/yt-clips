@@ -177,7 +177,8 @@ class FaceOSPipeline:
             self.identity_state._gate.set_reference_embedding(
                 self.identity.embeddings[0]
             )
-            print(f"  Verification gate: embedding_tolerance=0.45, min_face_pixels=4000, liveness_threshold=0.5")
+            # FIX: Read from config dynamically
+            print(f"  Verification gate: embedding_tolerance={cfg.identity.embedding_tolerance}, min_face_pixels={cfg.verification_gate.min_face_pixels}, liveness_threshold={cfg.verification_gate.liveness_threshold}")
 
         # Pre-populate from reference
         if self.identity.enrolled and self.identity.appearance.atlas_rgb is not None:
@@ -494,8 +495,8 @@ class FaceOSPipeline:
             x, y, w, h = face_track.smooth_bbox
             bbox_area = w * h
             # Estimate face occupancy from landmarks spread
-            if hasattr(landmarks, 'xy') and landmarks.xy is not None:
-                pts = np.array(landmarks.xy)
+            if hasattr(landmarks, 'points') and landmarks.points is not None:
+                pts = np.array(landmarks.points)
                 hull_area = cv2.contourArea(cv2.convexHull(pts.astype(np.float32)))
                 occupancy = hull_area / max(bbox_area, 1)
 
@@ -531,6 +532,7 @@ class FaceOSPipeline:
             return frame
 
         # 3. Canonical alignment
+        pose = None  # FIX: Initialize pose to prevent UnboundLocalError
         canonical_face = None
         quality_map = None
         canonical_face_mask = None  # Face mask in canonical space
@@ -541,9 +543,9 @@ class FaceOSPipeline:
                 quality_map = self._compute_quality_map(canonical_face, face_track.detection.confidence)
 
                 # Create face mask in canonical space
-                # Use landmarks to create convex hull, then warp to canonical
-                if hasattr(landmarks, 'xy') and landmarks.xy is not None:
-                    pts = np.array(landmarks.xy, dtype=np.int32)
+                # Use landmarks.points (not xy) to create convex hull, then warp to canonical
+                if hasattr(landmarks, 'points') and landmarks.points is not None:
+                    pts = np.array(landmarks.points, dtype=np.int32)
                     hull = cv2.convexHull(pts)
                     src_mask = np.zeros(frame.shape[:2], dtype=np.float32)
                     cv2.fillConvexPoly(src_mask, hull, 1.0)
@@ -572,7 +574,11 @@ class FaceOSPipeline:
             else:
                 # Get verification parameters from track
                 face_bbox = face_track.smooth_bbox
-                landmarks_pts = face_track.mesh_468[:, :2] if hasattr(face_track, 'mesh_468') and face_track.mesh_468 is not None else None
+                
+                # FIX: Robustly check for 478 (V4) or 468 (legacy) mesh attributes
+                mesh = getattr(face_track, 'mesh_478', getattr(face_track, 'mesh_468', None))
+                landmarks_pts = mesh[:, :2] if mesh is not None else (landmarks.points[:, :2] if landmarks and hasattr(landmarks, 'points') else None)
+                
                 embedding = face_track.detection.embedding if face_track.detection else None
 
                 # Update with verification gate
@@ -636,22 +642,34 @@ class FaceOSPipeline:
         )
 
         # 11. Composite — USE IDENTITY FACE, NOT RENDERED
-        if identity_face is not None and face_mask is not None:
-            # Warp identity face back to cropped space
-            # (simplified — use confidence-weighted blend)
-            conf = identity_confidence if identity_confidence is not None else np.ones(cropped.shape[:2], dtype=np.float32) * 0.3
-
-            if conf.shape[:2] != cropped.shape[:2]:
-                conf = cv2.resize(conf, (cropped.shape[1], cropped.shape[0]))
-
-            # CRITICAL FIX: Use identity_face (anchor-corrected) instead of rendered
-            # identity_face comes from identity_state.query() which applies anchor correction
-            # rendered comes from face_enhance.render_frame() which has NO brightness correction
-            output = self.compositor.composite(
-                cropped, identity_face,
-                confidence=ConfidenceMap(combined=conf),
-                face_mask=face_mask,
-            )
+        if identity_face is not None and face_mask is not None and landmarks is not None:
+            # Warp identity face from canonical space back to crop space
+            try:
+                adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
+                if adjusted_lm:
+                    _, _, M = canonical_map.warp_to_canonical(cropped, adjusted_lm)
+                    M_inv = np.linalg.inv(M)[:2]
+                    identity_in_crop = cv2.warpAffine(
+                        identity_face, M_inv, (cropped.shape[1], cropped.shape[0]),
+                        flags=cv2.INTER_LANCZOS4,
+                        borderMode=cv2.BORDER_REFLECT,
+                    )
+                    
+                    # Warp confidence to crop space
+                    conf = identity_confidence if identity_confidence is not None else np.ones((256, 256), dtype=np.float32) * 0.3
+                    if conf.shape[:2] != cropped.shape[:2]:
+                        conf = cv2.resize(conf, (cropped.shape[1], cropped.shape[0]))
+                    
+                    # CRITICAL: Use identity_in_crop (anchor-corrected, warped to crop space)
+                    output = self.compositor.composite(
+                        cropped, identity_in_crop,
+                        confidence=ConfidenceMap(combined=conf),
+                        face_mask=face_mask,
+                    )
+                else:
+                    output = rendered
+            except Exception:
+                output = rendered
         else:
             output = rendered
 

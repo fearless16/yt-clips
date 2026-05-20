@@ -80,7 +80,7 @@ compositor:
   confidence_threshold: 0.3
   blend_mode: "poisson"
   feather_pixels: 10
-  use_light_matching: true
+  use_light_matching: false  # Disabled: was darkening identity to match source
 
 export:
   codec: "libx264"
