@@ -42,6 +42,18 @@ from face_os.types import ConfidenceMap
 
 cfg = get_config()
 
+# Region definitions for region-specific confidence
+# These match the regions in patch_memory.py
+REGION_DEFS = {
+    'left_eye': {'bounds': (0.20, 0.28, 0.42, 0.42)},
+    'right_eye': {'bounds': (0.58, 0.28, 0.80, 0.42)},
+    'beard': {'bounds': (0.25, 0.55, 0.75, 0.85)},
+    'skin': {'bounds': (0.20, 0.40, 0.80, 0.65)},
+    'forehead': {'bounds': (0.25, 0.10, 0.75, 0.30)},
+    'nose': {'bounds': (0.40, 0.38, 0.60, 0.55)},
+    'lips': {'bounds': (0.35, 0.60, 0.65, 0.72)},
+}
+
 
 class FrequencyDecomposition:
     """Separates image into low and high frequency components.
@@ -863,6 +875,42 @@ class IdentityState:
         identity = self.belief.reconstruct()
         lab = cv2.cvtColor(identity, cv2.COLOR_BGR2LAB).astype(np.float32)
         return lab[:, :, 0]
+
+    def compute_region_confidence(self) -> Dict[str, float]:
+        """Compute confidence for each face region.
+
+        Region-specific confidence based on:
+        - Observation count per region
+        - Variance per region
+        - Quality per region
+
+        Returns:
+            Dict of region_name → confidence (0-1)
+        """
+        if not self.is_initialized():
+            return {name: 0.0 for name in REGION_DEFS}
+
+        h, w = self.belief.best_low.shape[:2]
+        confidence = self.belief.get_confidence()
+
+        region_confidence = {}
+        for name, rdef in REGION_DEFS.items():
+            # Get region bounds
+            x1f, y1f, x2f, y2f = rdef['bounds']
+            x1, y1 = int(x1f * w), int(y1f * h)
+            x2, y2 = int(x2f * w), int(y2f * h)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+
+            if x2 <= x1 or y2 <= y1:
+                region_confidence[name] = 0.0
+                continue
+
+            # Extract region confidence
+            region_conf = confidence[y1:y2, x1:x2]
+            region_confidence[name] = float(np.mean(region_conf))
+
+        return region_confidence
 
     def get_pose_at_best(self) -> Optional[Tuple[float, float, float]]:
         """Get the pose when the best observation was captured."""
