@@ -184,7 +184,10 @@ class BeliefPixel:
         # === OBSERVATION COUNT ===
         self.observation_count += quality
         self.quality_current = quality
-        self.last_update_frame[:] = self.frame_count
+        # FIX: Only update last_update_frame for pixels that were actually updated
+        # (i.e., where quality is above a threshold)
+        updated_mask = quality > 0.1  # Minimum quality threshold
+        self.last_update_frame = np.where(updated_mask, self.frame_count, self.last_update_frame)
 
     def reconstruct(self) -> np.ndarray:
         """Reconstruct the best known appearance.
@@ -610,22 +613,22 @@ class IdentityState:
         # Compute λ (lambda) — identity gravity strength
         # Base: drift-proportional (like gravitational force ~ 1/r² but clamped)
         if drift > 30:
-            lambda_base = 0.90  # Very strong pull for large drift
+            lambda_base = 0.95  # Very strong pull for large drift
         elif drift > 15:
-            lambda_base = 0.70  # Strong pull
+            lambda_base = 0.80  # Strong pull
         elif drift > 5:
-            lambda_base = 0.50  # Moderate pull
+            lambda_base = 0.60  # Moderate pull
         else:
-            lambda_base = 0.30  # Gentle pull (maintenance)
+            lambda_base = 0.40  # Gentle pull (maintenance)
 
         # Modulate by confidence (lower confidence → stronger anchor pull)
         # This is the key insight: unstable identity needs more anchor influence
         obs_count = np.mean(self.belief.observation_count)
         confidence_factor = 1.0 / (1.0 + obs_count * 0.01)  # Saturates at ~100 obs
-        lambda_conf = lambda_base * (0.5 + 0.5 * confidence_factor)
+        lambda_conf = lambda_base * (0.7 + 0.3 * confidence_factor)
 
-        # Clamp λ to safe range
-        lambda_clamped = np.clip(lambda_conf, 0.1, 0.95)
+        # Clamp λ to safe range - minimum 0.4 ensures strong anchor influence
+        lambda_clamped = np.clip(lambda_conf, 0.4, 0.95)
 
         # Apply identity gravity equation
         # I_t = (1 - λ) * I_t + λ * I_anchor
@@ -733,7 +736,8 @@ class IdentityState:
         # High current quality → trust source more (conf closer to 0.5)
         # Low current quality → trust identity more (conf closer to 1.0)
         # But we return confidence as "how much to trust identity"
-        confidence = base_confidence * (0.5 + 0.5 * current_quality)
+        # Simple approach: higher base confidence for identity
+        confidence = base_confidence * (0.7 + 0.3 * current_quality)
 
         # Frequency-aware blending
         low_curr, high_curr = self.freq.decompose(canonical_face)
@@ -774,14 +778,15 @@ class IdentityState:
             drift = np.sqrt(np.sum((anchor_mean - result_mean) ** 2))
 
             # Compute λ (identity gravity strength)
+            # Match the update function's lambda values
             if drift > 30:
-                lambda_base = 0.85
+                lambda_base = 0.90  # Very strong pull for large drift
             elif drift > 15:
-                lambda_base = 0.60
+                lambda_base = 0.70  # Strong pull
             elif drift > 5:
-                lambda_base = 0.35
+                lambda_base = 0.50  # Moderate pull
             else:
-                lambda_base = 0.15
+                lambda_base = 0.30  # Gentle pull (maintenance)
 
             # Modulate by confidence (lower confidence → stronger anchor)
             lambda_clamped = np.clip(lambda_base, 0.1, 0.95)
