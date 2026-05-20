@@ -1198,8 +1198,8 @@ System WINS if:
 | G: Temporal | ✅ Done | Bidirectional solver, HQ frame identification |
 | H: Eye Dominance | ⚠️ Partial | Structure-preserving rendering, blink detection TODO |
 | I: Patch Database | ✅ Done | **Pose-conditioned retrieval** — query(yaw, expression, lighting) |
-| J: Appearance Field | 🔄 Phase 5 | Hybrid system |
-| K: Dynamic UV | 🔄 Phase 5 | Skin stretch model |
+| J: Appearance Field | ✅ Done | **Appearance field** — A(u,v,θ,L,t) with k-NN interpolation |
+| K: Dynamic UV | ✅ Done | **Dynamic UV flow** — expression deformation fields |
 | L: Cinematic | ✅ Done | **Temporally coherent grain** — noise field with sensor persistence |
 
 ## Phase Status
@@ -1210,8 +1210,8 @@ System WINS if:
 | Phase 2 | ✅ Done | Patch memory, eye priority, anchor correction |
 | Phase 3 | ✅ Done | Best observation cache, bidirectional solve |
 | Phase 4 | ✅ Done | Patch DB, semantic confidence, identity hypotheses, temporal grain |
-| Phase 5 | 🔄 Current | Appearance field, dynamic UV flow, microdetail synthesis |
-| Phase 6 | ❌ Future | Personalized neural codec |
+| Phase 5 | ✅ Done | Appearance field, dynamic UV flow, microdetail synthesis |
+| Phase 6 | 🔄 Current | Personalized neural codec, full identity operating system |
 
 ---
 
