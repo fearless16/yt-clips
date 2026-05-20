@@ -4,222 +4,50 @@ Last updated: 2026-05-19
 
 ## Current State Summary
 
-The codebase has a **working pipeline** (download → transcribe → highlight → export → SEO → upload) that produces 9:16 Shorts from 16:9 YouTube VODs. A **3-pass selective enhancement pipeline** was added as standalone modules but is **NOT integrated** into the main pipeline and has critical bugs.
+The codebase has a **working pipeline** (download → transcribe → highlight → export → SEO → upload) that produces 9:16 Shorts from 16:9 YouTube VODs. **Reference-derived color grading** (`ref_grade.py`) is integrated as Phase 4.25 with a `--mode` CLI flag.
 
 ### What Works
-- Full 6-phase pipeline via `pipeline.py`
+- Full 6-phase pipeline via `pipeline.py` with `--mode {face_mapper,ref_grade}` flag
 - 16:9 → 9:16 smart cropping in `export.py` (face tracking, center crop, chat exclusion)
+- **ref_grade.py**: Target-based color grading — enrollment-once, apply-always. Blends source TOWARD reference (not beyond). LUT-based a,b transform, cached vignette, split-tone LUT. 128 tests pass.
 - Cheap analysis: `frame_analyzer.py` (Haar Cascade + heuristics)
 - Premium analysis: `premium_analyzer.py` (YOLOv8-face + ByteTrack + Kalman)
 - Premium render: `premium_render.py` (RIFE interpolation + GFPGAN + two-pass VBR)
 - Super-resolution: `utils/super_res.py` (Real-ESRGAN 4x + GFPGAN + reference guidance)
 - SEO generation with 3-tier fallback + self-improving loop
 - Colab/Kaggle bridge architecture (tunnel + watcher + job queue)
-- 219+ tests
-- **Reference-derived color grading** (`ref_grade.py`): enrollment-once, apply-always Apple Face ID paradigm — extracts ALL color parameters as constants from reference photo, applies same fixed grade to every frame (zero flicker by construction)
+- `video_analyzer.py`: Auto-detect CUDA/VideoToolbox hwaccel
+- `push_code.py`: Syncs `tests/*.py`, prevents Drive "(1)" duplicates
+- `monitor.py`: Poll Colab pipeline status via tunnel
+- **128 tests pass, 1 skipped, 0 failures**
 
-### What's Broken / Not Integrated
-
-#### CRITICAL: 3-Pass Enhancement Pipeline
-
-Three new modules exist but are **standalone** — not called from `pipeline.py`:
-
-| Module | Purpose | Status |
+### T4 GPU Performance
+| Operation | T4 CPU | Mac M1 |
 |---|---|---|
-| `state_analyzer.py` | Pass 1: Per-frame state classification (heavy/light/skip) | Standalone only |
-| `selective_enhancer.py` | Pass 2: Conditional GFPGAN/sharpening/propagation | Standalone only, **wrong input** |
-| `temporal_consistency.py` | Pass 3: Flicker removal + drift correction | Standalone only |
-| `test_full_pipeline.py` | End-to-end test of Pass 1+2+3 | Works but **produces wrong output** |
+| 1080p apply_grade | 8fps (130ms) | 29fps (35ms) |
+| 720p grade_video pipe | 8fps | 14fps |
+| Enrollment | 0.5s | 0.3s |
 
----
+### Parameter Tuning (Current)
+ref_grade uses TARGET-BASED BLENDING (not multipliers):
+- **L brightness**: Blends 25% toward reference mean per frame
+- **a,b LUTs**: Blend toward reference target by 25%
+- **Contrast**: Moderate stretch (ratio ~1.22) centered on per-frame mean
+- **Split tone**: Gentle (shadow=0.06, highlight=0.04)
+- **Vignette**: Cached by resolution
 
-## Identified Gaps (Priority Order)
+### Known Issues
+1. **Face detection fails on portrait content**: Haar cascade can't find faces in cropped 9:16 clips → export falls back to "degraded center-crop mode"
+2. **Colab inactivity timeout**: ngrok tunnel disconnects after ~10 min of inactivity. `monitor.py --watch` pings health endpoint to prevent this.
+3. **Drive sync latency**: Google Drive mount on Colab has caching delays (30-60s). Files may appear stale.
+4. **Drive "(1)" duplicates**: Fixed in push_code.py with `_find_file_by_name` fallback.
 
-### GAP 1: Wrong Pipeline Order (BROKEN OUTPUT)
-
-**Problem**: `test_full_pipeline.py` feeds raw 16:9 video into `selective_enhancer.py`, which does:
-```python
-frame = cv2.resize(frame, (target_w, target_h))  # 640x360 → 1080x1920
-```
-This **stretches** the 16:9 frame to 9:16 — the "sandwiched/flat" look the user reported.
-
-**Correct order**:
-```
-16:9 source → export.py (smart crop) → 9:16 clip → selective_enhancer → temporal_consistency → final
-```
-
-**Fix**: The 3-pass enhancement must run on `export.py`'s output (already-cropped 9:16 video), NOT on raw source.
-
-### GAP 2: Not Integrated into Pipeline
-
-`pipeline.py` has no awareness of the 3-pass enhancement. The export phase ends at Phase 4, and the enhancement modules are never called.
-
-**Fix**: Add Phase 4.25 (Selective Enhancement) between export and SEO, controlled by a config toggle.
-
-### GAP 3: Double Enhancement
-
-`export.py` already applies per-frame FFmpeg filters:
-```python
-# export.py line 600
-filter_base += ",unsharp=5:5:1.0:5:5:0.0,eq=saturation=1.15:contrast=1.15:brightness=0.04"
-```
-
-If `selective_enhancer.py` also runs, frames get sharpened + contrast-boosted **twice**.
-
-**Fix**: When selective enhancement is enabled, disable the FFmpeg filters in `export.py` (or make them conditional).
-
-### GAP 4: GFPGAN Never Actually Works
-
-`selective_enhancer.py` hardcodes:
-```python
-model_path="experiments/pretrained_models/GFPGANv1.4.pth"
-```
-This file doesn't exist. The module logs a warning and falls back to mild OpenCV sharpening — no actual face restoration happens.
-
-**Fix**: Use `utils/super_res.py`'s model loading logic (auto-download weights) or share the `SuperResEnhancer` instance.
-
-### GAP 5: Duplicate Face Detection
-
-Three separate Haar Cascade instances:
-- `state_analyzer.py` → `_detect_face()`
-- `selective_enhancer.py` → `_detect_face()`
-- `temporal_consistency.py` → `_detect_face()`
-
-Plus `frame_analyzer.py` and `premium_analyzer.py` have their own detection.
-
-**Fix**: Extract shared face detection into a common utility (or reuse `utils/face_matcher.py`).
-
-### GAP 6: No Config Toggle
-
-`config.yaml` has no setting to enable/disable selective enhancement or its sub-features.
-
-**Fix**: Add to config.yaml:
-```yaml
-enhancement:
-  selective: false          # Enable 3-pass selective enhancement
-  gfpgan_strength: 0.7     # Face restoration strength
-  temporal_alpha: 0.7      # Temporal smoothing (0=smooth, 1=raw)
-  drift_threshold: 65      # Identity drift detection threshold
-```
-
-### GAP 7: No Pipeline Integration Tests
-
-No tests verify that the 3-pass enhancement integrates correctly with `export.py`.
-
-### GAP 8: Temp Files Not Cleaned on Failure
-
-If `selective_enhancer.py` or `temporal_consistency.py` crash mid-process, `/tmp/yt_clips_enhance/` and `/tmp/yt_clips_consistency/` are left behind.
-
-### GAP 9: Doc Drift
-
-`ARCHITECTURE.md` and `README.md` don't mention the 3-pass enhancement pipeline at all.
-
----
-
-## Correct Architecture (Target State)
-
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  PHASE 1: DOWNLOAD (yt-dlp + aria2c)                             │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 2: TRANSCRIBE (faster-whisper)                            │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 2.5: VIDEO ANALYSIS (face/lighting map)                   │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 3: HIGHLIGHT DETECTION (audio RMS + transcript + AI)      │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 4: EXPORT (16:9 → 9:16 crop + encode)                     │
-│  ┌─ Standard: Haar/EMA → FFmpeg crop → single-pass encode ──┐   │
-│  ┌─ Premium:  YOLO/ByteTrack → Kalman/bezier → RIFE+GFPGAN ┐│   │
-│  └─────────────────────────────────────────────────────────────┘│
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 4.25: SELECTIVE ENHANCEMENT (NEW — config toggle)         │
-│  ┌─ Pass 1: state_analyzer.py — per-frame classification ────┐  │
-│  │   heavy/light/skip based on mouth, eyes, pose, lighting   │  │
-│  ├─ Pass 2: selective_enhancer.py — conditional enhancement ─┤  │
-│  │   heavy: GFPGAN face restore                              │  │
-│  │   light: conservative sharpen + color                     │  │
-│  │   skip:  temporal propagation from nearest enhanced       │  │
-│  ├─ Pass 3: temporal_consistency.py — flicker removal ───────┤  │
-│  │   IIR face smoothing, drift correction, boundary blend    │  │
-│  └─────────────────────────────────────────────────────────────┘│
-│  Input:  export.py output (already 9:16 cropped)                 │
-│  Output: enhanced 9:16 video (replaces export output)            │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 4.5: SEO & THUMBNAILS                                     │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 5: SYNC (optional)                                        │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 6: UPLOAD (optional)                                      │
-└──────────────────────────────────────────────────────────────────┘
-```
-
-### Key Design Rules
-
-1. **Selective enhancement operates on 9:16 cropped video** — never on raw 16:9 source
-2. **When selective enhancement is ON, disable FFmpeg filters** in `export.py` (no double processing)
-3. **GFPGAN must use auto-download weights** — share logic with `utils/super_res.py`
-4. **Face detection should be shared** — not duplicated across 3 modules
-5. **Config toggle** controls the entire 3-pass pipeline
-6. **Temp files cleaned up** in `finally` blocks
-
-### Integration Point in `pipeline.py`
-
-```python
-# After Phase 4 (export), before Phase 4.5 (SEO):
-if cfg.get("enhancement", {}).get("selective", False):
-    from selective_enhancer import enhance_clip
-    from temporal_consistency import apply_temporal_consistency
-    from state_analyzer import analyze_clip
-
-    for clip_path in exported:
-        # Pass 1: Analyze
-        analysis = analyze_clip(str(clip_path))
-        # Pass 2: Enhance (in-place or temp file)
-        enhanced = enhance_clip(str(clip_path), analysis_path=...)
-        # Pass 3: Temporal consistency
-        final = apply_temporal_consistency(enhanced, analysis_path=...)
-        # Replace original
-        Path(final).rename(clip_path)
-```
-
-### Integration Point in `export.py`
-
-When `enhancement.selective` is true, skip the FFmpeg enhancement filters:
-```python
-# In _build_enhance_stack():
-if not cfg.get("enhancement", {}).get("selective", False):
-    filter_base += ",unsharp=5:5:1.0:5:5:0.0,eq=saturation=1.15:contrast=1.15:brightness=0.04"
-```
-
----
-
-## Colab/Kaggle Status
-
-### Tunnel Architecture
-```
-Local Mac                    Google Drive              Colab T4
-─────────                    ────────────              ────────
-automate.sh → push_code.py → code files ────────────→ colab_setup.py
-automate.sh → bridge.py ───→ job file ───────────────→ watcher.py
-                             shorts/ ←───────────────── pipeline.py
-```
-
-### Known Colab Issues
-- Flask app on port 5000 blocks watcher.py — must `!fuser -k 5000/tcp` first
-- Ngrok tunnel goes offline frequently (ERR_NGROK_3200)
-- Drive-mounted paths cause cv2 VideoWriter corruption — use `/tmp/` for intermediate files
-- GFPGAN weights must be downloaded on Colab (not included in repo)
-
-### Colab GPU Memory Budget (T4, 16GB VRAM)
-| Operation | VRAM | Notes |
-|---|---|---|
-| YOLOv8-face | ~0.5 GB | Always loaded in premium mode |
-| GFPGAN | ~2.5 GB | Loaded on demand |
-| Real-ESRGAN 4x | ~3 GB | Loaded on demand |
-| FILM/RIFE | ~3 GB | Frame interpolation |
-| Whisper (CUDA) | ~1 GB | Transcription only |
-| Peak total | ~10 GB | Fits in T4's 16GB |
+### Abandoned / Not Integrated
+| Module | Status |
+|---|---|
+| `state_analyzer.py` | Abandoned (3-pass pipeline) |
+| `selective_enhancer.py` | Abandoned (3-pass pipeline) |
+| `temporal_consistency.py` | Abandoned (3-pass pipeline) |
 
 ---
 
@@ -228,7 +56,7 @@ automate.sh → bridge.py ───→ job file ──────────�
 ### Core Pipeline
 | File | Lines | Purpose |
 |---|---|---|
-| `pipeline.py` | 371 | Main orchestrator — 6 phases |
+| `pipeline.py` | 452 | Main orchestrator — 6 phases + `--mode` flag |
 | `download.py` | — | yt-dlp + aria2c |
 | `transcribe.py` | — | faster-whisper |
 | `highlight.py` | — | Audio RMS + transcript scoring |
@@ -242,43 +70,46 @@ automate.sh → bridge.py ───→ job file ──────────�
 |---|---|---|
 | `frame_analyzer.py` | 702 | Cheap: Haar Cascade + heuristics |
 | `premium_analyzer.py` | 956 | Premium: YOLOv8 + ByteTrack + Kalman |
-| `video_analyzer.py` | 642 | Pre-analysis: face/lighting map for full VOD |
-| `state_analyzer.py` | 774 | **NEW**: Per-frame enhancement classification |
+| `video_analyzer.py` | 655 | Pre-analysis: face/lighting map + auto hwaccel |
 
 ### Enhancement
 | File | Lines | Purpose |
 |---|---|---|
+| `ref_grade.py` | 327 | Target-based color grade (LUT + vignette cache) |
+| `face_mapper.py` | 642 | Per-frame 6-step pipeline + region-aware grading |
 | `premium_render.py` | 397 | Premium: RIFE + GFPGAN + two-pass VBR |
 | `utils/super_res.py` | 439 | Real-ESRGAN 4x + GFPGAN + reference |
-| `selective_enhancer.py` | 627 | **ABANDONED**: 3-pass conditional enhancement (flicker, wrong input order) |
-| `temporal_consistency.py` | 489 | **ABANDONED**: part of abandoned 3-pass pipeline |
-| `ref_grade.py` | 277 | **NEW**: Reference-derived color grade — enrollment-once, apply-always paradigm, zero flicker |
 
 ### Infrastructure
 | File | Lines | Purpose |
 |---|---|---|
 | `watcher.py` | 230 | Colab/Kaggle job listener |
-| `bridge.py` | — | Local→cloud job pusher |
-| `push_code.py` | — | Code sync to Drive |
+| `bridge.py` | 150 | Local→cloud job pusher |
+| `push_code.py` | 269 | Code sync to Drive (tests/*.py, no duplicates) |
 | `colab_setup.py` | — | Colab dependency installer |
+| `monitor.py` | 202 | Poll Colab pipeline status via tunnel |
+
+### Tests
+| File | Tests | Purpose |
+|---|---|---|
+| `tests/test_ref_grade.py` | 37 | ref_grade enrollment, grading, flicker, video |
+| `tests/test_face_mapper.py` | 35 | face_mapper enhancement |
+| `tests/test_video_analyzer.py` | 37 | video_analyzer analysis |
+| `tests/test_t4_compat.py` | 17 | T4 GPU compatibility (also runs under pytest) |
+| **Total** | **128** | **0 failures** |
 
 ### Config & Docs
 | File | Purpose |
 |---|---|
-| `config.yaml` | All configuration (193 lines) |
-| `ARCHITECTURE.md` | Pipeline design, GPU/CPU split |
-| `README.md` | Quick start, features, project structure |
-| `Colab.md` | Colab setup instructions |
+| `config.yaml` | All configuration (213 lines) |
 | `AGENTS.md` | **This file** — current state & gaps |
 
 ---
 
-## Next Steps (Ordered)
+## Next Steps
 
-1. **Integrate ref_grade into pipeline.py** — add `--mode face_mapper|ref_grade` flag to pipeline for switching between per-frame global corrections (face_mapper) and enrolled fixed grade (ref_grade)
-2. **Verify ref_grade on more test videos** — test on 3+ different clips with different lighting to confirm zero-flicker guarantee holds
-3. **Add config toggle** — `enhancement.ref_grade: false` in config.yaml
-4. **Optionally add `ref_grade` to Phase 4.25** — as alternative enhancement path after export crop
-5. **Add ref_grade tests** — unit tests for enrollment (does it extract same params from same reference?), inference (does same grade applied to same frame give same result?), and flicker (do 100 consecutive graded frames have <1.0 std in face a/b?)
-6. **Add colab bridge ref_grade support** — ensure `grade_video()` works in colab headless mode (no display)
-7. **Update docs** — ARCHITECTURE.md, README.md with ref_grade approach
+1. **Reconnect Colab** and re-run with new target-based params
+2. **Fix face detection** for portrait content (use YOLO or larger Haar cascade)
+3. **Tune parameters** based on re-run results (L blend strength, contrast ratio)
+4. **Add `--mode face_mapper`** test on real content
+5. **Update docs** — ARCHITECTURE.md, README.md
