@@ -304,24 +304,61 @@ class IdentityState:
         current = self.belief.reconstruct()
         current_lab = cv2.cvtColor(current, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-        # Check distance to anchor
+        # Check distance to anchor (drift)
         anchor_mean = np.mean(self._anchor_lab, axis=(0, 1))
         current_mean = np.mean(current_lab, axis=(0, 1))
-        distance = np.sqrt(np.sum((anchor_mean - current_mean) ** 2))
+        drift = np.sqrt(np.sum((anchor_mean - current_mean) ** 2))
 
-        # If distance exceeds threshold, apply stronger correction
-        if distance > self._anchor_threshold:
-            strength = min(0.7, self._anchor_strength * (distance / self._anchor_threshold))
+        # ═══════════════════════════════════════════════════════════════════
+        # IDENTITY GRAVITY EQUATION (Module D — Formalized)
+        # ═══════════════════════════════════════════════════════════════════
+        #
+        #   I_t = (1 - λ) * I_t + λ * I_anchor
+        #
+        # Where λ (lambda) is conditioned on:
+        #   - drift: higher drift → stronger pull (gravity increases with distance)
+        #   - confidence: lower confidence → stronger pull (unstable identity needs anchor)
+        #   - observation_count: fewer observations → stronger pull (new identity needs anchor)
+        #
+        # This creates "identity gravity" — the anchor pulls the identity
+        # toward it like a gravitational field. The pull is stronger when:
+        #   1. Identity has drifted far from anchor (high drift)
+        #   2. Identity confidence is low (unstable observations)
+        #   3. Few observations accumulated (new or reset identity)
+        #
+        # λ is clamped to [0.1, 0.95] to prevent:
+        #   - λ=0: anchor has no effect (identity drifts freely)
+        #   - λ=1: identity is always anchor (no source influence)
+        # ═══════════════════════════════════════════════════════════════════
+
+        # Compute λ (lambda) — identity gravity strength
+        # Base: drift-proportional (like gravitational force ~ 1/r² but clamped)
+        if drift > 30:
+            lambda_base = 0.85  # Very strong pull for large drift
+        elif drift > 15:
+            lambda_base = 0.60  # Strong pull
+        elif drift > 5:
+            lambda_base = 0.35  # Moderate pull
         else:
-            strength = self._anchor_strength
+            lambda_base = 0.15  # Gentle pull (maintenance)
 
-        # LOW FREQ: Strong correction (skin tone, lighting must match)
-        low_diff = self._anchor_low - self.belief.best_low
-        self.belief.best_low += low_diff * strength
+        # Modulate by confidence (lower confidence → stronger anchor pull)
+        # This is the key insight: unstable identity needs more anchor influence
+        obs_count = np.mean(self.belief.observation_count)
+        confidence_factor = 1.0 / (1.0 + obs_count * 0.01)  # Saturates at ~100 obs
+        lambda_conf = lambda_base * (0.5 + 0.5 * confidence_factor)
 
-        # HIGH FREQ: Weak correction (preserve source detail)
-        high_diff = self._anchor_high - self.belief.best_high
-        self.belief.best_high += high_diff * strength * 0.2
+        # Clamp λ to safe range
+        lambda_clamped = np.clip(lambda_conf, 0.1, 0.95)
+
+        # Apply identity gravity equation
+        # I_t = (1 - λ) * I_t + λ * I_anchor
+        self.belief.best_low = (1 - lambda_clamped) * self.belief.best_low + lambda_clamped * self._anchor_low
+
+        # High freq: weaker pull (preserve source detail)
+        # λ_high = λ * 0.2 (much less than low freq)
+        lambda_high = lambda_clamped * 0.2
+        self.belief.best_high = (1 - lambda_high) * self.belief.best_high + lambda_high * self._anchor_high
 
     def get_anchor_distance(self) -> float:
         """Get LAB distance between current identity and anchor.
@@ -433,7 +470,16 @@ class IdentityState:
         low_final = low_id * effective_low_blend + low_curr * (1 - effective_low_blend)
         high_final = high_id * effective_high_blend + high_curr * (1 - effective_high_blend)
 
-        # Module D: Pull toward anchor after blending
+        # ═══════════════════════════════════════════════════════════════════
+        # IDENTITY GRAVITY IN QUERY (Module D — Post-blend anchor correction)
+        # ═══════════════════════════════════════════════════════════════════
+        #
+        # After blending identity with source, apply identity gravity:
+        #   I_final = (1 - λ) * I_blend + λ * I_anchor
+        #
+        # This ensures the final output stays close to anchor,
+        # even when confidence is low and source dominates the blend.
+        # ═══════════════════════════════════════════════════════════════════
         if self._anchor_low is not None:
             # Check distance to anchor
             result_lab = cv2.cvtColor(
@@ -442,23 +488,24 @@ class IdentityState:
             ).astype(np.float32)
             anchor_mean = np.mean(self._anchor_lab, axis=(0, 1))
             result_mean = np.mean(result_lab, axis=(0, 1))
-            distance = np.sqrt(np.sum((anchor_mean - result_mean) ** 2))
+            drift = np.sqrt(np.sum((anchor_mean - result_mean) ** 2))
 
-            # Pull strength proportional to distance (more aggressive for large drift)
-            if distance > self._anchor_threshold:
-                # Large drift: pull aggressively (up to 80%)
-                pull = min(0.8, 0.4 * (distance / self._anchor_threshold))
-            elif distance > 10.0:
-                # Moderate drift: pull moderately (40-60%)
-                pull = 0.4 + 0.2 * ((distance - 10.0) / (self._anchor_threshold - 10.0))
+            # Compute λ (identity gravity strength)
+            if drift > 30:
+                lambda_base = 0.85
+            elif drift > 15:
+                lambda_base = 0.60
+            elif drift > 5:
+                lambda_base = 0.35
             else:
-                # Small drift: gentle pull (20%)
-                pull = 0.2
+                lambda_base = 0.15
 
-            # Apply to low freq (skin tone, brightness)
-            low_final = low_final + (self._anchor_low - low_final) * pull
-            # Apply weaker to high freq (preserve detail)
-            high_final = high_final + (self._anchor_high - high_final) * pull * 0.3
+            # Modulate by confidence (lower confidence → stronger anchor)
+            lambda_clamped = np.clip(lambda_base, 0.1, 0.95)
+
+            # Apply identity gravity: I_final = (1-λ)*I_blend + λ*I_anchor
+            low_final = (1 - lambda_clamped) * low_final + lambda_clamped * self._anchor_low
+            high_final = (1 - lambda_clamped * 0.2) * high_final + (lambda_clamped * 0.2) * self._anchor_high
 
         result = low_final + high_final
         result = np.clip(result, 0, 255).astype(np.uint8)

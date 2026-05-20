@@ -182,9 +182,138 @@ def apply_vignette(
 
 # ─── Cinematic noise ────────────────────────────────────────────────────────
 
+class TemporalNoiseField:
+    """Temporally coherent sensor grain field.
+
+    Architecture Module L: 'Noise MUST vary spatially, stay statistically consistent'
+
+    The problem with independent random noise per frame:
+      frame 1: noise_1
+      frame 2: noise_2  (completely different)
+      → micro shimmer flicker (brain detects as fake)
+
+    The solution: temporally coherent noise field
+      - Base noise field persists across frames
+      - Slowly evolves over time (low-frequency temporal drift)
+      - Sensor-pattern persistence (same hot pixels, same grain structure)
+      - Like real camera sensor noise: consistent pattern, slow drift
+
+    Math:
+      noise_t = base_noise * (1 - α) + new_noise * α
+      where α = 0.05 (very slow evolution)
+
+    This creates:
+      - Spatial variation (noise varies across frame)
+      - Temporal consistency (noise pattern persists across frames)
+      - Slow evolution (noise drifts slowly, like real sensor)
+    """
+
+    def __init__(self, h: int, w: int, alpha: float = 0.05):
+        """Initialize noise field.
+
+        Args:
+            h: Frame height
+            w: Frame width
+            alpha: Evolution rate (0=static, 1=independent per frame)
+        """
+        self.h = h
+        self.w = w
+        self.alpha = alpha
+
+        # Base noise field (persists across frames)
+        self._base_noise = np.random.randn(h, w).astype(np.float32)
+
+        # Correlated noise (sensor pattern)
+        self._sensor_pattern = self._generate_sensor_pattern()
+
+        # Temporal drift (slow low-frequency evolution)
+        self._drift_noise = np.random.randn(h, w).astype(np.float32) * 0.1
+
+        # Frame counter
+        self._frame_count = 0
+
+    def _generate_sensor_pattern(self) -> np.ndarray:
+        """Generate persistent sensor pattern (like real camera).
+
+        Real sensors have:
+        - Hot pixels (always bright)
+        - Column/row noise (readout pattern)
+        - Fixed pattern noise (manufacturing defects)
+        """
+        pattern = np.zeros((self.h, self.w), dtype=np.float32)
+
+        # Hot pixels (sparse, persistent)
+        num_hot = max(1, (self.h * self.w) // 10000)
+        hot_y = np.random.randint(0, self.h, num_hot)
+        hot_x = np.random.randint(0, self.w, num_hot)
+        pattern[hot_y, hot_x] = np.random.randn(num_hot) * 0.5
+
+        # Column noise (readout pattern)
+        col_noise = np.random.randn(self.w) * 0.1
+        pattern += col_noise[np.newaxis, :]
+
+        # Smooth to avoid sharp edges
+        pattern = cv2.GaussianBlur(pattern, (5, 5), 1.0)
+
+        return pattern
+
+    def get_noise(self, strength: float = 0.015) -> np.ndarray:
+        """Get temporally coherent noise for current frame.
+
+        Args:
+            strength: Noise intensity (0=none, 0.02=subtle, 0.05=visible)
+
+        Returns:
+            Noise field (H, W) float32, centered at 0
+        """
+        self._frame_count += 1
+
+        # Generate new random component
+        new_noise = np.random.randn(self.h, self.w).astype(np.float32)
+
+        # Evolve base noise slowly (temporal coherence)
+        # noise_t = base * (1-α) + new * α
+        self._base_noise = self._base_noise * (1 - self.alpha) + new_noise * self.alpha
+
+        # Combine: base noise + sensor pattern + temporal drift
+        noise = (
+            self._base_noise * 0.7 +           # Main noise (temporally coherent)
+            self._sensor_pattern * 0.2 +         # Persistent sensor pattern
+            self._drift_noise * 0.1              # Slow temporal drift
+        )
+
+        # Correlate slightly (mimics sensor readout)
+        noise = cv2.GaussianBlur(noise, (3, 3), 0.5)
+
+        # Scale by strength
+        noise *= strength * 255
+
+        return noise
+
+    def reset(self) -> None:
+        """Reset noise field (for new clip)."""
+        self._base_noise = np.random.randn(self.h, self.w).astype(np.float32)
+        self._sensor_pattern = self._generate_sensor_pattern()
+        self._drift_noise = np.random.randn(self.h, self.w).astype(np.float32) * 0.1
+        self._frame_count = 0
+
+
+# Global noise field (persists across frames in a clip)
+_noise_field: Optional[TemporalNoiseField] = None
+
+
+def _get_noise_field(h: int, w: int) -> TemporalNoiseField:
+    """Get or create global noise field."""
+    global _noise_field
+    if _noise_field is None or _noise_field.h != h or _noise_field.w != w:
+        _noise_field = TemporalNoiseField(h, w)
+    return _noise_field
+
+
 def add_cinematic_noise(
     frame: np.ndarray,
     strength: float = 0.015,
+    use_temporal: bool = True,
 ) -> np.ndarray:
     """Add subtle sensor grain for cinematic realism.
 
@@ -192,13 +321,13 @@ def add_cinematic_noise(
     - Noise MUST vary spatially
     - Noise MUST stay statistically consistent
     - Perfect clean output = FAKE
-    - Brain should register as "real camera footage"
+    - Brain should register as 'real camera footage'
 
-    The noise:
-    - Gaussian (matches sensor distribution)
-    - Slightly correlated (mimics real sensor patterns)
-    - Weaker in highlights (like real sensors)
-    - Applied in LAB to avoid color shifts
+    TEMPORALLY COHERENT (Module L):
+    - Uses persistent noise field across frames
+    - Slowly evolving noise (not independent per frame)
+    - Sensor-pattern persistence (hot pixels, column noise)
+    - Prevents micro-shimmer flicker
     """
     if strength <= 0:
         return frame
@@ -206,11 +335,14 @@ def add_cinematic_noise(
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB).astype(np.float32)
     h, w = lab.shape[:2]
 
-    # Generate noise
-    noise = np.random.randn(h, w).astype(np.float32) * strength * 255
-
-    # Correlate slightly (mimics sensor pattern)
-    noise = cv2.GaussianBlur(noise, (3, 3), 0.5)
+    if use_temporal:
+        # Temporally coherent noise
+        noise_field = _get_noise_field(h, w)
+        noise = noise_field.get_noise(strength)
+    else:
+        # Fallback: independent noise (for testing)
+        noise = np.random.randn(h, w).astype(np.float32) * strength * 255
+        noise = cv2.GaussianBlur(noise, (3, 3), 0.5)
 
     # Reduce in highlights (real sensor behavior)
     l_channel = lab[:, :, 0] / 255.0
@@ -222,6 +354,13 @@ def add_cinematic_noise(
     lab[:, :, 0] = np.clip(lab[:, :, 0], 0, 255)
 
     return cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+
+def reset_noise_field() -> None:
+    """Reset global noise field (for new clip)."""
+    global _noise_field
+    if _noise_field is not None:
+        _noise_field.reset()
 
 
 # ─── Main rendering pipeline ────────────────────────────────────────────────

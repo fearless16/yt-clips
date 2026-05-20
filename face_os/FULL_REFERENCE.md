@@ -757,36 +757,37 @@ qc:
 | Compositor was undoing anchor correction | L 72→99 (+27 points!) |
 | Pre-populate identity from reference (50 obs) | Confidence 0.09→0.33 |
 | Don't reset identity between clips | Preserves anchor + observations |
-| Increase anchor pull: 0.6→0.85 | Stronger correction for large drift |
+| Identity gravity equation | I_t = (1-λ)I_t + λI_anchor |
+| Temporally coherent grain | Noise field with sensor persistence |
+| Pose-conditioned patch retrieval | query(yaw, expression, lighting) |
 
 ---
 
-## 7. Known Issues & Next Steps
+## 7. Implementation Status
+
+### What's Actually Built
+
+| Module | Status | Notes |
+|---|---|---|
+| A: Telemetry | ✅ Done | Haar Cascade + dlib landmarks |
+| B: Canonical | ✅ Done | Similarity transform, 256x256 atlas |
+| C: Patch Belief | ✅ Done | Frequency decomposition, per-patch dynamics |
+| D: Anchor | ✅ Done | **Identity gravity equation** — I_t = (1-λ)I_t + λI_anchor |
+| E: Confidence | ✅ Done | Semantic confidence, multifactor, quality modulation |
+| F: Reconstruction | ✅ Done | Frequency-aware blending, anchor correction |
+| G: Temporal | ✅ Done | Bidirectional solver, HQ frame identification |
+| H: Eye Dominance | ⚠️ Partial | Structure-preserving rendering, blink detection TODO |
+| I: Patch Database | ✅ Done | **Pose-conditioned retrieval** — query(yaw, expression, lighting) |
+| J: Appearance Field | ❌ Future | — |
+| K: Dynamic UV | ❌ Future | — |
+| L: Cinematic | ✅ Done | **Temporally coherent grain** — noise field with sensor persistence |
 
 ### Remaining Issues
 
 | Issue | Root Cause | Fix |
 |---|---|---|
-| **Face L still 9.4 dark** | Source blending with low confidence | Increase low-freq blend toward identity |
-| **b channel Δ5.2** | Source b=128 vs ref b=147 | Increase b anchor correction |
-| **Temporal grain** | Independent random noise | Implement coherent grain |
-
-### Architecture Gaps
-
-| Gap | Status | Priority |
-|---|---|---|
-| Identity Anchor Correction | NOT implemented | HIGH — face brightness catastrophically wrong |
-| Per-face exposure normalization | NOT implemented | HIGH — source has L=16→155 swings |
-| Face matcher integration | NOT in pipeline | MEDIUM — needed for multi-face scenes |
-| Super-resolution | Not available (needs CUDA) | LOW — Mac M1 can't run Real-ESRGAN |
-
-### Next Steps (Priority)
-
-1. **Fix face brightness** — Implement Identity Anchor Correction: pull identity toward reference brightness/tone
-2. **Fix landmark scaling** — Face mask only 2.32% coverage (FIXED: now 9.95%)
-3. **Debug brightness loss** — Trace where 109→72 loss happens in pipeline
-4. **Test with higher-res source** — 640x360 limits detail
-5. **Add per-face exposure normalization** — Detect user face, normalize L before accumulation
+| **Face L still 8.6 dark** | Source blending with low confidence | Increase low-freq blend toward identity |
+| **b channel Δ5.8** | Source b=128 vs ref b=147 | Increase b anchor correction |
 
 ---
 
