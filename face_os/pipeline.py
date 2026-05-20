@@ -1,17 +1,32 @@
 """
-pipeline.py — Face OS Pipeline Orchestrator.
+pipeline.py — Face OS Pipeline Orchestrator v2.
 
-Ties all 10 modules together into a single processing pipeline.
+THE MENTAL SHIFT:
+  OLD: "how do I enhance this frame?"
+  NEW: "what does this person's face usually look like?"
 
-Usage:
-    from face_os.pipeline import FaceOSPipeline
+FLOW PER FRAME:
+  1. Detect & track face (telemetry extraction)
+  2. Extract landmarks + pose (face telemetry)
+  3. Canonical alignment (convert to standard face space)
+  4. Query identity state (what does this region usually look like?)
+  5. Query patch memory (pose-conditioned best patches)
+  6. Plan 9:16 crop (face-locked with headroom)
+  7. Render face (structure-preserving, NOT enhancing)
+  8. Composite (confidence-weighted, frequency-aware)
+  9. Write output
 
-    pipeline = FaceOSPipeline()
-    pipeline.enroll("expectation.png", reference_dir="photos/")
-    pipeline.process("input/video.mp4", "output/shorts/")
+OFFLINE SUPERPOWER (bidirectional):
+  Forward pass: collect all frames + quality
+  Solve: future frames repair past frames
+  Final pass: query solved identity for each frame
 
-CLI:
-    python -m face_os.pipeline --video input/video.mp4 --reference expectation.png
+CORE EQUATION:
+  FINAL = source * (1 - confidence) + identity_memory * confidence
+
+  But FREQUENCY-AWARE:
+    Low freq: trust identity more (skin tone is stable)
+    High freq: trust source more for current pose
 """
 
 import argparse
@@ -41,47 +56,58 @@ from face_os import detect_track
 from face_os import landmarks as lm_module
 from face_os import canonical_map
 from face_os import crop_planner
-from face_os import temporal_stabilize
 from face_os import face_enhance
-from face_os import identity_memory
 from face_os import compositor
 from face_os import export_qc
+
+# NEW modules
+from face_os.identity_state import IdentityState
+from face_os.patch_memory import PatchMemory
+from face_os.temporal_solve import TemporalRepairEngine, FrameQuality
 
 
 cfg = get_config()
 
 
 class FaceOSPipeline:
-    """The main Face OS processing pipeline.
+    """The Face OS processing pipeline v2.
 
     Philosophy:
-      - Overfit is the feature. One face, one environment, one camera.
-      - Face is a dynamic appearance function, not a static render.
-      - Pixels are noisy photon observations — accumulate confidence.
-      - Identity inertia: source fluctuates, identity stays stable.
-      - Eyes dominate perception — always highest fidelity.
+      - Source video is TELEMETRY, not ground truth
+      - Each frame is a noisy photon observation
+      - Maintain IDENTITY BELIEF STATE
+      - Query memory, don't enhance pixels
+      - Frequency decomposition: low freq smooth, high freq best-only
+      - Per-region independent dynamics
+      - Bidirectional temporal solve (offline superpower)
 
     Pipeline flow per frame:
-      1. Detect & track face
-      2. Extract landmarks + pose
-      3. Map to canonical space + update appearance field
-      4. Plan 9:16 crop with headroom
-      5. Apply temporal stabilization
-      6. Enhance face regions (eye-dominant)
-      7. Update identity memory
-      8. Composite using confidence weights
-      9. Write to output video
-      10. Run QC checks
+      1. Detect & track (telemetry)
+      2. Landmarks + pose (face telemetry)
+      3. Canonical alignment (standard face space)
+      4. Quality map computation (per-pixel quality)
+      5. Identity state update (belief update)
+      6. Patch memory update (per-region)
+      7. Query identity (what does this region usually look like?)
+      8. Crop planning (face-locked 9:16)
+      9. Render (structure-preserving)
+      10. Composite (confidence-weighted)
     """
 
-    def __init__(self):
-        # Initialize modules
+    def __init__(self, use_bidirectional: bool = True):
+        # Core modules
         self.tracker: Optional[detect_track.FaceTracker] = None
         self.appearance_builder: Optional[canonical_map.AppearanceFieldBuilder] = None
-        self.memory_atlas: Optional[identity_memory.IdentityMemoryAtlas] = None
         self.crop: Optional[crop_planner.CropPlanner] = None
-        self.temporal: Optional[temporal_stabilize.TemporalStabilizer] = None
         self.compositor: Optional[compositor.Compositor] = None
+
+        # NEW: Identity belief state
+        self.identity_state: Optional[IdentityState] = None
+        self.patch_memory: Optional[PatchMemory] = None
+
+        # NEW: Bidirectional solver
+        self.use_bidirectional = use_bidirectional
+        self.temporal_solver: Optional[TemporalRepairEngine] = None
 
         # Identity profile
         self.identity: Optional[IdentityProfile] = None
@@ -97,17 +123,11 @@ class FaceOSPipeline:
     ) -> bool:
         """Enroll the target identity from reference images.
 
-        This is the "Apple Face ID" style enrollment:
         1. Load reference images
         2. Extract face embeddings for identity matching
         3. Build initial canonical appearance atlas
-
-        Args:
-            reference_image: Path to primary reference image
-            reference_dir: Directory with additional reference photos
-
-        Returns:
-            True if enrollment succeeded
+        4. Initialize identity belief state
+        5. Initialize patch memory
         """
         print("=== FACE OS ENROLLMENT ===")
 
@@ -132,14 +152,24 @@ class FaceOSPipeline:
         # Initialize modules
         self.tracker = detect_track.FaceTracker(self.identity.embeddings)
         self.appearance_builder = canonical_map.AppearanceFieldBuilder()
-        self.memory_atlas = identity_memory.IdentityMemoryAtlas()
         self.crop = crop_planner.CropPlanner()
-        self.temporal = temporal_stabilize.TemporalStabilizer()
         self.compositor = compositor.Compositor()
 
-        # Pre-populate appearance builder from reference
+        # NEW: Initialize identity belief state
+        self.identity_state = IdentityState()
+        self.patch_memory = PatchMemory()
+
+        # Pre-populate from reference
         if self.identity.enrolled and self.identity.appearance.atlas_rgb is not None:
             self.appearance_builder.atlas = self.identity.appearance
+
+            # Initialize identity state from reference
+            ref_rgb = self.identity.appearance.atlas_rgb
+            if ref_rgb is not None:
+                h, w = ref_rgb.shape[:2]
+                quality = np.ones((h, w), dtype=np.float32) * 0.8
+                ref_bgr = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2BGR)
+                self.identity_state.update(ref_bgr, quality, pose=(0, 0, 0))
 
         self._enrolled = True
         print("  Enrollment complete.")
@@ -153,59 +183,66 @@ class FaceOSPipeline:
     ) -> Optional[str]:
         """Process a video through the full pipeline.
 
-        Args:
-            video_path: Input video path
-            output_path: Output video path
-            max_frames: Maximum frames to process (None = all)
+        If use_bidirectional is True:
+          1. Forward pass: collect all frames + quality metrics
+          2. Bidirectional solve: future frames repair past frames
+          3. Final pass: query solved identity for each frame
 
-        Returns:
-            Output path on success, None on failure
+        If use_bidirectional is False:
+          Standard forward-only pass
         """
         if not self._enrolled:
-            print("ERROR: Must enroll before processing. Call enroll() first.")
+            print("ERROR: Must enroll before processing.")
             return None
 
         print(f"\n=== FACE OS PROCESSING ===")
         print(f"  Input: {video_path}")
         print(f"  Output: {output_path}")
+        print(f"  Bidirectional: {self.use_bidirectional}")
 
-        # Load video metadata
         meta = ingest.load_video_meta(video_path)
         print(f"  Video: {meta.width}x{meta.height} @ {meta.fps:.1f}fps ({meta.total_frames} frames)")
 
         # Reset per-clip state
         self._reset_state()
 
+        if self.use_bidirectional:
+            return self._process_bidirectional(video_path, output_path, max_frames, meta)
+        else:
+            return self._process_forward(video_path, output_path, max_frames, meta)
+
+    def _process_forward(
+        self,
+        video_path: str,
+        output_path: str,
+        max_frames: Optional[int],
+        meta: VideoMeta,
+    ) -> Optional[str]:
+        """Standard forward-only processing."""
         # Open exporter
+        output_w = cfg.crop.output_size[0] if hasattr(cfg.crop, 'output_size') else 1080
+        output_h = cfg.crop.output_size[1] if hasattr(cfg.crop, 'output_size') else 1920
         exporter = export_qc.VideoExporter(
-            output_path,
-            fps=cfg.export.fps,
-            width=cfg.export.output_size[0] if hasattr(cfg.export, 'output_size') else cfg.crop.output_size[0],
-            height=cfg.export.output_size[1] if hasattr(cfg.export, 'output_size') else cfg.crop.output_size[1],
+            output_path, fps=cfg.export.fps,
+            width=output_w, height=output_h,
             source_path=video_path,
         )
 
-        # QC tracking
         face_detected_frames = 0
         total_frames = 0
         all_frames = []
-
         t_start = time.perf_counter()
 
         try:
-            # Process each frame
             for frame_idx, timestamp, source_frame in ingest.frame_reader(video_path):
                 if max_frames and total_frames >= max_frames:
                     break
 
-                # Process frame through pipeline
-                result = self._process_frame(source_frame, frame_idx, timestamp)
+                result = self._process_frame_v2(source_frame, frame_idx, timestamp)
 
                 if result is not None:
-                    # Write to output
                     exporter.write_frame(result)
                     all_frames.append(result)
-
                     if self.tracker and self.tracker.tracks:
                         face_detected_frames += 1
 
@@ -220,68 +257,187 @@ class FaceOSPipeline:
             print(f"  ERROR at frame {total_frames}: {e}")
             import traceback
             traceback.print_exc()
-
         finally:
-            # Close exporter
             exporter.close()
 
         elapsed = time.perf_counter() - t_start
 
-        # Apply fades
-        if cfg.export.fade_in > 0 or cfg.export.fade_out > 0:
-            print("  Applying fades...")
-            export_qc.apply_fades(
-                output_path,
-                fade_in=cfg.export.fade_in,
-                fade_out=cfg.export.fade_out,
-            )
-
-        # Run QC
-        print("  Running QC checks...")
-        ref_lab = None
-        if self.identity and self.identity.appearance.atlas_lab is not None:
-            ref_lab = tuple(np.mean(
-                self.identity.appearance.atlas_lab,
-                axis=(0, 1)
-            ).tolist())
-
-        qc_report = export_qc.compute_quality_metrics(all_frames, ref_lab)
-        qc_report.face_detection_rate = face_detected_frames / max(total_frames, 1)
-
-        if not qc_report.check():
-            print(f"  QC WARNINGS:")
-            for f in qc_report.failures:
-                print(f"    - {f}")
-        else:
-            print("  QC: All checks passed")
-
-        # Save QC report
-        report_path = Path(output_path).with_suffix(".qc.json")
-        with open(report_path, "w") as f:
-            json.dump(qc_report.to_dict(), f, indent=2)
-
-        print(f"\n  DONE: {total_frames} frames in {elapsed:.1f}s ({total_frames / max(elapsed, 0.001):.0f} fps)")
-        print(f"  Output: {output_path}")
-
+        # Post-processing
+        self._post_process(output_path, video_path, all_frames, face_detected_frames, total_frames, elapsed)
         return output_path
 
-    def _process_frame(
+    def _process_bidirectional(
+        self,
+        video_path: str,
+        output_path: str,
+        max_frames: Optional[int],
+        meta: VideoMeta,
+    ) -> Optional[str]:
+        """Bidirectional processing — the offline superpower.
+
+        Pass 1 (forward): Collect all canonical faces + quality metrics
+        Pass 2 (solve): Bidirectional temporal solve
+        Pass 3 (render): Query solved identity for each frame
+        """
+        self.temporal_solver = TemporalRepairEngine(
+            lookback=cfg.temporal.temporal_window if hasattr(cfg.temporal, 'temporal_window') else 10,
+            lookahead=cfg.temporal.temporal_window if hasattr(cfg.temporal, 'temporal_window') else 10,
+        )
+
+        # === PASS 1: Forward collection ===
+        print("  Pass 1/3: Forward collection...")
+        canonical_faces = {}  # frame_idx → canonical face
+        quality_maps = {}     # frame_idx → quality map
+        frame_data = {}       # frame_idx → (source_frame, face_track, landmarks, crop_plan)
+        total_frames = 0
+        t_start = time.perf_counter()
+
+        for frame_idx, timestamp, source_frame in ingest.frame_reader(video_path):
+            if max_frames and total_frames >= max_frames:
+                break
+
+            # Detect + landmarks + canonical
+            face_track = self.tracker.process_frame(source_frame, frame_idx)
+            landmarks = None
+            if face_track and face_track.smooth_bbox:
+                landmarks = lm_module.extract_landmarks(source_frame, face_track.smooth_bbox)
+                face_track.landmarks = landmarks
+
+            crop_plan = self.crop.plan_crop(source_frame.shape[:2], face_track, landmarks)
+
+            if landmarks and face_track.detection:
+                # Warp to canonical space
+                try:
+                    warped_rgb, warped_lab, M = canonical_map.warp_to_canonical(
+                        source_frame, landmarks
+                    )
+                    warped_bgr = cv2.cvtColor(warped_rgb, cv2.COLOR_RGB2BGR)
+
+                    # Compute quality map
+                    quality = self._compute_quality_map(warped_bgr, face_track.detection.confidence)
+
+                    # Compute sharpness
+                    gray = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2GRAY)
+                    sharpness = float(np.mean(np.abs(cv2.Laplacian(gray.astype(np.float32), cv2.CV_32F))))
+                    sharpness = np.clip(sharpness / 100.0, 0, 1)
+
+                    # Store for bidirectional solver
+                    canonical_faces[frame_idx] = warped_bgr
+                    quality_maps[frame_idx] = quality
+
+                    fq = FrameQuality(
+                        frame_idx=frame_idx,
+                        sharpness=sharpness,
+                        motion_blur=0.0,
+                        pose=(landmarks.yaw, landmarks.pitch, landmarks.roll),
+                        detection_confidence=face_track.detection.confidence,
+                    )
+                    self.temporal_solver.collect_frame(
+                        frame_idx, warped_bgr, quality,
+                        sharpness=sharpness,
+                        pose=(landmarks.yaw, landmarks.pitch, landmarks.roll),
+                        detection_confidence=face_track.detection.confidence,
+                    )
+
+                    frame_data[frame_idx] = (source_frame, face_track, landmarks, crop_plan)
+
+                except Exception:
+                    frame_data[frame_idx] = (source_frame, face_track, landmarks, crop_plan)
+
+            total_frames += 1
+
+            if total_frames % 100 == 0:
+                elapsed = time.perf_counter() - t_start
+                print(f"    {total_frames} frames ({total_frames / max(elapsed, 0.001):.0f} fps)")
+
+        print(f"    Collected {len(canonical_faces)} canonical faces from {total_frames} frames")
+
+        # === PASS 2: Bidirectional solve ===
+        print("  Pass 2/3: Bidirectional temporal solve...")
+        solved_faces = self.temporal_solver.solve()
+        hq_count = self.temporal_solver.solver.get_hq_frame_count()
+        print(f"    Solved {len(solved_faces)} frames, {hq_count} HQ frames")
+
+        # Update identity state with solved faces
+        for idx, (solved_face, solved_conf) in solved_faces.items():
+            self.identity_state.update(solved_face, solved_conf, pose=None)
+            if idx in frame_data:
+                _, _, landmarks, _ = frame_data[idx]
+                if landmarks:
+                    pose = (landmarks.yaw, landmarks.pitch, landmarks.roll)
+                    self.patch_memory.update(solved_face, solved_conf, pose=pose, frame_idx=idx)
+
+        # === PASS 3: Render ===
+        print("  Pass 3/3: Rendering...")
+        output_w = cfg.crop.output_size[0] if hasattr(cfg.crop, 'output_size') else 1080
+        output_h = cfg.crop.output_size[1] if hasattr(cfg.crop, 'output_size') else 1920
+        exporter = export_qc.VideoExporter(
+            output_path, fps=cfg.export.fps,
+            width=output_w, height=output_h,
+            source_path=video_path,
+        )
+
+        all_frames = []
+        face_detected_frames = 0
+
+        # Re-read video for rendering
+        for frame_idx, timestamp, source_frame in ingest.frame_reader(video_path):
+            if max_frames and frame_idx >= max_frames:
+                break
+
+            if frame_idx in frame_data:
+                _, face_track, landmarks, crop_plan = frame_data[frame_idx]
+
+                # Get solved canonical face
+                solved_face = None
+                solved_conf = None
+                if frame_idx in solved_faces:
+                    solved_face, solved_conf = solved_faces[frame_idx]
+
+                # Render frame
+                result = self._render_frame_v2(
+                    source_frame, frame_idx, face_track, landmarks, crop_plan,
+                    solved_face=solved_face, solved_conf=solved_conf,
+                )
+
+                if result is not None:
+                    exporter.write_frame(result)
+                    all_frames.append(result)
+                    face_detected_frames += 1
+            else:
+                # No face detected — write original
+                cropped = source_frame
+                if frame_idx in frame_data:
+                    _, _, _, crop_plan = frame_data[frame_idx]
+                    cropped = crop_planner.apply_crop(source_frame, crop_plan)
+                exporter.write_frame(cropped)
+                all_frames.append(cropped)
+
+        exporter.close()
+        elapsed = time.perf_counter() - t_start
+
+        self._post_process(output_path, video_path, all_frames, face_detected_frames, total_frames, elapsed)
+        return output_path
+
+    def _process_frame_v2(
         self,
         frame: np.ndarray,
         frame_idx: int,
         timestamp: float,
     ) -> Optional[np.ndarray]:
-        """Process a single frame through the pipeline.
+        """Process a single frame through the v2 pipeline.
 
         Flow:
-          1. Detect & track
-          2. Landmarks + pose
-          3. Canonical mapping
-          4. Crop planning
-          5. Temporal stabilization
-          6. Face enhancement
-          7. Identity memory update
-          8. Compositing
+          1. Detect & track (telemetry)
+          2. Landmarks + pose (face telemetry)
+          3. Canonical alignment (standard face space)
+          4. Quality map computation
+          5. Identity state update (belief update)
+          6. Patch memory update
+          7. Query identity (what does this region usually look like?)
+          8. Crop planning
+          9. Render (structure-preserving)
+          10. Composite
         """
         self._frame_count = frame_idx
 
@@ -294,76 +450,201 @@ class FaceOSPipeline:
             landmarks = lm_module.extract_landmarks(frame, face_track.smooth_bbox)
             face_track.landmarks = landmarks
 
-        # 3. Canonical mapping + appearance field update
+        # 3. Canonical alignment
+        canonical_face = None
+        quality_map = None
         if landmarks and face_track.detection:
-            self.appearance_builder.update(
-                frame, landmarks,
-                detection_confidence=face_track.detection.confidence,
-            )
+            try:
+                warped_rgb, warped_lab, M = canonical_map.warp_to_canonical(frame, landmarks)
+                canonical_face = cv2.cvtColor(warped_rgb, cv2.COLOR_RGB2BGR)
+                quality_map = self._compute_quality_map(canonical_face, face_track.detection.confidence)
+            except Exception:
+                pass
 
-        # 4. Crop planning
-        crop_plan = self.crop.plan_crop(
-            frame.shape[:2], face_track, landmarks,
-        )
+        # 4. Identity state update
+        if canonical_face is not None and quality_map is not None:
+            pose = (landmarks.yaw, landmarks.pitch, landmarks.roll) if landmarks else None
+            self.identity_state.update(canonical_face, quality_map, pose=pose)
 
-        # Apply crop
+        # 5. Patch memory update
+        if canonical_face is not None and quality_map is not None and landmarks:
+            pose = (landmarks.yaw, landmarks.pitch, landmarks.roll)
+            # Detect blink for eye freeze
+            is_blink = self._detect_blink(landmarks) if landmarks else False
+            self.patch_memory.update(canonical_face, quality_map, pose=pose, is_blink=is_blink, frame_idx=frame_idx)
+
+        # 6. Query identity (THE MENTAL SHIFT)
+        identity_face = None
+        identity_confidence = None
+        if canonical_face is not None and quality_map is not None:
+            identity_face, identity_confidence = self.identity_state.query(canonical_face, quality_map)
+
+        # 7. Crop planning
+        crop_plan = self.crop.plan_crop(frame.shape[:2], face_track, landmarks)
         cropped = crop_planner.apply_crop(frame, crop_plan)
 
-        # 5. Temporal stabilization
-        # Create face mask for region-specific stabilization
+        # 8. Get region masks
         face_mask = None
         region_masks = None
         if landmarks:
-            # Adjust landmarks to cropped space
             adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
             if adjusted_lm:
                 region_masks = lm_module.create_region_masks(adjusted_lm, cropped.shape[:2])
                 face_mask = region_masks.get("face")
 
-        stabilized = self.temporal.stabilize_face_region(
-            cropped, face_mask, face_track,
-        )
+        # 9. Get identity eyes for structure-preserving rendering
+        identity_eyes = None
+        eye_confidence = 0.0
+        if self.patch_memory and self.patch_memory._initialized and landmarks:
+            pose = (landmarks.yaw, landmarks.pitch, landmarks.roll)
+            left_eye, left_conf = self.patch_memory.query_region('left_eye', pose)
+            right_eye, right_conf = self.patch_memory.query_region('right_eye', pose)
+            if left_eye is not None and right_eye is not None:
+                # Combine eye patches (simplified — in canonical space)
+                identity_eyes = left_eye  # Use left as reference
+                eye_confidence = (left_conf + right_conf) / 2
 
-        # 6. Face enhancement
+        # 10. Render (structure-preserving)
         enhancement_mask = None
         if region_masks:
-            enhancement_mask = face_enhance.create_enhancement_mask(
-                region_masks, stabilized.shape,
-            )
+            enhancement_mask = face_enhance._create_enhancement_mask(region_masks, cropped.shape)
 
-        enhanced = face_enhance.enhance_frame(
-            stabilized, enhancement_mask, region_masks,
+        rendered = face_enhance.render_frame(
+            cropped, enhancement_mask, region_masks,
+            identity_eyes=identity_eyes,
+            eye_confidence=eye_confidence,
         )
 
-        # 7. Identity memory update
-        confidence = None
-        if face_track and face_track.smooth_bbox and landmarks:
-            # Extract face region for memory
-            face_region = self._extract_face_region(cropped, landmarks, crop_plan)
-            if face_region is not None:
-                pose = (landmarks.yaw, landmarks.pitch, landmarks.roll)
-                conf = face_track.detection.confidence if face_track.detection else 0.5
-                confidence = self.memory_atlas.update(face_region, conf, pose)
+        # 11. Composite
+        if identity_face is not None and face_mask is not None:
+            # Warp identity face back to cropped space
+            # (simplified — use confidence-weighted blend)
+            conf = identity_confidence if identity_confidence is not None else np.ones(cropped.shape[:2], dtype=np.float32) * 0.3
 
-        # 8. Compositing
-        memory_face = self.memory_atlas.get_stable_face()
+            if conf.shape[:2] != cropped.shape[:2]:
+                conf = cv2.resize(conf, (cropped.shape[1], cropped.shape[0]))
 
-        if memory_face is not None and face_mask is not None:
-            output = self.compositor.composite_with_memory(
-                stabilized, memory_face, confidence or ConfidenceMap(), face_mask,
+            # The compositor handles the final blend
+            output = self.compositor.composite(
+                cropped, rendered,
+                confidence=ConfidenceMap(combined=conf),
+                face_mask=face_mask,
             )
-            # Blend enhanced features on top
-            if enhancement_mask:
-                # Use enhanced version for eye/brow regions
-                eye_blend = enhancement_mask.eye_mask[:, :, np.newaxis] * 0.5
-                brow_blend = enhancement_mask.brow_mask[:, :, np.newaxis] * 0.3
-                feature_blend = np.clip(eye_blend + brow_blend, 0, 1)
-                output = output.astype(np.float32) * (1 - feature_blend) + enhanced.astype(np.float32) * feature_blend
-                output = np.clip(output, 0, 255).astype(np.uint8)
         else:
-            output = enhanced
+            output = rendered
 
         return output
+
+    def _render_frame_v2(
+        self,
+        source_frame: np.ndarray,
+        frame_idx: int,
+        face_track: Optional[FaceTrack],
+        landmarks: Optional[Landmarks],
+        crop_plan: CropPlan,
+        solved_face: Optional[np.ndarray] = None,
+        solved_conf: Optional[np.ndarray] = None,
+    ) -> Optional[np.ndarray]:
+        """Render a frame using solved identity data.
+
+        This is the final rendering pass — uses the bidirectionally-solved
+        identity to produce the best possible frame.
+        """
+        # Apply crop
+        cropped = crop_planner.apply_crop(source_frame, crop_plan)
+
+        # Get region masks
+        face_mask = None
+        region_masks = None
+        if landmarks:
+            adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
+            if adjusted_lm:
+                region_masks = lm_module.create_region_masks(adjusted_lm, cropped.shape[:2])
+                face_mask = region_masks.get("face")
+
+        # Get identity eyes
+        identity_eyes = None
+        eye_confidence = 0.0
+        if self.patch_memory and self.patch_memory._initialized and landmarks:
+            pose = (landmarks.yaw, landmarks.pitch, landmarks.roll)
+            left_eye, left_conf = self.patch_memory.query_region('left_eye', pose)
+            if left_eye is not None:
+                identity_eyes = left_eye
+                eye_confidence = left_conf
+
+        # Render
+        enhancement_mask = None
+        if region_masks:
+            enhancement_mask = face_enhance._create_enhancement_mask(region_masks, cropped.shape)
+
+        rendered = face_enhance.render_frame(
+            cropped, enhancement_mask, region_masks,
+            identity_eyes=identity_eyes,
+            eye_confidence=eye_confidence,
+        )
+
+        # Composite with solved identity
+        if solved_face is not None and face_mask is not None:
+            conf = solved_conf if solved_conf is not None else np.ones(cropped.shape[:2], dtype=np.float32) * 0.3
+            if conf.shape[:2] != cropped.shape[:2]:
+                conf = cv2.resize(conf, (cropped.shape[1], cropped.shape[0]))
+
+            output = self.compositor.composite(
+                cropped, rendered,
+                confidence=ConfidenceMap(combined=conf),
+                face_mask=face_mask,
+            )
+        else:
+            output = rendered
+
+        return output
+
+    def _compute_quality_map(
+        self,
+        canonical_face: np.ndarray,
+        detection_confidence: float,
+    ) -> np.ndarray:
+        """Compute per-pixel quality map for a canonical face.
+
+        Quality = sharpness × brightness × detection_confidence
+        """
+        h, w = canonical_face.shape[:2]
+
+        # Sharpness
+        gray = cv2.cvtColor(canonical_face, cv2.COLOR_BGR2GRAY)
+        lap = np.abs(cv2.Laplacian(gray.astype(np.float32), cv2.CV_32F))
+        sharpness = np.clip(lap / 50.0, 0, 1)
+
+        # Brightness (prefer well-lit)
+        brightness = gray.astype(np.float32) / 255.0
+        brightness_weight = 1.0 - np.abs(brightness - 0.5) * 2
+        brightness_weight = np.clip(brightness_weight, 0.1, 1.0)
+
+        return sharpness * brightness_weight * detection_confidence
+
+    def _detect_blink(self, landmarks: Landmarks) -> bool:
+        """Detect if eyes are blinking."""
+        if landmarks is None:
+            return False
+
+        pts = landmarks.points
+        if len(pts) < 48:
+            return False
+
+        # Eye aspect ratio for left eye (points 36-41)
+        left_eye = pts[36:42]
+        left_h = abs(left_eye[1][1] - left_eye[5][1]) + abs(left_eye[2][1] - left_eye[4][1])
+        left_w = abs(left_eye[0][0] - left_eye[3][0])
+        left_ear = left_h / (2.0 * left_w + 1e-6)
+
+        # Eye aspect ratio for right eye (points 42-47)
+        right_eye = pts[42:48]
+        right_h = abs(right_eye[1][1] - right_eye[5][1]) + abs(right_eye[2][1] - right_eye[4][1])
+        right_w = abs(right_eye[0][0] - right_eye[3][0])
+        right_ear = right_h / (2.0 * right_w + 1e-6)
+
+        avg_ear = (left_ear + right_ear) / 2
+        return avg_ear < 0.15  # Threshold for blink
 
     def _adjust_landmarks_to_crop(
         self,
@@ -374,15 +655,11 @@ class FaceOSPipeline:
         if crop_plan.src_w <= 0 or crop_plan.src_h <= 0:
             return None
 
-        # Scale factors
         sx = crop_plan.dst_w / crop_plan.src_w
         sy = crop_plan.dst_h / crop_plan.src_h
-
-        # Offset
         ox = crop_plan.src_x
         oy = crop_plan.src_y
 
-        # Transform points
         new_points = landmarks.points.copy()
         new_points[:, 0] = (landmarks.points[:, 0] - ox) * sx
         new_points[:, 1] = (landmarks.points[:, 1] - oy) * sy
@@ -411,32 +688,53 @@ class FaceOSPipeline:
             landmark_confidence=landmarks.landmark_confidence,
         )
 
-    def _extract_face_region(
+    def _post_process(
         self,
-        cropped: np.ndarray,
-        landmarks: Landmarks,
-        crop_plan: CropPlan,
-    ) -> Optional[np.ndarray]:
-        """Extract aligned face region for memory atlas."""
-        adjusted = self._adjust_landmarks_to_crop(landmarks, crop_plan)
-        if adjusted is None:
-            return None
+        output_path: str,
+        video_path: str,
+        all_frames: list,
+        face_detected_frames: int,
+        total_frames: int,
+        elapsed: float,
+    ) -> None:
+        """Apply fades, run QC, save report."""
+        # Apply fades
+        if cfg.export.fade_in > 0 or cfg.export.fade_out > 0:
+            print("  Applying fades...")
+            export_qc.apply_fades(output_path, fade_in=cfg.export.fade_in, fade_out=cfg.export.fade_out)
 
-        try:
-            # Warp to canonical space
-            warped, _, _ = canonical_map.warp_to_canonical(cropped, adjusted)
-            return cv2.cvtColor(warped, cv2.COLOR_RGB2BGR)
-        except Exception:
-            return None
+        # Run QC
+        print("  Running QC checks...")
+        ref_lab = None
+        if self.identity and self.identity.appearance.atlas_lab is not None:
+            ref_lab = tuple(np.mean(self.identity.appearance.atlas_lab, axis=(0, 1)).tolist())
+
+        qc_report = export_qc.compute_quality_metrics(all_frames, ref_lab)
+        qc_report.face_detection_rate = face_detected_frames / max(total_frames, 1)
+
+        if not qc_report.check():
+            print(f"  QC WARNINGS:")
+            for f in qc_report.failures:
+                print(f"    - {f}")
+        else:
+            print("  QC: All checks passed")
+
+        # Save QC report
+        report_path = Path(output_path).with_suffix(".qc.json")
+        with open(report_path, "w") as f:
+            json.dump(qc_report.to_dict(), f, indent=2)
+
+        print(f"\n  DONE: {total_frames} frames in {elapsed:.1f}s ({total_frames / max(elapsed, 0.001):.0f} fps)")
+        print(f"  Output: {output_path}")
 
     def _reset_state(self) -> None:
         """Reset per-clip state."""
         if self.crop:
             self.crop.reset()
-        if self.temporal:
-            self.temporal.reset()
-        if self.memory_atlas:
-            self.memory_atlas.reset()
+        if self.identity_state:
+            self.identity_state.reset()
+        if self.patch_memory:
+            self.patch_memory.reset()
         if self.compositor:
             self.compositor.reset()
         self._frame_count = 0
@@ -446,7 +744,7 @@ class FaceOSPipeline:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Face OS — Personal Face Operating System",
+        description="Face OS v2 — Identity Belief State Engine",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--video", required=True, help="Input video path")
@@ -454,12 +752,13 @@ def main():
     parser.add_argument("--photos", default="photos/", help="Reference photos directory")
     parser.add_argument("--output", "-o", default=None, help="Output video path")
     parser.add_argument("--max-frames", type=int, default=None, help="Max frames to process")
+    parser.add_argument("--no-bidirectional", action="store_true", help="Disable bidirectional solve")
 
     args = parser.parse_args()
 
     output = args.output or "output/face_os/output.mp4"
 
-    pipeline = FaceOSPipeline()
+    pipeline = FaceOSPipeline(use_bidirectional=not args.no_bidirectional)
     if not pipeline.enroll(args.reference, args.photos):
         return
 
