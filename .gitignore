@@ -17,6 +17,8 @@ logs/
 opencode.json
 transcripts/
 highlights/
+output/
+archive/
 
 # Configuration & Secrets (CRITICAL: DO NOT PUSH THESE)
 yt_token.json
@@ -59,3 +61,8 @@ test_frames/
 
 # Analytics token (contains OAuth secrets)
 yt_analytics_token.json
+
+# Colab/Kaggle specific
+colab_setup.py
+kaggle_cell.py
+kaggle_monitor.py
