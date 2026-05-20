@@ -562,18 +562,18 @@ class IdentityState:
         drift = _lab_distance(anchor_mean, current_mean)
 
         if drift > 30:
-            lambda_base = 0.75
+            lambda_base = cfg.identity_state.anchor_lambda_max
         elif drift > 15:
-            lambda_base = 0.70
+            lambda_base = cfg.identity_state.anchor_lambda_max * 0.93
         elif drift > 5:
-            lambda_base = 0.65
+            lambda_base = cfg.identity_state.anchor_lambda_max * 0.87
         else:
-            lambda_base = 0.60
+            lambda_base = cfg.identity_state.anchor_lambda_max * 0.80
 
         obs_count = np.mean(self.belief.observation_count)
         confidence_factor = 1.0 / (1.0 + obs_count * 0.01)
         lambda_conf = lambda_base * (0.9 + 0.1 * confidence_factor)
-        lambda_clamped = np.clip(lambda_conf, 0.60, 0.75)
+        lambda_clamped = np.clip(lambda_conf, 0.60, cfg.identity_state.anchor_lambda_max)
 
         self.belief.best_low = (
             (1 - lambda_clamped) * self.belief.best_low
@@ -712,8 +712,8 @@ class IdentityState:
         # High confidence → more identity, less source
         # Low confidence → less identity, more source
         mean_conf = float(np.mean(confidence))
-        low_blend = 0.85 + 0.1 * mean_conf
-        high_blend = 0.15 - 0.1 * mean_conf
+        low_blend = cfg.identity_state.low_blend_base + (1 - cfg.identity_state.low_blend_base) * mean_conf
+        high_blend = cfg.identity_state.high_blend_base - cfg.identity_state.high_blend_base * mean_conf
 
         conf_3d = confidence[:, :, np.newaxis]
         effective_low_blend = low_blend * conf_3d
@@ -733,15 +733,15 @@ class IdentityState:
             drift = _lab_distance(anchor_mean, result_mean)
 
             if drift > 30:
-                lambda_base = 0.75
+                lambda_base = cfg.identity_state.anchor_lambda_max
             elif drift > 15:
-                lambda_base = 0.70
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.93
             elif drift > 5:
-                lambda_base = 0.65
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.87
             else:
-                lambda_base = 0.60
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.80
 
-            lambda_clamped = np.clip(lambda_base, 0.60, 0.75)
+            lambda_clamped = np.clip(lambda_base, 0.60, cfg.identity_state.anchor_lambda_max)
 
             low_final = (1 - lambda_clamped) * low_final + lambda_clamped * self._anchor_low
             high_final = (1 - lambda_clamped * 0.2) * high_final + (
@@ -786,15 +786,15 @@ class IdentityState:
             drift = _lab_distance(anchor_mean, id_mean)
 
             if drift > 30:
-                lambda_base = 0.95
+                lambda_base = cfg.identity_state.anchor_lambda_max
             elif drift > 15:
-                lambda_base = 0.85
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.93
             elif drift > 5:
-                lambda_base = 0.75
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.87
             else:
-                lambda_base = 0.65
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.80
 
-            lambda_clamped = np.clip(lambda_base, 0.65, 0.95)
+            lambda_clamped = np.clip(lambda_base, 0.60, cfg.identity_state.anchor_lambda_max)
 
             # Pull identity toward anchor
             id_lab[:, :, 0] = (1 - lambda_clamped) * id_lab[:, :, 0] + lambda_clamped * self._anchor_lab[:, :, 0]
