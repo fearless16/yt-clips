@@ -355,24 +355,59 @@ distance(output_identity, anchor_identity) < threshold
 
 ---
 
+## IDENTITY GRAVITY EQUATION (Formalized) 👑
+
+The anchor correction is formalized as **identity gravity**:
+
+```text
+I_t = (1 - λ) * I_t + λ * I_anchor
+```
+
+Where λ (lambda) is conditioned on:
+- **drift**: higher drift → stronger pull (gravity increases with distance)
+- **confidence**: lower confidence → stronger pull (unstable identity needs anchor)
+- **observation_count**: fewer observations → stronger pull (new identity needs anchor)
+
+This creates **identity gravity** — the anchor pulls the identity toward it like a gravitational field. The pull is stronger when:
+1. Identity has drifted far from anchor (high drift)
+2. Identity confidence is low (unstable observations)
+3. Few observations accumulated (new or reset identity)
+
+λ is clamped to [0.1, 0.95] to prevent:
+- λ=0: anchor has no effect (identity drifts freely)
+- λ=1: identity is always anchor (no source influence)
+
+---
+
 ## ANCHOR CORRECTION MATH
 
 ```python
-# For LOW freq (skin tone, lighting):
-pull = anchor_strength * (anchor_L - identity_L)
-identity_L += pull
-
-# For HIGH freq (pores, edges):
-pull = anchor_strength * 0.3 * (anchor_H - identity_H)
-identity_H += pull  # less aggressive — preserve source detail
-
-# Pull strength proportional to distance
-if distance > threshold:
-    pull = min(0.8, 0.4 * (distance / threshold))
-elif distance > 10.0:
-    pull = 0.4 + 0.2 * ((distance - 10.0) / (threshold - 10.0))
+# Compute λ (identity gravity strength)
+if drift > 30:
+    lambda_base = 0.85  # Very strong pull for large drift
+elif drift > 15:
+    lambda_base = 0.60  # Strong pull
+elif drift > 5:
+    lambda_base = 0.35  # Moderate pull
 else:
-    pull = 0.2  # gentle pull even when close
+    lambda_base = 0.15  # Gentle pull (maintenance)
+
+# Modulate by confidence (lower confidence → stronger anchor pull)
+obs_count = mean(observation_count)
+confidence_factor = 1.0 / (1.0 + obs_count * 0.01)  # Saturates at ~100 obs
+lambda_conf = lambda_base * (0.5 + 0.5 * confidence_factor)
+
+# Clamp λ to safe range
+lambda_clamped = clip(lambda_conf, 0.1, 0.95)
+
+# Apply identity gravity equation
+# I_t = (1 - λ) * I_t + λ * I_anchor
+best_low = (1 - lambda_clamped) * best_low + lambda_clamped * anchor_low
+
+# High freq: weaker pull (preserve source detail)
+# λ_high = λ * 0.2 (much less than low freq)
+lambda_high = lambda_clamped * 0.2
+best_high = (1 - lambda_high) * best_high + lambda_high * anchor_high
 ```
 
 ---
@@ -617,30 +652,48 @@ patch hypotheses
 
 ---
 
+## POSE-CONDITIONED PATCH RETRIEVAL (THE REAL SAUCE) 👑
+
+```python
+# THE REAL FUCKING SAUCE
+query(
+    yaw=15,
+    expression='smile',
+    lighting='warm'
+)
+
+# Returns:
+# - best beard patch
+# - best eye patch
+# - best lip patch
+```
+
+THIS IS THE REAL BREAKTHROUGH.
+
+---
+
 ## PATCH DATABASE STRUCTURE
 
 ```python
 patch_database = {
     'left_eye': {
-        'frontal_open': best_patch,
-        'frontal_half': best_patch,
-        'left_yaw': best_patch,
-        'right_yaw': best_patch,
-        'looking_up': best_patch,
-        'looking_down': best_patch,
+        'frontal_neutral_neutral': best_patch,
+        'frontal_smile_warm': best_patch,
+        'left_15_neutral_cool': best_patch,
+        'right_15_smile_neutral': best_patch,
+        # ... etc
     },
     'beard': {
-        'frontal': best_patch,
-        'left_yaw': best_patch,
-        'right_yaw': best_patch,
-        'slight_smile': best_patch,
-        'neutral': best_patch,
+        'frontal_neutral_neutral': best_patch,
+        'frontal_smile_warm': best_patch,
+        'left_15_neutral_cool': best_patch,
+        # ... etc
     },
     'lips': {
-        'closed': best_patch,
-        'slight_open': best_patch,
-        'smile': best_patch,
-        'talking': best_patch,
+        'frontal_neutral_neutral': best_patch,
+        'frontal_talk_neutral': best_patch,
+        'frontal_smile_warm': best_patch,
+        # ... etc
     },
     # ... etc
 }
@@ -648,29 +701,42 @@ patch_database = {
 
 ---
 
-## QUERY LOGIC
+## QUERY LOGIC (Multi-dimensional)
 
 ```python
-def query_patch(patch_name, current_pose, current_expression):
-    """Find best matching patch from database."""
+def query_patch(patch_name, yaw, expression, lighting):
+    """Find best matching patch from database.
 
-    # Get pose-conditioned patches
-    candidates = patch_database[patch_name]
+    POSE-CONDITIONED PATCH RETRIEVAL:
+      query(yaw=15, expression='smile', lighting='warm')
+      → returns best patch for that condition
 
-    # Find best match
-    best_match = None
-    best_score = 0
+    Priority:
+      1. Composite condition (pose + expression + lighting)
+      2. Pose-only condition
+      3. Closest pose bin
+      4. Overall best patch
+    """
+    # Create composite condition key
+    cond_key = f'{pose_bin(yaw)}_{expression}_{lighting}'
 
-    for condition, patch in candidates.items():
-        score = pose_similarity(current_pose, condition)
-        score *= expression_similarity(current_expression, condition)
-        score *= patch.confidence
+    # Try composite condition first
+    if cond_key in patch_database[patch_name]:
+        return patch_database[patch_name][cond_key]
 
-        if score > best_score:
-            best_score = score
-            best_match = patch
+    # Try partial match (pose + expression, without lighting)
+    partial_key = f'{pose_bin(yaw)}_{expression}_any'
+    if partial_key in patch_database[patch_name]:
+        return patch_database[patch_name][partial_key] * 0.9
 
-    return best_match, best_score
+    # Try pose-only condition
+    pose_key = pose_bin(yaw)
+    for key in patch_database[patch_name]:
+        if key.startswith(pose_key):
+            return patch_database[patch_name][key] * 0.8
+
+    # Fallback: overall best
+    return best_patch
 ```
 
 ---
@@ -776,7 +842,69 @@ DO:
 # Temporally coherent grain = cinematic
 # Use low-frequency noise that evolves slowly
 noise_t = base_noise * (1 - alpha) + new_noise * alpha
-# alpha = 0.1 (slow evolution)
+# alpha = 0.05 (very slow evolution)
+```
+
+---
+
+## TEMPORAL NOISE FIELD IMPLEMENTATION
+
+```python
+class TemporalNoiseField:
+    """Temporally coherent sensor grain field.
+
+    The problem with independent random noise per frame:
+      frame 1: noise_1
+      frame 2: noise_2  (completely different)
+      → micro shimmer flicker (brain detects as fake)
+
+    The solution: temporally coherent noise field
+      - Base noise field persists across frames
+      - Slowly evolves over time (low-frequency temporal drift)
+      - Sensor-pattern persistence (same hot pixels, same grain structure)
+      - Like real camera sensor noise: consistent pattern, slow drift
+    """
+
+    def __init__(self, h, w, alpha=0.05):
+        self.alpha = alpha  # Evolution rate (0=static, 1=independent)
+        self._base_noise = randn(h, w)  # Persists across frames
+        self._sensor_pattern = self._generate_sensor_pattern()
+        self._drift_noise = randn(h, w) * 0.1  # Slow temporal drift
+
+    def _generate_sensor_pattern(self):
+        """Generate persistent sensor pattern (like real camera).
+
+        Real sensors have:
+        - Hot pixels (always bright)
+        - Column/row noise (readout pattern)
+        - Fixed pattern noise (manufacturing defects)
+        """
+        pattern = zeros(h, w)
+        # Hot pixels (sparse, persistent)
+        pattern[hot_y, hot_x] = randn(num_hot) * 0.5
+        # Column noise (readout pattern)
+        pattern += col_noise
+        return pattern
+
+    def get_noise(self, strength=0.015):
+        """Get temporally coherent noise for current frame."""
+        new_noise = randn(h, w)
+
+        # Evolve base noise slowly (temporal coherence)
+        # noise_t = base * (1-α) + new * α
+        self._base_noise = self._base_noise * (1 - self.alpha) + new_noise * self.alpha
+
+        # Combine: base noise + sensor pattern + temporal drift
+        noise = (
+            self._base_noise * 0.7 +           # Main noise (temporally coherent)
+            self._sensor_pattern * 0.2 +         # Persistent sensor pattern
+            self._drift_noise * 0.1              # Slow temporal drift
+        )
+
+        # Correlate slightly (mimics sensor readout)
+        noise = GaussianBlur(noise, (3, 3), 0.5)
+
+        return noise * strength * 255
 ```
 
 ---
@@ -788,6 +916,7 @@ Noise MUST:
 * vary spatially
 * stay statistically consistent
 * evolve temporally (NOT independent per frame)
+* include sensor-pattern persistence (hot pixels, column noise)
 
 ---
 
@@ -1060,16 +1189,16 @@ System WINS if:
 |---|---|---|
 | A: Telemetry | ✅ Done | Haar Cascade + dlib landmarks |
 | B: Canonical | ✅ Done | Similarity transform, 256x256 atlas |
-| C: Patch Belief | ⚠️ Partial | Frequency decomposition done, per-patch dynamics TODO |
-| D: Anchor | ✅ Done | Reference-based correction, LAB distance |
-| E: Confidence | ⚠️ Partial | Basic quality map, semantic confidence TODO |
+| C: Patch Belief | ✅ Done | Frequency decomposition, per-patch dynamics, independent stability |
+| D: Anchor | ✅ Done | **Identity gravity equation** — I_t = (1-λ)I_t + λI_anchor |
+| E: Confidence | ✅ Done | Semantic confidence, multifactor, quality modulation |
 | F: Reconstruction | ✅ Done | Frequency-aware blending, anchor correction |
 | G: Temporal | ✅ Done | Bidirectional solver, HQ frame identification |
 | H: Eye Dominance | ⚠️ Partial | Structure-preserving rendering, blink detection TODO |
-| I: Patch Database | ❌ TODO | Pose-conditioned storage |
+| I: Patch Database | ✅ Done | **Pose-conditioned retrieval** — query(yaw, expression, lighting) |
 | J: Appearance Field | ❌ Future | — |
 | K: Dynamic UV | ❌ Future | — |
-| L: Cinematic | ⚠️ Partial | Grain added, temporal coherence TODO |
+| L: Cinematic | ✅ Done | **Temporally coherent grain** — noise field with sensor persistence |
 
 ---
 

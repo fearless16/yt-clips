@@ -106,6 +106,74 @@ def _pose_bin(pose: Tuple[float, float, float]) -> str:
         return 'frontal_neutral'
 
 
+def _expression_bin(expression_vector: Optional[np.ndarray] = None) -> str:
+    """Quantize expression to a bin label.
+
+    Args:
+        expression_vector: Optional expression vector (from landmarks)
+
+    Returns: e.g., 'neutral', 'smile', 'talk', etc.
+    """
+    if expression_vector is None:
+        return 'neutral'
+
+    # Simple expression classification from mouth landmarks
+    # Can be extended with more sophisticated expression detection
+    if len(expression_vector) >= 2:
+        mouth_open = expression_vector[0]
+        smile = expression_vector[1]
+
+        if smile > 0.5:
+            return 'smile'
+        elif mouth_open > 0.3:
+            return 'talk'
+        else:
+            return 'neutral'
+
+    return 'neutral'
+
+
+def _lighting_bin(lighting_vector: Optional[np.ndarray] = None) -> str:
+    """Quantize lighting to a bin label.
+
+    Args:
+        lighting_vector: Optional lighting vector (from face analysis)
+
+    Returns: e.g., 'warm', 'cool', 'neutral', etc.
+    """
+    if lighting_vector is None:
+        return 'neutral'
+
+    # Simple lighting classification
+    if len(lighting_vector) >= 3:
+        # Assume lighting_vector is [R, G, B] mean
+        r, g, b = lighting_vector[:3]
+        if r > b * 1.1:
+            return 'warm'
+        elif b > r * 1.1:
+            return 'cool'
+        else:
+            return 'neutral'
+
+    return 'neutral'
+
+
+def _composite_condition_key(
+    pose: Optional[Tuple[float, float, float]] = None,
+    expression: Optional[str] = None,
+    lighting: Optional[str] = None,
+) -> str:
+    """Create composite condition key for multi-dimensional query.
+
+    Returns: e.g., 'frontal_neutral_warm', 'left_15_smile_cool', etc.
+    """
+    pose_part = _pose_bin(pose) if pose else 'any'
+    expr_part = expression or 'neutral'
+    light_part = lighting or 'neutral'
+
+    return f'{pose_part}_{expr_part}_{light_part}'
+
+
 class RegionPatch:
     """Memory for a single face region.
 
@@ -114,8 +182,22 @@ class RegionPatch:
     - best_quality: quality of best observation
     - best_pose: pose when best was captured
     - pose_patches: dict of pose_bin → best patch for that pose
+    - condition_patches: dict of composite_condition_key → best patch
     - observation_count: total observations
     - current_confidence: current confidence level
+
+    POSE-CONDITIONED PATCH DATABASE (Module I):
+      Store best patches per condition:
+      - frontal neutral
+      - frontal smile
+      - left yaw 15°
+      - right yaw 15°
+      - warm lighting
+      - cool lighting
+      - etc.
+
+      When reconstructing, query the patch database for the closest condition.
+      This kills: smear, fake texture, temporal instability.
     """
 
     def __init__(self, region_name: str, region_def: dict):
@@ -133,6 +215,10 @@ class RegionPatch:
         # Pose-conditioned patch database
         self.pose_patches: Dict[str, np.ndarray] = {}
         self.pose_qualities: Dict[str, float] = {}
+
+        # Multi-dimensional condition database (pose + expression + lighting)
+        self.condition_patches: Dict[str, np.ndarray] = {}
+        self.condition_qualities: Dict[str, float] = {}
 
         # Stats
         self.observation_count: int = 0
@@ -171,6 +257,8 @@ class RegionPatch:
         pose: Optional[Tuple[float, float, float]] = None,
         is_blink: bool = False,
         frame_idx: int = 0,
+        expression: Optional[str] = None,
+        lighting: Optional[str] = None,
     ) -> float:
         """Update this region's memory.
 
@@ -180,7 +268,10 @@ class RegionPatch:
         3. Compute region quality
         4. If quality > best_quality → update best (NEVER average)
         5. Update pose-conditioned database
-        6. Compute confidence
+        6. Update expression-conditioned database
+        7. Update lighting-conditioned database
+        8. Update composite condition database
+        9. Compute confidence
 
         Returns:
             Updated confidence for this region
@@ -224,6 +315,13 @@ class RegionPatch:
                 self.pose_patches[pbin] = patch.copy()
                 self.pose_qualities[pbin] = region_quality
 
+        # Update multi-dimensional condition database (pose + expression + lighting)
+        if pose is not None or expression is not None or lighting is not None:
+            cond_key = _composite_condition_key(pose, expression, lighting)
+            if cond_key not in self.condition_qualities or region_quality > self.condition_qualities[cond_key]:
+                self.condition_patches[cond_key] = patch.copy()
+                self.condition_qualities[cond_key] = region_quality
+
         # Confidence = quality * observation_factor
         obs_factor = min(self.observation_count / 10.0, 1.0)
         self.current_confidence = region_quality * obs_factor
@@ -233,11 +331,20 @@ class RegionPatch:
     def query(
         self,
         pose: Optional[Tuple[float, float, float]] = None,
+        expression: Optional[str] = None,
+        lighting: Optional[str] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
         """Query the best patch for this region.
 
-        If pose is available, returns the best patch for that pose bin.
-        Otherwise, returns the overall best patch.
+        POSE-CONDITIONED PATCH RETRIEVAL (Module I):
+          query(yaw=15, expression='smile', lighting='warm')
+          → returns best beard patch, best eye patch, best lip patch
+
+        Priority:
+          1. Composite condition (pose + expression + lighting)
+          2. Pose-only condition
+          3. Closest pose bin
+          4. Overall best patch
 
         Returns:
             (patch, confidence) or (None, 0.0)
@@ -245,7 +352,25 @@ class RegionPatch:
         if self.best_patch is None:
             return None, 0.0
 
-        # Try pose-specific patch first
+        # Try composite condition first (pose + expression + lighting)
+        if (pose is not None or expression is not None or lighting is not None):
+            cond_key = _composite_condition_key(pose, expression, lighting)
+            if cond_key in self.condition_patches:
+                return self.condition_patches[cond_key], self.current_confidence
+
+            # Try partial match (pose + expression, without lighting)
+            if pose is not None and expression is not None:
+                partial_key = f'{_pose_bin(pose)}_{expression}_any'
+                if partial_key in self.condition_patches:
+                    return self.condition_patches[partial_key], self.current_confidence * 0.9
+
+            # Try partial match (pose + lighting, without expression)
+            if pose is not None and lighting is not None:
+                partial_key = f'{_pose_bin(pose)}_neutral_{lighting}'
+                if partial_key in self.condition_patches:
+                    return self.condition_patches[partial_key], self.current_confidence * 0.9
+
+        # Try pose-specific patch
         if pose is not None and self.pose_patches:
             pbin = _pose_bin(pose)
             if pbin in self.pose_patches:
@@ -317,8 +442,19 @@ class PatchMemory:
         pose: Optional[Tuple[float, float, float]] = None,
         is_blink: bool = False,
         frame_idx: int = 0,
+        expression: Optional[str] = None,
+        lighting: Optional[str] = None,
     ) -> Dict[str, float]:
         """Update all regions with new observation.
+
+        Args:
+            canonical_face: Face in canonical space
+            quality_map: Per-pixel quality
+            pose: Head pose (yaw, pitch, roll)
+            is_blink: Whether eyes are blinking
+            frame_idx: Frame index
+            expression: Expression label (e.g., 'smile', 'neutral', 'talk')
+            lighting: Lighting label (e.g., 'warm', 'cool', 'neutral')
 
         Returns:
             Dict of region_name → confidence
@@ -329,7 +465,10 @@ class PatchMemory:
 
         confidences = {}
         for name, region in self.regions.items():
-            conf = region.update(canonical_face, quality_map, pose, is_blink, frame_idx)
+            conf = region.update(
+                canonical_face, quality_map, pose, is_blink, frame_idx,
+                expression=expression, lighting=lighting,
+            )
             confidences[name] = conf
 
         return confidences
@@ -338,8 +477,14 @@ class PatchMemory:
         self,
         region_name: str,
         pose: Optional[Tuple[float, float, float]] = None,
+        expression: Optional[str] = None,
+        lighting: Optional[str] = None,
     ) -> Tuple[Optional[np.ndarray], float]:
         """Query best patch for a specific region.
+
+        POSE-CONDITIONED PATCH RETRIEVAL (Module I):
+          query_region('beard', yaw=15, expression='smile', lighting='warm')
+          → returns best beard patch for that condition
 
         Returns:
             (patch, confidence) or (None, 0.0)
@@ -347,7 +492,7 @@ class PatchMemory:
         if region_name not in self.regions:
             return None, 0.0
 
-        return self.regions[region_name].query(pose)
+        return self.regions[region_name].query(pose, expression, lighting)
 
     def query_all(
         self,
