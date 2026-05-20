@@ -169,6 +169,12 @@ class FaceOSPipeline:
                 h, w = ref_rgb.shape[:2]
                 quality = np.ones((h, w), dtype=np.float32) * 0.8
                 ref_bgr = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2BGR)
+
+                # Module D: Set identity anchor from reference
+                # This prevents identity drift — all reconstructions must stay close to anchor
+                self.identity_state.set_anchor(ref_bgr)
+                print(f"  Anchor set from reference (LAB distance threshold: {self.identity_state._anchor_threshold})")
+
                 self.identity_state.update(ref_bgr, quality, pose=(0, 0, 0))
 
         self._enrolled = True
@@ -549,6 +555,9 @@ class FaceOSPipeline:
 
         THE KEY INSIGHT: The solved canonical face IS the identity belief.
         Warp it back to source space and composite with confidence.
+
+        MODULE D: Query identity state (with anchor correction) instead of
+        using raw solved face directly.
         """
         # Apply crop
         cropped = crop_planner.apply_crop(source_frame, crop_plan)
@@ -565,6 +574,16 @@ class FaceOSPipeline:
         # If we have a solved canonical face, warp it back to source space
         if solved_face is not None and landmarks is not None:
             try:
+                # Module D: Query identity state for anchor-corrected appearance
+                # Instead of using raw solved face, query the identity state
+                if self.identity_state.is_initialized():
+                    # Compute quality map for current frame
+                    quality_map = self._compute_quality_map(solved_face, face_track.detection.confidence if face_track and face_track.detection else 0.5)
+                    identity_face, identity_conf = self.identity_state.query(solved_face, quality_map)
+                    # Use anchor-corrected identity instead of raw solved face
+                    solved_face = identity_face
+                    solved_conf = identity_conf
+
                 # Warp solved face back to source crop space
                 _, _, M = canonical_map.warp_to_canonical(cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks)
                 M_inv = np.linalg.inv(M)[:2]
@@ -751,6 +770,15 @@ class FaceOSPipeline:
 
         print(f"\n  DONE: {total_frames} frames in {elapsed:.1f}s ({total_frames / max(elapsed, 0.001):.0f} fps)")
         print(f"  Output: {output_path}")
+
+        # Module D: Report anchor distance
+        if self.identity_state and self.identity_state.is_initialized():
+            anchor_dist = self.identity_state.get_anchor_distance()
+            print(f"  Anchor distance: {anchor_dist:.1f} LAB (threshold: {self.identity_state._anchor_threshold})")
+            if anchor_dist > self.identity_state._anchor_threshold:
+                print(f"  WARNING: Identity drift detected! Output may not match reference.")
+            else:
+                print(f"  Identity anchored to reference.")
 
     def _reset_state(self) -> None:
         """Reset per-clip state."""
