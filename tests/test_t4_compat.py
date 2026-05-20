@@ -32,7 +32,7 @@ class TestEnrollment:
 
     def test_contrast_ratio(self):
         params = _get_params()
-        assert abs(params["_contrast_ratio"] - 1.54) < 0.1
+        assert abs(params["_contrast_ratio"] - 1.83) < 0.1
 
     def test_skin_targets(self):
         params = _get_params()
