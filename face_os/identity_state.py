@@ -536,6 +536,7 @@ class IdentityState:
         canonical_face: np.ndarray,
         quality_map: np.ndarray,
         pose: Optional[Tuple[float, float, float]] = None,
+        face_mask: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         if not self.is_initialized():
             return canonical_face, np.ones(canonical_face.shape[:2], dtype=np.float32) * 0.5
@@ -555,6 +556,10 @@ class IdentityState:
 
         # Higher current quality -> slightly more trust in source; lower quality -> identity dominates
         confidence = base_confidence * (0.9 + 0.1 * current_quality)
+
+        # Mask confidence to face region only — prevent background reconstruction
+        if face_mask is not None:
+            confidence = confidence * face_mask
 
         low_curr, high_curr = self.freq.decompose(canonical_face)
         low_id, high_id = self.freq.decompose(identity)
