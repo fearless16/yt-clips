@@ -536,9 +536,9 @@ class IdentityState:
 
         # Verification Gate
         self._gate = VerificationGate(
-            embedding_tolerance=0.45,
-            min_face_pixels=4000,
-            liveness_threshold=0.5,
+            embedding_tolerance=cfg.identity.embedding_tolerance,
+            min_face_pixels=cfg.verification_gate.min_face_pixels,
+            liveness_threshold=cfg.verification_gate.liveness_threshold,
         )
 
     def is_initialized(self) -> bool:
@@ -638,7 +638,7 @@ class IdentityState:
 
         # Compute region confidence mask for low_rate modulation
         # Eyes: slower learning (preserve structure), Skin: faster (normalize lighting)
-        region_mask = np.ones((h, w), dtype=np.float32)
+        computed_region_mask = np.ones((h, w), dtype=np.float32)
         for name, rdef in REGION_DEFS.items():
             x1f, y1f, x2f, y2f = rdef["bounds"]
             x1, y1 = int(x1f * w), int(y1f * h)
@@ -647,17 +647,19 @@ class IdentityState:
             x2, y2 = min(w, x2), min(h, y2)
             if x2 > x1 and y2 > y1:
                 if "eye" in name:
-                    region_mask[y1:y2, x1:x2] = 0.5  # Slower for eyes
+                    computed_region_mask[y1:y2, x1:x2] = 0.5  # Slower for eyes
                 elif name == "skin":
-                    region_mask[y1:y2, x1:x2] = 1.5  # Faster for skin
+                    computed_region_mask[y1:y2, x1:x2] = 1.5  # Faster for skin
                 elif name == "forehead":
-                    region_mask[y1:y2, x1:x2] = 1.3  # Faster for forehead
+                    computed_region_mask[y1:y2, x1:x2] = 1.3  # Faster for forehead
+
+        # Use provided region_mask if available, otherwise use computed one
+        final_region_mask = region_mask if region_mask is not None else computed_region_mask
 
         low, high = self.freq.decompose(canonical_face)
-        self.belief.update(low, high, quality_map, pose, region_mask=region_mask)
+        self.belief.update(low, high, quality_map, pose, region_mask=final_region_mask)
 
-        # Anchor correction in update — prevents drift during processing
-        self._apply_anchor_correction()
+        # Anchor correction removed from update - only apply at query time to preserve raw telemetry
 
         quality_mean = float(np.mean(quality_map))
         self.hypotheses.update(
