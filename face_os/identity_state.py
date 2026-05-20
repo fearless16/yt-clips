@@ -233,10 +233,18 @@ class IdentityState:
     - Per-pixel belief distributions
     - Per-patch memory (regions with independent dynamics)
     - Canonical UV-space state (stabilized here, not in image space)
+    - **Identity Anchor** (Module D): prevents identity drift
 
     THE MENTAL SHIFT:
       OLD: "how do I enhance this frame?"
       NEW: "what does this person's face usually look like?"
+
+    ANCHOR CORRECTION (Module D from architecture):
+      Every reconstruction must satisfy:
+        distance(output_identity, anchor_identity) < threshold
+
+      The anchor is the reference face's LAB values.
+      After each update, identity is pulled toward anchor to prevent drift.
     """
 
     def __init__(self, atlas_size: Tuple[int, int] = (256, 256)):
@@ -245,8 +253,92 @@ class IdentityState:
         self.belief: Optional[BeliefPixel] = None
         self._pose_history = []
 
+        # Module D: Identity Anchor
+        self._anchor_low: Optional[np.ndarray] = None   # Reference low-freq (canonical)
+        self._anchor_high: Optional[np.ndarray] = None  # Reference high-freq (canonical)
+        self._anchor_lab: Optional[np.ndarray] = None   # Reference LAB for distance check
+        self._anchor_strength = 0.35  # How much to pull toward anchor per update
+        self._anchor_threshold = 25.0  # Max LAB distance before forced correction
+
     def is_initialized(self) -> bool:
         return self.belief is not None and self.belief._initialized
+
+    def set_anchor(self, reference_face: np.ndarray) -> None:
+        """Set the identity anchor from reference image.
+
+        Module D: Identity Anchor System
+        The anchor is the reference face warped to canonical space.
+        All future reconstructions must stay close to this anchor.
+
+        Args:
+            reference_face: Reference face in canonical UV space (H, W, 3) BGR
+        """
+        low, high = self.freq.decompose(reference_face)
+        self._anchor_low = low.copy()
+        self._anchor_high = high.copy()
+        self._anchor_lab = cv2.cvtColor(reference_face, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+    def _apply_anchor_correction(self) -> None:
+        """Apply anchor correction to prevent identity drift.
+
+        Module D Rule: distance(output_identity, anchor_identity) < threshold
+
+        Math:
+          For LOW freq (skin tone, lighting):
+            pull = anchor_strength * (anchor_L - identity_L)
+            identity_L += pull
+
+          For HIGH freq (pores, edges):
+            pull = anchor_strength * 0.3 * (anchor_H - identity_H)
+            identity_H += pull  (less aggressive — preserve source detail)
+
+        This ensures:
+          - Skin tone matches reference
+          - Brightness matches reference
+          - Fine detail preserved from source
+        """
+        if self._anchor_low is None or self.belief is None:
+            return
+
+        # Current identity
+        current = self.belief.reconstruct()
+        current_lab = cv2.cvtColor(current, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        # Check distance to anchor
+        anchor_mean = np.mean(self._anchor_lab, axis=(0, 1))
+        current_mean = np.mean(current_lab, axis=(0, 1))
+        distance = np.sqrt(np.sum((anchor_mean - current_mean) ** 2))
+
+        # If distance exceeds threshold, apply stronger correction
+        if distance > self._anchor_threshold:
+            strength = min(0.7, self._anchor_strength * (distance / self._anchor_threshold))
+        else:
+            strength = self._anchor_strength
+
+        # LOW FREQ: Strong correction (skin tone, lighting must match)
+        low_diff = self._anchor_low - self.belief.best_low
+        self.belief.best_low += low_diff * strength
+
+        # HIGH FREQ: Weak correction (preserve source detail)
+        high_diff = self._anchor_high - self.belief.best_high
+        self.belief.best_high += high_diff * strength * 0.2
+
+    def get_anchor_distance(self) -> float:
+        """Get LAB distance between current identity and anchor.
+
+        Returns:
+            LAB distance (float). Should be < threshold for valid identity.
+        """
+        if not self.is_initialized() or self._anchor_lab is None:
+            return 0.0
+
+        current = self.belief.reconstruct()
+        current_lab = cv2.cvtColor(current, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        anchor_mean = np.mean(self._anchor_lab, axis=(0, 1))
+        current_mean = np.mean(current_lab, axis=(0, 1))
+
+        return float(np.sqrt(np.sum((anchor_mean - current_mean) ** 2)))
 
     def update(
         self,
@@ -272,6 +364,9 @@ class IdentityState:
         # Update belief
         self.belief.update(low, high, quality_map, pose)
 
+        # Module D: Apply anchor correction to prevent identity drift
+        self._apply_anchor_correction()
+
         # Track pose
         if pose is not None:
             self._pose_history.append(pose)
@@ -291,6 +386,9 @@ class IdentityState:
         But FREQUENCY-AWARE:
           - Low freq: trust memory more (skin tone is stable)
           - High freq: trust source more for current pose (texture changes with expression)
+
+        ANCHOR CORRECTION (Module D):
+          After blending, pull result toward anchor to prevent drift.
 
         Args:
             canonical_face: Current frame's face in canonical space
@@ -334,6 +432,33 @@ class IdentityState:
         # Reconstruct
         low_final = low_id * effective_low_blend + low_curr * (1 - effective_low_blend)
         high_final = high_id * effective_high_blend + high_curr * (1 - effective_high_blend)
+
+        # Module D: Pull toward anchor after blending
+        if self._anchor_low is not None:
+            # Check distance to anchor
+            result_lab = cv2.cvtColor(
+                np.clip(low_final + high_final, 0, 255).astype(np.uint8),
+                cv2.COLOR_BGR2LAB
+            ).astype(np.float32)
+            anchor_mean = np.mean(self._anchor_lab, axis=(0, 1))
+            result_mean = np.mean(result_lab, axis=(0, 1))
+            distance = np.sqrt(np.sum((anchor_mean - result_mean) ** 2))
+
+            # Pull strength proportional to distance (more aggressive for large drift)
+            if distance > self._anchor_threshold:
+                # Large drift: pull aggressively (up to 80%)
+                pull = min(0.8, 0.4 * (distance / self._anchor_threshold))
+            elif distance > 10.0:
+                # Moderate drift: pull moderately (40-60%)
+                pull = 0.4 + 0.2 * ((distance - 10.0) / (self._anchor_threshold - 10.0))
+            else:
+                # Small drift: gentle pull (20%)
+                pull = 0.2
+
+            # Apply to low freq (skin tone, brightness)
+            low_final = low_final + (self._anchor_low - low_final) * pull
+            # Apply weaker to high freq (preserve detail)
+            high_final = high_final + (self._anchor_high - high_final) * pull * 0.3
 
         result = low_final + high_final
         result = np.clip(result, 0, 255).astype(np.uint8)
@@ -421,6 +546,7 @@ class IdentityState:
         return (yaw, pitch, roll)
 
     def reset(self) -> None:
-        """Reset identity state."""
+        """Reset identity state (but preserve anchor)."""
         self.belief = None
         self._pose_history.clear()
+        # Note: anchor is preserved across resets (it's the reference)

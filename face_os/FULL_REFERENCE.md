@@ -1,15 +1,15 @@
-# Face OS — Complete Architecture & Parameter Reference
+# Face OS — Complete Architecture & Parameter Reference (V2)
 
-**Version:** 0.1.0  
+**Version:** 0.2.0  
 **Branch:** `feat/face-os-pipeline`  
 **Date:** 2026-05-20  
-**Author:** Auto-generated from codebase analysis
+**Status:** Architecture compliance 39/39 PASSING | Face brightness NOT matching reference
 
 ---
 
 ## Table of Contents
 
-1. [What Changed](#1-what-changed)
+1. [What Changed From V1](#1-what-changed-from-v1)
 2. [Architecture Overview](#2-architecture-overview)
 3. [Module-by-Module Deep Dive](#3-module-by-module-deep-dive)
 4. [Core Parameter Calculations](#4-core-parameter-calculations)
@@ -19,47 +19,43 @@
 
 ---
 
-## 1. What Changed
+## 1. What Changed From V1
 
-### Branch: `feat/face-os-pipeline` from `main`
+### V1 (Abandoned) → V2 (Current)
 
-**16 new files, 4,176 lines of code:**
-
-| File | Lines | Purpose |
+| V1 Module | V2 Module | Why Changed |
 |---|---|---|
-| `face_os/__init__.py` | 27 | Package init |
-| `face_os/types.py` | 234 | Core data structures |
-| `face_os/config.py` | 218 | YAML config loader |
-| `face_os/ingest.py` | 195 | Video ingestion + frame reader |
-| `face_os/detect_track.py` | 370 | Face detection + temporal tracking |
-| `face_os/landmarks.py` | 346 | 68-point landmarks + head pose |
-| `face_os/canonical_map.py` | 407 | Appearance field + photic memory |
-| `face_os/crop_planner.py` | 270 | Face-aware 9:16 crop |
-| `face_os/temporal_stabilize.py` | 163 | Identity inertia + flicker suppression |
-| `face_os/face_enhance.py` | 315 | Eye-dominant rendering |
-| `face_os/identity_memory.py` | 243 | Per-pixel confidence accumulation |
-| `face_os/compositor.py` | 208 | Confidence-weighted compositing |
-| `face_os/export_qc.py` | 341 | FFmpeg encode + quality validation |
-| `face_os/pipeline.py` | 473 | Orchestrator |
-| `face_os_config.yaml` | — | All tuning parameters |
-| `face_os/ARCHITECTURE_V2.md` | 274 | Architecture doc |
-
-**2 additional files:**
-
-| File | Lines | Purpose |
-|---|---|---|
-| `test_face_os_comparison.py` | 612 | 4-way comparison test |
+| `temporal_stabilize.py` (EMA flicker suppression) | `temporal_solve.py` (bidirectional temporal solver) | EMA averages pores — wrong. Bidirectional solver identifies HQ frames and repairs past from future. |
+| `identity_memory.py` (per-pixel confidence) | `identity_state.py` (frequency decomposition) | Per-pixel accumulation averages high-frequency detail. Frequency decomposition: low freq uses EMA, high freq uses BEST observation only. |
+| `face_enhance.py` (eye-dominant rendering) | `face_enhance.py` (structure-preserving rendering) | Old version hallucinated eyelashes/pores. New version preserves source structure, enhances contrast/definition only. |
+| `export_qc.py` (FFmpeg encode) | Integrated into `pipeline.py` | Export logic moved to pipeline orchestrator. |
 
 ### What Was NOT Changed
 
-The existing pipeline (`pipeline.py`, `export.py`, `ref_grade.py`, `face_mapper.py`, `frame_analyzer.py`) is untouched. Face OS is a parallel system that can coexist.
+- `canonical_map.py` — Canonical UV alignment + Appearance Field builder (unchanged)
+- `compositor.py` — Confidence-weighted compositing (unchanged)
+- `crop_planner.py` — Rewritten to use reference-based composition matching
+- `landmarks.py` — Fixed face mask generation (was using jaw-only convex hull, now uses all 68 landmarks + forehead extension)
+
+### Architecture Contract
+
+The architecture doc `architecture-appearence-field.md` is THE contract. Nothing can differ from it.
+
+**Key principles:**
+- Source video is TELEMETRY, not ground truth
+- Pixels are noisy photon observations — accumulate confidence over time
+- ΔI_identity ≪ ΔI_source (identity inertia)
+- High freq (pores, edges) = BEST observation only — never average
+- Low freq (skin tone, lighting) = EMA over time
+- Bidirectional temporal solve: future sharp frames repair past blurry frames
+- Structure-preserving rendering: preserve source structure, don't hallucinate
 
 ---
 
 ## 2. Architecture Overview
 
 ```
-INPUT: 16:9 source video + reference face images
+INPUT: 16:9 source video + reference face images (expectation.png + photos/)
                     │
     ┌───────────────┼───────────────┐
     │               │               │
@@ -74,52 +70,56 @@ INPUT: 16:9 source video + reference face images
             │
             ▼
     ┌───────────────┐
-    │   Module 4    │ ◄── Appearance Field A(u,v,θ,L,t)
-    │   Canonical   │     (Photic Memory accumulation)
-    │   Face Map    │
+    │   Module 4    │ ◄── Canonical UV alignment
+    │   Canonical   │     Appearance Field A(u,v,θ,L,t)
+    │   Face Map    │     Pose-conditioned patch database
     └───────┬───────┘
             │
             ▼
     ┌───────────────┐
-    │   Module 5    │ ◄── Face-locked 9:16 with headroom
-    │   Crop Plan   │     (protect forehead, allow bottom crop)
+    │   Module 5    │ ◄── Reference-based composition
+    │   Crop Plan   │     Matches expectation.png layout
+    │   + Headroom  │     Preserves source headroom (never reduces)
+    └───────┬───────┘
+            │
+    ┌───────────────┐
+    │   Module 6    │ ◄── Bidirectional temporal solver
+    │   Temporal    │     Forward pass: collect confidence
+    │   Solve       │     Backward pass: HQ frames repair past
     └───────┬───────┘
             │
             ▼
     ┌───────────────┐
-    │   Module 6    │ ◄── Identity Inertia
-    │   Temporal    │     (ΔI_identity ≪ ΔI_source)
-    │   Stabilizer  │
+    │   Module 7    │ ◄── Structure-preserving rendering
+    │   Face        │     Eyes: enhance definition (NOT hallucinate)
+    │   Enhance     │     Beard: preserve texture
+    │               │     Skin: gentle smoothing + cinematic noise
     └───────┬───────┘
             │
             ▼
     ┌───────────────┐
-    │   Module 7    │ ◄── Eye Dominance Rendering
-    │   Face        │     (eyes > brows > beard > skin > bg)
-    │   Enhancer    │
+    │   Module 8    │ ◄── Frequency decomposition
+    │   Identity    │     Low freq (skin tone): EMA
+    │   State       │     High freq (pores): BEST observation only
     └───────┬───────┘
             │
             ▼
     ┌───────────────┐
-    │   Module 8    │ ◄── Photic Memory
-    │   Identity    │     (accumulate confidence over time)
-    │   Memory      │
+    │   Module 9    │ ◄── Confidence-weighted compositing
+    │   Compositor  │     High conf = identity memory
+    │               │     Low conf = source pixels
     └───────┬───────┘
             │
             ▼
     ┌───────────────┐
-    │   Module 9    │ ◄── Per-pixel confidence blending
-    │   Compositor  │     (high conf = memory, low conf = source)
-    └───────┬───────┘
-            │
-            ▼
-    ┌───────────────┐
-    │   Module 10   │ ◄── Quality validation
-    │   Export + QC │     (face rate, drift, flicker, sharpness)
+    │   Pipeline    │ ◄── 3-pass orchestrator
+    │   Orchestrator│     Pass 1: Forward collection
+    │               │     Pass 2: Bidirectional solve
+    │               │     Pass 3: Rendering
     └───────────────┘
             │
             ▼
-OUTPUT: 9:16 stabilized video
+OUTPUT: 9:16 stabilized video (1080x1920)
 ```
 
 ---
@@ -140,12 +140,6 @@ def frame_reader(video_path, start_frame=0, end_frame=None, step=1):
     """Yield (frame_idx, timestamp_sec, bgr_frame) from video."""
 ```
 
-**How it works:**
-1. Opens video with OpenCV `VideoCapture`
-2. Seeks to `start_frame` if needed
-3. Reads frames sequentially, yields every `step`-th frame
-4. Closes capture when done
-
 ---
 
 ### Module 2: `detect_track.py` — Face Detection + Tracking
@@ -159,15 +153,11 @@ def frame_reader(video_path, start_frame=0, end_frame=None, step=1):
 **Detection strategy:**
 ```
 Frame 0:  DETECT → find faces → match identity → create track
-Frame 1:  TRACK  → predict position (use last known bbox)
-Frame 2:  TRACK  → predict position
-Frame 3:  TRACK  → predict position
-Frame 4:  TRACK  → predict position
+Frame 1-4: TRACK → predict position (use last known bbox)
 Frame 5:  DETECT → find faces → match identity → update track
-...
 ```
 
-**Identity matching formula:**
+**Identity matching:**
 ```python
 # Compute face embedding (dlib or histogram fallback)
 embedding = face_recognition.face_encodings(rgb_frame, face_locations)
@@ -185,13 +175,6 @@ is_match = min_distance <= tolerance  # default: 0.50
 smoothed_bbox = prev_bbox * (1 - alpha) + current_bbox * alpha
 # alpha = 0.3 (config.detection.smoothing_alpha)
 ```
-
-**Track state machine:**
-```
-DETECTED → (miss 1 frame) → TRACKED → (miss N frames) → OCCLUDED → (miss M frames) → LOST → removed
-```
-- N = `max_lost_frames / 2` = 15 frames
-- M = `max_lost_frames` = 30 frames
 
 ---
 
@@ -215,6 +198,27 @@ Points 48-59:  Outer lip (12 points)
 Points 60-67:  Inner lip (8 points)
 ```
 
+**Face mask generation (V2 — FIXED):**
+```python
+# OLD (V1 — broken): used only jaw points 0-16
+# Result: 2.32% frame coverage, face treated as background
+
+# NEW (V2 — fixed): uses ALL 68 landmarks + forehead extension
+all_face_pts = pts[0:68]  # All 68 landmarks
+hull = cv2.convexHull(all_face_pts)
+
+# Extend upward to include forehead
+brow_top = int(np.min(pts[17:26, 1]))
+jaw_top = int(np.min(pts[0:17, 1]))
+forehead_height = jaw_top - brow_top
+forehead_top = max(0, brow_top - forehead_height)
+
+# Fill forehead area within face width
+face_left = int(np.min(pts[0:17, 0])) - 10
+face_right = int(np.max(pts[0:17, 0])) + 10
+face_mask[forehead_top:brow_top, face_left:face_right] = 255
+```
+
 **Head pose estimation (PnP):**
 ```python
 # 3D model points (generic face model)
@@ -227,39 +231,13 @@ model_points = np.array([
     [28.9, -28.9, -24.1],         # Right mouth (point 54)
 ])
 
-# 2D image points from detected landmarks
-image_points = pts[[30, 8, 36, 45, 48, 54]]
-
-# Camera matrix (approximate)
-focal_length = frame_width
-camera_matrix = [[focal_length, 0, center_x],
-                 [0, focal_length, center_y],
-                 [0, 0, 1]]
-
-# Solve PnP
+# Solve PnP → Euler angles (yaw, pitch, roll)
 success, rotation_vec, translation_vec = cv2.solvePnP(
     model_points, image_points, camera_matrix, dist_coeffs
 )
-
-# Convert to Euler angles
 rotation_mat, _ = cv2.Rodrigues(rotation_vec)
 angles, _, _, _, _, _ = cv2.RQDecomp3x3(rotation_mat)
-
-yaw = angles[1]    # Left/right rotation
-pitch = angles[0]  # Up/down rotation
-roll = angles[2]   # Head tilt
-```
-
-**Region mask generation:**
-```python
-# Eye mask: elliptical around eye contour points
-for i in range(6):
-    angle = i * np.pi / 3
-    eye_points[i] = [center_x + radius * cos(angle),
-                     center_y + radius * sin(angle)]
-
-# Gaussian smoothing for soft edges
-mask = cv2.GaussianBlur(mask, (ksize, ksize), sigma)
+yaw, pitch, roll = angles[1], angles[0], angles[2]
 ```
 
 ---
@@ -279,11 +257,7 @@ canonical_points = _get_canonical_points((256, 256))
 
 # Compute similarity transform (rotation + scale + translation)
 anchor_indices = [30, 36, 45, 48, 54]  # Nose, eyes, mouth corners
-src_anchor = source_landmarks[anchor_indices]
-dst_anchor = canonical_points[anchor_indices]
-
 M = cv2.estimateAffinePartial2D(src_anchor, dst_anchor)  # 2x3 matrix
-M_3x3 = np.vstack([M, [0, 0, 1]])  # 3x3 for inverse
 
 # Warp face to canonical space
 warped = cv2.warpAffine(frame, M, (256, 256), flags=cv2.INTER_LANCZOS4)
@@ -297,17 +271,10 @@ quality = sharpness * brightness_weight * detection_confidence * pose_weight
 # Exponential moving average (EMA)
 rate = 0.1  # accumulation_rate
 weight = rate * quality * detection_confidence
-weight_3d = weight[:, :, np.newaxis]  # For RGB broadcasting
-
 accumulated = accumulated * (1 - weight_3d) + new_observation * weight_3d
-
-# Observation count (decays without new observations)
-observation_count = observation_count * (1 - decay_rate) + quality
-# decay_rate = 0.01
 
 # Confidence = normalized observation count
 confidence = np.clip(observation_count / min_observations, 0, 1)
-# min_observations = 5
 ```
 
 **Pose weighting:**
@@ -317,8 +284,6 @@ pose_distance = sqrt(yaw^2 + pitch^2)
 frontal_weight = exp(-pose_distance / 45.0)  # 45° half-life
 
 # Consistency weight (prefer poses close to recent average)
-avg_yaw = mean(recent_yaws)
-avg_pitch = mean(recent_pitches)
 consistency = exp(-sqrt((yaw-avg_yaw)^2 + (pitch-avg_pitch)^2) / 30.0)
 
 pose_weight = frontal_weight * consistency
@@ -326,44 +291,38 @@ pose_weight = frontal_weight * consistency
 
 ---
 
-### Module 5: `crop_planner.py` — Face-Aware Crop with Headroom
+### Module 5: `crop_planner.py` — Reference-Based Crop Planning
 
 **What it does:**
-- Plans 16:9 → 9:16 crop that follows the face
-- Positions face at ~30% from top (matching reference composition)
-- Protects forehead (never crops above top of head)
-- Allows bottom crop (OK to crop below chin)
+- Analyzes reference image (expectation.png) at startup for composition targets
+- Plans 16:9 → 9:16 crop that matches reference composition
+- Preserves source headroom (never reduces it — can't add space that doesn't exist)
 - Smooths crop transitions with EMA
+
+**Reference analysis (expectation.png):**
+```
+Headroom: 24.3% (face center from top)
+Face height: 33.7% of frame
+Face center X: 41.1% (slightly left of center)
+```
 
 **Crop calculation:**
 ```python
-# Target face width in output (pixels)
-target_face_w = 270  # 25% of 1080px output
+# Reference-based targets
+ref_headroom = 0.243  # From expectation.png analysis
+ref_face_height = 0.337
 
-# Zoom scale
-scale = target_face_w / source_face_w
+# Source face position
+src_headroom = face_center_y / source_h  # e.g., 0.189
 
-# Crop dimensions in source space
-crop_w = output_width / scale   # e.g., 1080 / scale
-crop_h = output_height / scale  # e.g., 1920 / scale
+# Use whichever is higher (source or reference)
+# Can't add headroom that doesn't exist in source
+headroom = max(src_headroom, ref_headroom)
 
-# Maintain 9:16 aspect ratio
-target_aspect = 1080 / 1920  # = 0.5625
-if crop_w / crop_h > target_aspect:
-    crop_w = crop_h * target_aspect
-else:
-    crop_h = crop_w / target_aspect
+# Position: face at headroom from top
+crop_y = face_center_y - crop_h * headroom
 
-# Position: face at headroom_ratio from top
-headroom_ratio = 0.30
-crop_x = face_center_x - crop_w / 2
-crop_y = face_center_y - crop_h * headroom_ratio
-
-# Clamp to frame bounds
-crop_x = max(0, min(crop_x, source_w - crop_w))
-crop_y = max(0, min(crop_y, source_h - crop_h))
-
-# Protect forehead
+# Protect forehead (never crop above top of head)
 head_top = min(landmarks.points[:, 1])
 if crop_y > head_top - 10:
     crop_y = max(0, head_top - 10)
@@ -374,106 +333,93 @@ if crop_y > head_top - 10:
 alpha = 0.25  # smoothing_alpha
 max_velocity = 50  # max pixels per frame
 
-dx = new_x - smooth_x
-dy = new_y - smooth_y
-dx = np.clip(dx, -max_velocity, max_velocity)
-dy = np.clip(dy, -max_velocity, max_velocity)
+dx = np.clip(new_x - smooth_x, -max_velocity, max_velocity)
+dy = np.clip(new_y - smooth_y, -max_velocity, max_velocity)
 
 smooth_x += dx * alpha
 smooth_y += dy * alpha
-smooth_w = smooth_w * (1 - alpha) + new_w * alpha
-smooth_h = smooth_h * (1 - alpha) + new_h * alpha
 ```
 
 ---
 
-### Module 6: `temporal_stabilize.py` — Temporal Stabilizer (Identity Inertia)
+### Module 6: `temporal_solve.py` — Bidirectional Temporal Solver
 
 **What it does:**
-- Tracks frame-to-frame LAB statistics (mean L, a, b)
-- Detects flicker (sudden LAB shifts not caused by real motion)
-- Suppresses flicker by pulling toward rolling average
-- Reduces stabilization during real movement (motion compensation)
+- **Forward pass (Pass 1):** Collects per-frame quality metrics, identifies HQ frames
+- **Backward pass (Pass 2):** HQ frames repair past blurry frames
+- This is the offline pipeline's superpower — future frames can fix the past
 
-**Core formula (Identity Inertia):**
-```
-ΔI_identity ≪ ΔI_source
-```
-
-**Implementation:**
+**HQ frame identification:**
 ```python
-# Track LAB statistics per frame
-l_mean = mean(lab[:, :, 0])
-a_mean = mean(lab[:, :, 1])
-b_mean = mean(lab[:, :, 2])
+# Per-frame quality score
+sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+face_sharpness = cv2.Laplacian(face_gray, cv2.CV_64F).var()
+brightness = np.mean(gray)
+face_brightness = np.mean(face_gray)
 
-# Rolling average (last N frames)
-history = deque(maxlen=5)
-avg_stats = mean(history, axis=0)
-
-# Deviation from average
-deviation = current_stats - avg_stats
-deviation_magnitude = sqrt(sum(deviation^2))
-
-# If deviation > threshold, it's likely flicker
-threshold = 15.0  # LAB distance units
-
-if deviation_magnitude > threshold:
-    # Motion-compensated correction
-    motion_factor = 1.0 - min(motion_score / 50.0, 0.8)
-    inertia = 0.85  # identity_inertia
-
-    correction = deviation * inertia * motion_factor
-    corrected = current_stats - correction
-
-    # Apply to LAB channels
-    lab[:, :, 0] += (corrected[0] - current_stats[0])
-    lab[:, :, 1] += (corrected[1] - current_stats[1])
-    lab[:, :, 2] += (corrected[2] - current_stats[2])
-```
-
-**Motion detection (optical flow):**
-```python
-# Dense optical flow (Farneback)
-flow = cv2.calcOpticalFlowFarneback(
-    prev_gray, curr_gray,
-    pyr_scale=0.5, levels=3, winsize=15,
-    iterations=3, poly_n=5, poly_sigma=1.2
+quality = (
+    min(sharpness / 100.0, 1.0) * 0.3 +
+    min(face_sharpness / 50.0, 1.0) * 0.4 +
+    (1.0 - abs(brightness - 128) / 128.0) * 0.15 +
+    (1.0 - abs(face_brightness - 128) / 128.0) * 0.15
 )
-magnitude = sqrt(flow[:,:,0]^2 + flow[:,:,1]^2)
-motion_score = mean(magnitude)
+
+# HQ if above threshold
+is_hq = quality >= hq_threshold  # default: 0.6
+```
+
+**Bidirectional repair:**
+```python
+# Forward pass: collect stats
+fwd_sharpness[i] = sharpness
+fwd_face_l[i] = face_L
+fwd_confidence[i] = quality
+
+# Backward pass: HQ frames repair past
+# When HQ frame found, push its stats backward to repair
+for i in range(num_frames):
+    if is_hq[i]:
+        # This frame is HQ — use it as anchor
+        # Push backward to repair previous frames
+        for j in range(max(0, i - temporal_window), i):
+            weight = 1.0 - (i - j) / temporal_window
+            repaired_L[j] = fwd_face_l[j] * (1 - weight) + fwd_face_l[i] * weight
+```
+
+**Temporal solve formula:**
+```
+repaired[i] = source[i] * (1 - w) + hq_anchor[i] * w
+where w = f(temporal_distance, hq_quality)
 ```
 
 ---
 
-### Module 7: `face_enhance.py` — Eye-Dominant Face Enhancement
+### Module 7: `face_enhance.py` — Structure-Preserving Rendering
 
 **What it does:**
-- Applies per-region enhancement based on facial landmarks
-- Eyes get highest boost (human perception is eye-obsessed)
-- Adds cinematic noise for realism (clean renders look fake)
+- Enhances face regions while PRESERVING source structure
+- Does NOT hallucinate details (eyelashes, pores, etc.)
+- Adds cinematic noise for realism
 
-**Enhancement levels:**
+**Enhancement approach (V2):**
 
-| Region | Boost | Method |
+| Region | Enhancement | Method |
 |---|---|---|
-| Eyes | 1.5x | Sharpen (0.4 amount) + brighten sclera (+8 L) |
-| Brows | 1.3x | Contrast boost (1.2x on L channel) |
-| Beard | 1.2x | Detail enhancement (high-pass blend 0.5x) |
-| Skin | 0.3x | Bilateral smoothing (d=9, sigmaColor=75) |
-| Background | 0.3x | Vignette (center 1.0, edges 0.7) |
-| Global | 0.15x | Gentle unsharp mask |
+| Eyes | Definition boost | Contrast enhancement + edge sharpening (NOT hallucinated lashes) |
+| Brows | Texture boost | High-frequency detail preservation |
+| Beard | Texture preservation | Keep source beard detail, enhance contrast |
+| Skin | Gentle smoothing | Bilateral filter (d=9, sigmaColor=75) |
+| Background | Vignette | Center 1.0, edges 0.7 |
 
-**Eye enhancement formula:**
+**Vignette (background darkening):**
 ```python
-# Sharpen
-sharpened = unsharp_mask(frame, amount=0.4, radius=1.0)
-
-# Brighten (sclera appears whiter)
-brightened = frame + 8
-
-# Blend in eye region
-result = frame * (1 - mask*boost) + sharpened * mask*boost * 0.6 + brightened * mask*boost * 0.4
+# Vignette mask: center=1.0, edges=darkened
+Y, X = np.ogrid[:h, :w]
+cx, cy = w // 2, h // 2
+r_max = sqrt(cx^2 + cy^2)
+r = sqrt((X - cx)^2 + (Y - cy)^2) / r_max
+vignette = 1.0 - r * darken_amount  # darken_amount = 0.3
+vignette = clip(vignette, 0.7, 1.0)
 ```
 
 **Cinematic noise:**
@@ -494,56 +440,47 @@ lab[:, :, 0] += noise
 
 ---
 
-### Module 8: `identity_memory.py` — Photic Memory Atlas
+### Module 8: `identity_state.py` — Frequency Decomposition + Belief Distributions
 
 **What it does:**
-- Treats each frame as a noisy photon observation
-- Accumulates per-pixel confidence over time
-- Confidence grows with more observations, decays without
-- Pose-weighted: frontal observations count more
+- Decomposes identity into LOW frequency (skin tone, lighting) and HIGH frequency (pores, edges)
+- LOW freq: EMA over time (smooth, stable)
+- HIGH freq: BEST observation only (never average — averaging pores = blur)
+- Confidence-weighted blending between best observation and current frame
 
-**Per-pixel quality calculation:**
+**Frequency decomposition:**
 ```python
-# Sharpness (Laplacian magnitude)
-lap = abs(cv2.Laplacian(gray, CV_32F))
-sharpness = clip(lap / 50.0, 0, 1)
+# Low frequency: Gaussian blur (removes fine detail)
+low_freq = cv2.GaussianBlur(canonical_face, (ksize, ksize), sigma)
 
-# Brightness preference (mid-tones are best)
-brightness = gray / 255.0
-brightness_weight = 1.0 - abs(brightness - 0.5) * 2
-brightness_weight = clip(brightness_weight, 0.1, 1.0)
-
-# Combined quality
-quality = sharpness * brightness_weight * detection_confidence * pose_weight
+# High frequency: residual (fine detail only)
+high_freq = canonical_face - low_freq
 ```
 
-**Accumulation rate adaptation:**
+**Belief distribution (per frequency band):**
 ```python
-# Slower accumulation for well-observed pixels
-obs_factor = 1.0 / (1.0 + observation_count * 0.01)
-effective_rate = base_rate * obs_factor * quality * pose_weight
-# base_rate = 0.1
+# Low freq belief: EMA
+low_freq_belief = low_freq_belief * (1 - ema_rate) + new_low_freq * ema_rate
+# ema_rate = 0.1
 
-# EMA update
-accumulated = accumulated * (1 - effective_rate) + new_observation * effective_rate
+# High freq belief: BEST observation only
+if new_quality > best_quality:
+    high_freq_belief = new_high_freq
+    best_quality = new_quality
 
-# Decay unobserved pixels
-frames_since_last = current_frame - last_observation_frame
-if frames_since_last > max_age_frames:  # 300
-    observation_count *= 0.5
+# Composite: low freq (EMA) + high freq (BEST)
+identity = low_freq_belief + high_freq_belief
 ```
 
-**Confidence map:**
+**Confidence modulation:**
 ```python
-# Spatial confidence (normalized observation count)
-spatial_conf = clip(observation_count / min_observations, 0, 1)
-# min_observations = 5
+# Confidence modulated by CURRENT quality (not just history)
+# If current frame is dark/blurry, confidence drops
+current_quality = compute_quality(current_frame)
+effective_confidence = base_confidence * current_quality
 
-# Temporal stability (how similar is current to history)
-stability = exp(-abs(new - accumulated) / 20.0)
-
-# Combined confidence
-confidence = spatial_conf * temporal_stability
+# Blend: high conf = identity memory, low conf = source
+result = identity * effective_confidence + source * (1 - effective_confidence)
 ```
 
 ---
@@ -565,14 +502,6 @@ feathered = GaussianBlur(face_mask, (ksize, ksize), feather/2)
 # Blend weight = face_mask * confidence
 blend_weight = feathered * confidence
 
-# Optional: lighting matching
-if use_light_matching:
-    # Match mean brightness between face and background
-    ref_mean = mean(original_L[face_mask > 0.5])
-    tgt_mean = mean(enhanced_L[face_mask > 0.5])
-    adjustment = (ref_mean - tgt_mean) * 0.3
-    enhanced_L += adjustment
-
 # Composite
 result = original * (1 - blend_weight) + enhanced * blend_weight
 ```
@@ -591,40 +520,61 @@ if abs(diff) > 5:
 
 ---
 
-### Module 10: `export_qc.py` — Export + Quality Control
+### Pipeline Orchestrator: `pipeline.py` — 3-Pass Architecture
 
 **What it does:**
-- Exports processed frames to video via FFmpeg pipe
-- Applies fade in/out transitions
-- Validates quality with 5 checks
+- Coordinates all modules in a 3-pass pipeline
+- Pass 1 (Forward): Collect telemetry, build identity state
+- Pass 2 (Backward): Bidirectional temporal solve, HQ frame repair
+- Pass 3 (Render): Structure-preserving enhancement + compositing
 
-**FFmpeg pipe:**
+**Pass 1 — Forward collection:**
 ```python
-cmd = [
-    "ffmpeg", "-y",
-    "-f", "rawvideo", "-pix_fmt", "bgr24",
-    "-s", f"{width}x{height}", "-r", str(fps),
-    "-i", "-",                          # stdin pipe
-    "-i", source_path,                  # for audio muxing
-    "-map", "0:v", "-map", "1:a?",
-    "-c:v", "libx264", "-crf", "18", "-preset", "slow",
-    "-c:a", "aac", "-b:a", "320k",
-    "-movflags", "+faststart",
-    output_path,
-]
-proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-proc.stdin.write(frame.tobytes())  # Write each frame
+for frame_idx, timestamp, frame in frame_reader(video_path):
+    # 1. Detect face
+    detections = detect_faces(frame)
+    
+    # 2. Extract landmarks + pose
+    landmarks = extract_landmarks(frame, face_bbox)
+    pose = estimate_pose(landmarks, frame.shape[:2])
+    
+    # 3. Build canonical face
+    canonical_face, transform = build_canonical_face(frame, landmarks)
+    
+    # 4. Update identity state (frequency decomposition)
+    identity_state.update(canonical_face, quality, landmarks, pose)
+    
+    # 5. Store canonical face for bidirectional pass
+    canonical_faces.append(canonical_face)
+    frame_stats.append(quality_metrics)
 ```
 
-**QC checks:**
+**Pass 2 — Bidirectional temporal solve:**
+```python
+# Identify HQ frames
+hq_frames = identify_hq_frames(frame_stats)
 
-| Check | Threshold | Formula |
-|---|---|---|
-| Face detection rate | ≥ 80% | `frames_with_face / total_frames` |
-| Identity drift | ≤ 20.0 LAB | `sqrt((L-ref_L)^2 + (a-ref_a)^2 + (b-ref_b)^2)` |
-| Flicker score | ≤ 5.0 LAB | `mean(sqrt(ΔL^2 + Δa^2 + Δb^2))` between consecutive frames |
-| Sharpness | ≥ 10.0 | `var(Laplacian(gray))` |
-| A/V sync | ≤ 0.5s | `abs(video_duration - audio_duration)` |
+# Bidirectional repair
+repaired = bidirectional_temporal_solve(
+    canonical_faces, hq_frames, frame_stats
+)
+```
+
+**Pass 3 — Rendering:**
+```python
+for i, canonical_face in enumerate(repaired):
+    # 1. Query identity memory (don't enhance pixels)
+    identity = identity_state.query(quality=frame_stats[i]['quality'])
+    
+    # 2. Structure-preserving rendering
+    rendered = render_face(identity, landmarks, enhance_params)
+    
+    # 3. Composite onto original frame
+    result = compositor.composite(original_frame, rendered, confidence)
+    
+    # 4. Write to output
+    write_frame(result)
+```
 
 ---
 
@@ -653,27 +603,29 @@ lab_distance = sqrt((L1-L2)^2 + (a1-a2)^2 + (b1-b2)^2)
 
 | Parameter | Value | Source |
 |---|---|---|
-| Face L | 108.5 | Mean of face LAB L channel |
+| Face L | 108.4 | Mean of face LAB L channel |
 | Face a | 139.6 | Mean of face LAB a channel |
 | Face b | 146.7 | Mean of face LAB b channel |
 | Body L | 174.8 | Mean of body region L |
-| Background L | 102.1 | Mean of non-face, non-body L |
-| Contrast (std) | 58.5 | Std of face grayscale |
-| Saturation | 124.7 | Mean of face HSV S channel |
-| Vignette ratio | 1.19 | Center/edge brightness ratio |
-| Face position | y=0.24, h=0.34 | Normalized face bbox |
+| Background L | 41.5 | Mean of non-face, non-body L |
+| Headroom | 24.3% | Face center from top |
+| Face height | 33.7% | Face bbox height / frame height |
+| Face center X | 41.1% | Slightly left of center |
 
 ### Key Formulas Summary
 
 | Formula | Where Used | Purpose |
 |---|---|---|
-| `EMA = prev * (1-α) + new * α` | Modules 2,4,5,6,8 | Temporal smoothing |
-| `quality = sharpness * brightness * conf * pose` | Modules 4,8 | Per-pixel quality scoring |
+| `EMA = prev * (1-α) + new * α` | Modules 2,4,5,8 | Temporal smoothing |
+| `quality = sharpness * brightness * conf * pose` | Modules 4,6,8 | Per-pixel quality scoring |
 | `confidence = clip(obs_count / min_obs, 0, 1)` | Module 8 | Confidence accumulation |
 | `blend = original * (1-w) + enhanced * w` | Module 9 | Confidence-weighted compositing |
-| `lab_dist = sqrt(ΔL² + Δa² + Δb²)` | Module 10 | Identity drift measurement |
-| `flicker = mean(sqrt(ΔL² + Δa² + Δb²))` | Module 10 | Frame-to-frame stability |
-| `PnP → RQDecomp → (yaw, pitch, roll)` | Module 3 | Head pose estimation |
+| `lab_dist = sqrt(ΔL² + Δa² + Δb²)` | Pipeline | Identity drift measurement |
+| `flicker = mean(sqrt(ΔL² + Δa² + Δb²))` | Pipeline | Frame-to-frame stability |
+| `low_freq = GaussianBlur(face, ksize)` | Module 8 | Frequency decomposition |
+| `high_freq = face - low_freq` | Module 8 | Frequency decomposition |
+| `identity = low_freq_ema + high_freq_best` | Module 8 | Identity reconstruction |
+| `repaired[i] = source*(1-w) + hq*w` | Module 6 | Bidirectional temporal repair |
 
 ---
 
@@ -683,59 +635,60 @@ lab_distance = sqrt((L1-L2)^2 + (a1-a2)^2 + (b1-b2)^2)
 
 ```yaml
 identity:
-  reference_dir: "photos/"           # Directory with reference face photos
-  reference_image: "expectation.png" # Primary reference for appearance
-  embedding_tolerance: 0.50          # Face matching threshold (lower = stricter)
+  reference_dir: "photos/"
+  reference_image: "expectation.png"
+  embedding_tolerance: 0.50
 
 detection:
-  model: "hog"                       # hog (CPU) | cnn (GPU)
-  min_face_size: 60                  # Minimum face size in pixels
-  detection_interval: 5              # Detect every N frames (track in between)
-  max_lost_frames: 30                # Frames before declaring face LOST
-  smoothing_alpha: 0.3               # EMA smoothing for bbox
+  model: "hog"
+  min_face_size: 60
+  detection_interval: 5
+  max_lost_frames: 30
+  smoothing_alpha: 0.3
 
 landmarks:
-  model: "dlib_68"                   # dlib_68 | mediapipe_468
-  pose_smoothing: 0.4                # EMA for head pose angles
+  model: "dlib_68"
+  pose_smoothing: 0.4
 
 canonical:
-  atlas_size: [256, 256]             # Canonical face resolution [W, H]
-  alignment_mode: "similarity"       # similarity | affine | perspective
-  enrollment_frames: 30              # Frames to average for enrollment
+  atlas_size: [256, 256]
+  alignment_mode: "similarity"
+  enrollment_frames: 30
 
 crop:
-  output_size: [1080, 1920]          # Target output [W, H]
-  headroom_ratio: 0.30               # Fraction of output above face center
-  face_target_width: 270             # Target face width in output (pixels)
-  smoothing_alpha: 0.25              # EMA for crop position
-  max_crop_velocity: 50              # Max pixels crop can move per frame
-  protect_forehead: true             # Never crop above forehead
+  output_size: [1080, 1920]
+  headroom_ratio: 0.30
+  face_target_width: 270
+  smoothing_alpha: 0.25
+  max_crop_velocity: 50
+  protect_forehead: true
 
 temporal:
-  identity_inertia: 0.85             # How much identity resists change (0-1)
-  flicker_threshold: 15.0            # LAB distance to trigger stabilization
-  temporal_window: 5                 # Frames to average for stabilization
+  bidirectional: true
+  hq_threshold: 0.6
+  temporal_window: 5
+  repair_strength: 0.3
 
 enhance:
-  eye_boost: 1.5                     # Enhancement multiplier for eyes
-  brow_boost: 1.3                    # Enhancement multiplier for brows
-  beard_boost: 1.2                   # Enhancement multiplier for beard
-  skin_smoothing: 0.3                # Skin smoothing strength (0 = none)
-  sharpen_amount: 0.3                # Sharpening strength
-  use_cinematic_noise: true          # Add subtle sensor grain
-  noise_strength: 0.02               # Grain intensity (0 = none)
+  structure_preserving: true
+  eye_definition_boost: 1.3
+  brow_texture_boost: 1.2
+  beard_preservation: 0.9
+  skin_smoothing: 0.3
+  sharpen_amount: 0.3
+  use_cinematic_noise: true
+  noise_strength: 0.02
 
-memory:
-  accumulation_rate: 0.1             # How fast confidence accumulates
-  decay_rate: 0.01                   # How fast confidence decays
-  min_observations: 5                # Min observations before using memory
-  max_age_frames: 300                # Max frames to keep in memory
-  use_pose_weighting: true           # Weight observations by pose similarity
+identity_state:
+  low_freq_ema_rate: 0.1
+  high_freq_best_only: true
+  confidence_modulation: true
+  base_confidence: 0.7
 
 compositor:
-  confidence_threshold: 0.3          # Below this, use source pixels
-  feather_pixels: 10                 # Edge feathering width
-  use_light_matching: true           # Match lighting between face and bg
+  confidence_threshold: 0.3
+  feather_pixels: 10
+  use_light_matching: true
 
 export:
   codec: "libx264"
@@ -748,107 +701,117 @@ export:
   fade_out: 0.5
 
 qc:
-  min_face_detection_rate: 0.80      # Min % of frames with face
-  max_identity_drift: 20.0           # Max LAB distance from reference
-  max_flicker_score: 5.0             # Max frame-to-frame variance
-  min_sharpness: 10.0                # Min Laplacian variance
-  check_av_sync: true                # Validate audio-video sync
+  min_face_detection_rate: 0.80
+  max_identity_drift: 20.0
+  max_flicker_score: 5.0
+  min_sharpness: 10.0
 ```
 
 ---
 
 ## 6. Test Results & Comparison
 
-**Test clip:** `clips_test/test_clip.mp4` (640x360, 30fps, 11.5s, 345 frames)  
+**Test clip:** `clips_test/test_clip.mp4` (640x360, 30fps, 15s, 450 frames)  
 **Reference:** `expectation.png` (941x1672, portrait)  
-**Reference face:** L=108.5, a=139.6, b=146.7
+**Reference face:** L=108.4, a=139.6, b=146.7
 
-### Parameter Comparison
+### Architecture Compliance Tests
 
-| Metric | Reference | Original | ref_grade | face_mapper | Face OS |
-|---|---|---|---|---|---|
-| **L (brightness)** | 108.5 | 98.9 | 100.6 (+1.7) | 99.1 (+0.3) | 97.4 (-1.5) |
-| **a (red-green)** | 139.6 | 138.3 | 137.2 (-1.1) | 135.7 (-2.6) | 137.4 (-0.9) |
-| **b (yellow-blue)** | 146.7 | 130.3 | 137.9 (+7.6) | 138.2 (+7.9) | 132.3 (+1.9) |
-| **L std (contrast)** | 58.5 | 39.8 | 26.3 (-13.5) | 40.0 (+0.1) | 37.2 (-2.7) |
-| **Sharpness** | 232.2 | 310.5 | 215.3 (-95.2) | 296.6 (-14.0) | 5.3 (-305.2) |
-| **Saturation** | 124.7 | 85.4 | 87.0 (+1.6) | 92.8 (+7.3) | 81.5 (-3.9) |
-| **Flicker (L diff)** | — | 2.38 | 1.57 | **1.07** | 9.10 |
-| **Flicker (LAB dist)** | — | 2.53 | 1.64 | **1.25** | 9.87 |
-| **Face detection** | — | 100% | 100% | 100% | 91.3% |
-| **LAB dist from ref** | 0.0 | 19.0 | **12.0** | 13.2 | 18.3 |
-| **L distance from ref** | 0.0 | 9.6 | **7.9** | 9.3 | 11.1 |
+**39 tests, ALL PASSING:**
 
-### Verdict
-
-| Metric | Winner | Score |
+| Module | Tests | Status |
 |---|---|---|
-| Closest to reference (LAB) | **ref_grade** | 12.0 |
-| Most stable (lowest flicker) | **face_mapper** | 1.25 |
-| Best L match | **ref_grade** | 7.9 |
-| Best a match (skin tone) | **Face OS** | 0.9 |
-| Best b match (warmth) | **ref_grade** | 7.6 |
+| Module A (Telemetry) | 3 | ✅ PASS |
+| Module B (Canonical Alignment) | 3 | ✅ PASS |
+| Module C (Photic Memory) | 4 | ✅ PASS |
+| Module D (Identity Anchor) | 2 | ✅ PASS |
+| Module E (Confidence) | 2 | ✅ PASS |
+| Module F (Reconstruction) | 2 | ✅ PASS |
+| Module G (Temporal Inertia) | 2 | ✅ PASS |
+| Module H (Eye Dominance) | 3 | ✅ PASS |
+| Module K (Cinematic Realism) | 3 | ✅ PASS |
+| Edge Cases | 5 | ✅ PASS |
+| Composition | 6 | ✅ PASS |
+| Failure Conditions | 2 | ✅ PASS |
+| Bidirectional Solve | 2 | ✅ PASS |
 
-### Output Files
+### Face Identity Comparison (HONEST)
+
+| Metric | Reference | Source | Output | Status |
+|---|---|---|---|---|
+| **L (brightness)** | 108.4 | 97-106 | 46-72 | ❌ 37-62 too dark |
+| **a (skin tone)** | 139.6 | 138-140 | 135-139 | ✅ Δ0.4-0.8 |
+| **b (warmth)** | 146.7 | 127-130 | 134-138 | ⚠️ Δ8.6-9.1 |
+| **Face detection** | — | 100% | 100% | ✅ |
+| **Flicker (LAB)** | — | 2.53 | 0.22 | ✅ Best |
+| **Face height** | 33.7% | 37.5% | 33.9% | ✅ Matched |
+| **Headroom** | 24.3% | 18.9% | 15.9% | ⚠️ Source-limited |
+
+### Brightness Loss Trace
 
 ```
-output/face_os_comparison/
-├── original.mp4          792 KB   640x360   (input clip)
-├── ref_graded.mp4        1.3 MB   640x360   (ref_grade output)
-├── face_mapped.mp4       2.6 MB   640x360   (face_mapper output)
-├── face_os_output.mp4    11 MB    1080x1920 (Face OS 9:16 output)
-├── comparison_grid.jpg   Side-by-side frame comparison
-├── comparison_full_grid.jpg  5 frames × 4 variants
-├── comparison_results.json   Raw metrics
-└── frames/               20 sample frames
+Source crop:     L=109.2
+After render:    L=93.8  (vignette darkens background)
+Output face:     L=72.1  (compositor/warp adds more loss)
+Step-by-step:    eyes/brows/beard/skin preserve face_L=98.0
+                 vignette drops full_L from 109.2→94.2
 ```
+
+**Root cause:** Identity state accumulates DARK source observations without correcting toward reference brightness. Architecture says "Identity Anchor Correction" should pull toward reference, but current code doesn't implement this.
 
 ---
 
 ## 7. Known Issues & Next Steps
 
-### Current Issues
+### Critical Issues
 
 | Issue | Root Cause | Fix |
 |---|---|---|
-| Flicker = 9.87 (too high) | Crop planner jitter + temporal stabilizer too weak | Increase inertia 0.85→0.95, fix crop smoothing |
-| Sharpness = 5.3 (too low) | Bilateral filter + cinematic noise over-smooth at 640x360 | Reduce smoothing at low resolutions |
-| Face detection = 91.3% | Haar cascade misses some frames | Add dlib tracker fallback |
-| a channel = 137.4 (only -0.9) | Identity embedding correctly identifies skin tone | Working as intended |
-| b channel = 132.3 (only +1.9) | Not enough warmth boost | Increase b channel blend toward reference |
+| **Face L=72 vs ref L=108** | Identity state accumulates dark source without anchor correction | Implement Identity Anchor Correction (Module D) |
+| **Brightness loss 109→72** | Vignette + compositor + identity blending all darken | Fix: protect face region from vignette, normalize brightness before accumulation |
+| **b channel Δ8.6** | Source b=127-130 vs ref b=146.7, not enough correction | Increase b channel blend toward reference |
+
+### Architecture Gaps
+
+| Gap | Status | Priority |
+|---|---|---|
+| Identity Anchor Correction | NOT implemented | HIGH — face brightness catastrophically wrong |
+| Per-face exposure normalization | NOT implemented | HIGH — source has L=16→155 swings |
+| Face matcher integration | NOT in pipeline | MEDIUM — needed for multi-face scenes |
+| Super-resolution | Not available (needs CUDA) | LOW — Mac M1 can't run Real-ESRGAN |
 
 ### Next Steps (Priority)
 
-1. **Fix flicker**: Increase temporal inertia, fix crop smoothing jitter
-2. **Fix sharpness**: Resolution-adaptive enhancement (less smoothing at low res)
-3. **Improve detection**: Add dlib HOG detector as fallback
-4. **Tune b channel**: Increase warmth blend toward reference b=146.7
-5. **Add tests**: Unit tests for each module
-6. **GPU path**: CUDA for detection + landmarks on Colab T4
+1. **Fix face brightness** — Implement Identity Anchor Correction: pull identity toward reference brightness/tone
+2. **Fix landmark scaling** — Face mask only 2.32% coverage (FIXED: now 9.95%)
+3. **Debug brightness loss** — Trace where 109→72 loss happens in pipeline
+4. **Test with higher-res source** — 640x360 limits detail
+5. **Add per-face exposure normalization** — Detect user face, normalize L before accumulation
 
 ---
 
-## File Structure
+## File Structure (V2)
 
 ```
 face_os/
 ├── __init__.py              # Package init
-├── types.py                 # Core data structures (FaceDetection, Landmarks, AppearanceField, CropPlan, ConfidenceMap, etc.)
-├── config.py                # YAML config loader with dot-notation access
-├── ingest.py                # Module 1: Video loading, frame reader, reference images
-├── detect_track.py          # Module 2: Haar/dlib detection, embedding matching, temporal tracker
-├── landmarks.py             # Module 3: 68-point landmarks (dlib or geometric), PnP pose, region masks
-├── canonical_map.py         # Module 4: Canonical UV alignment, Appearance Field builder
-├── crop_planner.py          # Module 5: Face-locked 9:16 crop, headroom, EMA smoothing
-├── temporal_stabilize.py    # Module 6: Identity inertia, LAB flicker suppression, optical flow
-├── face_enhance.py          # Module 7: Eye-dominant rendering, cinematic noise
-├── identity_memory.py       # Module 8: Per-pixel confidence accumulation, pose weighting
-├── compositor.py            # Module 9: Confidence-weighted blending, lighting matching
-├── export_qc.py             # Module 10: FFmpeg pipe, fades, quality validation
-└── pipeline.py              # Orchestrator tying all 10 modules
+├── types.py                 # Core data structures
+├── config.py                # YAML config loader
+├── ingest.py                # Module 1: Video loading, frame reader
+├── detect_track.py          # Module 2: Face detection + tracking
+├── landmarks.py             # Module 3: 68-point landmarks + PnP pose + region masks
+├── canonical_map.py         # Module 4: Canonical UV alignment + Appearance Field
+├── crop_planner.py          # Module 5: Reference-based crop planning
+├── temporal_solve.py        # Module 6: Bidirectional temporal solver
+├── face_enhance.py          # Module 7: Structure-preserving rendering
+├── identity_state.py        # Module 8: Frequency decomposition + belief distributions
+├── compositor.py            # Module 9: Confidence-weighted compositing
+└── pipeline.py              # Orchestrator (3-pass architecture)
 
 face_os_config.yaml          # All tuning parameters
-test_face_os_comparison.py   # 4-way comparison test
+test_architecture_compliance.py  # 39 architecture compliance tests
+test_face_os_v2.py           # Unit tests for v2 modules
+test_face_os_comparison.py   # 4-way comparison test (v1, outdated)
 ```
 
 ---
@@ -857,9 +820,9 @@ test_face_os_comparison.py   # 4-way comparison test
 
 | Package | Version | Purpose |
 |---|---|---|
-| OpenCV (cv2) | ≥4.5 | Image processing, face detection, optical flow |
+| OpenCV (cv2) | ≥4.5 | Image processing, face detection |
 | NumPy | ≥1.20 | Array operations |
-| dlib | ≥19.22 | 68-point landmarks, face embeddings (optional) |
-| face_recognition | ≥1.3 | Identity matching (optional, wraps dlib) |
+| dlib | ≥19.22 | 68-point landmarks, face embeddings |
+| face_recognition | ≥1.3 | Identity matching (wraps dlib) |
 | FFmpeg | ≥5.0 | Video encoding (external binary) |
 | PyYAML | ≥5.0 | Config file parsing |

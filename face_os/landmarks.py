@@ -320,11 +320,28 @@ def create_region_masks(
     ry = int(np.max(mouth_pts[:, 1]) - np.min(mouth_pts[:, 1])) // 2 + 5
     masks["mouth"] = _elliptical_mask(h, w, center[1], center[0], ry, rx)
 
-    # Face contour (convex hull of jaw points)
-    jaw_pts = pts[0:17]
-    hull = cv2.convexHull(jaw_pts)
+    # Face contour (convex hull of ALL face landmarks, not just jaw)
+    # Architecture: face mask must cover the ENTIRE face including forehead
+    # Using jaw-only creates a tiny mask that leaves most of the face unprotected
+    all_face_pts = pts[0:68]  # All 68 landmarks
+    hull = cv2.convexHull(all_face_pts)
     face_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillConvexPoly(face_mask, hull, 255)
+    
+    # Extend upward to include forehead (landmarks don't cover forehead)
+    # The forehead is typically above the eyebrow landmarks (17-26)
+    brow_top = int(np.min(pts[17:26, 1]))
+    jaw_top = int(np.min(pts[0:17, 1]))
+    # Forehead = same height as from brows to jaw
+    forehead_height = jaw_top - brow_top
+    forehead_top = max(0, brow_top - forehead_height)
+    # Fill forehead area (only above the convex hull, within face width)
+    face_left = int(np.min(pts[0:17, 0])) - 10
+    face_right = int(np.max(pts[0:17, 0])) + 10
+    face_left = max(0, face_left)
+    face_right = min(w, face_right)
+    face_mask[forehead_top:brow_top, face_left:face_right] = 255
+    
     face_mask = cv2.GaussianBlur(face_mask.astype(np.float32) / 255.0, (11, 11), 3)
     masks["face"] = face_mask
 

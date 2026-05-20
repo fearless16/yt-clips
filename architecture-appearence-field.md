@@ -39,6 +39,27 @@ Final face is reconstructed from:
 
 ---
 
+## THE MENTAL SHIFT 🧠
+
+OLD (pixel-centric):
+
+```text
+identity = image
+enhance each frame
+```
+
+NEW (belief-centric):
+
+```text
+identity = latent appearance manifold
+maintain persistent belief about what THIS human looks like
+through noisy observations over time
+```
+
+THIS IS THE FUNDAMENTAL DIFFERENCE.
+
+---
+
 # 1. NORTH STAR 🎯
 
 Goal is NOT:
@@ -61,19 +82,23 @@ UNDER DEGRADED OBSERVATION
 ```text
 RAW STREAM
     ↓
-FACE TRACKING
+FACE TRACKING (telemetry extraction)
     ↓
-CANONICAL ALIGNMENT
+CANONICAL ALIGNMENT (stabilize coordinate space)
     ↓
-PHOTONIC MEMORY UPDATE
+PATCH EXTRACTION (per-region decomposition)
     ↓
-IDENTITY ANCHOR CORRECTION
+PATCH BELIEF UPDATE (per-patch confidence accumulation)
+    ↓
+IDENTITY ANCHOR CORRECTION (prevent drift)
+    ↓
+PATCH DATABASE QUERY (best patch retrieval)
     ↓
 CONFIDENCE-WEIGHTED RECONSTRUCTION
     ↓
-TEMPORAL STABILIZATION
+BIDIRECTIONAL TEMPORAL SOLVE (future repairs past)
     ↓
-CINEMATIC POST PROCESS
+CINEMATIC POST PROCESS (temporally coherent grain)
     ↓
 FINAL 9:16 OUTPUT
 ```
@@ -142,7 +167,7 @@ canonical_uv
 
 ---
 
-# MODULE C — PHOTONIC MEMORY ENGINE 🔥
+# MODULE C — PATCH BELIEF ENGINE 🔥
 
 ## CORE IDEA
 
@@ -156,31 +181,95 @@ NOT final truth.
 
 ---
 
-## MEMORY STRUCTURE
+## THE PATCH-FIRST APPROACH 🚨
+
+DO NOT THINK:
+
+```text
+identity = whole face image
+```
+
+THINK:
+
+```text
+identity = collection of patch beliefs
+```
+
+Each patch has INDEPENDENT dynamics:
 
 ```python
-memory = {
-    forehead_patch,
-    left_eye_patch,
-    right_eye_patch,
-    beard_patch,
-    eyebrow_patch,
-    lips_patch,
-    cheek_patch,
-    jaw_patch,
+patch_belief = {
+    'left_eye': {
+        best_observation,
+        confidence_distribution,
+        lighting_model,
+        pose_memory,
+        temporal_variance,
+        observation_count
+    },
+    'right_eye': { ... },
+    'beard': { ... },
+    'forehead': { ... },
+    'lips': { ... },
+    'nose': { ... },
+    'left_cheek': { ... },
+    'right_cheek': { ... },
+    'jaw': { ... }
 }
 ```
 
-Each patch stores:
+---
+
+## WHY PATCH-FIRST? 😭
+
+Because:
+
+* Eyes blink → eye patch needs freeze logic
+* Beard is stable → beard patch accumulates fast
+* Forehead barely moves → highest confidence
+* Lips change expression → need pose-conditioned storage
+
+ONE global memory = WRONG.
+
+PER-PATCH belief = CORRECT.
+
+---
+
+## PATCH MEMORY STRUCTURE
+
+```python
+class PatchBelief:
+    # Frequency decomposition (per-patch)
+    best_low: np.ndarray      # Low freq: EMA (skin tone, lighting)
+    best_high: np.ndarray     # High freq: BEST observation only (pores, edges)
+    quality_max: np.ndarray   # Quality of best observation
+
+    # Semantic confidence
+    confidence: float         # Per-patch confidence (NOT global)
+    observation_count: int    # How many observations accumulated
+    temporal_variance: float  # How noisy observations are
+
+    # Pose-conditioned storage
+    pose_at_best: Tuple[float, float, float]  # Pose when best was captured
+    lighting_at_best: np.ndarray               # Lighting when best was captured
+
+    # Independent dynamics
+    stability: float          # How stable this patch is (forehead=high, lips=low)
+    decay_rate: float         # How fast confidence decays without observations
+```
+
+---
+
+## MEMORY STRUCTURE (per patch)
 
 ```python
 {
-    low_frequency,
-    high_frequency,
-    confidence,
-    best_observation,
-    temporal_variance,
-    lighting_history
+    low_frequency,      # skin tone / lighting (EMA)
+    high_frequency,     # pores / beard / edges (BEST only)
+    confidence,         # per-patch confidence
+    best_observation,   # highest quality seen
+    temporal_variance,  # observation noise
+    lighting_history    # lighting conditions when observed
 }
 ```
 
@@ -196,6 +285,36 @@ Separate:
 LOW FREQUENCY  = skin tone / lighting
 HIGH FREQUENCY = pores / beard / edges
 ```
+
+---
+
+## PATCH DYNAMICS (INDEPENDENT) 🔥
+
+Each patch has its own:
+
+```python
+# Stability (how fast it changes)
+forehead_stability = 0.95  # barely moves
+beard_stability = 0.90     # very stable
+eye_stability = 0.70       # blinks, gaze shifts
+lip_stability = 0.60       # expression changes
+
+# Confidence decay (how fast confidence drops without observations)
+forehead_decay = 0.001  # very slow decay
+beard_decay = 0.002     # slow decay
+eye_decay = 0.01        # medium decay (blinks)
+lip_decay = 0.02        # fast decay (expression changes)
+
+# Accumulation rate (how fast it learns)
+forehead_rate = 0.20   # fast learning (stable)
+beard_rate = 0.15      # medium learning
+eye_rate = 0.10        # slow learning (noisy)
+lip_rate = 0.08        # slowest learning (very noisy)
+```
+
+THIS IS THE KEY INNOVATION.
+
+Different face regions have DIFFERENT temporal dynamics.
 
 ---
 
@@ -236,7 +355,29 @@ distance(output_identity, anchor_identity) < threshold
 
 ---
 
-# MODULE E — CONFIDENCE ENGINE ⚡
+## ANCHOR CORRECTION MATH
+
+```python
+# For LOW freq (skin tone, lighting):
+pull = anchor_strength * (anchor_L - identity_L)
+identity_L += pull
+
+# For HIGH freq (pores, edges):
+pull = anchor_strength * 0.3 * (anchor_H - identity_H)
+identity_H += pull  # less aggressive — preserve source detail
+
+# Pull strength proportional to distance
+if distance > threshold:
+    pull = min(0.8, 0.4 * (distance / threshold))
+elif distance > 10.0:
+    pull = 0.4 + 0.2 * ((distance - 10.0) / (threshold - 10.0))
+else:
+    pull = 0.2  # gentle pull even when close
+```
+
+---
+
+# MODULE E — SEMANTIC CONFIDENCE ENGINE ⚡
 
 ## CONFIDENCE IS NOT:
 
@@ -248,31 +389,60 @@ TOO NAIVE.
 
 ---
 
-## REAL CONFIDENCE
+## REAL CONFIDENCE (per-patch, semantic)
 
 ```python
-confidence = f(
-    sharpness,
-    motion_blur,
-    compression_level,
-    pose_quality,
-    visibility,
-    eye_visibility,
-    lighting_quality,
-    occlusion
-)
+# Per-patch semantic confidence
+confidence = {
+    'left_eye': f(sharpness, blink_state, gaze_quality, occlusion),
+    'right_eye': f(sharpness, blink_state, gaze_quality, occlusion),
+    'beard': f(sharpness, pose, lighting, occlusion),
+    'forehead': f(sharpness, lighting, hair_occlusion),
+    'lips': f(sharpness, expression, occlusion),
+    'nose': f(sharpness, pose, lighting),
+    'skin': f(sharpness, lighting, compression),
+}
+```
+
+---
+
+## SEMANTIC CONFIDENCE RULES 🚨
+
+```python
+# Eye confidence
+if is_blinking:
+    eye_confidence = 0.0  # DON'T learn blink frames
+elif gaze_away:
+    eye_confidence = 0.3  # learn slowly
+
+# Beard confidence
+if frontal_pose:
+    beard_confidence = 0.9  # learn fast (stable)
+elif side_pose:
+    beard_confidence = 0.5  # learn slower
+
+# Forehead confidence
+forehead_confidence = 0.95  # almost always high (barely moves)
+
+# Lip confidence
+if talking:
+    lip_confidence = 0.2  # learn very slowly (changes fast)
+else:
+    lip_confidence = 0.7  # learn normally
 ```
 
 ---
 
 ## PURPOSE
 
-Decide:
+Decide PER-PATCH:
 
 ```text
 trust source?
 or trust identity memory?
 ```
+
+NOT globally — PER REGION.
 
 ---
 
@@ -293,6 +463,25 @@ BUT:
 
 ---
 
+## PATCH-WISE RECONSTRUCTION
+
+```python
+# For each patch independently
+for patch_name in patches:
+    patch_conf = semantic_confidence[patch_name]
+
+    # Frequency-aware blending
+    low_final = low_id * patch_conf * low_blend + low_curr * (1 - patch_conf * low_blend)
+    high_final = high_id * patch_conf * high_blend + high_curr * (1 - patch_conf * high_blend)
+
+    # Apply anchor correction
+    low_final = low_final + (anchor_low - low_final) * anchor_pull
+
+    result_patch = low_final + high_final
+```
+
+---
+
 # MODULE G — TEMPORAL INERTIA ENGINE ⏳
 
 ## MOST IMPORTANT REALISM RULE
@@ -306,6 +495,40 @@ Mathematically:
 
 ```text
 Δ(identity) << Δ(source)
+```
+
+---
+
+## BIDIRECTIONAL TEMPORAL SOLVE 🚨
+
+THE OFFLINE PIPELINE'S SUPERPOWER:
+
+```text
+future sharp frame repairs past blurry frame
+```
+
+Algorithm:
+
+```python
+# Forward pass: collect per-frame quality + appearance
+for frame in video:
+    store(canonical_face, quality_map, pose, sharpness)
+
+# Identify HQ frames
+hq_frames = [f for f in frames if f.quality > threshold]
+
+# Backward pass: HQ frames repair past
+for frame in frames:
+    nearest_hq = find_nearest_hq(frame, direction='both')
+
+    # Weighted by temporal distance
+    weight = 1.0 / (1.0 + temporal_distance * 0.1)
+
+    # Pose similarity bonus
+    pose_sim = exp(-pose_distance / 30.0)
+
+    # Fuse
+    result = (current * current_quality + hq * weight * pose_sim) / total_weight
 ```
 
 ---
@@ -356,7 +579,121 @@ NOT area size
 
 ---
 
-# MODULE I — APPEARANCE FIELD (FUTURE PHASE) 🌌
+## EYE PRESERVATION RULES 🚨
+
+```python
+# NEVER hallucinate eyelashes
+# NEVER hallucinate iris detail
+# NEVER hallucinate sclera brightness
+
+# PRESERVE eye structure
+# PRESERVE temporal stability (no eye flicker)
+# PRESERVE gaze direction
+
+# If identity memory has good eye data, prefer it
+if eye_confidence > 0.6:
+    result = identity_eyes * 0.7 + source_eyes * 0.3
+else:
+    result = source_eyes  # don't enhance, just preserve
+```
+
+---
+
+# MODULE I — PATCH DATABASE 🗄️
+
+## THE NEXT LEAP 🚨
+
+Instead of:
+
+```text
+store pixel observations
+```
+
+Store:
+
+```text
+patch hypotheses
+```
+
+---
+
+## PATCH DATABASE STRUCTURE
+
+```python
+patch_database = {
+    'left_eye': {
+        'frontal_open': best_patch,
+        'frontal_half': best_patch,
+        'left_yaw': best_patch,
+        'right_yaw': best_patch,
+        'looking_up': best_patch,
+        'looking_down': best_patch,
+    },
+    'beard': {
+        'frontal': best_patch,
+        'left_yaw': best_patch,
+        'right_yaw': best_patch,
+        'slight_smile': best_patch,
+        'neutral': best_patch,
+    },
+    'lips': {
+        'closed': best_patch,
+        'slight_open': best_patch,
+        'smile': best_patch,
+        'talking': best_patch,
+    },
+    # ... etc
+}
+```
+
+---
+
+## QUERY LOGIC
+
+```python
+def query_patch(patch_name, current_pose, current_expression):
+    """Find best matching patch from database."""
+
+    # Get pose-conditioned patches
+    candidates = patch_database[patch_name]
+
+    # Find best match
+    best_match = None
+    best_score = 0
+
+    for condition, patch in candidates.items():
+        score = pose_similarity(current_pose, condition)
+        score *= expression_similarity(current_expression, condition)
+        score *= patch.confidence
+
+        if score > best_score:
+            best_score = score
+            best_match = patch
+
+    return best_match, best_score
+```
+
+---
+
+## WHY THIS MATTERS 😭
+
+Instead of averaging all observations:
+
+```text
+pixel = mean(observations)  # wax museum
+```
+
+We query the BEST observation for current conditions:
+
+```text
+pixel = best_match(current_pose, current_expression)  # real face
+```
+
+HUGE DIFFERENCE.
+
+---
+
+# MODULE J — APPEARANCE FIELD (FUTURE PHASE) 🌌
 
 ## LONG TERM GOAL
 
@@ -389,7 +726,7 @@ Outputs:
 
 ---
 
-# MODULE J — DYNAMIC UV FLOW 🌀
+# MODULE K — DYNAMIC UV FLOW 🌀
 
 ## FUTURE PHASE
 
@@ -411,7 +748,7 @@ Equation:
 
 ---
 
-# MODULE K — CINEMATIC REALISM 🎥
+# MODULE L — CINEMATIC REALISM 🎥
 
 ## PERFECT CLEAN OUTPUT = FAKE
 
@@ -424,12 +761,33 @@ Need:
 
 ---
 
+## TEMPORALLY COHERENT GRAIN 🚨
+
+DO NOT:
+
+```python
+# Independent random grain per frame = micro flicker
+noise = randn(h, w) * strength
+```
+
+DO:
+
+```python
+# Temporally coherent grain = cinematic
+# Use low-frequency noise that evolves slowly
+noise_t = base_noise * (1 - alpha) + new_noise * alpha
+# alpha = 0.1 (slow evolution)
+```
+
+---
+
 ## RULE
 
 Noise MUST:
 
 * vary spatially
 * stay statistically consistent
+* evolve temporally (NOT independent per frame)
 
 ---
 
@@ -523,6 +881,7 @@ Even tiny eye artifact:
 
 * minimal hallucination
 * maximum temporal stability
+* patch-level freeze during blinks
 
 ---
 
@@ -590,7 +949,7 @@ source > anchor > memory > render
 
 # 5. DEVELOPMENT PHASES 🚀
 
-# PHASE 1 — MVP
+# PHASE 1 — MVP ✅
 
 Build:
 
@@ -605,9 +964,11 @@ GOAL:
 prove temporal accumulation works
 ```
 
+STATUS: DONE
+
 ---
 
-# PHASE 2
+# PHASE 2 ✅
 
 Add:
 
@@ -616,9 +977,11 @@ Add:
 * anchor correction
 * high/low frequency split
 
+STATUS: DONE
+
 ---
 
-# PHASE 3
+# PHASE 3 ✅
 
 Add:
 
@@ -626,9 +989,24 @@ Add:
 * bidirectional temporal solve
 * lighting conditioning
 
+STATUS: DONE
+
 ---
 
-# PHASE 4
+# PHASE 4 — CURRENT 🔄
+
+Add:
+
+* patch database (pose-conditioned)
+* semantic confidence (per-patch)
+* identity hypotheses (not just observations)
+* temporally coherent grain
+
+STATUS: IN PROGRESS
+
+---
+
+# PHASE 5 — FUTURE
 
 Add:
 
@@ -638,7 +1016,7 @@ Add:
 
 ---
 
-# PHASE 5
+# PHASE 6 — FAR FUTURE
 
 Add:
 
@@ -657,7 +1035,7 @@ System FAILS if:
 * temporal consistency breaks
 * identity drifts
 * pores hallucinate randomly
-* output looks “AI clean”
+* output looks "AI clean"
 
 ---
 
@@ -674,7 +1052,51 @@ System WINS if:
 
 ---
 
-# 8. FINAL PHILOSOPHY 😭
+# 8. IMPLEMENTATION STATUS 📊
+
+## What's Actually Built
+
+| Module | Status | Notes |
+|---|---|---|
+| A: Telemetry | ✅ Done | Haar Cascade + dlib landmarks |
+| B: Canonical | ✅ Done | Similarity transform, 256x256 atlas |
+| C: Patch Belief | ⚠️ Partial | Frequency decomposition done, per-patch dynamics TODO |
+| D: Anchor | ✅ Done | Reference-based correction, LAB distance |
+| E: Confidence | ⚠️ Partial | Basic quality map, semantic confidence TODO |
+| F: Reconstruction | ✅ Done | Frequency-aware blending, anchor correction |
+| G: Temporal | ✅ Done | Bidirectional solver, HQ frame identification |
+| H: Eye Dominance | ⚠️ Partial | Structure-preserving rendering, blink detection TODO |
+| I: Patch Database | ❌ TODO | Pose-conditioned storage |
+| J: Appearance Field | ❌ Future | — |
+| K: Dynamic UV | ❌ Future | — |
+| L: Cinematic | ⚠️ Partial | Grain added, temporal coherence TODO |
+
+---
+
+## Current Test Results
+
+| Metric | Reference | Output | Status |
+|---|---|---|---|
+| L (brightness) | 108.4 | 71.7 | ❌ 37 too dark |
+| a (skin tone) | 139.6 | 139.2 | ✅ Δ0.4 |
+| b (warmth) | 146.7 | 138.3 | ⚠️ Δ8.4 |
+| Face detection | — | 100% | ✅ |
+| Flicker | — | 0.22 | ✅ |
+| Anchor distance | — | 0.1 LAB | ✅ |
+
+---
+
+## Known Issues
+
+| Issue | Root Cause | Fix |
+|---|---|---|
+| Face L too dark | Source accumulation without enough anchor pull | Increase anchor strength |
+| Identity drift | Confidence too low early on | Pre-populate from reference |
+| Temporal grain | Independent random noise | Implement coherent grain |
+
+---
+
+# 9. FINAL PHILOSOPHY 😭
 
 ```text
 DO NOT ENHANCE PIXELS.
@@ -683,3 +1105,31 @@ INFER THE MOST PLAUSIBLE
 PERSISTENT VERSION
 OF THIS HUMAN OVER TIME.
 ```
+
+---
+
+# 10. THE REAL MOAT 🚨
+
+The REAL competitive advantage is:
+
+```text
+persistent identity coherence
+```
+
+NOT:
+
+```text
+fake 4K pores
+```
+
+Anyone can sharpen.
+
+Nobody else maintains:
+
+```text
+temporal belief about what THIS person looks like
+across degraded observations
+over time
+```
+
+THIS IS THE MOAT.
