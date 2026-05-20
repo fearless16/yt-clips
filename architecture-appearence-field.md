@@ -1077,13 +1077,14 @@ System WINS if:
 
 | Metric | Reference | Output | Status |
 |---|---|---|---|
-| L (brightness) | 108.4 | 99.0 | ⚠️ Δ9.4 (was Δ37!) |
-| a (skin tone) | 139.6 | 139.7 | ✅ Δ0.1 (PERFECT) |
-| b (warmth) | 146.7 | 141.5 | ⚠️ Δ5.2 (was Δ8.4) |
+| L (brightness) | 108.4 | 99.7 | ⚠️ Δ8.6 (was Δ37!) |
+| a (skin tone) | 139.6 | 139.3 | ✅ Δ0.3 (PERFECT) |
+| b (warmth) | 146.7 | 140.9 | ⚠️ Δ5.8 (was Δ8.4) |
 | Face detection | — | 100% | ✅ |
 | Flicker | — | 0.22 | ✅ |
 | Anchor distance | — | 0.8 LAB | ✅ |
-| LAB distance | — | 10.7 | ✅ (was 36.7!) |
+| LAB distance | — | 10.4 | ✅ (was 36.7!) |
+| Tests | — | 51/51 | ✅ |
 
 ---
 
