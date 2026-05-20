@@ -1487,6 +1487,171 @@ class TestRenderingPipeline:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# MODULE J — APPEARANCE FIELD (Phase 5)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestModuleJ_AppearanceField:
+    """Test appearance field.
+
+    Architecture says:
+    - A(u,v,θ,L,t) → appearance
+    - Instead of: mesh → texture → render
+    - Learn: appearance as function of pose + lighting
+    - Support interpolation between stored appearances
+    """
+
+    def test_appearance_field_stores_samples(self):
+        """Appearance field must store samples per (pose, lighting)."""
+        from face_os.appearance_field import AppearanceField
+
+        field = AppearanceField(max_samples=10)
+
+        # Add samples at different poses
+        for yaw in [-30, 0, 30]:
+            face = np.ones((256, 256, 3), dtype=np.uint8) * 128
+            face[:, :, 0] = 128 + yaw  # Different color per pose
+            field.add_sample(face, pose=(yaw, 0, 0), quality=0.8)
+
+        assert len(field.samples) == 3, f"Should have 3 samples, got {len(field.samples)}"
+
+    def test_appearance_field_queries_closest_pose(self):
+        """Query must return closest pose sample."""
+        from face_os.appearance_field import AppearanceField
+
+        field = AppearanceField(max_samples=10)
+
+        # Add samples
+        face_0 = np.ones((256, 256, 3), dtype=np.uint8) * 100
+        face_30 = np.ones((256, 256, 3), dtype=np.uint8) * 200
+
+        field.add_sample(face_0, pose=(0, 0, 0), quality=0.8)
+        field.add_sample(face_30, pose=(30, 0, 0), quality=0.8)
+
+        # Query at intermediate pose
+        result, conf = field.query(pose=(15, 0, 0))
+        assert result is not None, "Must return result for intermediate pose"
+        assert conf > 0, "Must have non-zero confidence"
+
+    def test_appearance_field_interpolates(self):
+        """Query must interpolate between nearby samples."""
+        from face_os.appearance_field import AppearanceField
+
+        field = AppearanceField(max_samples=10)
+
+        # Add samples at extremes with different qualities
+        face_dark = np.ones((256, 256, 3), dtype=np.uint8) * 50
+        face_bright = np.ones((256, 256, 3), dtype=np.uint8) * 200
+
+        field.add_sample(face_dark, pose=(-30, 0, 0), quality=0.8)
+        field.add_sample(face_bright, pose=(30, 0, 0), quality=0.8)
+
+        # Query at center (should interpolate)
+        result, conf = field.query(pose=(0, 0, 0))
+        assert result is not None, "Must return interpolated result"
+        assert conf > 0, "Must have non-zero confidence"
+
+    def test_appearance_field_prunes_low_quality(self):
+        """Field must prune low quality samples when full."""
+        from face_os.appearance_field import AppearanceField
+
+        field = AppearanceField(max_samples=5)
+
+        # Add 10 samples (more than max)
+        for i in range(10):
+            face = np.ones((256, 256, 3), dtype=np.uint8) * (i * 25)
+            field.add_sample(face, pose=(i * 10, 0, 0), quality=i / 10.0)
+
+        # Should have pruned to max_samples
+        assert len(field.samples) <= 5, \
+            f"Should have ≤5 samples, got {len(field.samples)}"
+
+        # Remaining samples should be higher quality
+        qualities = [s.quality for s in field.samples]
+        assert all(q >= 0.5 for q in qualities), \
+            "Remaining samples should have quality ≥ 0.5"
+
+    def test_appearance_field_stats(self):
+        """Field must track statistics."""
+        from face_os.appearance_field import AppearanceField
+
+        field = AppearanceField(max_samples=10)
+
+        # Add some samples
+        for i in range(5):
+            face = np.ones((256, 256, 3), dtype=np.uint8) * 128
+            field.add_sample(face, pose=(i * 10, 0, 0), quality=0.8)
+
+        # Query a few times
+        for i in range(3):
+            field.query(pose=(i * 10, 0, 0))
+
+        stats = field.get_stats()
+        assert stats['num_samples'] == 5, f"Should have 5 samples, got {stats['num_samples']}"
+        assert stats['frame_count'] == 5, f"Should have 5 frames, got {stats['frame_count']}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MODULE K — DYNAMIC UV FLOW (Phase 5)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestModuleK_DynamicUV:
+    """Test dynamic UV flow.
+
+    Architecture says:
+    - Skin is NOT rigid
+    - Need: expression-dependent pore movement, skin stretching
+    - Equation: (u',v') = Φ(u,v,θ)
+    """
+
+    def test_appearance_field_stores_deformations(self):
+        """Dynamic field must store UV deformations per expression."""
+        from face_os.appearance_field import DynamicAppearanceField
+
+        field = DynamicAppearanceField(max_samples=10)
+
+        # Add deformation for smile
+        deformation = np.random.randn(256, 256, 2).astype(np.float32) * 5
+        field.add_expression_deformation('smile', deformation)
+
+        assert 'smile' in field.uv_deformations, "Must store smile deformation"
+
+    def test_appearance_field_applies_deformation(self):
+        """Query with expression must apply deformation."""
+        from face_os.appearance_field import DynamicAppearanceField
+
+        field = DynamicAppearanceField(max_samples=10)
+
+        # Add base sample
+        face = np.ones((256, 256, 3), dtype=np.uint8) * 128
+        field.add_sample(face, pose=(0, 0, 0), quality=0.8)
+
+        # Add deformation
+        deformation = np.zeros((256, 256, 2), dtype=np.float32)
+        deformation[:, :, 0] = 10  # Shift right by 10 pixels
+        field.add_expression_deformation('smile', deformation)
+
+        # Query with expression
+        result, conf = field.query_with_deformation(
+            pose=(0, 0, 0),
+            expression='smile',
+        )
+
+        assert result is not None, "Must return deformed result"
+
+    def test_microdetail_generation(self):
+        """Dynamic field must generate microdetail."""
+        from face_os.appearance_field import DynamicAppearanceField
+
+        field = DynamicAppearanceField(max_samples=10)
+
+        face = np.ones((256, 256, 3), dtype=np.uint8) * 128
+        detail = field.generate_microdetail(face, detail_level=0.5)
+
+        assert detail is not None, "Must generate microdetail"
+        assert detail.shape == (256, 256), f"Detail shape {detail.shape} should be (256, 256)"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════════════════════
 
