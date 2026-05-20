@@ -1,16 +1,25 @@
 """
-crop_planner.py — Module 5: Face-Aware Crop Planning with Headroom.
+crop_planner.py — Reference-Based Face-Aware Crop Planning.
 
-Plans the 16:9 → 9:16 crop that keeps the face properly positioned.
+OLD APPROACH: fixed headroom_ratio → face positioned at 30% from top
+NEW APPROACH: analyze expectation reference → match composition
 
-Core rules:
-  - Protect forehead/headroom — never crop above the top of the head
-  - Allow bottom crop — it's OK to crop below the chin
-  - Face target width: ~270px in 1080px output (25%)
-  - Face at ~30% from top of output (matching reference composition)
-  - Smooth crop transitions to prevent jitter
+The expectation image tells us EXACTLY how the output should look:
+  - Face top: 24.3% from top
+  - Face height: 33.7% of output
+  - Face center: 41.1% from top
+  - Headroom: 24.3%
 
-The crop plan is a CropPlan dataclass consumed by downstream modules.
+We use these as COMPOSITION TARGETS and adapt based on source constraints.
+
+When source face is larger than expectation face:
+  - Can't shrink face below source size (crop limitation)
+  - Use expectation's RELATIVE positioning within face region
+  - Accept slightly larger face, match headroom ratio
+
+When source face is smaller than expectation face:
+  - Zoom in to match expectation face size
+  - Position using expectation's headroom ratio
 """
 
 from typing import Optional, Tuple
@@ -25,14 +34,85 @@ from face_os.types import CropPlan, CropStrategy, FaceTrack, Landmarks
 cfg = get_config()
 
 
+# ─── Expectation Reference Analysis ─────────────────────────────────────────
+
+class CompositionReference:
+    """Composition metrics extracted from the expectation image.
+
+    These are the TARGET values that the crop planner tries to match.
+    """
+
+    def __init__(
+        self,
+        face_top_pct: float = 0.243,      # Face top position (% from top)
+        face_height_pct: float = 0.337,    # Face height (% of output)
+        face_center_y_pct: float = 0.411,  # Face center Y (% from top)
+        headroom_pct: float = 0.243,       # Space above face (% of output)
+    ):
+        self.face_top_pct = face_top_pct
+        self.face_height_pct = face_height_pct
+        self.face_center_y_pct = face_center_y_pct
+        self.headroom_pct = headroom_pct
+
+    @classmethod
+    def from_image(cls, image_path: str) -> 'CompositionReference':
+        """Extract composition metrics from a reference image."""
+        img = cv2.imread(image_path)
+        if img is None:
+            return cls()  # Use defaults
+
+        h, w = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+        faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
+
+        if len(faces) == 0:
+            return cls()
+
+        x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+
+        face_top_pct = y / h
+        face_height_pct = fh / h
+        face_center_y_pct = (y + fh / 2) / h
+        headroom_pct = y / h
+
+        return cls(
+            face_top_pct=face_top_pct,
+            face_height_pct=face_height_pct,
+            face_center_y_pct=face_center_y_pct,
+            headroom_pct=headroom_pct,
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"CompositionReference("
+            f"top={self.face_top_pct:.1%}, "
+            f"height={self.face_height_pct:.1%}, "
+            f"center={self.face_center_y_pct:.1%}, "
+            f"headroom={self.headroom_pct:.1%})"
+        )
+
+
+# ─── Crop Planner ───────────────────────────────────────────────────────────
+
 class CropPlanner:
     """Plans 9:16 crops from 16:9 source frames.
 
-    Maintains state across frames for smooth crop transitions.
-    Uses EMA smoothing to prevent frame-to-frame jitter.
+    Uses reference-based composition matching:
+    1. Analyze expectation image at startup
+    2. For each frame, plan crop that MATCHES expectation composition
+    3. Adapt based on source face size vs expectation face size
+    4. Smooth transitions with EMA
     """
 
-    def __init__(self):
+    def __init__(self, reference_image: str = "expectation.png"):
+        # Analyze expectation for composition targets
+        self.reference = CompositionReference.from_image(reference_image)
+        print(f"  Crop reference: {self.reference}")
+
+        # Smoothing state
         self._prev_crop: Optional[CropPlan] = None
         self._smooth_x: Optional[float] = None
         self._smooth_y: Optional[float] = None
@@ -50,8 +130,8 @@ class CropPlanner:
 
         Args:
             source_shape: (height, width) of source frame
-            face_track: Current face tracking data (may be None)
-            landmarks: Detected landmarks (may be None)
+            face_track: Current face tracking data
+            landmarks: Detected landmarks
 
         Returns:
             CropPlan with source crop region and target dimensions
@@ -61,7 +141,7 @@ class CropPlanner:
 
         if face_track and face_track.smooth_bbox:
             self._frames_without_face = 0
-            plan = self._plan_face_locked(
+            plan = self._plan_reference_based(
                 src_w, src_h, dst_w, dst_h,
                 face_track, landmarks,
             )
@@ -74,33 +154,56 @@ class CropPlanner:
 
         # Smooth the crop
         plan = self._smooth(plan)
-
         self._prev_crop = plan
         return plan
 
-    def _plan_face_locked(
+    def _plan_reference_based(
         self,
         src_w: int, src_h: int,
         dst_w: int, dst_h: int,
         face_track: FaceTrack,
         landmarks: Optional[Landmarks],
     ) -> CropPlan:
-        """Plan crop centered on detected face with headroom."""
+        """Plan crop using reference-based composition matching.
+
+        Algorithm:
+        1. Get face bbox from source
+        2. Compute ideal crop height to match expectation face ratio
+        3. If crop exceeds source, use full source height
+        4. Position face to match expectation's relative position
+        5. Protect forehead if landmarks available
+
+        CONSTRAINTS:
+        - Source face may be HIGHER than expectation (less headroom)
+        - Source face may be LARGER than expectation (can't shrink)
+        - We match what we CAN, accept what we can't
+        """
         fx, fy, fw, fh = face_track.smooth_bbox
 
         # Face center in source
         face_cx = fx + fw // 2
         face_cy = fy + fh // 2
 
-        # Target face width in output
-        target_face_w = cfg.crop.face_target_width
+        # ─── Step 1: Determine ideal crop dimensions ───
 
-        # How much to zoom: scale = target_face_w / source_face_w
-        scale = target_face_w / max(fw, 1)
+        # What face height ratio do we want in the output?
+        target_face_ratio = self.reference.face_height_pct  # 0.337
 
-        # Crop dimensions in source space
-        crop_w = int(dst_w / scale)
-        crop_h = int(dst_h / scale)
+        # What's the current face ratio if we use full source height?
+        current_face_ratio = fh / src_h  # e.g., 135/360 = 0.375
+
+        if current_face_ratio <= target_face_ratio:
+            # Face is smaller than target — zoom in to match
+            ideal_crop_h = int(fh / target_face_ratio)
+            scale = dst_h / ideal_crop_h
+            crop_w = int(dst_w / scale)
+            crop_h = ideal_crop_h
+        else:
+            # Face is larger than target — use full source height
+            # Can't shrink face below source size
+            crop_h = src_h
+            scale = dst_h / crop_h
+            crop_w = int(dst_w / scale)
 
         # Clamp to source bounds
         crop_w = min(crop_w, src_w)
@@ -111,38 +214,51 @@ class CropPlanner:
         current_aspect = crop_w / max(crop_h, 1)
 
         if current_aspect > target_aspect:
-            # Too wide — reduce width
             crop_w = int(crop_h * target_aspect)
         else:
-            # Too tall — reduce height
             crop_h = int(crop_w / target_aspect)
 
-        # Position: face at headroom_ratio from top
-        headroom = cfg.crop.headroom_ratio
+        # ─── Step 2: Position face to match expectation composition ───
+
+        # We want face center at expectation's position (41.1%)
+        # But source face may be higher — in that case, use source face position
+        target_center_in_crop = self.reference.face_center_y_pct  # 0.411
+
+        # What's the face center if we use crop_y = 0?
+        default_center = face_cy / max(crop_h, 1)
+
+        if default_center <= target_center_in_crop:
+            # Face is higher than target — we can shift crop down
+            # to position face at target center
+            crop_y = face_cy - int(crop_h * target_center_in_crop)
+            crop_y = max(0, crop_y)
+        else:
+            # Face is lower than target — use crop_y = 0
+            crop_y = 0
 
         # Horizontal: center on face
         crop_x = face_cx - crop_w // 2
 
-        # Vertical: face should be at headroom_ratio from top of crop
-        # face_cy in source should map to headroom * crop_h from crop top
-        crop_y = face_cy - int(crop_h * headroom)
+        # ─── Step 3: Clamp to source bounds ───
 
-        # Clamp to source bounds
         crop_x = max(0, min(crop_x, src_w - crop_w))
         crop_y = max(0, min(crop_y, src_h - crop_h))
 
-        # Protect forehead: if landmarks available, ensure top of head isn't cropped
+        # ─── Step 4: Protect forehead ───
+
         if landmarks and cfg.crop.protect_forehead:
             head_top = int(np.min(landmarks.points[:, 1]))
-            if crop_y > head_top - 10:
-                crop_y = max(0, head_top - 10)
+            min_crop_y = head_top - 10
+            if crop_y > min_crop_y:
+                crop_y = max(0, min_crop_y)
                 # Re-clamp bottom
                 if crop_y + crop_h > src_h:
                     crop_y = src_h - crop_h
 
-        # Compute face center in output space
-        face_out_x = int((face_cx - crop_x) * dst_w / crop_w)
-        face_out_y = int((face_cy - crop_y) * dst_h / crop_h)
+        # ─── Step 5: Compute output face position ───
+
+        face_out_x = int((face_cx - crop_x) * dst_w / max(crop_w, 1))
+        face_out_y = int((face_cy - crop_y) * dst_h / max(crop_h, 1))
 
         return CropPlan(
             strategy=CropStrategy.FACE_LOCKED,
@@ -153,7 +269,7 @@ class CropPlanner:
             dst_w=dst_w,
             dst_h=dst_h,
             face_center_out=(face_out_x, face_out_y),
-            headroom_ratio=headroom,
+            headroom_ratio=self.reference.headroom_pct,
             confidence=face_track.detection.confidence if face_track.detection else 0.5,
         )
 
@@ -211,7 +327,7 @@ class CropPlanner:
             self._smooth_h = float(plan.src_h)
             return plan
 
-        # Clamp velocity (max pixels per frame)
+        # Clamp velocity
         dx = plan.src_x - self._smooth_x
         dy = plan.src_y - self._smooth_y
         dx = np.clip(dx, -max_vel, max_vel)
