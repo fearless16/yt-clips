@@ -241,7 +241,7 @@ class IdentityState:
 
     def __init__(self, atlas_size: Tuple[int, int] = (256, 256)):
         self.atlas_size = atlas_size
-        self.freq = FrequencyDecomposition(low_pass_sigma=3.0)
+        self.freq = FrequencyDecomposition(low_pass_sigma=2.0)
         self.belief: Optional[BeliefPixel] = None
         self._pose_history = []
 
@@ -313,9 +313,9 @@ class IdentityState:
         low_id, high_id = self.freq.decompose(identity)
 
         # Low freq: trust identity more (skin tone is stable)
-        low_blend = 0.7  # 70% identity for low freq
+        low_blend = 0.5  # 50% identity for low freq
         # High freq: trust source more for current pose
-        high_blend = 0.3  # 30% identity for high freq
+        high_blend = 0.15  # 15% identity for high freq (preserve source detail)
 
         # But modulate by confidence
         conf_3d = confidence[:, :, np.newaxis]

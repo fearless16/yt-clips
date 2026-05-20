@@ -547,8 +547,8 @@ class FaceOSPipeline:
     ) -> Optional[np.ndarray]:
         """Render a frame using solved identity data.
 
-        This is the final rendering pass — uses the bidirectionally-solved
-        identity to produce the best possible frame.
+        THE KEY INSIGHT: The solved canonical face IS the identity belief.
+        Warp it back to source space and composite with confidence.
         """
         # Apply crop
         cropped = crop_planner.apply_crop(source_frame, crop_plan)
@@ -562,42 +562,67 @@ class FaceOSPipeline:
                 region_masks = lm_module.create_region_masks(adjusted_lm, cropped.shape[:2])
                 face_mask = region_masks.get("face")
 
-        # Get identity eyes
-        identity_eyes = None
-        eye_confidence = 0.0
-        if self.patch_memory and self.patch_memory._initialized and landmarks:
-            pose = (landmarks.yaw, landmarks.pitch, landmarks.roll)
-            left_eye, left_conf = self.patch_memory.query_region('left_eye', pose)
-            if left_eye is not None:
-                identity_eyes = left_eye
-                eye_confidence = left_conf
+        # If we have a solved canonical face, warp it back to source space
+        if solved_face is not None and landmarks is not None:
+            try:
+                # Warp solved face back to source crop space
+                _, _, M = canonical_map.warp_to_canonical(cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks)
+                M_inv = np.linalg.inv(M)[:2]
+                solved_in_crop = cv2.warpAffine(
+                    solved_face, M_inv, (cropped.shape[1], cropped.shape[0]),
+                    flags=cv2.INTER_LANCZOS4,
+                    borderMode=cv2.BORDER_REFLECT,
+                )
 
-        # Render
+                # Blend solved identity with source using confidence
+                if solved_conf is not None:
+                    conf = cv2.resize(solved_conf, (cropped.shape[1], cropped.shape[0]))
+                else:
+                    conf = np.ones(cropped.shape[:2], dtype=np.float32) * 0.5
+
+                # Higher confidence = more identity (solved), less source
+                conf_3d = conf[:, :, np.newaxis]
+                blended = cropped.astype(np.float32) * (1 - conf_3d) + solved_in_crop.astype(np.float32) * conf_3d
+                blended = np.clip(blended, 0, 255).astype(np.uint8)
+
+                # Apply structure-preserving rendering on top
+                enhancement_mask = None
+                if region_masks:
+                    enhancement_mask = face_enhance._create_enhancement_mask(region_masks, blended.shape)
+
+                rendered = face_enhance.render_frame(
+                    blended, enhancement_mask, region_masks,
+                    identity_eyes=None, eye_confidence=0.0,
+                )
+
+                # Final composite with face mask
+                if face_mask is not None:
+                    output = self.compositor.composite(
+                        cropped, rendered,
+                        confidence=ConfidenceMap(combined=conf),
+                        face_mask=face_mask,
+                    )
+                else:
+                    output = rendered
+
+                # Post-sharpen to recover detail from low-res source
+                output = face_enhance._sharpen(output, amount=0.3, radius=0.8)
+                return output
+
+            except Exception:
+                pass
+
+        # Fallback: structure-preserving rendering only
         enhancement_mask = None
         if region_masks:
             enhancement_mask = face_enhance._create_enhancement_mask(region_masks, cropped.shape)
 
         rendered = face_enhance.render_frame(
             cropped, enhancement_mask, region_masks,
-            identity_eyes=identity_eyes,
-            eye_confidence=eye_confidence,
+            identity_eyes=None, eye_confidence=0.0,
         )
 
-        # Composite with solved identity
-        if solved_face is not None and face_mask is not None:
-            conf = solved_conf if solved_conf is not None else np.ones(cropped.shape[:2], dtype=np.float32) * 0.3
-            if conf.shape[:2] != cropped.shape[:2]:
-                conf = cv2.resize(conf, (cropped.shape[1], cropped.shape[0]))
-
-            output = self.compositor.composite(
-                cropped, rendered,
-                confidence=ConfidenceMap(combined=conf),
-                face_mask=face_mask,
-            )
-        else:
-            output = rendered
-
-        return output
+        return rendered
 
     def _compute_quality_map(
         self,
