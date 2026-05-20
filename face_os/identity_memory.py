@@ -107,7 +107,8 @@ class IdentityMemoryAtlas:
         effective_rate = rate * obs_factor * quality * pose_weight
 
         # EMA update
-        self._accumulated = self._accumulated * (1 - effective_rate) + lab * effective_rate
+        effective_rate_3d = effective_rate[:, :, np.newaxis]
+        self._accumulated = self._accumulated * (1 - effective_rate_3d) + lab * effective_rate_3d
 
         # Update observation count
         self._observation_count += quality
