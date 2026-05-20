@@ -4,25 +4,44 @@
 identity:
   reference_dir: "photos/"
   reference_image: "expectation.png"
-  embedding_tolerance: 0.50
+  embedding_tolerance: 0.45
   max_embeddings: 50
 
 detection:
-  model: "hog"
+  model: "mediapipe"
   min_face_size: 60
   detection_interval: 5
   max_lost_frames: 30
   smoothing_alpha: 0.3
 
 landmarks:
-  model: "dlib_68"
+  model: "mediapipe_478"
   pose_smoothing: 0.4
+
+quality_gates:
+  procrustes_threshold: 0.2
+  jitter_threshold: 0.0008
+  occupancy_threshold: 0.25
+
+verification_gate:
+  embedding_tolerance: 0.45
+  min_face_pixels: 4000
+  liveness_threshold: 0.5
 
 canonical:
   atlas_size: [256, 256]
   alignment_mode: "similarity"
   enrollment_frames: 30
   min_confidence_for_update: 0.7
+
+identity_state:
+  low_freq_ema_rate: 0.1
+  high_freq_best_only: true
+  confidence_modulation: true
+  base_confidence: 0.7
+  anchor_lambda_max: 0.95
+  low_blend_base: 0.95
+  high_blend_base: 0.05
 
 crop:
   output_size: [1080, 1920]
