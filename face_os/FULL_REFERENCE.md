@@ -739,37 +739,35 @@ qc:
 
 | Metric | Reference | Source | Output | Status |
 |---|---|---|---|---|
-| **L (brightness)** | 108.4 | 97-106 | 46-72 | ❌ 37-62 too dark |
-| **a (skin tone)** | 139.6 | 138-140 | 135-139 | ✅ Δ0.4-0.8 |
-| **b (warmth)** | 146.7 | 127-130 | 134-138 | ⚠️ Δ8.6-9.1 |
+| **L (brightness)** | 108.4 | 97-106 | 99.0 | ⚠️ Δ9.4 (was Δ37!) |
+| **a (skin tone)** | 139.6 | 138-140 | 139.7 | ✅ Δ0.1 (PERFECT) |
+| **b (warmth)** | 146.7 | 127-130 | 141.5 | ⚠️ Δ5.2 (was Δ8.6) |
 | **Face detection** | — | 100% | 100% | ✅ |
 | **Flicker (LAB)** | — | 2.53 | 0.22 | ✅ Best |
 | **Face height** | 33.7% | 37.5% | 33.9% | ✅ Matched |
 | **Headroom** | 24.3% | 18.9% | 15.9% | ⚠️ Source-limited |
+| **LAB distance** | — | — | 10.7 | ✅ (was 36.7!) |
 
-### Brightness Loss Trace
+### Key Fixes Applied
 
-```
-Source crop:     L=109.2
-After render:    L=93.8  (vignette darkens background)
-Output face:     L=72.1  (compositor/warp adds more loss)
-Step-by-step:    eyes/brows/beard/skin preserve face_L=98.0
-                 vignette drops full_L from 109.2→94.2
-```
-
-**Root cause:** Identity state accumulates DARK source observations without correcting toward reference brightness. Architecture says "Identity Anchor Correction" should pull toward reference, but current code doesn't implement this.
+| Fix | Impact |
+|---|---|
+| Compositor was undoing anchor correction | L 72→99 (+27 points!) |
+| Pre-populate identity from reference (50 obs) | Confidence 0.09→0.33 |
+| Don't reset identity between clips | Preserves anchor + observations |
+| Increase anchor pull: 0.6→0.85 | Stronger correction for large drift |
 
 ---
 
 ## 7. Known Issues & Next Steps
 
-### Critical Issues
+### Remaining Issues
 
 | Issue | Root Cause | Fix |
 |---|---|---|
-| **Face L=72 vs ref L=108** | Identity state accumulates dark source without anchor correction | Implement Identity Anchor Correction (Module D) |
-| **Brightness loss 109→72** | Vignette + compositor + identity blending all darken | Fix: protect face region from vignette, normalize brightness before accumulation |
-| **b channel Δ8.6** | Source b=127-130 vs ref b=146.7, not enough correction | Increase b channel blend toward reference |
+| **Face L still 9.4 dark** | Source blending with low confidence | Increase low-freq blend toward identity |
+| **b channel Δ5.2** | Source b=128 vs ref b=147 | Increase b anchor correction |
+| **Temporal grain** | Independent random noise | Implement coherent grain |
 
 ### Architecture Gaps
 

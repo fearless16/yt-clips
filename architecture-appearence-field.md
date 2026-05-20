@@ -1077,12 +1077,24 @@ System WINS if:
 
 | Metric | Reference | Output | Status |
 |---|---|---|---|
-| L (brightness) | 108.4 | 71.7 | ❌ 37 too dark |
-| a (skin tone) | 139.6 | 139.2 | ✅ Δ0.4 |
-| b (warmth) | 146.7 | 138.3 | ⚠️ Δ8.4 |
+| L (brightness) | 108.4 | 99.0 | ⚠️ Δ9.4 (was Δ37!) |
+| a (skin tone) | 139.6 | 139.7 | ✅ Δ0.1 (PERFECT) |
+| b (warmth) | 146.7 | 141.5 | ⚠️ Δ5.2 (was Δ8.4) |
 | Face detection | — | 100% | ✅ |
 | Flicker | — | 0.22 | ✅ |
-| Anchor distance | — | 0.1 LAB | ✅ |
+| Anchor distance | — | 0.8 LAB | ✅ |
+| LAB distance | — | 10.7 | ✅ (was 36.7!) |
+
+---
+
+## Key Fixes Applied
+
+| Fix | Impact |
+|---|---|
+| Compositor was undoing anchor correction | L 72→99 (+27 points!) |
+| Pre-populate identity from reference (50 obs) | Confidence 0.09→0.33 |
+| Don't reset identity between clips | Preserves anchor + observations |
+| Increase anchor pull: 0.6→0.85 | Stronger correction for large drift |
 
 ---
 
@@ -1090,8 +1102,8 @@ System WINS if:
 
 | Issue | Root Cause | Fix |
 |---|---|---|
-| Face L too dark | Source accumulation without enough anchor pull | Increase anchor strength |
-| Identity drift | Confidence too low early on | Pre-populate from reference |
+| Face L still 9.4 dark | Source blending with low confidence | Increase low-freq blend toward identity |
+| b channel 5.2 cold | Source b=128 vs ref b=147 | Increase b anchor correction |
 | Temporal grain | Independent random noise | Implement coherent grain |
 
 ---
