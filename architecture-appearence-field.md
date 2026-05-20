@@ -1196,7 +1196,7 @@ System WINS if:
 | E: Confidence | ✅ Done | Semantic confidence, multifactor, quality modulation |
 | F: Reconstruction | ✅ Done | Frequency-aware blending, anchor correction |
 | G: Temporal | ✅ Done | Bidirectional solver, HQ frame identification |
-| H: Eye Dominance | ⚠️ Partial | Structure-preserving rendering, blink detection TODO |
+| H: Eye Dominance | ✅ Done | **Blink detection** + eye freeze + structure-preserving rendering |
 | I: Patch Database | ✅ Done | **Pose-conditioned retrieval** — query(yaw, expression, lighting) |
 | J: Appearance Field | ✅ Done | **Appearance field** — A(u,v,θ,L,t) with k-NN interpolation |
 | K: Dynamic UV | ✅ Done | **Dynamic UV flow** — expression deformation fields |

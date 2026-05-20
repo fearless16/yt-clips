@@ -776,7 +776,7 @@ qc:
 | E: Confidence | ✅ Done | Semantic confidence, multifactor, quality modulation |
 | F: Reconstruction | ✅ Done | Frequency-aware blending, anchor correction |
 | G: Temporal | ✅ Done | Bidirectional solver, HQ frame identification |
-| H: Eye Dominance | ⚠️ Partial | Structure-preserving rendering, blink detection TODO |
+| H: Eye Dominance | ✅ Done | **Blink detection** + eye freeze + structure-preserving rendering |
 | I: Patch Database | ✅ Done | **Pose-conditioned retrieval** — query(yaw, expression, lighting) |
 | J: Appearance Field | ✅ Done | **Appearance field** — A(u,v,θ,L,t) with k-NN interpolation |
 | K: Dynamic UV | ✅ Done | **Dynamic UV flow** — expression deformation fields |
@@ -797,8 +797,8 @@ qc:
 
 | Issue | Root Cause | Fix |
 |---|---|---|
-| **Face L still 8.6 dark** | Source blending with low confidence | Increase low-freq blend toward identity |
-| **b channel Δ5.8** | Source b=128 vs ref b=147 | Increase b anchor correction |
+| **Face L still 7.0 dark** | Source blending with low confidence | Increase low-freq blend toward identity |
+| **b channel Δ5.1** | Source b=128 vs ref b=147 | Increase b anchor correction |
 
 ---
 
