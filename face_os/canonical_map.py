@@ -283,7 +283,7 @@ class AppearanceFieldBuilder:
         Returns:
             Updated AppearanceField
         """
-        if self.atlas is None:
+        if self.atlas is None or self._accumulated_rgb is None:
             self.initialize(frame, landmarks)
             return self.atlas
 
@@ -298,12 +298,13 @@ class AppearanceFieldBuilder:
         # Accumulate with exponential moving average
         rate = cfg.memory.accumulation_rate
         weight = rate * quality * detection_confidence
+        weight_3d = weight[:, :, np.newaxis]  # (H, W) -> (H, W, 1) for broadcasting
 
         self._accumulated_rgb = (
-            self._accumulated_rgb * (1 - weight) + warped_rgb.astype(np.float64) * weight
+            self._accumulated_rgb * (1 - weight_3d) + warped_rgb.astype(np.float64) * weight_3d
         )
         self._accumulated_lab = (
-            self._accumulated_lab * (1 - weight) + warped_lab.astype(np.float64) * weight
+            self._accumulated_lab * (1 - weight_3d) + warped_lab.astype(np.float64) * weight_3d
         )
         self._observation_count = self._observation_count * (1 - cfg.memory.decay_rate) + quality
 
