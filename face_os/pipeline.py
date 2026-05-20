@@ -465,18 +465,38 @@ class FaceOSPipeline:
         # 3. Canonical alignment
         canonical_face = None
         quality_map = None
+        canonical_face_mask = None  # Face mask in canonical space
         if landmarks and face_track.detection:
             try:
                 warped_rgb, warped_lab, M = canonical_map.warp_to_canonical(frame, landmarks)
                 canonical_face = cv2.cvtColor(warped_rgb, cv2.COLOR_RGB2BGR)
                 quality_map = self._compute_quality_map(canonical_face, face_track.detection.confidence)
+
+                # Create face mask in canonical space
+                # Use landmarks to create convex hull, then warp to canonical
+                if hasattr(landmarks, 'xy') and landmarks.xy is not None:
+                    pts = np.array(landmarks.xy, dtype=np.int32)
+                    hull = cv2.convexHull(pts)
+                    src_mask = np.zeros(frame.shape[:2], dtype=np.float32)
+                    cv2.fillConvexPoly(src_mask, hull, 1.0)
+                    src_mask = cv2.GaussianBlur(src_mask, (15, 15), 5)
+                    # Warp to canonical space
+                    canonical_face_mask = cv2.warpAffine(
+                        src_mask, M[:2], (256, 256),
+                        flags=cv2.INTER_LINEAR,
+                        borderMode=cv2.BORDER_CONSTANT,
+                        borderValue=0,
+                    )
+                    canonical_face_mask = np.clip(canonical_face_mask, 0, 1)
             except Exception:
                 pass
 
         # 4. Identity state update
         if canonical_face is not None and quality_map is not None:
             pose = (landmarks.yaw, landmarks.pitch, landmarks.roll) if landmarks else None
-            self.identity_state.update(canonical_face, quality_map, pose=pose)
+            # Mask quality_map to face region only — prevent background learning
+            masked_quality = quality_map * canonical_face_mask if canonical_face_mask is not None else quality_map
+            self.identity_state.update(canonical_face, masked_quality, pose=pose)
 
         # 5. Patch memory update
         if canonical_face is not None and quality_map is not None and landmarks:
@@ -490,6 +510,9 @@ class FaceOSPipeline:
         identity_confidence = None
         if canonical_face is not None and quality_map is not None:
             identity_face, identity_confidence = self.identity_state.query(canonical_face, quality_map, pose=pose)
+            # Mask confidence to face region only — prevent background reconstruction
+            if canonical_face_mask is not None and identity_confidence is not None:
+                identity_confidence = identity_confidence * canonical_face_mask
 
         # 7. Crop planning
         crop_plan = self.crop.plan_crop(frame.shape[:2], face_track, landmarks)
