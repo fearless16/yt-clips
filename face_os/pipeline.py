@@ -167,7 +167,7 @@ class FaceOSPipeline:
             ref_rgb = self.identity.appearance.atlas_rgb
             if ref_rgb is not None:
                 h, w = ref_rgb.shape[:2]
-                quality = np.ones((h, w), dtype=np.float32) * 0.8
+                quality = np.ones((h, w), dtype=np.float32) * 0.9
                 ref_bgr = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2BGR)
 
                 # Module D: Set identity anchor from reference
@@ -175,7 +175,13 @@ class FaceOSPipeline:
                 self.identity_state.set_anchor(ref_bgr)
                 print(f"  Anchor set from reference (LAB distance threshold: {self.identity_state._anchor_threshold})")
 
-                self.identity_state.update(ref_bgr, quality, pose=(0, 0, 0))
+                # Pre-populate identity state with MULTIPLE reference observations
+                # This gives the identity state a strong starting point
+                # Like a Bayesian prior — strong belief from reference
+                for _ in range(50):
+                    self.identity_state.update(ref_bgr, quality, pose=(0, 0, 0))
+
+                print(f"  Identity pre-populated with 50 reference observations")
 
         self._enrolled = True
         print("  Enrollment complete.")
@@ -556,8 +562,9 @@ class FaceOSPipeline:
         THE KEY INSIGHT: The solved canonical face IS the identity belief.
         Warp it back to source space and composite with confidence.
 
-        MODULE D: Query identity state (with anchor correction) instead of
-        using raw solved face directly.
+        MODULE D: Apply anchor correction AFTER blending with source.
+        This ensures the output identity stays close to reference,
+        even when confidence is low.
         """
         # Apply crop
         cropped = crop_planner.apply_crop(source_frame, crop_plan)
@@ -575,7 +582,6 @@ class FaceOSPipeline:
         if solved_face is not None and landmarks is not None:
             try:
                 # Module D: Query identity state for anchor-corrected appearance
-                # Instead of using raw solved face, query the identity state
                 if self.identity_state.is_initialized():
                     # Compute quality map for current frame
                     quality_map = self._compute_quality_map(solved_face, face_track.detection.confidence if face_track and face_track.detection else 0.5)
@@ -604,6 +610,12 @@ class FaceOSPipeline:
                 blended = cropped.astype(np.float32) * (1 - conf_3d) + solved_in_crop.astype(np.float32) * conf_3d
                 blended = np.clip(blended, 0, 255).astype(np.uint8)
 
+                # Module D: Apply anchor correction AFTER blending
+                # This pulls the blended result toward reference, ensuring
+                # identity stays close to anchor even with low confidence
+                if self.identity_state.is_initialized() and face_mask is not None:
+                    blended = self._apply_anchor_to_frame(blended, face_mask)
+
                 # Apply structure-preserving rendering on top
                 enhancement_mask = None
                 if region_masks:
@@ -614,15 +626,10 @@ class FaceOSPipeline:
                     identity_eyes=None, eye_confidence=0.0,
                 )
 
-                # Final composite with face mask
-                if face_mask is not None:
-                    output = self.compositor.composite(
-                        cropped, rendered,
-                        confidence=ConfidenceMap(combined=conf),
-                        face_mask=face_mask,
-                    )
-                else:
-                    output = rendered
+                # DON'T composite back with original — that would undo
+                # the anchor correction. The anchor-corrected + enhanced
+                # frame IS the final result.
+                output = rendered
 
                 # Post-sharpen to recover detail from low-res source
                 output = face_enhance._sharpen(output, amount=0.3, radius=0.8)
@@ -642,6 +649,80 @@ class FaceOSPipeline:
         )
 
         return rendered
+
+    def _apply_anchor_to_frame(
+        self,
+        frame: np.ndarray,
+        face_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Apply anchor correction to the rendered frame.
+
+        Module D: Pull face region toward reference brightness/tone.
+        This is applied AFTER blending with source, ensuring the output
+        identity stays close to reference even when confidence is low.
+
+        Math:
+          For face pixels:
+            result = frame + (anchor_mean - face_mean) * pull_strength * face_mask
+
+        Args:
+            frame: Rendered frame (BGR)
+            face_mask: Face region mask (H, W) float [0, 1]
+
+        Returns:
+            Anchor-corrected frame (BGR)
+        """
+        if not self.identity_state.is_initialized():
+            return frame
+
+        # Get anchor LAB values
+        anchor_lab = self.identity_state._anchor_lab
+        if anchor_lab is None:
+            return frame
+
+        # Get anchor mean (reference face)
+        anchor_mean = np.mean(anchor_lab, axis=(0, 1))  # [L, a, b]
+
+        # Get current face mean
+        frame_lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB).astype(np.float32)
+        face_mask_bool = face_mask > 0.5
+        if face_mask_bool.sum() < 100:
+            return frame
+
+        face_mean = np.mean(frame_lab[face_mask_bool], axis=0)  # [L, a, b]
+
+        # Calculate correction needed
+        diff = anchor_mean - face_mean  # [ΔL, Δa, Δb]
+
+        # Apply correction with distance-proportional strength
+        distance = np.sqrt(np.sum(diff ** 2))
+        if distance < 5.0:
+            return frame  # Already close enough
+
+        # Pull strength: more aggressive for larger drift
+        # Like SLAM loop closure — strong correction when far from anchor
+        if distance > 30:
+            pull = 0.85  # Very strong pull for large drift
+        elif distance > 15:
+            pull = 0.65  # Strong pull
+        else:
+            pull = 0.4   # Moderate pull (even when close)
+
+        # Apply correction to face region only
+        correction = np.zeros_like(frame_lab)
+        correction[:, :, 0] = diff[0] * pull  # L channel
+        correction[:, :, 1] = diff[1] * pull * 0.5  # a channel (less aggressive)
+        correction[:, :, 2] = diff[2] * pull * 0.5  # b channel (less aggressive)
+
+        # Mask to face region only
+        face_mask_3d = face_mask[:, :, np.newaxis]
+        correction *= face_mask_3d
+
+        # Apply correction
+        corrected_lab = frame_lab + correction
+        corrected_lab = np.clip(corrected_lab, 0, 255).astype(np.uint8)
+
+        return cv2.cvtColor(corrected_lab, cv2.COLOR_LAB2BGR)
 
     def _compute_quality_map(
         self,
@@ -781,11 +862,15 @@ class FaceOSPipeline:
                 print(f"  Identity anchored to reference.")
 
     def _reset_state(self) -> None:
-        """Reset per-clip state."""
+        """Reset per-clip state.
+
+        NOTE: Identity state is NOT reset — it preserves the anchor
+        and accumulated observations from enrollment.
+        """
         if self.crop:
             self.crop.reset()
-        if self.identity_state:
-            self.identity_state.reset()
+        # DON'T reset identity state — it preserves the anchor
+        # and accumulated observations from enrollment
         if self.patch_memory:
             self.patch_memory.reset()
         if self.compositor:
