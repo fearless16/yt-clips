@@ -279,9 +279,10 @@ class TestQualityGateIntegration:
         if mesh is None:
             pytest.skip("Could not extract mesh from reference")
 
-        # Create a simple bbox around the face
-        x, y = mesh.min(axis=0).astype(int)
-        x2, y2 = mesh.max(axis=0).astype(int)
+        # Create a simple bbox around the face (use x,y only)
+        pts_2d = mesh[:, :2] if mesh.shape[1] > 2 else mesh
+        x, y = pts_2d.min(axis=0).astype(int)
+        x2, y2 = pts_2d.max(axis=0).astype(int)
         bbox = (x, y, x2 - x, y2 - y)
 
         # Create landmark history with some movement

@@ -86,24 +86,24 @@ class TestMediaPipeDetection:
         result = detect_faces(real_face_img)
         assert len(result) > 0, "No face detected in expectation.png"
 
-    def test_detect_faces_returns_tuple_format(self, real_face_img):
-        """Each detection should be (x, y, w, h, confidence)."""
+    def test_detect_faces_returns_face_tracks(self, real_face_img):
+        """Each detection should be a FaceTrack with bbox and confidence."""
         result = detect_faces(real_face_img)
-        for det in result:
-            assert len(det) == 5
-            x, y, w, h, conf = det
+        for track in result:
+            assert hasattr(track, 'smooth_bbox'), "FaceTrack should have smooth_bbox"
+            assert hasattr(track, 'detection'), "FaceTrack should have detection"
+            x, y, w, h = track.smooth_bbox
             assert isinstance(x, int)
             assert isinstance(y, int)
             assert isinstance(w, int)
             assert isinstance(h, int)
-            assert isinstance(conf, float)
-            assert 0.0 <= conf <= 1.0
+            assert 0.0 <= track.detection.confidence <= 1.0
 
     def test_detect_faces_confidence_above_threshold(self, real_face_img):
         """Real face detections should have confidence >= 0.6."""
         result = detect_faces(real_face_img)
-        for det in result:
-            assert det[4] >= 0.6, f"Confidence {det[4]} below 0.6 threshold"
+        for track in result:
+            assert track.detection.confidence >= 0.6, f"Confidence {track.detection.confidence} below 0.6 threshold"
 
 
 # ─── Test: Poster Rejection ────────────────────────────────────────────────
@@ -115,14 +115,14 @@ class TestPosterRejection:
         """Synthetic poster with no face should return empty list or low confidence."""
         result = detect_faces(synthetic_poster)
         # Either no detections, or all detections have low confidence
-        for det in result:
-            assert det[4] < 0.5, f"Poster detected as face with confidence {det[4]}"
+        for track in result:
+            assert track.detection.confidence < 0.5, f"Poster detected as face with confidence {track.detection.confidence}"
 
     def test_poster_rejection_logo(self, poster_img):
         """Logo image should return empty list or low confidence."""
         result = detect_faces(poster_img)
-        for det in result:
-            assert det[4] < 0.5, f"Logo detected as face with confidence {det[4]}"
+        for track in result:
+            assert track.detection.confidence < 0.5, f"Logo detected as face with confidence {track.detection.confidence}"
 
 
 # ─── Test: Identity Matching ────────────────────────────────────────────────
