@@ -334,13 +334,13 @@ class IdentityState:
         # Compute λ (lambda) — identity gravity strength
         # Base: drift-proportional (like gravitational force ~ 1/r² but clamped)
         if drift > 30:
-            lambda_base = 0.85  # Very strong pull for large drift
+            lambda_base = 0.90  # Very strong pull for large drift
         elif drift > 15:
-            lambda_base = 0.60  # Strong pull
+            lambda_base = 0.70  # Strong pull
         elif drift > 5:
-            lambda_base = 0.35  # Moderate pull
+            lambda_base = 0.50  # Moderate pull
         else:
-            lambda_base = 0.15  # Gentle pull (maintenance)
+            lambda_base = 0.30  # Gentle pull (maintenance)
 
         # Modulate by confidence (lower confidence → stronger anchor pull)
         # This is the key insight: unstable identity needs more anchor influence

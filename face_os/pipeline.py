@@ -702,17 +702,17 @@ class FaceOSPipeline:
         # Pull strength: more aggressive for larger drift
         # Like SLAM loop closure — strong correction when far from anchor
         if distance > 30:
-            pull = 0.90  # Very strong pull for large drift
+            pull = 0.95  # Very strong pull for large drift
         elif distance > 15:
-            pull = 0.80  # Strong pull
+            pull = 0.85  # Strong pull
         else:
-            pull = 0.60  # Moderate pull (even when close)
+            pull = 0.70  # Moderate pull (even when close)
 
         # Apply correction to face region only
         correction = np.zeros_like(frame_lab)
-        correction[:, :, 0] = diff[0] * pull  # L channel
-        correction[:, :, 1] = diff[1] * pull * 0.5  # a channel (less aggressive)
-        correction[:, :, 2] = diff[2] * pull * 0.5  # b channel (less aggressive)
+        correction[:, :, 0] = diff[0] * pull  # L channel (brightness)
+        correction[:, :, 1] = diff[1] * pull * 0.6  # a channel (skin tone)
+        correction[:, :, 2] = diff[2] * pull * 0.7  # b channel (warmth - more aggressive)
 
         # Mask to face region only
         face_mask_3d = face_mask[:, :, np.newaxis]
