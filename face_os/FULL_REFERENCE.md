@@ -741,14 +741,14 @@ qc:
 
 | Metric | Reference | Source | Output | Status |
 |---|---|---|---|---|
-| **L (brightness)** | 108.4 | 97-106 | 99.7 | ⚠️ Δ8.6 (was Δ37!) |
-| **a (skin tone)** | 139.6 | 138-140 | 139.3 | ✅ Δ0.3 (PERFECT) |
-| **b (warmth)** | 146.7 | 127-130 | 140.9 | ⚠️ Δ5.8 (was Δ8.6) |
+| **L (brightness)** | 108.4 | 97-106 | 101.4 | ⚠️ Δ7.0 (was Δ37!) |
+| **a (skin tone)** | 139.6 | 138-140 | 139.2 | ✅ Δ0.4 (PERFECT) |
+| **b (warmth)** | 146.7 | 127-130 | 141.6 | ⚠️ Δ5.1 (was Δ8.6) |
 | **Face detection** | — | 100% | 100% | ✅ |
 | **Flicker (LAB)** | — | 2.53 | 0.22 | ✅ Best |
 | **Face height** | 33.7% | 37.5% | 33.9% | ✅ Matched |
 | **Headroom** | 24.3% | 18.9% | 15.9% | ⚠️ Source-limited |
-| **LAB distance** | — | — | 10.4 | ✅ (was 36.7!) |
+| **LAB distance** | — | — | 8.6 | ✅ (was 36.7!) |
 
 ### Key Fixes Applied
 
