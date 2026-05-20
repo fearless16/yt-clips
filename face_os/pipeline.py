@@ -702,11 +702,11 @@ class FaceOSPipeline:
         # Pull strength: more aggressive for larger drift
         # Like SLAM loop closure — strong correction when far from anchor
         if distance > 30:
-            pull = 0.85  # Very strong pull for large drift
+            pull = 0.90  # Very strong pull for large drift
         elif distance > 15:
-            pull = 0.65  # Strong pull
+            pull = 0.80  # Strong pull
         else:
-            pull = 0.4   # Moderate pull (even when close)
+            pull = 0.60  # Moderate pull (even when close)
 
         # Apply correction to face region only
         correction = np.zeros_like(frame_lab)
