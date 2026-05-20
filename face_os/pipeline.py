@@ -116,6 +116,11 @@ class FaceOSPipeline:
         self._enrolled = False
         self._frame_count = 0
 
+        # Face lock state machine
+        self._face_state = "LOST_FACE"  # FACE_LOCKED, LOST_FACE, RECOVERY
+        self._lost_frame_count = 0
+        self._recovery_frame_count = 0
+
     def enroll(
         self,
         reference_image: str = "expectation.png",
@@ -462,6 +467,54 @@ class FaceOSPipeline:
             landmarks = lm_module.extract_landmarks(frame, face_track.smooth_bbox)
             face_track.landmarks = landmarks
 
+        # ═══════════════════════════════════════════════════════════════════
+        # FACE LOCK STATE MACHINE
+        # ═══════════════════════════════════════════════════════════════════
+        face_detected = face_track is not None and landmarks is not None
+        detection_conf = face_track.detection.confidence if face_track and face_track.detection else 0.0
+
+        # Compute occupancy estimate
+        occupancy = 0.0
+        if face_detected and face_track.smooth_bbox:
+            x, y, w, h = face_track.smooth_bbox
+            bbox_area = w * h
+            # Estimate face occupancy from landmarks spread
+            if hasattr(landmarks, 'xy') and landmarks.xy is not None:
+                pts = np.array(landmarks.xy)
+                hull_area = cv2.contourArea(cv2.convexHull(pts.astype(np.float32)))
+                occupancy = hull_area / max(bbox_area, 1)
+
+        # State transitions
+        if face_detected and occupancy > 0.25 and detection_conf > 0.5:
+            if self._face_state == "LOST_FACE":
+                self._face_state = "RECOVERY"
+                self._recovery_frame_count = 0
+                print(f"  Frame {frame_idx}: RECOVERY — face returned (occ={occupancy:.2f}, conf={detection_conf:.2f})")
+            elif self._face_state == "RECOVERY":
+                self._recovery_frame_count += 1
+                if self._recovery_frame_count > 5:
+                    self._face_state = "FACE_LOCKED"
+                    print(f"  Frame {frame_idx}: FACE_LOCKED — stable (occ={occupancy:.2f})")
+            else:
+                self._face_state = "FACE_LOCKED"
+            self._lost_frame_count = 0
+        else:
+            self._lost_frame_count += 1
+            if self._face_state != "LOST_FACE":
+                self._face_state = "LOST_FACE"
+                print(f"  Frame {frame_idx}: LOST_FACE — no valid detection (occ={occupancy:.2f}, conf={detection_conf:.2f})")
+
+        # Log state periodically
+        if frame_idx % 30 == 0:
+            print(f"  Frame {frame_idx}: state={self._face_state}, occ={occupancy:.2f}, conf={detection_conf:.2f}")
+
+        # ═══════════════════════════════════════════════════════════════════
+        # GATE: Skip identity update if face is lost
+        # ═══════════════════════════════════════════════════════════════════
+        if self._face_state == "LOST_FACE":
+            # Return source frame unchanged — no identity processing
+            return frame
+
         # 3. Canonical alignment
         canonical_face = None
         quality_map = None
@@ -496,7 +549,13 @@ class FaceOSPipeline:
             pose = (landmarks.yaw, landmarks.pitch, landmarks.roll) if landmarks else None
             # Mask quality_map to face region only — prevent background learning
             masked_quality = quality_map * canonical_face_mask if canonical_face_mask is not None else quality_map
-            self.identity_state.update(canonical_face, masked_quality, pose=pose)
+
+            # GATE: Skip update if face mask is too small
+            if canonical_face_mask is not None and canonical_face_mask.sum() < 100:
+                # Face mask too small — skip update
+                pass
+            else:
+                self.identity_state.update(canonical_face, masked_quality, pose=pose)
 
         # 5. Patch memory update
         if canonical_face is not None and quality_map is not None and landmarks:
