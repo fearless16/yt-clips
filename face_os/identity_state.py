@@ -298,6 +298,10 @@ class IdentityHypothesis:
         If observation is similar → increase support
         If observation is different → increase contradiction
 
+        Uses region-based LAB distance for better matching:
+        - Eyes, beard, forehead, etc. are compared independently
+        - Weighted by perceptual importance
+
         Returns:
             True if observation supports this hypothesis
         """
@@ -305,14 +309,54 @@ class IdentityHypothesis:
         if self.canonical_face.shape != observation.shape:
             return False
 
-        # LAB distance
+        # Region-based LAB distance
         hyp_lab = cv2.cvtColor(self.canonical_face, cv2.COLOR_BGR2LAB).astype(np.float32)
         obs_lab = cv2.cvtColor(observation, cv2.COLOR_BGR2LAB).astype(np.float32)
 
-        hyp_mean = np.mean(hyp_lab, axis=(0, 1))
-        obs_mean = np.mean(obs_lab, axis=(0, 1))
+        h, w = hyp_lab.shape[:2]
 
-        distance = np.sqrt(np.sum((hyp_mean - obs_mean) ** 2))
+        # Region weights (perceptual importance)
+        region_weights = {
+            'left_eye': 2.0,   # Eyes are most important
+            'right_eye': 2.0,
+            'beard': 1.5,      # Beard is important for identity
+            'forehead': 0.5,   # Forehead changes least
+            'nose': 1.0,
+            'lips': 1.5,       # Lips important for expression
+            'skin': 0.8,
+        }
+
+        # Compute weighted distance per region
+        total_distance = 0.0
+        total_weight = 0.0
+
+        for name, weight in region_weights.items():
+            if name in REGION_DEFS:
+                x1f, y1f, x2f, y2f = REGION_DEFS[name]['bounds']
+                x1, y1 = int(x1f * w), int(y1f * h)
+                x2, y2 = int(x2f * w), int(y2f * h)
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(w, x2), min(h, y2)
+
+                if x2 > x1 and y2 > y1:
+                    hyp_region = hyp_lab[y1:y2, x1:x2]
+                    obs_region = obs_lab[y1:y2, x1:x2]
+
+                    hyp_mean = np.mean(hyp_region, axis=(0, 1))
+                    obs_mean = np.mean(obs_region, axis=(0, 1))
+
+                    region_dist = np.sqrt(np.sum((hyp_mean - obs_mean) ** 2))
+                    total_distance += region_dist * weight
+                    total_weight += weight
+
+        # Average weighted distance
+        if total_weight > 0:
+            distance = total_distance / total_weight
+        else:
+            # Fallback to global distance
+            hyp_mean = np.mean(hyp_lab, axis=(0, 1))
+            obs_mean = np.mean(obs_lab, axis=(0, 1))
+            distance = np.sqrt(np.sum((hyp_mean - obs_mean) ** 2))
 
         # If distance is small, observation supports this hypothesis
         if distance < 20:  # LAB distance threshold
