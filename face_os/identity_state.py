@@ -151,6 +151,7 @@ class BeliefPixel:
         high: np.ndarray,
         quality: np.ndarray,
         pose: Optional[Tuple[float, float, float]] = None,
+        region_mask: Optional[np.ndarray] = None,
     ) -> None:
         self.frame_count += 1
 
@@ -162,6 +163,11 @@ class BeliefPixel:
         base_rate = 0.15
         obs_factor = 1.0 / (1.0 + self.observation_count * 0.005)
         low_rate = base_rate * obs_factor * quality
+
+        # Region confidence modulation: faster learning for skin, slower for eyes
+        if region_mask is not None:
+            low_rate = low_rate * region_mask
+
         low_rate_3d = low_rate[:, :, np.newaxis]
         self.best_low = self.best_low * (1 - low_rate_3d) + low * low_rate_3d
 
@@ -490,8 +496,25 @@ class IdentityState:
         if self.belief is None:
             self.belief = BeliefPixel(h, w, 3)
 
+        # Compute region confidence mask for low_rate modulation
+        # Eyes: slower learning (preserve structure), Skin: faster (normalize lighting)
+        region_mask = np.ones((h, w), dtype=np.float32)
+        for name, rdef in REGION_DEFS.items():
+            x1f, y1f, x2f, y2f = rdef["bounds"]
+            x1, y1 = int(x1f * w), int(y1f * h)
+            x2, y2 = int(x2f * w), int(y2f * h)
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            if x2 > x1 and y2 > y1:
+                if "eye" in name:
+                    region_mask[y1:y2, x1:x2] = 0.5  # Slower for eyes
+                elif name == "skin":
+                    region_mask[y1:y2, x1:x2] = 1.5  # Faster for skin
+                elif name == "forehead":
+                    region_mask[y1:y2, x1:x2] = 1.3  # Faster for forehead
+
         low, high = self.freq.decompose(canonical_face)
-        self.belief.update(low, high, quality_map, pose)
+        self.belief.update(low, high, quality_map, pose, region_mask=region_mask)
 
         # Anchor correction in update — prevents drift during processing
         self._apply_anchor_correction()
@@ -523,7 +546,7 @@ class IdentityState:
         # Phase 4: Check hypotheses for better pose-matched identity
         if pose is not None:
             hyp_face, hyp_score = self.hypotheses.query(pose=pose)
-            if hyp_face is not None and hyp_score > 0.6:
+            if hyp_face is not None and hyp_score > 0.4:  # Lowered from 0.6
                 # Use hypothesis as identity — it's pose-matched
                 identity = hyp_face
                 base_confidence = base_confidence * (0.7 + 0.3 * hyp_score)
@@ -561,11 +584,11 @@ class IdentityState:
             elif drift > 15:
                 lambda_base = 0.80
             elif drift > 5:
-                lambda_base = 0.65
+                lambda_base = 0.70
             else:
-                lambda_base = 0.60
+                lambda_base = 0.65
 
-            lambda_clamped = np.clip(lambda_base, 0.6, 0.95)
+            lambda_clamped = np.clip(lambda_base, 0.65, 0.95)
 
             low_final = (1 - lambda_clamped) * low_final + lambda_clamped * self._anchor_low
             high_final = (1 - lambda_clamped * 0.2) * high_final + (
