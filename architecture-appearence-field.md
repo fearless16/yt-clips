@@ -1122,7 +1122,7 @@ STATUS: DONE
 
 ---
 
-# PHASE 4 — CURRENT 🔄
+# PHASE 4 — COMPLETE ✅
 
 Add:
 
@@ -1131,17 +1131,19 @@ Add:
 * identity hypotheses (not just observations)
 * temporally coherent grain
 
-STATUS: IN PROGRESS
+STATUS: DONE
 
 ---
 
-# PHASE 5 — FUTURE
+# PHASE 5 — CURRENT 🔄
 
 Add:
 
 * appearance field
 * dynamic UV flow
 * microdetail synthesis
+
+STATUS: IN PROGRESS
 
 ---
 
@@ -1189,16 +1191,27 @@ System WINS if:
 |---|---|---|
 | A: Telemetry | ✅ Done | Haar Cascade + dlib landmarks |
 | B: Canonical | ✅ Done | Similarity transform, 256x256 atlas |
-| C: Patch Belief | ✅ Done | Frequency decomposition, per-patch dynamics, independent stability |
+| C: Patch Belief | ✅ Done | Frequency decomposition, per-patch dynamics |
 | D: Anchor | ✅ Done | **Identity gravity equation** — I_t = (1-λ)I_t + λI_anchor |
 | E: Confidence | ✅ Done | Semantic confidence, multifactor, quality modulation |
 | F: Reconstruction | ✅ Done | Frequency-aware blending, anchor correction |
 | G: Temporal | ✅ Done | Bidirectional solver, HQ frame identification |
 | H: Eye Dominance | ⚠️ Partial | Structure-preserving rendering, blink detection TODO |
 | I: Patch Database | ✅ Done | **Pose-conditioned retrieval** — query(yaw, expression, lighting) |
-| J: Appearance Field | ❌ Future | — |
-| K: Dynamic UV | ❌ Future | — |
+| J: Appearance Field | 🔄 Phase 5 | Hybrid system |
+| K: Dynamic UV | 🔄 Phase 5 | Skin stretch model |
 | L: Cinematic | ✅ Done | **Temporally coherent grain** — noise field with sensor persistence |
+
+## Phase Status
+
+| Phase | Status | Items |
+|---|---|---|
+| Phase 1 (MVP) | ✅ Done | Face tracking, canonical alignment, memory buffer |
+| Phase 2 | ✅ Done | Patch memory, eye priority, anchor correction |
+| Phase 3 | ✅ Done | Best observation cache, bidirectional solve |
+| Phase 4 | ✅ Done | Patch DB, semantic confidence, identity hypotheses, temporal grain |
+| Phase 5 | 🔄 Current | Appearance field, dynamic UV flow, microdetail synthesis |
+| Phase 6 | ❌ Future | Personalized neural codec |
 
 ---
 
