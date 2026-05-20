@@ -1798,6 +1798,165 @@ class TestModuleH_BlinkDetection:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# PHASE 6 — PERSONALIZED NEURAL CODEC
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestPhase6_NeuralCodec:
+    """Test personalized neural codec.
+
+    Architecture Phase 6:
+    - Personalized neural codec
+    - Full identity operating system
+    """
+
+    def test_personalized_space_trains(self):
+        """PersonalizedSpace must train from reference faces."""
+        from face_os.neural_codec import PersonalizedSpace
+
+        space = PersonalizedSpace(dimensions=16)
+
+        # Create mock reference faces
+        faces = [np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8) for _ in range(5)]
+
+        space.train(faces)
+
+        assert space.is_trained(), "Space should be trained"
+        assert space.mean_face is not None, "Must have mean face"
+        assert space.basis is not None, "Must have basis vectors"
+
+    def test_personalized_space_encodes_decodes(self):
+        """PersonalizedSpace must encode and decode faces."""
+        from face_os.neural_codec import PersonalizedSpace
+
+        space = PersonalizedSpace(dimensions=16)
+
+        # Create mock reference faces (more than dimensions)
+        faces = [np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8) for _ in range(20)]
+        space.train(faces)
+
+        # Encode and decode
+        face = np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8)
+        encoded = space.encode(face)
+        decoded = space.decode(encoded)
+
+        assert encoded.shape[0] > 0, f"Encoded should have dimensions"
+        assert decoded.shape == face.shape, f"Decoded shape {decoded.shape} should match input"
+
+    def test_neural_codec_trains(self):
+        """NeuralCodec must train from reference faces."""
+        from face_os.neural_codec import NeuralCodec
+
+        codec = NeuralCodec(dimensions=16)
+
+        # Create mock reference faces
+        faces = [np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8) for _ in range(5)]
+
+        codec.train(faces)
+
+        assert codec.is_trained(), "Codec should be trained"
+
+    def test_neural_codec_encodes_and_corrects(self):
+        """NeuralCodec must encode and apply identity correction."""
+        from face_os.neural_codec import NeuralCodec
+
+        codec = NeuralCodec(dimensions=16)
+
+        # Create mock reference faces (more than dimensions)
+        faces = [np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8) for _ in range(20)]
+        codec.train(faces)
+
+        # Encode and correct
+        face = np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8)
+        corrected, encoded = codec.encode_and_correct(face)
+
+        assert corrected.shape == face.shape, f"Corrected shape {corrected.shape} should match input"
+        assert encoded.shape[0] > 0, f"Encoded should have dimensions"
+
+    def test_neural_codec_identity_score(self):
+        """NeuralCodec must compute identity score."""
+        from face_os.neural_codec import NeuralCodec
+
+        codec = NeuralCodec(dimensions=16)
+
+        # Create mock reference faces
+        faces = [np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8) for _ in range(5)]
+        codec.train(faces)
+
+        # Get identity score
+        face = np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8)
+        score = codec.get_identity_score(face)
+
+        assert 0.0 <= score <= 1.0, f"Score {score} should be between 0 and 1"
+
+    def test_identity_os_initializes(self):
+        """IdentityOperatingSystem must initialize with reference faces."""
+        from face_os.neural_codec import IdentityOperatingSystem
+
+        ios = IdentityOperatingSystem()
+
+        # Create mock reference faces
+        faces = [np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8) for _ in range(5)]
+
+        ios.initialize(faces)
+
+        assert ios.is_initialized(), "IOS should be initialized"
+
+    def test_identity_os_processes_frames(self):
+        """IdentityOperatingSystem must process frames."""
+        from face_os.neural_codec import IdentityOperatingSystem
+
+        ios = IdentityOperatingSystem()
+
+        # Create mock reference faces
+        faces = [np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8) for _ in range(5)]
+        ios.initialize(faces)
+
+        # Process frame
+        face = np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8)
+        processed, score = ios.process_frame(face)
+
+        assert processed.shape == face.shape, f"Processed shape {processed.shape} should match input"
+        assert 0.0 <= score <= 1.0, f"Score {score} should be between 0 and 1"
+
+    def test_identity_os_tracks_stability(self):
+        """IdentityOperatingSystem must track identity stability."""
+        from face_os.neural_codec import IdentityOperatingSystem
+
+        ios = IdentityOperatingSystem()
+
+        # Create mock reference faces
+        faces = [np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8) for _ in range(5)]
+        ios.initialize(faces)
+
+        # Process multiple frames
+        for i in range(20):
+            face = np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8)
+            ios.process_frame(face)
+
+        stability = ios.get_identity_stability()
+        assert 0.0 <= stability <= 1.0, f"Stability {stability} should be between 0 and 1"
+
+    def test_identity_os_stats(self):
+        """IdentityOperatingSystem must track statistics."""
+        from face_os.neural_codec import IdentityOperatingSystem
+
+        ios = IdentityOperatingSystem()
+
+        # Create mock reference faces
+        faces = [np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8) for _ in range(5)]
+        ios.initialize(faces)
+
+        # Process some frames
+        for i in range(10):
+            face = np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8)
+            ios.process_frame(face)
+
+        stats = ios.get_stats()
+        assert stats['is_initialized'] == True
+        assert stats['frame_count'] == 10
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # RUNNER
 # ═══════════════════════════════════════════════════════════════════════════════
 
