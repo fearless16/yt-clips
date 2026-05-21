@@ -87,6 +87,19 @@ class IntrinsicComponents:
     # Reconstruction error: ||Y - (A * S + specular)||
     reconstruction_error: float
 
+    # V3: Uncertainty propagation
+    # Albedo uncertainty: (H, W, 1) — uncertainty in albedo estimate
+    albedo_uncertainty: Optional[np.ndarray] = None
+
+    # Shading uncertainty: (H, W, 1) — uncertainty in shading estimate
+    shading_uncertainty: Optional[np.ndarray] = None
+
+    # Specular uncertainty: (H, W, 1) — uncertainty in specular estimate
+    specular_uncertainty: Optional[np.ndarray] = None
+
+    # Overall decomposition quality [0, 1]
+    decomposition_quality: float = 0.0
+
 
 @dataclass
 class DecompositionReport:
@@ -165,6 +178,16 @@ class IntrinsicDecomposer:
             image, albedo, shading, specular
         )
 
+        # Step 7: Compute uncertainty propagation
+        albedo_uncertainty = self._compute_albedo_uncertainty(albedo, shading)
+        shading_uncertainty = self._compute_shading_uncertainty(shading)
+        specular_uncertainty = self._compute_specular_uncertainty(specular)
+
+        # Step 8: Compute overall decomposition quality
+        decomposition_quality = self._compute_decomposition_quality(
+            reconstruction_error, confidence, albedo_uncertainty
+        )
+
         return IntrinsicComponents(
             albedo=albedo.astype(np.float32),
             shading=shading.astype(np.float32),
@@ -172,6 +195,10 @@ class IntrinsicDecomposer:
             normal_map=normal_map.astype(np.float32),
             confidence=confidence.astype(np.float32),
             reconstruction_error=float(reconstruction_error),
+            albedo_uncertainty=albedo_uncertainty.astype(np.float32),
+            shading_uncertainty=shading_uncertainty.astype(np.float32),
+            specular_uncertainty=specular_uncertainty.astype(np.float32),
+            decomposition_quality=float(decomposition_quality),
         )
 
     def _estimate_shading(self, image: np.ndarray) -> np.ndarray:
@@ -370,6 +397,120 @@ class IntrinsicDecomposer:
         reconstructed = albedo * shading_3ch + specular
         error = np.mean(np.abs(image - reconstructed))
         return float(error)
+
+    def _compute_albedo_uncertainty(
+        self,
+        albedo: np.ndarray,
+        shading: np.ndarray,
+    ) -> np.ndarray:
+        """Compute uncertainty in albedo estimate.
+
+        Uncertainty is higher where:
+        - Shading is dark (division by small number)
+        - Albedo has high variance (ambiguous regions)
+        - Edges (gradient discontinuities)
+
+        Args:
+            albedo: Albedo estimate (H, W, 3)
+            shading: Shading estimate (H, W, 1)
+
+        Returns:
+            Albedo uncertainty (H, W, 1)
+        """
+        # Shading-based uncertainty: darker shading = higher uncertainty
+        shading_uncertainty = 1.0 - shading
+
+        # Gradient-based uncertainty: edges = higher uncertainty
+        from scipy.ndimage import sobel
+        albedo_gray = np.mean(albedo, axis=2)
+        gradient_x = sobel(albedo_gray, axis=1)
+        gradient_y = sobel(albedo_gray, axis=0)
+        gradient_mag = np.sqrt(gradient_x**2 + gradient_y**2)
+        edge_uncertainty = np.clip(gradient_mag * 10, 0, 1)
+
+        # Combined uncertainty
+        uncertainty = np.maximum(shading_uncertainty[:, :, 0], edge_uncertainty)
+        return uncertainty[:, :, np.newaxis]
+
+    def _compute_shading_uncertainty(
+        self,
+        shading: np.ndarray,
+    ) -> np.ndarray:
+        """Compute uncertainty in shading estimate.
+
+        Uncertainty is higher where:
+        - Shading changes rapidly (gradient)
+        - Shading is near boundaries
+
+        Args:
+            shading: Shading estimate (H, W, 1)
+
+        Returns:
+            Shading uncertainty (H, W, 1)
+        """
+        from scipy.ndimage import sobel
+        shading_2d = shading[:, :, 0]
+        gradient_x = sobel(shading_2d, axis=1)
+        gradient_y = sobel(shading_2d, axis=0)
+        gradient_mag = np.sqrt(gradient_x**2 + gradient_y**2)
+        uncertainty = np.clip(gradient_mag * 5, 0, 1)
+        return uncertainty[:, :, np.newaxis]
+
+    def _compute_specular_uncertainty(
+        self,
+        specular: np.ndarray,
+    ) -> np.ndarray:
+        """Compute uncertainty in specular estimate.
+
+        Uncertainty is higher where:
+        - Specular is bright (could be texture)
+        - Specular is near edges
+
+        Args:
+            specular: Specular estimate (H, W, 3)
+
+        Returns:
+            Specular uncertainty (H, W, 1)
+        """
+        specular_mag = np.linalg.norm(specular, axis=2)
+        uncertainty = np.clip(specular_mag * 2, 0, 1)
+        return uncertainty[:, :, np.newaxis]
+
+    def _compute_decomposition_quality(
+        self,
+        reconstruction_error: float,
+        confidence: np.ndarray,
+        albedo_uncertainty: np.ndarray,
+    ) -> float:
+        """Compute overall decomposition quality.
+
+        Quality = f(reconstruction_error, confidence, uncertainty)
+
+        Args:
+            reconstruction_error: Reconstruction error
+            confidence: Confidence map (H, W, 1)
+            albedo_uncertainty: Albedo uncertainty (H, W, 1)
+
+        Returns:
+            Decomposition quality [0, 1]
+        """
+        # Error quality: lower error = higher quality
+        error_quality = 1.0 - min(reconstruction_error * 5, 1.0)
+
+        # Confidence quality: higher confidence = higher quality
+        confidence_quality = float(np.mean(confidence))
+
+        # Uncertainty quality: lower uncertainty = higher quality
+        uncertainty_quality = 1.0 - float(np.mean(albedo_uncertainty))
+
+        # Weighted combination
+        quality = (
+            0.4 * error_quality
+            + 0.3 * confidence_quality
+            + 0.3 * uncertainty_quality
+        )
+
+        return float(np.clip(quality, 0, 1))
 
     def decompose_batch(
         self, images: list[np.ndarray]
