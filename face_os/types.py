@@ -183,6 +183,50 @@ class ConfidenceMap:
     contour_quality: float = 0.0
 
 
+# ─── Geometry Estimator structures ─────────────────────────────────────────
+
+@dataclass
+class GeometryState:
+    """Geometry state from Geometry Estimator subsystem."""
+    landmarks_478: Optional[np.ndarray] = None          # (478, 3) MediaPipe mesh
+    landmarks: Optional[Landmarks] = None               # Extracted landmarks with pose
+    pose: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # (yaw, pitch, roll)
+    canonical_transform: Optional[np.ndarray] = None    # Transform to canonical space
+    inverse_transform: Optional[np.ndarray] = None      # Transform from canonical space  
+    crop_transform: Optional[CropPlan] = None           # Crop plan
+    mesh: Optional[np.ndarray] = None                   # Face mesh
+    semantic_regions: Optional[Dict[str, np.ndarray]] = None  # Region masks
+    mask: Optional[np.ndarray] = None                   # Geometry-based face mask
+    geometry_confidence: float = 0.0                    # Overall geometry confidence
+    canonical_face: Optional[np.ndarray] = None         # Frame warped to canonical space
+
+
+# ─── Identity Estimator structures ─────────────────────────────────────────
+
+@dataclass
+class IdentityState:
+    """Identity state from Identity Estimator subsystem."""
+    anchor_basis: list = field(default_factory=list)           # List of anchor states
+    anchor_weights: list = field(default_factory=list)         # Weights for anchors
+    appearance_latent: Optional[np.ndarray] = None             # Current identity appearance
+    region_confidence: Dict[str, float] = field(default_factory=dict)  # Per-region confidence
+    identity_uncertainty: float = 1.0                          # Overall uncertainty (0-1)
+    initialized: bool = False                                  # Whether initialized
+
+
+# ─── Temporal Estimator structures ─────────────────────────────────────────
+
+@dataclass
+class TemporalState:
+    """Temporal state from Temporal Estimator subsystem."""
+    motion_field: Optional[np.ndarray] = None                  # Optical flow field (H, W, 2)
+    temporal_confidence: float = 1.0                          # Temporal consistency confidence
+    drift_score: float = 0.0                                  # Identity drift from anchor
+    continuity_score: float = 1.0                             # Temporal smoothness score  
+    smoothing_constraints: Dict[str, float] = field(default_factory=dict)  # Smoothing limits
+    pose: Optional[Tuple[float, float, float]] = None         # Pose for continuity tracking
+
+
 # ─── Pipeline structures ────────────────────────────────────────────────────
 
 @dataclass

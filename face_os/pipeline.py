@@ -129,6 +129,9 @@ class FaceOSPipeline:
         # M_inv smoothing for floating mask fix
         self._last_M_inv: Optional[np.ndarray] = None
 
+        # Last good crop plan for fallback paths (prevents frame size change)
+        self._last_good_crop_plan: Optional[CropPlan] = None
+
     def enroll(
         self,
         reference_image: str = "expectation.png",
@@ -356,6 +359,10 @@ class FaceOSPipeline:
 
             crop_plan = self.crop.plan_crop(source_frame.shape[:2], face_track, landmarks)
 
+            # Track last good crop plan for fallback in pass 3
+            if crop_plan is not None:
+                self._last_good_crop_plan = crop_plan
+
             if landmarks and face_track.detection:
                 # Warp to canonical space
                 try:
@@ -456,11 +463,14 @@ class FaceOSPipeline:
                     all_frames.append(result)
                     face_detected_frames += 1
             else:
-                # No face detected — write original
-                cropped = source_frame
+                # No face detected — apply last known crop to maintain frame size
                 if frame_idx in frame_data:
                     _, _, _, crop_plan = frame_data[frame_idx]
-                    cropped = crop_planner.apply_crop(source_frame, crop_plan)
+                elif self._last_good_crop_plan is not None:
+                    crop_plan = self._last_good_crop_plan
+                else:
+                    crop_plan = self.crop.plan_crop(source_frame.shape[:2], None, None)
+                cropped = crop_planner.apply_crop(source_frame, crop_plan)
                 exporter.write_frame(cropped)
                 all_frames.append(cropped)
 
@@ -669,9 +679,9 @@ class FaceOSPipeline:
                     _, _, M = canonical_map.warp_to_canonical(cropped, adjusted_lm)
                     M_inv = np.linalg.inv(M)[:2]
 
-                    # FIX: EMA smooth the transform to prevent floating mask jitter
+                    # EMA smooth the transform to prevent floating mask jitter
                     if self._last_M_inv is not None and self._last_M_inv.shape == M_inv.shape:
-                        M_inv = 0.7 * self._last_M_inv + 0.3 * M_inv
+                        M_inv = 0.4 * self._last_M_inv + 0.6 * M_inv
                     self._last_M_inv = M_inv.copy()
 
                     identity_in_crop = cv2.warpAffine(
@@ -680,10 +690,8 @@ class FaceOSPipeline:
                         borderMode=cv2.BORDER_REFLECT,
                     )
                     
-                    # FIX: Derive mask from canonical face, warp with SAME transform
-                    canonical_mask = np.ones(identity_face.shape[:2], dtype=np.float32)
-                    gray_canon = cv2.cvtColor(identity_face, cv2.COLOR_BGR2GRAY)
-                    canonical_mask[gray_canon < 5] = 0.0
+                    # Use geometry-based canonical mask (brightness-invariant)
+                    canonical_mask = self._make_canonical_geometry_mask(identity_face.shape[:2])
                     aligned_mask = cv2.warpAffine(
                         canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
                         flags=cv2.INTER_LINEAR,
@@ -781,9 +789,9 @@ class FaceOSPipeline:
                 _, _, M = canonical_map.warp_to_canonical(cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks)
                 M_inv = np.linalg.inv(M)[:2]
 
-                # FIX: EMA smooth the transform to prevent floating mask jitter
+                # EMA smooth the transform to prevent floating mask jitter
                 if self._last_M_inv is not None and self._last_M_inv.shape == M_inv.shape:
-                    M_inv = 0.7 * self._last_M_inv + 0.3 * M_inv
+                    M_inv = 0.4 * self._last_M_inv + 0.6 * M_inv
                 self._last_M_inv = M_inv.copy()
 
                 solved_in_crop = cv2.warpAffine(
@@ -792,13 +800,8 @@ class FaceOSPipeline:
                     borderMode=cv2.BORDER_REFLECT,
                 )
 
-                # FIX: Derive face mask from canonical face, warp back with SAME transform.
-                # Old approach used source landmarks → mask spatially misaligned with warped content.
-                canonical_h, canonical_w = solved_face.shape[:2]
-                canonical_mask = np.ones((canonical_h, canonical_w), dtype=np.float32)
-                # Zero out borders (canonical face has black padding outside face region)
-                gray_canon = cv2.cvtColor(solved_face, cv2.COLOR_BGR2GRAY)
-                canonical_mask[gray_canon < 5] = 0.0
+                # Use geometry-based canonical mask (brightness-invariant)
+                canonical_mask = self._make_canonical_geometry_mask(solved_face.shape[:2])
                 # Warp mask back to crop space using SAME M_inv as content
                 aligned_mask = cv2.warpAffine(
                     canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
@@ -863,6 +866,72 @@ class FaceOSPipeline:
         )
 
         return rendered
+
+    @staticmethod
+    def _make_canonical_geometry_mask(
+        canonical_size: tuple,
+    ) -> np.ndarray:
+        """Create a brightness-invariant geometry-based face mask for canonical space.
+
+        Uses a fixed elliptical mask based on canonical face geometry, NOT
+        intensity thresholding. This ensures the mask is stable across frames
+        regardless of lighting changes.
+
+        The canonical face occupies the central ~70% of the atlas.
+        This mask defines the expected face region as a smooth elliptical area.
+
+        Args:
+            canonical_size: (height, width) of canonical space, typically (256, 256)
+
+        Returns:
+            Mask (H, W) float32, values [0, 1] with feathered edges
+        """
+        h, w = canonical_size
+        # Face region in canonical space: centered oval occupying ~60% of the area
+        cy, cx = h / 2, w / 2
+        ry, rx = h * 0.50, w * 0.45  # semi-axes
+
+        Y, X = np.ogrid[:h, :w]
+        d = ((X - cx) / max(rx, 1)) ** 2 + ((Y - cy) / max(ry, 1)) ** 2
+        mask = np.clip(1.0 - d, 0, 1)
+
+        # Light feathering only
+        k = 11  # fixed small kernel
+        mask = cv2.GaussianBlur(mask, (k, k), k / 5.0)
+        mask = np.clip(mask, 0, 1).astype(np.float32)
+        return mask
+
+    @staticmethod
+    def validate_frame_contract(frame: np.ndarray, expected_h: int, expected_w: int,
+                                expected_dtype=np.uint8, expected_channels: int = 3) -> bool:
+        """Validate that a frame meets the output contract.
+
+        The contract guarantees:
+          - Correct spatial dimensions
+          - Correct dtype
+          - Correct number of channels
+          - No NaN or Inf
+          - Values in uint8 range [0, 255]
+
+        Args:
+            frame: Output frame to validate
+            expected_h: Expected height
+            expected_w: Expected width
+            expected_dtype: Expected dtype (default np.uint8)
+            expected_channels: Expected channels (default 3)
+
+        Returns:
+            True if valid, False otherwise
+        """
+        if frame is None:
+            return False
+        if frame.shape != (expected_h, expected_w, expected_channels):
+            return False
+        if frame.dtype != expected_dtype:
+            return False
+        if np.any(np.isnan(frame)) or np.any(np.isinf(frame)):
+            return False
+        return True
 
     def _compute_quality_map(
         self,
@@ -1018,6 +1087,7 @@ class FaceOSPipeline:
             self.compositor.reset()
         self._frame_count = 0
         self._last_M_inv = None
+        self._last_good_crop_plan = None
 
 
 # ─── CLI ────────────────────────────────────────────────────────────────────
