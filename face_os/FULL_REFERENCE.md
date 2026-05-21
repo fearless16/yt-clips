@@ -1,9 +1,9 @@
 # Face OS — Complete Architecture & Parameter Reference (V2)
 
-**Version:** 2.3.0  
+**Version:** 2.4.0  
 **Branch:** `feat/face-os-v2-phase1`  
 **Date:** 2026-05-21  
-**Status:** Phase 0 + Phase 1 COMPLETE | **341 tests passing** | Energy framework validated | System identifiability analysis complete
+**Status:** Phase 0 + Phase 1 + Phase 2A COMPLETE | **380 tests passing** | State-space formulation | System identifiability analysis complete
 
 ---
 
@@ -602,7 +602,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 **Test clip:** `clips_test/test_clip.mp4` (640x360, 30fps, 345 frames)  
 **Reference:** `expectation.png` (941x1672, portrait)
 
-### Test Suite (V2.3.0)
+### Test Suite (V2.4.0)
 
 | File | Tests | Status | Purpose |
 |---|---|---|---|
@@ -611,7 +611,8 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_math_hardening.py` | 37 | ✅ All pass | 10 invariant classes: UV roundtrip, transform det, temporal drift, flow shimmer, reprojection, lighting/pose invariance, mask topology, subpixel drift, edge cases |
 | `test_phase1_hardening.py` | 37 | ✅ All pass | Long-horizon drift, system identifiability, renderer equation, VerificationGate |
 | `test_phase0_contract.py` | 28 | ✅ All pass | FrameContract, EnergyReport, RendererReport, PassReport, VisibilityLogger |
-| `test_phase1_energy.py` | 36 | ✅ All pass | **NEW** — Energy term existence, numeric range, delta regression, monotonicity |
+| `test_phase1_energy.py` | 36 | ✅ All pass | Energy term existence, numeric range, delta regression, monotonicity |
+| `test_phase2a_state_space.py` | 39 | ✅ All pass | **NEW** — LatentState, StateTransition, ProcessNoise, Observation, StateSpaceEstimator |
 | `test_detection.py` | 14 | ✅ All pass | MediaPipe tasks API, poster rejection, identity matching |
 | `test_quality_gates.py` | 13 | ✅ All pass | Procrustes, jitter, occupancy, SSIM, Laplacian |
 | `test_identity_state.py` | 17 | ✅ All pass | Identity state, frequency decomposition, hypotheses |
@@ -623,7 +624,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_neural_codec.py` | 12 | ✅ All pass | PersonalizedSpace, NeuralCodec, identity score |
 | `test_hypothesis_matching.py` | 4 | ✅ All pass | Hypothesis space, pose/expression selection |
 | `test_region_confidence.py` | 4 | ✅ All pass | Region confidence, semantic confidence |
-| **Total** | **341** | **0 failures** | **All green** |
+| **Total** | **380** | **0 failures** | **All green** |
 
 ### QC Metrics (Identity Mode, V2.1.0 — 345 frames, Phase 1 Hardening)
 
@@ -1109,6 +1110,52 @@ Every pass must expose:
 - ✅ Each term has a testable numeric range
 - ✅ No energy term is hidden inside a black box
 - ✅ EnergyReport per frame is computable
+
+### Phase 2A: State-Space Formulation (COMPLETE)
+
+**Status:** ✅ All 380 tests passing (39 new Phase 2A tests)
+
+**New Module:** `face_os/state_space.py`
+
+**Components:**
+- `LatentState` — 11-dimensional hidden state vector (geometry, identity, temporal, recovery, lighting)
+- `StateTransitionModel` — `x_t = f(x_{t-1}) + ε_t` with damping toward equilibrium
+- `ProcessNoiseModel` — `ε_t ~ N(0, Q)` with positive-definite covariance
+- `ObservationModel` — `z_t = h(x_t) + δ_t` with Jacobian
+- `StateSpaceEstimator` — Kalman-like predict-update cycle
+- `StateEvolutionReport` — per-frame state evolution metrics
+- `RecoveryState` — stable/uncertain/degraded/recovering/reset_required
+
+**State Vector (11D):**
+| Index | Component | Description |
+|---|---|---|
+| 0 | yaw | Head rotation left/right |
+| 1 | pitch | Head rotation up/down |
+| 2 | roll | Head tilt |
+| 3 | identity_uncertainty | Identity confidence [0,1] |
+| 4 | appearance_latent_norm | L2 norm of appearance |
+| 5 | temporal_confidence | Temporal consistency [0,1] |
+| 6 | drift_score | Identity drift from anchor |
+| 7 | continuity_score | Temporal smoothness [0,1] |
+| 8 | recovery_state | Recovery state (encoded) |
+| 9 | brightness_mean | Frame brightness |
+| 10 | contrast_mean | Frame contrast |
+
+**Tests Added:**
+- LatentState (7 tests) — geometry, identity, temporal, covariance, to_vector/from_vector
+- StateTransitionModel (6 tests) — deterministic, noise, stability
+- ProcessNoiseModel (5 tests) — positive definite, sample statistics
+- ObservationModel (5 tests) — observe, residual, Jacobian
+- StateEvolutionReport (5 tests) — metrics, serialization
+- StateSpaceEstimator (11 tests) — predict, update, convergence, drift, occlusion, recovery
+
+**Exit Condition Met:**
+- ✅ State transition law defined (damping toward equilibrium)
+- ✅ Process noise model defined (positive-definite covariance)
+- ✅ Observation model defined (linear mapping with Jacobian)
+- ✅ Uncertainty propagation implemented (Kalman predict-update)
+- ✅ Recovery states defined (5 states)
+- ✅ Drift bounded over 500 frames
 
 **Logging Format:**
 ```json
