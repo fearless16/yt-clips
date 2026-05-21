@@ -69,6 +69,7 @@ from face_os.temporal_solve import TemporalRepairEngine, FrameQuality
 from face_os.physical_renderer import PhysicalRenderer, LightingModel
 from face_os.intrinsic_decomposition import IntrinsicComponents
 from face_os.lie_group import SIM2Transform, interpolate_sim2
+from face_os.renderer_mode import RendererMode, RendererModeState
 
 
 cfg = get_config()
@@ -139,6 +140,9 @@ class FaceOSPipeline:
 
         # V3: Physical renderer
         self.physical_renderer: Optional[PhysicalRenderer] = None
+
+        # V3: Renderer mode state
+        self.renderer_mode_state: Optional[RendererModeState] = None
 
         # V3: LieGroup transform state
         self._last_SIM2: Optional[SIM2Transform] = None
@@ -226,6 +230,9 @@ class FaceOSPipeline:
 
         # V3: Initialize physical renderer
         self.physical_renderer = PhysicalRenderer()
+
+        # V3: Initialize renderer mode state
+        self.renderer_mode_state = RendererModeState()
 
         # Extract reference mesh for quality gates
         ref_mesh = detect_track.extract_face_mesh(primary)
@@ -839,15 +846,39 @@ class FaceOSPipeline:
                     # Compute quality map for current frame
                     quality_map = self._compute_quality_map(solved_face, face_track.detection.confidence if face_track and face_track.detection else 0.5)
                     
-                    # V3: Try intrinsic rendering first
+                    # V3: Query intrinsic components
                     intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
                     
-                    if intrinsic_components is not None and self.physical_renderer is not None:
+                    # V3: Update renderer mode state
+                    if self.renderer_mode_state is not None:
+                        intrinsic_available = intrinsic_components is not None
+                        avg_confidence = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
+                        decomposition_error = intrinsic_components.reconstruction_error if intrinsic_components is not None else 1.0
+                        
+                        renderer_mode = self.renderer_mode_state.update(
+                            intrinsic_available=intrinsic_available,
+                            intrinsic_confidence=avg_confidence,
+                            decomposition_error=decomposition_error,
+                        )
+                        
+                        # Log mode changes
+                        if self.renderer_mode_state.transition_count > 0 and frame_idx % 30 == 0:
+                            print(f"  Frame {frame_idx}: renderer_mode={renderer_mode.value} "
+                                  f"confidence={avg_confidence:.3f} "
+                                  f"transitions={self.renderer_mode_state.transition_count}")
+                    
+                    # V3: Use PhysicalRenderer if mode allows
+                    if (intrinsic_components is not None 
+                        and self.physical_renderer is not None
+                        and self.renderer_mode_state is not None
+                        and self.renderer_mode_state.current_mode in [RendererMode.PHYSICAL, RendererMode.HYBRID]):
                         # V3 PHYSICAL RENDERING PATH
-                        return self._render_with_physical_renderer(
+                        result = self._render_with_physical_renderer(
                             source_frame, cropped, intrinsic_components, intrinsic_conf,
                             landmarks, crop_plan, frame_idx, region_masks
                         )
+                        if result is not None:
+                            return result
                     
                     # Fallback: Get raw identity (anchor-corrected) — compositor handles blending
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
