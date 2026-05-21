@@ -1,9 +1,9 @@
 # Face OS — Complete Architecture & Parameter Reference (V2)
 
-**Version:** 2.4.0  
+**Version:** 2.5.0  
 **Branch:** `feat/face-os-v2-phase1`  
 **Date:** 2026-05-21  
-**Status:** Phase 0 + Phase 1 + Phase 2A COMPLETE | **380 tests passing** | State-space formulation | System identifiability analysis complete
+**Status:** Phase 0 + Phase 1 + Phase 2A + Phase 2B COMPLETE | **412 tests passing** | Optimizer architecture | System identifiability analysis complete
 
 ---
 
@@ -602,7 +602,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 **Test clip:** `clips_test/test_clip.mp4` (640x360, 30fps, 345 frames)  
 **Reference:** `expectation.png` (941x1672, portrait)
 
-### Test Suite (V2.4.0)
+### Test Suite (V2.5.0)
 
 | File | Tests | Status | Purpose |
 |---|---|---|---|
@@ -612,7 +612,8 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_phase1_hardening.py` | 37 | ✅ All pass | Long-horizon drift, system identifiability, renderer equation, VerificationGate |
 | `test_phase0_contract.py` | 28 | ✅ All pass | FrameContract, EnergyReport, RendererReport, PassReport, VisibilityLogger |
 | `test_phase1_energy.py` | 36 | ✅ All pass | Energy term existence, numeric range, delta regression, monotonicity |
-| `test_phase2a_state_space.py` | 39 | ✅ All pass | **NEW** — LatentState, StateTransition, ProcessNoise, Observation, StateSpaceEstimator |
+| `test_phase2a_state_space.py` | 39 | ✅ All pass | LatentState, StateTransition, ProcessNoise, Observation, StateSpaceEstimator |
+| `test_phase2b_optimizer.py` | 32 | ✅ All pass | **NEW** — GaussNewton, LevenbergMarquardt, convergence, singularity, rollback |
 | `test_detection.py` | 14 | ✅ All pass | MediaPipe tasks API, poster rejection, identity matching |
 | `test_quality_gates.py` | 13 | ✅ All pass | Procrustes, jitter, occupancy, SSIM, Laplacian |
 | `test_identity_state.py` | 17 | ✅ All pass | Identity state, frequency decomposition, hypotheses |
@@ -624,7 +625,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_neural_codec.py` | 12 | ✅ All pass | PersonalizedSpace, NeuralCodec, identity score |
 | `test_hypothesis_matching.py` | 4 | ✅ All pass | Hypothesis space, pose/expression selection |
 | `test_region_confidence.py` | 4 | ✅ All pass | Region confidence, semantic confidence |
-| **Total** | **380** | **0 failures** | **All green** |
+| **Total** | **412** | **0 failures** | **All green** |
 
 ### QC Metrics (Identity Mode, V2.1.0 — 345 frames, Phase 1 Hardening)
 
@@ -1156,6 +1157,45 @@ Every pass must expose:
 - ✅ Uncertainty propagation implemented (Kalman predict-update)
 - ✅ Recovery states defined (5 states)
 - ✅ Drift bounded over 500 frames
+
+### Phase 2B: Optimizer Architecture (COMPLETE)
+
+**Status:** ✅ All 412 tests passing (32 new Phase 2B tests)
+
+**New Module:** `face_os/optimizer.py`
+
+**Components:**
+- `OptimizerConfig` — max_iterations, tolerance, damping, rollback_threshold
+- `OptimizerState` — iteration, energy_history, converged, rollback_count
+- `GaussNewtonOptimizer` — `x_{k+1} = x_k - H^{-1} * g`
+- `LevenbergMarquardtOptimizer` — adaptive damping `(H + lambda*I)^{-1} * g`
+- `ConvergenceReport` — x, energy, iterations, converged, energy_history
+
+**Update Rules:**
+- Gauss-Newton: `x_{k+1} = x_k - H^{-1} * g`
+- Levenberg-Marquardt: `x_{k+1} = x_k - (H + lambda*I)^{-1} * g`
+
+**Damping Strategy:**
+- If energy decreased: `lambda *= decrease_factor`
+- If energy increased: `lambda *= increase_factor`, rollback
+
+**Tests Added:**
+- OptimizerConfig (5 tests) — max_iterations, tolerance, damping, rollback
+- OptimizerState (5 tests) — iteration, energy_history, converged, rollback_count
+- GaussNewtonOptimizer (6 tests) — convergence, energy descent, bounded iterations
+- LevenbergMarquardtOptimizer (4 tests) — ill-conditioned, adaptive damping
+- ConvergenceReport (7 tests) — metrics, serialization
+- EnergyDescent (2 tests) — consistency, descent rate
+- SingularityHandling (2 tests) — singular Hessian, zero gradient
+- Rollback (1 test) — rollback on energy increase
+
+**Exit Condition Met:**
+- ✅ Optimizer abstraction defined
+- ✅ Convergence logic implemented
+- ✅ Update scheduling (adaptive damping)
+- ✅ Stopping conditions (gradient norm, step norm, max iterations)
+- ✅ Numerical stability (conditioning threshold, damping adaptation)
+- ✅ Rollback policy (energy increase detection)
 
 **Logging Format:**
 ```json
