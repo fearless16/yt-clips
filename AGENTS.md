@@ -1,6 +1,6 @@
 # AGENTS.md — Source of Truth
 
-Last updated: 2026-05-21 (Face OS V3.3 — Runtime Activation Validation Complete)
+Last updated: 2026-05-21 (Face OS V3.3 — Runtime Activation Validated + Render Core Unified)
 
 ---
 
@@ -10,13 +10,13 @@ Three parallel systems in the codebase:
 
 1. **Legacy pipeline** (download → transcribe → highlight → export → SEO → upload) — working
 2. **Face OS V0.5 pipeline** (identity reconstruction via MediaPipe V4) — **220 tests passing, 0 failures**
-3. **Face OS V3 pipeline** (subsystem-based + V3 modules) — **768 tests passing, 0 failures**
+3. **Face OS V3 pipeline** (subsystem-based + V3 modules) — **773 tests passing, 0 failures**
 
-### Face OS Test Suite (768 tests)
+### Face OS Test Suite (773 tests)
 
 | File | Tests | Status | Purpose |
-|---|---|---|---|
-| `test_strict_regression.py` | 26 | ✅ | Frame contract, mask stability, NaN/Inf, bidirectional frame size, EMA convergence |
+|---|---|---|---|---|
+| `test_strict_regression.py` | 31 | ✅ | Frame contract, mask stability, NaN/Inf, bidirectional frame size, EMA convergence, render core path coverage |
 | `test_math_hardening.py` | 37 | ✅ | 10 invariant classes: UV roundtrip, transform det, temporal drift, flow shimmer, reprojection, lighting/pose invariance, mask topology, subpixel drift |
 | `test_v2_subsystems.py` | 20 | ✅ | V2 subsystem isolation, coordinate systems, mathematical invariants |
 | `test_phase1_hardening.py` | 37 | ✅ | Long-horizon drift (500 frames), system identifiability, renderer equation, VerificationGate, BeliefPixel properties |
@@ -50,9 +50,9 @@ Three parallel systems in the codebase:
 | `test_map_estimation.py` | 19 | ✅ | MAPOptimizer, LocalMAPApproximation, MAPReport |
 | `test_energy_normalization.py` | 6 | ✅ | normalize_energy flag, z-score normalization |
 | `test_recovery_dynamics.py` | 38 | ✅ | RecoveryTransitionMatrix (5x5), Bayesian update |
-| **Total** | **768** | **0 failures** | **All green** |
+| **Total** | **773** | **0 failures** | **All green** |
 
-### Phase 1 Hardening Tests (NEW)
+### Phase 1 Hardening Tests
 
 | Test Class | Tests | What They Verify |
 |---|---|---|
@@ -220,7 +220,7 @@ Face OS V2 decomposes the pipeline into 4 isolated subsystems:
 | Avg decomposition error | 0.053 | ✅ |
 | RendererMode transitions | 1 | ✅ (stable) |
 
-**Tests:** All 768 tests pass (0 failures, 0 regressions)
+**Tests:** All 773 tests pass (0 failures, 0 regressions)
 
 **IMPORTANT:** Any new V3 module integration must be added to BOTH `_process_frame_v2()` (forward-only path) and `_render_frame_v2()` (bidirectional render pass).
 
@@ -233,7 +233,7 @@ Face OS V2 decomposes the pipeline into 4 isolated subsystems:
 
 ## Strict Regression Tests (test_strict_regression.py)
 
-26 tests enforcing deterministic numeric assertions across 4 bug classes:
+31 tests enforcing deterministic numeric assertions across 5 bug classes:
 
 | Class | Tests | What They Guard |
 |---|---|---|
@@ -244,6 +244,7 @@ Face OS V2 decomposes the pipeline into 4 isolated subsystems:
 | **No-Identity Path** | 2 | `render_frame` preserves shape/dtype with and without masks |
 | **Landmark Scaling** | 1 | `_adjust_landmarks_to_crop` coordinate contract |
 | **EMA Convergence** | 2 | EMA alpha must converge in < 15 frames (now < 5) |
+| **Render Core** | 5 | Both runtime paths use `_render_core()`, no inline rendering outside `_render_core()`, telemetry tracked in core |
 
 Run with: `.venv/bin/python -m pytest tests/face_os/test_strict_regression.py -v`
 
@@ -318,27 +319,49 @@ tests/face_os/
 
 ---
 
-## Next Steps (Priority Order)
+## Next Steps (Priority Order — from AGAINST.md)
+
+### P0 — Build Benchmark Suite (AGAINST.md I-02)
+- Categorised clips: easy / medium / hard / adversarial
+- Per-clip: physical_render_rate, drift, flicker, fallback, geometric consistency
+- A/B test: PhysicalRenderer output vs alpha compositing (I-03)
+
+### P1 — Geometry Normals (AGAINST.md I-04)
+- Break circularity: landmarks → geometry normals → renderer
+- Currently: shading → normals → shading (circular)
+
+### P1 — Identity Anchor Decoupling (AGAINST.md I-05)
+- Split anchor: albedo + appearance + white-balance normalize
+- Currently RGB-entangled — lighting leaks into identity
+
+### P1 — Geometric Consistency Metric (AGAINST.md I-07)
+- SIM(2) vs linear EMA A/B on high-rotation clips
+- Mesh distortion, determinant stability, landmark coherence
+
+### P2 — State Prediction (AGAINST.md I-09)
+- Constant velocity model on SIM(2): T_hat(t+1) = T(t) * exp(v_t)
+- Needed for occlusion recovery, missed detections
+
+### P3 — Stranded Modules (AGAINST.md I-10)
+- IdentityManifold, VisibilityCalibration, OptimizationEngine, DenseGeometry
+- Each: integrate, schedule, isolate, or delete
 
 ### Short-term
-1. **Anchor correction verification** — Run pipeline with identity path on real video; assert output L is ~108 (not 87), L std < 1.5
-2. **Add face map comparison test** — Assert output L within 5 of reference
-3. **Update README.md / ARCHITECTURE.md**
-
-### Medium-term
-4. **Prototype lasso cut** — MediaPipe Selfie Segmentation for person isolation + background composite
-5. **Multi-anchor system** — Currently 1 anchor, need 7+ (frontal, smile, left/right yaw, etc.)
-6. **Per-face exposure normalization** — Source video has L=16→155 swings; apply per-frame exposure correction
+- Anchor correction verification — output LAB ~108, std < 1.5
+- Face map comparison — output L within 5 of reference
+- Prototype lasso cut — MediaPipe Selfie Segmentation
+- Multi-anchor system — 7+ (frontal, smile, yaw left/right, etc.)
+- Per-face exposure normalisation — L=16→155 swings
 
 ---
 
 ## How to Run Tests
 
 ```bash
-# Full Face OS test suite (768 tests)
+# Full Face OS test suite (773 tests)
 .venv/bin/python -m pytest tests/face_os/ -v
 
-# Strict regression tests only (26 tests)
+# Strict regression tests only (31 tests)
 .venv/bin/python -m pytest tests/face_os/test_strict_regression.py -v
 
 # V2 subsystem tests only (20 tests)
@@ -346,6 +369,9 @@ tests/face_os/
 
 # Single file
 .venv/bin/python -m pytest tests/face_os/test_patch_memory.py -v
+
+# Real-video metrics validation (10 claims pass/fail)
+.venv/bin/python validate_metrics.py
 ```
 
 ## API — Key Validation Entry Points

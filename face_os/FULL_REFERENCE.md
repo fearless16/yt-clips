@@ -4,7 +4,7 @@
 **Version:** 3.0.0  
 **Branch:** `fix/v3-audit-stabilization`  
 **Date:** 2026-05-21  
-**Tests:** 768 passing, 0 failures  
+**Tests:** 773 passing, 0 failures  
 
 ---
 
@@ -24,7 +24,7 @@ Face OS V3.0.0 has strong architecture language, strong test coverage, and worki
 | Avg intrinsic confidence | 0.758 | ✅ |
 | Avg decomposition error | 0.053 | ✅ |
 | RendererMode transitions | 1 | ✅ (stable) |
-| All 768 tests | 0 failures | ✅ |
+| All 773 tests | 0 failures | ✅ |
 
 ### ⚠️ Validation Dataset Limitations
 
@@ -104,7 +104,7 @@ Face OS enhances portrait videos by:
 2. Estimating identity and temporal consistency
 3. Rendering enhanced output (9:16 portrait from 16:9 source)
 
-### Current Test Count: 768 tests, 0 failures
+### Current Test Count: 773 tests, 0 failures
 
 ---
 
@@ -421,7 +421,7 @@ GeometryState    IdentityState    TemporalState    Output Frame
 
 ## 6. Test Suite
 
-### Test Files (768 tests total)
+### Test Files (773 tests total)
 
 | File | Tests | Status | Purpose |
 |------|-------|--------|---------|
@@ -459,7 +459,7 @@ GeometryState    IdentityState    TemporalState    Output Frame
 | test_mathematical_foundation.py | 25 | ✅ | State evolution, energy scaling, optimizer |
 | test_long_horizon.py | 9 | ✅ | 1000+ frame stability |
 | test_architectural_completeness.py | 10 | ✅ | Completeness tracking |
-| **Total** | **768** | **0 failures** | **All green** |
+| **Total** | **773** | **0 failures** | **All green** |
 
 ---
 
@@ -485,7 +485,7 @@ Processing time:      98.4s (3.8 fps)
 | V2.0.0 | 16.25 | 100% | 0.83 | 24.08 | 240 | 4 isolated subsystems |
 | V2.1.0 | 12.83 | 80.9% | 0.87 | 13.31 | 277 | Phase 1 hardening |
 | V2.8.0 | 12.8 | 80.9% | 0.87 | 13.3 | 531 | Probabilistic recovery |
-| **V3.0.0** | **12.8** | **80.9%** | **0.87** | **13.3** | **768** | **PhysicalRenderer 96%, IntrinsicDecomposer 100%** |
+| **V3.0.0** | **12.8** | **80.9%** | **0.87** | **13.3** | **773** | **PhysicalRenderer 96%, IntrinsicDecomposer 100%** |
 
 **Note:** V3.0.0 core metrics unchanged from V2.8.0 because PhysicalRenderer output quality has not yet been validated against alpha compositing. See [I-05](#i-05-sim2-benefit-not-measured-⚠️-partially-resolved).
 
@@ -519,7 +519,7 @@ Processing time:      98.4s (3.8 fps)
 
 #### 5. Version References Mixed — FIXED
 - All references updated to V3.0.0 consistently
-- Test counts updated to 768
+- Test counts updated to 773
 
 #### 6. Stale Metrics Tables — FIXED
 - All tables now reference V3.0.0
@@ -532,7 +532,7 @@ Processing time:      98.4s (3.8 fps)
 - Output contract: 1080x1920 uint8 ✅
 - PhysicalRenderer: 96% activation ✅
 - IntrinsicDecomposer: 100% success ✅
-- All 768 tests passing ✅
+- All 773 tests passing ✅
 
 ---
 
@@ -582,10 +582,12 @@ Processing time:      98.4s (3.8 fps)
 
 ## 10. Must-Fix Issues (I-01 to I-10)
 
-### I-01 — Rendering Contradiction (✅ RESOLVED)
-**Issue:** Document claimed PhysicalRenderer was integrated but production may still use alpha compositing for most frames.
+### I-01 — Rendering Contradiction + Duplicate Paths (✅ RESOLVED)
+**Issue:** (a) Document claimed PhysicalRenderer was integrated but production may still use alpha compositing. (b) Both `_process_frame_v2()` and `_render_frame_v2()` contained duplicated rendering logic, and V3 modules were bypassed in the forward path.
 
-**Resolution:** Runtime telemetry confirms PhysicalRenderer at 96% activation, alpha fallback at 4%. The contradiction is resolved.
+**Resolution:**
+- (a) Runtime telemetry confirms PhysicalRenderer at 96% activation, alpha fallback at 4%
+- (b) Created `_render_core()` — shared single source of truth for ALL rendering logic. Both paths now call it. Added `_composite_identity_to_crop()` shared helper. 5 CI tests enforce no future divergence.
 
 ---
 
@@ -696,7 +698,7 @@ Face OS V3.0.0 is **architecturally serious** and **runtime-verified**. The crit
 - **PhysicalRenderer: 96% activation** (was 0%)
 - **IntrinsicDecomposer: 100% success** (was 0%)
 - **RendererMode: stable** (1 transition in 100 frames)
-- **768 tests: 0 failures**
+- **773 tests: 0 failures**
 
 ### What Is Correct and Should Stay
 - Runtime telemetry concept and schema
@@ -817,7 +819,7 @@ output/face_os/
 ## How to Run Tests
 
 ```bash
-# Full test suite (768 tests)
+# Full test suite (773 tests)
 .venv/bin/python -m pytest tests/face_os/ -v
 
 # V3 modules only (98 tests)
