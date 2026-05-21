@@ -371,6 +371,8 @@ class EnergyTerms:
     E_photometric: float = 0.0              # Photometric energy
     E_smoothness: float = 0.0               # Smoothness energy
     E_total: float = 0.0                    # Sum of all terms
+    _normalized: bool = False               # Whether E_total is normalized
+    _raw_total: float = 0.0                 # Raw sum before normalization
 
     def to_dict(self) -> Dict[str, float]:
         return {
@@ -380,6 +382,8 @@ class EnergyTerms:
             "E_photometric": self.E_photometric,
             "E_smoothness": self.E_smoothness,
             "E_total": self.E_total,
+            "E_total_raw": self._raw_total,
+            "normalized": self._normalized,
         }
 
 

@@ -71,13 +71,14 @@ def _estimate_pose_478(landmarks: Landmarks, frame_shape: Tuple[int, int]) -> No
     h, w = frame_shape
 
     # 3D model points (generic face, approximate)
+    # Z-axis negated to match camera convention (Z forward = positive)
     model_points = np.array([
         [0.0, 0.0, 0.0],             # Nose tip
-        [0.0, -63.6, -12.5],         # Chin
-        [-43.3, 32.7, -26.0],        # Left eye
-        [43.3, 32.7, -26.0],         # Right eye
-        [-28.9, -28.9, -24.1],       # Left mouth
-        [28.9, -28.9, -24.1],        # Right mouth
+        [0.0, -63.6, 12.5],          # Chin (Z negated)
+        [-43.3, 32.7, 26.0],         # Left eye (Z negated)
+        [43.3, 32.7, 26.0],          # Right eye (Z negated)
+        [-28.9, -28.9, 24.1],        # Left mouth (Z negated)
+        [28.9, -28.9, 24.1],         # Right mouth (Z negated)
     ], dtype=np.float64)
 
     # 2D image points (MediaPipe 478 indices)

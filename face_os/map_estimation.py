@@ -122,7 +122,7 @@ class MAPOptimizer:
         if prior_covariance is None:
             prior_covariance = np.eye(n) * 10.0
         if observation_covariance is None:
-            observation_covariance = np.eye(5) * 1.0  # 5 observation dimensions
+            observation_covariance = np.eye(9) * 1.0  # 9 observation dimensions
 
         # Previous state prediction
         if x_prev is not None:
@@ -132,13 +132,13 @@ class MAPOptimizer:
         else:
             x_pred = x0.copy()
 
-        # Observation vector
+        # Observation vector (9 dimensions matching expanded observation model)
         if observation is None:
-            observation = np.zeros(5)  # Default: zero observation
+            observation = np.zeros(9)  # Default: zero observation
 
         # Inverse covariances
         Sigma_inv = np.linalg.inv(prior_covariance + np.eye(n) * 1e-10)
-        R_inv = np.linalg.inv(observation_covariance + np.eye(5) * 1e-10)
+        R_inv = np.linalg.inv(observation_covariance + np.eye(9) * 1e-10)
 
         # Optimization loop
         energy_history = []
@@ -232,15 +232,19 @@ class MAPOptimizer:
         )
 
     def _observation_vector(self, x: np.ndarray) -> np.ndarray:
-        """Map state to observation space."""
+        """Map state to observation space (9 dimensions)."""
         state = LatentState.from_vector(x)
         obs = self.observation.observe(state)
         return np.array([
             obs["yaw"],
             obs["pitch"],
             obs["roll"],
-            obs["confidence"],
             obs["identity_uncertainty"],
+            obs["confidence"],
+            obs["brightness_mean"],
+            obs["contrast_mean"],
+            obs["drift_score"],
+            obs["continuity_score"],
         ])
 
     def _observation_jacobian(self, x: np.ndarray) -> np.ndarray:
