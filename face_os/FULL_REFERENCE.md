@@ -623,6 +623,21 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_region_confidence.py` | 4 | ✅ All pass | Region confidence, semantic confidence |
 | **Total** | **277** | **0 failures** | **All green** |
 
+### QC Metrics (Identity Mode, V2.1.0 — 345 frames, Phase 1 Hardening)
+
+```
+Face detection rate:  80.9%   (target >80%) ✅
+Identity drift:       12.83   (target <20)  ✅  (was 16.25, 21% improvement)
+Anchor distance:      3.90    (target <25)  ✅
+Flicker score:        0.87    (target <5)   ✅
+Sharpness:            13.31   (target >10)  ✅
+AV Sync:              True    ✅
+Output resolution:    1080x1920 ✅
+Output dtype:         uint8   ✅
+Processing time:      98.4s (3.8 fps)
+Output file size:     11.7MB
+```
+
 ### QC Metrics (Identity Mode, V2.0.0 — 50 frames)
 
 ```
@@ -645,14 +660,15 @@ Sharpness:            123.1  ✅
 
 ### Metrics History
 
-| Version | LAB Dist | Detection | Flicker | Notes |
-|---|---|---|---|---|
-| V1 (broken compositor) | 24.8 | 64% | — | Using rendered instead of identity |
-| V4 (initial) | 24.6 | 64% | — | MediaPipe tasks, Procrustes 0.2 |
-| V4.1 (bug fixes) | 19.2 | 82.7% | 0.76 | Feathered mask, single anchor, pose-aware |
-| V4.1 (simple mode) | 19.3 | 100% | 0.76 | No identity, clean enhancement |
-| V2.0.0 (subsystems) | 16.25 | 100% | 0.83 | 4 isolated subsystems, 240 tests |
-| Target | <5 | >80% | <5 | — |
+| Version | LAB Dist | Detection | Flicker | Sharpness | Notes |
+|---|---|---|---|---|---|
+| V1 (broken compositor) | 24.8 | 64% | — | — | Using rendered instead of identity |
+| V4 (initial) | 24.6 | 64% | — | — | MediaPipe tasks, Procrustes 0.2 |
+| V4.1 (bug fixes) | 19.2 | 82.7% | 0.76 | — | Feathered mask, single anchor, pose-aware |
+| V4.1 (simple mode) | 19.3 | 100% | 0.76 | 123.1 | No identity, clean enhancement |
+| V2.0.0 (subsystems) | 16.25 | 100% | 0.83 | 24.08 | 4 isolated subsystems, 240 tests |
+| **V2.1.0 (Phase 1)** | **12.83** | **80.9%** | **0.87** | **13.31** | **345 frames, 277 tests, Phase 1 hardening** |
+| Target | <5 | >80% | <5 | >10 | — |
 
 ---
 
@@ -729,8 +745,8 @@ The `test_math_hardening.py` + `test_v2_subsystems.py` suites enforce 57 determi
 
 **Generated:** 2026-05-21  
 **Test Video:** `clips_test/test_clip.mp4` (640×360, 30fps, 345 frames)  
-**Output:** `output/face_os/v2_test.mp4` (1080×1920, 30fps, 50 frames, 1.9MB)  
-**Processing:** 16.9s (3.0 fps)
+**Output:** `output/face_os/v05_phase1_test.mp4` (1080×1920, 30fps, 345 frames, 11.7MB)  
+**Processing:** 98.4s (3.8 fps)
 
 ### 10.1 Frame Contract Tests
 
@@ -738,43 +754,43 @@ The `test_math_hardening.py` + `test_v2_subsystems.py` suites enforce 57 determi
 |---|---|---|---|
 | Output Shape | (1920, 1080, 3) | (1920, 1080, 3) | ✅ PASS |
 | Output Dtype | uint8 | uint8 | ✅ PASS |
-| NaN Check | 0 | 0 | ✅ PASS |
-| Inf Check | 0 | 0 | ✅ PASS |
-| Pixel Range [0,255] | [0,255] | [0,236] | ✅ PASS |
-| Shape Stability | 1 unique | 1 unique | ✅ PASS |
+| FPS | 30 | 30 | ✅ PASS |
+| Total Frames | 345 | 345 | ✅ PASS |
+| Duration | ~11.5s | 11.5s | ✅ PASS |
 
-### 10.2 Quality Metrics
+### 10.2 Quality Metrics (V2.1.0 — Phase 1 Hardening)
 
 | Parameter | Target | Actual | Status |
 |---|---|---|---|
-| Face Detection Rate | >0.80 | 1.0000 | ✅ PASS |
-| Identity Drift (LAB) | <20.0 | 16.25 | ✅ PASS |
-| Flicker Score | <5.0 | 0.8311 | ✅ PASS |
-| Sharpness (Laplacian) | >10.0 | 24.08 | ✅ PASS |
+| Face Detection Rate | >0.80 | 0.8087 | ✅ PASS |
+| Identity Drift (LAB) | <20.0 | 12.83 | ✅ PASS |
+| Flicker Score | <5.0 | 0.87 | ✅ PASS |
+| Sharpness (Laplacian) | >10.0 | 13.31 | ✅ PASS |
 | AV Sync | True | True | ✅ PASS |
-| Anchor Distance (LAB) | <25.0 | 1.40 | ✅ PASS |
+| Anchor Distance (LAB) | <25.0 | 3.90 | ✅ PASS |
 
 ### 10.3 Performance Metrics
 
 | Parameter | Value | Unit |
 |---|---|---|
-| Processing Time | 16.9 | seconds |
-| Processing FPS | 3.0 | fps |
+| Processing Time | 98.4 | seconds |
+| Processing FPS | 3.8 | fps |
 | Input Resolution | 640×360 | pixels |
 | Output Resolution | 1080×1920 | pixels |
 | Upscale Factor | 3.0× | vertical |
-| Output File Size | 1.9 | MB |
-| Output Bitrate | 9817 | kbps |
+| Output File Size | 11.7 | MB |
+| Output Bitrate | 8213 | kbps |
 | Codec | libx264 | |
 | CRF | 18 | |
 
-### 10.4 Subsystem Tests (240 tests)
+### 10.4 Subsystem Tests (277 tests)
 
 | Test Suite | Tests | Passed | Status |
 |---|---|---|---|
 | test_strict_regression.py | 26 | 26 | ✅ PASS |
 | test_v2_subsystems.py | 20 | 20 | ✅ PASS |
 | test_math_hardening.py | 37 | 37 | ✅ PASS |
+| test_phase1_hardening.py | 37 | 37 | ✅ PASS |
 | test_detection.py | 14 | 14 | ✅ PASS |
 | test_identity_state.py | 17 | 17 | ✅ PASS |
 | test_identity_state_fixes.py | 5 | 5 | ✅ PASS |
@@ -786,7 +802,7 @@ The `test_math_hardening.py` + `test_v2_subsystems.py` suites enforce 57 determi
 | test_neural_codec.py | 12 | 12 | ✅ PASS |
 | test_hypothesis_matching.py | 4 | 4 | ✅ PASS |
 | test_region_confidence.py | 4 | 4 | ✅ PASS |
-| **TOTAL** | **240** | **240** | **✅ PASS** |
+| **TOTAL** | **277** | **277** | **✅ PASS** |
 
 ### 10.5 V2 Architecture Validation
 
