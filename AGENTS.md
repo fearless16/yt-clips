@@ -1,6 +1,6 @@
 # AGENTS.md — Source of Truth
 
-Last updated: 2026-05-21 (Face OS V2 Architecture + Subsystem Isolation)
+Last updated: 2026-05-21 (Face OS V2.1.0 — Phase 1 Hardening Complete)
 
 ---
 
@@ -10,15 +10,16 @@ Three parallel systems in the codebase:
 
 1. **Legacy pipeline** (download → transcribe → highlight → export → SEO → upload) — working
 2. **Face OS V0.5 pipeline** (identity reconstruction via MediaPipe V4) — **220 tests passing, 0 failures**
-3. **Face OS V2 pipeline** (subsystem-based architecture) — **240 tests passing, 0 failures**
+3. **Face OS V2 pipeline** (subsystem-based architecture) — **277 tests passing, 0 failures**
 
-### Face OS Test Suite (240 tests)
+### Face OS Test Suite (277 tests)
 
 | File | Tests | Status | Purpose |
 |---|---|---|---|
 | `test_strict_regression.py` | 26 | ✅ | Frame contract, mask stability, NaN/Inf, bidirectional frame size, EMA convergence |
 | `test_math_hardening.py` | 37 | ✅ | 10 invariant classes: UV roundtrip, transform det, temporal drift, flow shimmer, reprojection, lighting/pose invariance, mask topology, subpixel drift |
-| `test_v2_subsystems.py` | 20 | ✅ | **NEW** — V2 subsystem isolation, coordinate systems, mathematical invariants |
+| `test_v2_subsystems.py` | 20 | ✅ | V2 subsystem isolation, coordinate systems, mathematical invariants |
+| `test_phase1_hardening.py` | 37 | ✅ | **NEW** — Long-horizon drift (500 frames), system identifiability, renderer equation, VerificationGate, BeliefPixel properties |
 | `test_detection.py` | 14 | ✅ | MediaPipe detection, poster rejection, identity matching, no-fallback |
 | `test_identity_state.py` | 17 | ✅ | Identity state, frequency decomposition, anchor correction |
 | `test_identity_state_fixes.py` | 5 | ✅ | LastUpdateFrame, region confidence |
@@ -30,7 +31,35 @@ Three parallel systems in the codebase:
 | `test_neural_codec.py` | 12 | ✅ | Neural codec, identity score |
 | `test_hypothesis_matching.py` | 4 | ✅ | Hypothesis space |
 | `test_region_confidence.py` | 4 | ✅ | Region confidence |
-| **Total** | **240** | **0 failures** | **All green** |
+| **Total** | **277** | **0 failures** | **All green** |
+
+### Phase 1 Hardening Tests (NEW)
+
+| Test Class | Tests | What They Verify |
+|---|---|---|
+| TestLongHorizonIdentityDrift | 5 | Identity stays within 10 LAB of anchor over 500 frames, resists slow brightness/color drift |
+| TestSystemIdentifiability | 4 | Two different faces produce distinguishable identity states (>20 LAB apart), same face converges (<5 LAB) |
+| TestRendererBlendingEquation | 5 | `Y = M * Y_face + (1-M) * Y_bg` verified with known inputs, output contract preserved |
+| TestVerificationGate | 10 | All 3 gate checks tested: face pixels, embedding distance, liveness jitter |
+| TestRendererWithIdentity | 4 | Identity path exercised with actual identity data, low confidence handled |
+| TestTemporalStateProperties | 3 | Confidence/drift/continuity bounds verified |
+| TestFrequencyDecompositionProperties | 3 | Lossless reconstruction, low-freq smoother, high-freq mean near zero |
+| TestBeliefPixelProperties | 3 | Observation count grows, variance decreases, confidence bounded |
+
+### System Identifiability Analysis (V2.1.0)
+
+Key findings from architecture review:
+
+| Issue | Current State | Correct State |
+|---|---|---|
+| Identity representation | `appearance_latent` = RGB image (256x256x3) | Intrinsic albedo + geometric micro-detail |
+| Temporal state | Scalar confidence (float) | Bayesian belief (mean + covariance) |
+| Rendering | Alpha-blend compositing | Physical rendering `Y = R(G, A, L, V)` |
+| Transforms | Linear EMA (`0.4*last + 0.6*new`) | Lie-group geodesic (SE(2)/SIM(2)) |
+| Identity anchors | Single discrete anchor | Continuous latent manifold |
+| Geometry | 478 sparse landmarks | Dense mesh / neural implicit |
+
+See `face_os/FULL_REFERENCE.md` Sections 12-13 for full analysis and Phase 1 roadmap.
 
 ### V2 Architecture (NEW)
 
