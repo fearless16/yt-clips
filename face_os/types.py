@@ -3,11 +3,13 @@ types.py — Core data structures for the Face OS pipeline.
 
 Every module communicates through these typed structures.
 No raw dicts flowing between modules — everything is explicit.
+
+Phase 0: Contract Lockdown — FrameContract, EnergyReport, RendererReport, PassReport
 """
 
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -280,3 +282,242 @@ class IdentityProfile:
     # Enrollment state
     enrolled: bool = False
     enrollment_frames: int = 0
+
+
+# ─── Phase 0: Contract Lockdown Structures ──────────────────────────────────
+
+@dataclass
+class FrameContract:
+    """Frame output contract — every output frame must satisfy these invariants."""
+    # Shape contract
+    expected_height: int = 1920
+    expected_width: int = 1080
+    expected_channels: int = 3
+    # Dtype contract
+    expected_dtype: str = "uint8"
+    # Value range contract
+    min_value: int = 0
+    max_value: int = 255
+    # Stability contract
+    allow_nan: bool = False
+    allow_inf: bool = False
+
+    def validate(self, frame: np.ndarray) -> Tuple[bool, str]:
+        """Validate a frame against this contract.
+
+        Returns:
+            (passed, reason) — True if all checks pass
+        """
+        if frame.shape != (self.expected_height, self.expected_width, self.expected_channels):
+            return False, f"shape_mismatch: {frame.shape} != ({self.expected_height}, {self.expected_width}, {self.expected_channels})"
+
+        if str(frame.dtype) != self.expected_dtype:
+            return False, f"dtype_mismatch: {frame.dtype} != {self.expected_dtype}"
+
+        if not self.allow_nan and np.any(np.isnan(frame)):
+            return False, "nan_detected"
+
+        if not self.allow_inf and np.any(np.isinf(frame)):
+            return False, "inf_detected"
+
+        if frame.min() < self.min_value or frame.max() > self.max_value:
+            return False, f"value_range: [{frame.min()}, {frame.max()}] not in [{self.min_value}, {self.max_value}]"
+
+        return True, "passed"
+
+
+@dataclass
+class GeometryMetrics:
+    """Geometry state metrics for parameter-wise visibility."""
+    yaw: float = 0.0
+    pitch: float = 0.0
+    roll: float = 0.0
+    det_A: float = 1.0                      # Determinant of transform matrix
+    mask_coverage_pct: float = 0.0          # Mask coverage percentage
+    transform_stability: float = 1.0        # Frame-to-frame transform stability
+    geometry_confidence: float = 0.0
+    landmark_count: int = 0
+    pose_magnitude: float = 0.0             # |yaw| + |pitch| + |roll|
+
+
+@dataclass
+class IdentityMetrics:
+    """Identity state metrics for parameter-wise visibility."""
+    anchor_weights: List[float] = field(default_factory=list)
+    uncertainty: float = 1.0
+    region_confidence: Dict[str, float] = field(default_factory=dict)
+    appearance_latent_norm: float = 0.0     # L2 norm of appearance_latent
+    anchor_distance_lab: float = 0.0        # LAB distance from anchor
+    observation_count: float = 0.0          # Mean observation count
+
+
+@dataclass
+class TemporalMetrics:
+    """Temporal state metrics for parameter-wise visibility."""
+    temporal_confidence: float = 1.0
+    drift_score: float = 0.0
+    continuity_score: float = 1.0
+    motion_field_norm: float = 0.0          # Mean magnitude of motion field
+    covariance_trace: float = 0.0           # Trace of belief covariance (Phase 3)
+    uncertainty_mean: float = 0.0           # Mean uncertainty (Phase 3)
+
+
+@dataclass
+class EnergyTerms:
+    """Energy function terms — each term is a measurable float."""
+    E_geom: float = 0.0                     # Geometry energy
+    E_identity: float = 0.0                 # Identity energy
+    E_temporal: float = 0.0                 # Temporal energy
+    E_photometric: float = 0.0              # Photometric energy
+    E_smoothness: float = 0.0               # Smoothness energy
+    E_total: float = 0.0                    # Sum of all terms
+
+    def to_dict(self) -> Dict[str, float]:
+        return {
+            "E_geom": self.E_geom,
+            "E_identity": self.E_identity,
+            "E_temporal": self.E_temporal,
+            "E_photometric": self.E_photometric,
+            "E_smoothness": self.E_smoothness,
+            "E_total": self.E_total,
+        }
+
+
+@dataclass
+class RendererMetrics:
+    """Renderer metrics for parameter-wise visibility."""
+    M_mean: float = 0.0                     # Mean mask value
+    M_min: float = 0.0                      # Min mask value
+    M_max: float = 0.0                      # Max mask value
+    Y_face_range: Tuple[int, int] = (0, 255)  # Face pixel range
+    Y_bg_range: Tuple[int, int] = (0, 255)    # Background pixel range
+    blend_weight_min: float = 0.0
+    blend_weight_mean: float = 0.0
+    blend_weight_max: float = 0.0
+    temporal_confidence: float = 1.0
+    output_shape: Tuple[int, int, int] = (1920, 1080, 3)
+    output_dtype: str = "uint8"
+
+
+@dataclass
+class EnergyReport:
+    """Per-frame energy report — all energy terms as measurable floats."""
+    frame_idx: int = 0
+    terms: EnergyTerms = field(default_factory=EnergyTerms)
+    geometry: GeometryMetrics = field(default_factory=GeometryMetrics)
+    identity: IdentityMetrics = field(default_factory=IdentityMetrics)
+    temporal: TemporalMetrics = field(default_factory=TemporalMetrics)
+    renderer: RendererMetrics = field(default_factory=RendererMetrics)
+    status: str = "pending"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "frame_idx": self.frame_idx,
+            "status": self.status,
+            "energy_terms": self.terms.to_dict(),
+            "geometry": {
+                "yaw": self.geometry.yaw,
+                "pitch": self.geometry.pitch,
+                "roll": self.geometry.roll,
+                "det_A": self.geometry.det_A,
+                "mask_coverage_pct": self.geometry.mask_coverage_pct,
+                "transform_stability": self.geometry.transform_stability,
+                "geometry_confidence": self.geometry.geometry_confidence,
+            },
+            "identity": {
+                "anchor_weights": self.identity.anchor_weights,
+                "uncertainty": self.identity.uncertainty,
+                "region_confidence": self.identity.region_confidence,
+                "appearance_latent_norm": self.identity.appearance_latent_norm,
+                "anchor_distance_lab": self.identity.anchor_distance_lab,
+            },
+            "temporal": {
+                "temporal_confidence": self.temporal.temporal_confidence,
+                "drift_score": self.temporal.drift_score,
+                "continuity_score": self.temporal.continuity_score,
+                "covariance_trace": self.temporal.covariance_trace,
+            },
+            "renderer": {
+                "M_mean": self.renderer.M_mean,
+                "Y_face_range": list(self.renderer.Y_face_range),
+                "Y_bg_range": list(self.renderer.Y_bg_range),
+                "blend_weight_stats": {
+                    "min": self.renderer.blend_weight_min,
+                    "mean": self.renderer.blend_weight_mean,
+                    "max": self.renderer.blend_weight_max,
+                },
+            },
+        }
+
+
+@dataclass
+class RendererReport:
+    """Per-frame renderer report — output contract validation."""
+    frame_idx: int = 0
+    output_shape: Tuple[int, int, int] = (1920, 1080, 3)
+    output_dtype: str = "uint8"
+    nan_count: int = 0
+    inf_count: int = 0
+    value_range: Tuple[int, int] = (0, 255)
+    contract_passed: bool = True
+    contract_reason: str = "pending"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "frame_idx": self.frame_idx,
+            "output_shape": list(self.output_shape),
+            "output_dtype": self.output_dtype,
+            "nan_count": self.nan_count,
+            "inf_count": self.inf_count,
+            "value_range": list(self.value_range),
+            "contract_passed": self.contract_passed,
+            "contract_reason": self.contract_reason,
+        }
+
+
+@dataclass
+class PassReport:
+    """Per-pass report with before/after/delta metrics.
+
+    This is the MANDATORY visibility format for every change.
+    If this report is missing, the change must be rejected.
+    """
+    pass_id: str = ""                       # e.g. "phase2_transform_hardening"
+    frame_id: int = 0                       # Frame index
+    status: str = "pending"                 # accepted / rejected / skipped
+    before: Dict[str, float] = field(default_factory=dict)
+    after: Dict[str, float] = field(default_factory=dict)
+    delta: Dict[str, float] = field(default_factory=dict)
+    metrics: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "pass_id": self.pass_id,
+            "frame_id": self.frame_id,
+            "status": self.status,
+            "before": self.before,
+            "after": self.after,
+            "delta": self.delta,
+            "metrics": self.metrics,
+        }
+
+    def compute_delta(self) -> None:
+        """Compute delta from before and after."""
+        for key in self.before:
+            if key in self.after:
+                before_val = self.before[key]
+                after_val = self.after[key]
+                if isinstance(before_val, (int, float)) and isinstance(after_val, (int, float)):
+                    self.delta[key] = after_val - before_val
+
+
+@dataclass
+class PhaseState:
+    """Current phase state for the pipeline."""
+    current_phase: int = 0                  # 0-6
+    phase_name: str = "phase0_contract_lockdown"
+    phase_status: str = "in_progress"       # in_progress / passed / failed
+    invariants_passed: int = 0
+    invariants_total: int = 0
+    energy_reports: List[EnergyReport] = field(default_factory=list)
+    pass_reports: List[PassReport] = field(default_factory=list)
