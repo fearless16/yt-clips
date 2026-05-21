@@ -373,6 +373,7 @@ class TestMeshTopology:
 
     def test_normal_consistency(self):
         """Face normals must be consistent with vertex normals."""
+        np.random.seed(0)
         estimator = DenseGeometryEstimator()
         landmarks = np.random.rand(478, 2).astype(np.float32) * 256
         result = estimator.estimate(landmarks)

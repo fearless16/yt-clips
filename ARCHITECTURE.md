@@ -1,252 +1,221 @@
 # Architecture
 
-## Pipeline Phases
+Two parallel systems co-exist in this codebase:
+
+1. **Face OS** (primary) — Identity-reconstruction pipeline for portrait-mode studio video
+2. **Legacy cricket pipeline** — 16:9 live stream → 9:16 shorts (Haar/YOLO + GFPGAN)
+
+---
+
+## Face OS Pipeline
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  PHASE 1: DOWNLOAD                                              │
-│  yt-dlp + aria2c → input/video.mp4                              │
-│  --skip-download to reuse existing                              │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 2: TRANSCRIBE                                            │
-│  faster-whisper → transcripts/{video}.json                      │
-│  Language: hi (Hinglish/Hindi)                                  │
-│  Device: cuda on Colab, cpu on Mac                              │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 2.5: VIDEO ANALYSIS                                      │
-│  video_analyzer.py — face/lighting map for full VOD             │
-│  Samples every 2s, builds quality map for highlight selection   │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 3: HIGHLIGHT DETECTION                                   │
-│  Audio RMS energy + transcript scoring → highlights/{video}.yaml│
-│  Gemini AI refinement (optional)                                │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 4: FRAME ANALYSIS + EXPORT                               │
-│  16:9 → 9:16 smart crop + encode                                │
-│  ┌─ Cheap (default): ──────────────────────────────────────────┐│
-│  │ Haar Cascade → EMA smooth → heuristic layout → FFmpeg crop ││
-│  └─────────────────────────────────────────────────────────────┘│
-│  ┌─ Premium (config toggle): ──────────────────────────────────┐│
-│  │ YOLOv8-face → ByteTrack → Kalman+bezier → layout classifier││
-│  │ → RIFE 30→60fps → GFPGAN enhance → two-pass VBR            ││
-│  └─────────────────────────────────────────────────────────────┘│
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 4.25: SELECTIVE ENHANCEMENT (config toggle)              │
-│  3-pass enhancement on 9:16 cropped output from Phase 4         │
-│  ┌─ Pass 1: state_analyzer.py ─────────────────────────────────┐│
-│  │ Per-frame state classification: heavy/light/skip             ││
-│  │ Based on mouth, eyes, pose, lighting, sharpness              ││
-│  ├─ Pass 2: selective_enhancer.py ─────────────────────────────┤│
-│  │ heavy: GFPGAN face restore + sharpen                        ││
-│  │ light: conservative sharpen + color                         ││
-│  │ skip:  temporal propagation from nearest enhanced            ││
-│  ├─ Pass 3: temporal_consistency.py ───────────────────────────┤│
-│  │ IIR face smoothing, drift correction, boundary blend        ││
-│  └─────────────────────────────────────────────────────────────┘│
-│  Input:  export.py output (9:16 cropped video)                  │
-│  Output: enhanced 9:16 video (replaces export output)           │
-│  Toggle: enhancement.selective in config.yaml                   │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 4.5: SEO + THUMBNAILS                                    │
-│  Model chain: MinMax → Groq → NVIDIA (quality-gated)            │
-│  LLM generates: title, description, hashtags, tags, search      │
-│  terms. Quality validator ensures pipe format, sections, tags.  │
-│  Falls back to template if all models fail.                     │
-│  seo_learner tracks performance → self-improving prompts.       │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 5: SYNC (optional)                                       │
-│  Google Drive upload via Drive API                               │
-├──────────────────────────────────────────────────────────────────┤
-│  PHASE 6: UPLOAD (optional)                                     │
-│  YouTube API → private/unlisted/public                           │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│  FACE OS — Identity Belief State Engine                             │
+│  (pipeline.py, face_os/*)                                           │
+│                                                                     │
+│  Core equation:  OUTPUT = source * (1 - conf) + identity * conf    │
+│  Frequency-aware: low-freq trust identity, high-freq trust source   │
+├─────────────────────────────────────────────────────────────────────┤
+│  PHASE 1: ENROLL                                                    │
+│  expectation.png + photos/* → identity embeddings + canonical atlas │
+│  MediaPipe FaceLandmarker (478-point mesh)                          │
+│  PnP head pose from 6 key landmarks                                 │
+│  Verification gate: embedding distance + face pixels + liveness     │
+├─────────────────────────────────────────────────────────────────────┤
+│  PHASE 2: PER-FRAME PROCESSING (forward path)                       │
+│  ┌─ Detect & track ───────────────────────────────────────────────┐ │
+│  │  MediaPipe FaceDetector + FaceLandmarker                        │ │
+│  │  Identity matching (face_recognition embeddings)                │ │
+│  │  Occupancy gate (face_area/bbox_area < 0.25 → reject)          │ │
+│  │  No fallback to non-target tracks                               │ │
+│  ├─ Geometry ──────────────────────────────────────────────────────┤ │
+│  │  478-point landmarks + PnP head pose → SE(2)/SIM(2) transform  │ │
+│  │  Canonical warp via LieGroup interpolation                      │ │
+│  │  Geometry-based elliptical mask (brightness-invariant)          │ │
+│  ├─ Identity ──────────────────────────────────────────────────────┤ │
+│  │  Query identity belief state (frequency decomposition)          │ │
+│  │  Query intrinsic (albedo/shading/specular) from IntrinsicDecomp │ │
+│  │  Query patch memory (pose-conditioned retrieval)                │ │
+│  ├─ Render ────────────────────────────────────────────────────────┤ │
+│  │  _render_core() — SINGLE source of truth for ALL rendering      │ │
+│  │    1. PhysicalRenderer (96%): albedo + shading + specular       │ │
+│  │    2. Identity composite fallback: warp anchor face + blend     │ │
+│  │    3. Enhancement last resort: sharpen + denoise                │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+├─────────────────────────────────────────────────────────────────────┤
+│  PHASE 3: BIDIRECTIONAL SOLVE (offline, optional)                   │
+│  Forward pass: collect all frames + quality metrics                 │
+│  Temporal solve: future frames repair past frames                   │
+│  Render pass: query solved identity for each frame                  │
+├─────────────────────────────────────────────────────────────────────┤
+│  PHASE 4: EXPORT + QC                                               │
+│  VideoExporter (1080x1920, H.264, audio muxing)                     │
+│  Fade in/out transitions (configurable duration)                    │
+│  QC checks: identity drift, sharpness, flicker, face detection rate │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-## Key Design Decisions
-
-### 1. Dual Pipeline Architecture
-The codebase maintains TWO complete analysis paths:
-- **Cheap path** (`frame_analyzer.py`): OpenCV Haar Cascade + heuristics. No GPU needed. Runs anywhere.
-- **Premium path** (`premium_analyzer.py` + `premium_render.py`): YOLOv8-face + ByteTrack + Kalman + RIFE + GFPGAN. Requires GPU.
-
-Selected via `premium.enabled` in config.yaml. `export.py` auto-detects which path to use at import time.
-
-### 2. Selective Enhancement Pipeline (Phase 4.25)
-
-When `enhancement.selective: true` in config.yaml, a 3-pass enhancement runs on each exported 9:16 clip:
+### V3 Module Integration Status
 
 ```
-export.py output (9:16)
-    │
-    ├─ Pass 1: state_analyzer.py
-    │   Per-frame classification → heavy/light/skip
-    │   Factors: mouth state, eye state, pose, lighting, sharpness, artifacts
-    │   Output: analysis JSON with per-frame enhancement map
-    │
-    ├─ Pass 2: selective_enhancer.py
-    │   heavy frames → GFPGAN face restore + sharpen
-    │   light frames → conservative sharpen + color boost
-    │   skip frames → propagate from nearest enhanced frame
-    │   Background → global grade (brightness/contrast/color temp)
-    │
-    └─ Pass 3: temporal_consistency.py
-        IIR face smoothing (alpha=0.7) → no flicker between frames
-        Global frame smoothing (alpha=0.85) → no background flicker
-        Drift detection → re-sync if face identity changes
-        Segment boundary blending → smooth transitions
+Module                Integrated   Active    Validated    Default
+──────────────────────────────────────────────────────────────────
+IntrinsicDecomposer   ✅ Yes       ✅ 100%   ❌ No        ✅ Yes
+PhysicalRenderer      ✅ Yes       ✅ 96%    ❌ No        ✅ Yes
+LieGroup SIM(2)       ✅ Yes       ✅ Yes    ⚠️ Partial   ✅ Yes
+RendererMode          ✅ Yes       ✅ Yes    ❌ No        ✅ Yes
+StateEvolution        ✅ Yes       ✅ Yes    ❌ No        ✅ Yes
+EnergyScaler          ✅ Yes       ⚠️ Opt-in ❌ No        ❌ No
+OptimizationEngine    ❌ No        ❌ No     ❌ No        ❌ No
+DenseGeometry         ❌ No        ❌ No     ❌ No        ❌ No
+IdentityManifold      ❌ No        ❌ No     ❌ No        ❌ No
+VisibilityCalibration ❌ No        ❌ No     ❌ No        ❌ No
 ```
 
-**Critical: This operates on 9:16 cropped video, NOT raw 16:9 source.**
+**Key:** ACTIVE ≠ VALIDATED. PhysicalRenderer runs 96% of frames but no proof yet that output quality improved over alpha compositing. See `AGAINST.md`.
 
-When selective enhancement is ON, the FFmpeg filters in `export.py` are disabled to prevent double processing.
+### V2 Subsystem Architecture
 
-### 3. Pre-Generation Test Guard
-Controlled by `testing.enabled` in config.yaml (default: `false` on Colab for speed).
-When enabled, `pytest tests/ -x --timeout=120` runs before any expensive operation.
-Use `--skip-tests` to bypass. Set `testing.enabled: true` for local development.
+Face OS decomposes into 4 isolated subsystems (face_os/subsystems/):
 
-### 3. Colab Bridge Architecture
-```mermaid
-graph LR
-    A[Local: automate.sh] -->|push_code.py| B[Google Drive]
-    A -->|bridge.py| C[Job file]
-    B --> D[Colab worker]
-    C --> D
-    D -->|pipeline.py| E[Output shorts]
-    E -->|sync.py| B
+1. **Geometry Estimator** — all spatial structure, no identity/lighting logic
+2. **Identity Estimator** — stable identity, no RGB blending
+3. **Temporal Estimator** — temporal consistency, no texture injection
+4. **Renderer** — physically consistent output, no heuristic compositing
+
+---
+
+## Legacy Cricket Pipeline
+
+```text
+URL → Download (yt-dlp + aria2c)
+    → Transcribe (faster-whisper, Hindi/English)
+    → Video Analysis (face/lighting map)
+    → Highlight Detection (audio RMS + transcript scoring + Gemini AI)
+    → Frame Analysis (cheap=Haar / premium=YOLO+ByteTrack)
+    → Export (crop + enhance + interpolate + encode)
+    → Selective Enhancement (3-pass: state→enhance→temporal)
+    → SEO + Thumbnails
+    → Upload to YouTube
 ```
 
-The bridge system:
-1. `push_code.py` syncs code files to Google Drive
-2. `bridge.py` writes a job file (youtube URL + flags)
-3. `colab_setup.py` + `watcher.py` on Colab — sets up deps + tunnel, listens for pipeline jobs
-4. Results sync back to Drive
+Two analysis paths:
+- **Cheap** (`frame_analyzer.py`): Haar Cascade + heuristics, no GPU
+- **Premium** (`premium_analyzer.py` + `premium_render.py`): YOLOv8-face + ByteTrack + Kalman + RIFE + GFPGAN, GPU required
 
-### 4. ByteTrack Implementation
-Custom lightweight ByteTrack (not the full boxmot library):
-- KalmanBoxTracker: 7-dim state [x1,y1,x2,y2,vx,vy,vw], 4-dim measurement
-- Two-stage matching: high-confidence detections first, low-confidence second
-- Hungarian algorithm via scipy (fallback: greedy matching)
-- Graceful degradation: falls back to Haar Cascade + EMA if filterpy/scipy missing
+---
 
-### 5. SEO Generation Architecture
+## Key Design Decisions (Face OS)
 
-Three-tier fallback with quality validation:
+### Why Geometry-Based Mask (Not Intensity Threshold)
+Old: `mask[gray < 5] = 0.0` → beard, shadows, dark skin erased → flicker
+New: fixed elliptical geometry mask → brightness-invariant, deterministic
+
+### Why Direct Blend
+Both frames use `src * (1-mask) + identity * mask` (not compositor.composite()).
+Identity face is already anchor-corrected in canonical space and warped to crop space.
+Re-introducing compositor would de-correct the anchor.
+
+### Why EMA at 0.4/0.6
+Old 0.7/0.3 caused 10-frame lag (~300ms at 30fps, visible ghosting).
+New converges in 5 frames (~150ms), smooths jitter without visible lag.
+
+### Why Last Good Crop Plan
+When face is lost mid-clip, `_last_good_crop_plan` preserves the last valid crop position.
+Prevents jarring 16:9 full-frame output when face temporarily disappears.
+
+### Why _render_core()
+Both `_process_frame_v2()` (forward) and `_render_frame_v2()` (bidirectional) had duplicated rendering logic. This caused the V3 modules to be bypassed in the forward path. `_render_core()` is now the single source of truth for all rendering: PhysicalRenderer → identity composite → enhancement fallback.
+
+---
+
+## Test Suite (773 Face OS tests)
 
 ```
-generate_clip_seo(clip_id, transcript, ...)
-  │
-  ├─ #1: _try_model_chain()
-  │   ├─ MinMax-m2.5 (OpenRouter, free) — best quality, 25+ tags/terms
-  │   ├─ llama-3.3-70b (Groq, free, fast) — reliable fallback
-  │   └─ llama-3.3-70b (NVIDIA) — last resort
-  │   └─ Each output validated by validate_seo_quality():
-  │       ✓ Title has "| Team vs Team | Tournament" pipe format
-  │       ✓ Description has 3+ of 4 required sections
-  │       ✓ 10+ SEO tags, 10+ search terms
-  │       ✓ Includes #Shorts hashtag
-  │       ✓ No generic patterns ("cricket live:", etc.)
-  │
-  ├─ #2: Direct AI call (configured provider, retry loop with backoff)
-  │   └─ Also quality-validated
-  │
-  └─ #3: Template fallback (_generate_template_seo)
-      └─ ai_generated=False → upload skips these clips
+tests/face_os/
+├── test_strict_regression.py       # 31 — Frame contract, mask stability, render core
+├── test_math_hardening.py          # 37 — Invariant classes
+├── test_v2_subsystems.py           # 20 — Subsystem isolation
+├── test_phase1_hardening.py        # 37 — Long-horizon drift, system identifiability
+├── test_detection.py               # 14 — MediaPipe detection
+├── test_identity_state.py          # 17 — Frequency decomposition
+├── test_identity_state_fixes.py    #  5 — LastUpdateFrame
+├── test_patch_memory.py            # 18 — Region patches
+├── test_temporal_solve.py          # 10 — Bidirectional solver
+├── test_face_enhance.py            # 18 — Blink detection, eye freeze
+├── test_quality_gates.py           # 13 — Procrustes, jitter, occupancy
+├── test_appearance_field.py        # 14 — Appearance field
+├── test_neural_codec.py            # 12 — Neural codec
+├── test_hypothesis_matching.py     #  4 — Hypothesis space
+├── test_region_confidence.py       #  4 — Region confidence
+├── test_renderer_mode.py           # 21 — RendererMode state machine
+├── test_adversarial.py             # 31 — Pathological inputs
+├── test_visibility_calibration.py  # 16 — VisibilityCalibrator
+├── test_identity_manifold.py       # 26 — Riemannian manifold
+├── test_mathematical_foundation.py # 25 — StateEvolution, EnergyScaler
+├── test_long_horizon.py            #  9 — 1000-frame drift
+├── test_architectural_completeness.py # 10 — Completeness levels
+├── test_phase0_contract.py         # 28 — FrameContract, EnergyReport
+├── test_intrinsic_decomposition.py # 26 — IntrinsicDecomposer
+├── test_physical_renderer.py       # 26 — PhysicalRenderer
+├── test_dense_geometry.py          # 23 — DenseGeometry (de-scoped)
+├── test_lie_group.py               # 23 — SE2/SIM2 transforms
+├── test_state_space.py             # 39 — LatentState
+├── test_optimizer_architecture.py  # 32 — GaussNewton, LM
+├── test_observability.py           # 28 — ObservabilityAnalyzer
+├── test_state_separation.py        # 34 — PhysicalState, BeliefState
+├── test_map_estimation.py          # 19 — MAPOptimizer
+├── test_energy_normalization.py    #  6 — Normalize energy
+├── test_recovery_dynamics.py       # 38 — RecoveryTransitionMatrix
+└── conftest.py
 ```
 
-**Self-improving loop** (seo_learner.py):
-- After upload, `learn_from_clip_performance()` records views/likes/CTR
-- Tracks patterns: pipe_format, power_word, player_name, sections, tags count
-- `enhance_seo_prompt()` appends learned insights to next prompt:
-  ```
-  ✅ What WORKS: pipe_format:true_power_word:true (avg score: 0.85)
-  ❌ What to AVOID: pipe_format:false (avg score: 0.32)
-  💡 Recommendation: Always add | Team vs Team | Tournament
-  ```
+---
 
-### 6. Speed Profile
-Gaussian-smoothed per-frame speed multiplier (1.0-1.25x):
-- Base: 1.0x (normal pace)
-- Fast speech (>150 WPM): 1.15x
-- High silence ratio (>30%): 1.25x
-- Transitions: Gaussian kernel with sigma = 5% of clip duration
+## Runtime Validation
 
-## GPU/CPU Split (Colab T4)
+Run with `.venv/bin/python validate_metrics.py`
 
-| Operation | Device | VRAM |
+### Latest Dashboard (100 frames, test_clip.mp4)
+
+| Claim | Value | Status |
 |---|---|---|
-| YOLOv8-face inference | GPU | ~0.5 GB |
-| ByteTrack matching | CPU | 0 |
-| FILM/RIFE interpolation | GPU | ~3 GB |
-| GFPGAN enhancement | GPU | ~2.5 GB |
-| Real-ESRGAN 4x upscale | GPU | ~3 GB |
-| FFmpeg NVENC encode | GPU | ~0.5 GB |
-| Whisper transcription | CPU (parallel) | 0 |
-| State analysis (Pass 1) | CPU | 0 |
-| Selective enhancement (Pass 2) | GPU (GFPGAN) | ~2.5 GB |
-| Temporal consistency (Pass 3) | CPU | 0 |
-| Peak total (with selective) | GPU | ~8.5 GB |
+| PhysicalRenderer active | 96.0% | ✅ |
+| IntrinsicDecomposer active | 100.0% | ✅ |
+| Frame contract (1920x1080x3, uint8) | 50/50 frames | ✅ |
+| RendererMode stable | 1 transition | ✅ |
+| Avg intrinsic confidence | 0.758 | ✅ |
+| Avg decomposition error | 0.053 | ✅ |
+| Fallback reason telemetry | renderer_mode_alpha=4 | ✅ |
+| No NaN/Inf in output | 50/50 clean | ✅ |
+| Telemetry key coverage | 14/14 keys | ✅ |
+| PhysicalRenderer dominant | 4% alpha fallback | ✅ |
 
-## Config Reference
+---
 
-```yaml
-paths:           # All I/O directories
-download:        # yt-dlp + aria2c params
-transcription:   # faster-whisper model/device/language
-highlight:       # scoring thresholds, clip sizes
-premium:         # premium toggle + feature flags
-layout:          # facecam position, chat overlay config
-export:          # resolution, fps, bitrate, encoder, transitions
-enhancement:     # 3-pass selective enhancement (Phase 4.25)
-youtube:         # upload privacy, scheduling, category
-ai:              # LLM provider (groq/nvidia/openrouter)
-thumbnail:       # AI thumbnail generation
-quality:         # black detection, silence, frame sampling
-testing:         # pre-generation test guard config
-logging:         # level, log file path
-```
+## Configuration
 
-## Test Suite Structure (219+ tests)
+Two config files:
 
-```
-tests/
-├── conftest.py              # 7 synthetic 16:9 fixtures + parametrized any_video
-├── test_analyzer.py         # Cheap analyzer smoke tests (5)
-├── test_analytics_tdd.py    # Analytics/SEO feedback loop tests (5)
-├── test_bugs_corrected.py   # TDD bug regression tests (22)
-├── test_clipping_quality.py # Clipping regression tests (10)
-├── test_cricbuzz_integration.py  # Cricbuzz API tests (7)
-├── test_export.py           # Export pipeline tests (15)
-├── test_features_tdd.py     # Feature regression tests (5)
-├── test_flow.py             # Integration flow tests (3)
-├── test_frame_analyzer.py   # Frame analyzer unit tests (17)
-├── test_full_scan_and_layout.py  # Full scan tests (5)
-├── test_seo.py              # SEO generation tests (50+): unit, quality validation,
-│                           # model fallback chain, AI failure threshold, upload guard
-├── test_premium_analyzer.py # Premium analyzer unit tests (20)
-├── test_premium_render.py   # Premium render unit tests (9)
-├── test_synthetic_quality.py # Synthetic image/video quality tests (14)
-├── test_integration.py      # End-to-end integration tests (14)
-├── test_tdd_regression.py   # Regression guard tests (9)
-├── test_fuzz.py             # Fuzz testing — random inputs (20)
-├── test_state_analyzer.py   # State analyzer integration tests (standalone)
-└── test_full_pipeline.py    # 3-pass enhancement end-to-end test (standalone)
-```
+| File | Purpose |
+|---|---|
+| `face_os_config.yaml` | Face OS tuning (identity, renderer, crop, export, enhancement) |
+| `config.yaml` | Legacy pipeline config (download, transcription, premium toggle) |
 
-## Dependencies
+---
 
-### Core
-- Python 3.11+
-- faster-whisper, yt-dlp, opencv-python-headless, numpy
-- rich (logging), PyYAML, Pillow
-- google-api-python-client (Drive/YouTube)
-- openai (OpenRouter, Groq, NVIDIA providers)
+## Stale/Unresolved (Face OS)
 
-### Testing
-- pytest, pytest-timeout, pytest-mock
+| Issue | Status |
+|---|---|
+| I-01 Duplicate render paths | ✅ FIXED (_render_core()) |
+| I-02 Benchmark suite | ❌ PENDING |
+| I-03 Normals circular (shading→normals→shading) | ❌ PENDING |
+| I-05 Identity anchor RGB-entangled | ❌ PENDING |
+| I-07 SIM(2) benefit unmeasured | ❌ PENDING |
+| I-09 State prediction (constant velocity) | ❌ PENDING |
+| I-10 Stranded modules | ❌ PENDING |
+| ARCHITECTURE.md stale | ✅ UPDATED |
 
-### Premium (Colab T4)
-- ultralytics (YOLOv8-face), torch
-- filterpy (Kalman filter), scipy (Hungarian matching)
-- gfpgan, basicsr (face enhancement)
-- realesrgan (super-resolution)
+See `AGAINST.md` for full analysis.

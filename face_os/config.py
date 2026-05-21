@@ -74,6 +74,12 @@ _DEFAULTS: Dict[str, Any] = {
         "noise_strength": 0.02,               # Grain intensity (0 = none)
     },
 
+    # ─── Energy Scaling ────────────────────────────────────────────────────
+    "energy": {
+        "normalize_energy": True,             # I-07: Enable energy normalization (z-score)
+        "normalization_method": "zscore",     # zscore | minmax | none
+    },
+
     # ─── Identity Memory (Photic Memory) ───────────────────────────────────
     "memory": {
         "accumulation_rate": 0.1,             # How fast confidence accumulates
