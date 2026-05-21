@@ -65,6 +65,11 @@ from face_os.identity_state import IdentityState
 from face_os.patch_memory import PatchMemory
 from face_os.temporal_solve import TemporalRepairEngine, FrameQuality
 
+# V3 modules
+from face_os.physical_renderer import PhysicalRenderer, LightingModel
+from face_os.intrinsic_decomposition import IntrinsicComponents
+from face_os.lie_group import SIM2Transform, interpolate_sim2
+
 
 cfg = get_config()
 
@@ -132,6 +137,54 @@ class FaceOSPipeline:
         # Last good crop plan for fallback paths (prevents frame size change)
         self._last_good_crop_plan: Optional[CropPlan] = None
 
+        # V3: Physical renderer
+        self.physical_renderer: Optional[PhysicalRenderer] = None
+
+        # V3: LieGroup transform state
+        self._last_SIM2: Optional[SIM2Transform] = None
+
+    @staticmethod
+    def _affine_to_sim2(M_inv_2x3: np.ndarray) -> SIM2Transform:
+        """Convert 2x3 affine matrix to SIM2Transform.
+
+        Decomposes affine matrix into rotation, translation, scale.
+
+        Args:
+            M_inv_2x3: 2x3 affine matrix
+
+        Returns:
+            SIM2Transform
+        """
+        # Extract rotation and scale from 2x2 part
+        R = M_inv_2x3[:, :2]
+        # Compute scale as average of column norms
+        scale = (np.linalg.norm(R[:, 0]) + np.linalg.norm(R[:, 1])) / 2.0
+        # Normalize rotation matrix
+        R_normalized = R / (scale + 1e-8)
+        # Extract rotation angle
+        theta = np.arctan2(R_normalized[1, 0], R_normalized[0, 0])
+        # Extract translation
+        tx = M_inv_2x3[0, 2]
+        ty = M_inv_2x3[1, 2]
+
+        return SIM2Transform(theta=theta, tx=tx, ty=ty, scale=scale)
+
+    @staticmethod
+    def _sim2_to_affine(T: SIM2Transform) -> np.ndarray:
+        """Convert SIM2Transform to 2x3 affine matrix.
+
+        Args:
+            T: SIM2Transform
+
+        Returns:
+            2x3 affine matrix
+        """
+        c, s = np.cos(T.theta), np.sin(T.theta)
+        return np.array([
+            [T.scale * c, -T.scale * s, T.tx],
+            [T.scale * s,  T.scale * c, T.ty]
+        ], dtype=np.float64)
+
     def enroll(
         self,
         reference_image: str = "expectation.png",
@@ -170,6 +223,9 @@ class FaceOSPipeline:
         self.appearance_builder = canonical_map.AppearanceFieldBuilder()
         self.crop = crop_planner.CropPlanner(reference_image=reference_image)
         self.compositor = compositor.Compositor()
+
+        # V3: Initialize physical renderer
+        self.physical_renderer = PhysicalRenderer()
 
         # Extract reference mesh for quality gates
         ref_mesh = detect_track.extract_face_mesh(primary)
@@ -679,10 +735,12 @@ class FaceOSPipeline:
                     _, _, M = canonical_map.warp_to_canonical(cropped, adjusted_lm)
                     M_inv = np.linalg.inv(M)[:2]
 
-                    # EMA smooth the transform to prevent floating mask jitter
-                    if self._last_M_inv is not None and self._last_M_inv.shape == M_inv.shape:
-                        M_inv = 0.4 * self._last_M_inv + 0.6 * M_inv
-                    self._last_M_inv = M_inv.copy()
+                    # V3: LieGroup geodesic interpolation (replaces linear EMA)
+                    current_sim2 = self._affine_to_sim2(M_inv)
+                    if self._last_SIM2 is not None:
+                        interpolated = interpolate_sim2(self._last_SIM2, current_sim2, 0.6)
+                        M_inv = self._sim2_to_affine(interpolated)
+                    self._last_SIM2 = current_sim2
 
                     identity_in_crop = cv2.warpAffine(
                         identity_face, M_inv, (cropped.shape[1], cropped.shape[0]),
@@ -780,7 +838,18 @@ class FaceOSPipeline:
                 if self.identity_state.is_initialized():
                     # Compute quality map for current frame
                     quality_map = self._compute_quality_map(solved_face, face_track.detection.confidence if face_track and face_track.detection else 0.5)
-                    # Get raw identity (anchor-corrected) — compositor handles blending
+                    
+                    # V3: Try intrinsic rendering first
+                    intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
+                    
+                    if intrinsic_components is not None and self.physical_renderer is not None:
+                        # V3 PHYSICAL RENDERING PATH
+                        return self._render_with_physical_renderer(
+                            source_frame, cropped, intrinsic_components, intrinsic_conf,
+                            landmarks, crop_plan, frame_idx, region_masks
+                        )
+                    
+                    # Fallback: Get raw identity (anchor-corrected) — compositor handles blending
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
                     solved_face = identity_face
                     solved_conf = identity_conf
@@ -789,10 +858,12 @@ class FaceOSPipeline:
                 _, _, M = canonical_map.warp_to_canonical(cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks)
                 M_inv = np.linalg.inv(M)[:2]
 
-                # EMA smooth the transform to prevent floating mask jitter
-                if self._last_M_inv is not None and self._last_M_inv.shape == M_inv.shape:
-                    M_inv = 0.4 * self._last_M_inv + 0.6 * M_inv
-                self._last_M_inv = M_inv.copy()
+                # V3: LieGroup geodesic interpolation (replaces linear EMA)
+                current_sim2 = self._affine_to_sim2(M_inv)
+                if self._last_SIM2 is not None:
+                    interpolated = interpolate_sim2(self._last_SIM2, current_sim2, 0.6)
+                    M_inv = self._sim2_to_affine(interpolated)
+                self._last_SIM2 = current_sim2
 
                 solved_in_crop = cv2.warpAffine(
                     solved_face, M_inv, (cropped.shape[1], cropped.shape[0]),
@@ -866,6 +937,137 @@ class FaceOSPipeline:
         )
 
         return rendered
+
+    def _render_with_physical_renderer(
+        self,
+        source_frame: np.ndarray,
+        cropped: np.ndarray,
+        intrinsic_components: 'IntrinsicComponents',
+        intrinsic_conf: np.ndarray,
+        landmarks: Optional[Landmarks],
+        crop_plan: CropPlan,
+        frame_idx: int,
+        region_masks: Optional[dict] = None,
+    ) -> Optional[np.ndarray]:
+        """Render using V3 PhysicalRenderer with intrinsic decomposition.
+
+        Uses albedo, shading, specular, and normals from IntrinsicDecomposer
+        instead of alpha compositing.
+
+        Args:
+            source_frame: Original source frame
+            cropped: Cropped source frame
+            intrinsic_components: IntrinsicComponents from identity state
+            intrinsic_conf: Confidence map from identity state
+            landmarks: Face landmarks
+            crop_plan: Crop plan
+            frame_idx: Frame index
+            region_masks: Region masks dict
+
+        Returns:
+            Rendered frame or None on failure
+        """
+        try:
+            # Warp intrinsic components to crop space
+            _, _, M = canonical_map.warp_to_canonical(
+                cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks
+            )
+            M_inv = np.linalg.inv(M)[:2]
+
+            # V3: LieGroup geodesic interpolation (replaces linear EMA)
+            current_sim2 = self._affine_to_sim2(M_inv)
+            if self._last_SIM2 is not None:
+                interpolated = interpolate_sim2(self._last_SIM2, current_sim2, 0.6)
+                M_inv = self._sim2_to_affine(interpolated)
+            self._last_SIM2 = current_sim2
+
+            # Warp albedo to crop space
+            albedo_crop = cv2.warpAffine(
+                intrinsic_components.albedo, M_inv, (cropped.shape[1], cropped.shape[0]),
+                flags=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REFLECT,
+            )
+
+            # Warp shading to crop space
+            shading_crop = cv2.warpAffine(
+                intrinsic_components.shading, M_inv, (cropped.shape[1], cropped.shape[0]),
+                flags=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REFLECT,
+            )
+
+            # Warp normal map to crop space
+            normal_map_crop = cv2.warpAffine(
+                intrinsic_components.normal_map, M_inv, (cropped.shape[1], cropped.shape[0]),
+                flags=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REFLECT,
+            )
+
+            # Warp specular to crop space
+            specular_crop = cv2.warpAffine(
+                intrinsic_components.specular, M_inv, (cropped.shape[1], cropped.shape[0]),
+                flags=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REFLECT,
+            )
+
+            # Estimate lighting from shading
+            lighting = LightingModel(
+                ambient=float(np.mean(shading_crop)) * 0.3,
+                diffuse_intensity=float(np.mean(shading_crop)) * 0.8,
+            )
+
+            # Render with PhysicalRenderer
+            rendered_output = self.physical_renderer.render(
+                albedo=albedo_crop,
+                normal_map=normal_map_crop,
+                shading=shading_crop,
+                lighting=lighting,
+            )
+
+            # Convert from [0,1] to [0,255] uint8
+            rendered_face = (rendered_output.rendered * 255).astype(np.uint8)
+
+            # Create mask for blending
+            canonical_mask = self._make_canonical_geometry_mask(intrinsic_components.albedo.shape[:2])
+            aligned_mask = cv2.warpAffine(
+                canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=0,
+            )
+            aligned_mask = np.clip(aligned_mask, 0, 1)
+
+            # Feather the mask
+            feather_ksize = max(3, cfg.compositor.feather_pixels * 2 + 1)
+            feathered_mask = cv2.GaussianBlur(
+                aligned_mask, (feather_ksize, feather_ksize), cfg.compositor.feather_pixels / 2
+            )
+
+            # Blend rendered face with source
+            conf_3d = feathered_mask[:, :, np.newaxis]
+            blended = cropped.astype(np.float32) * (1 - conf_3d) + rendered_face.astype(np.float32) * conf_3d
+            blended = np.clip(blended, 0, 255).astype(np.uint8)
+
+            # Apply structure-preserving rendering on top
+            enhancement_mask = None
+            if region_masks:
+                enhancement_mask = face_enhance._create_enhancement_mask(region_masks, blended.shape)
+
+            rendered = face_enhance.render_frame(
+                blended, enhancement_mask, region_masks,
+                identity_eyes=None, eye_confidence=0.0,
+            )
+
+            # Post-sharpen
+            output = face_enhance._sharpen(rendered, amount=0.3, radius=0.8)
+
+            if frame_idx % 30 == 0:
+                print(f"  Frame {frame_idx}: V3 physical render (albedo mean={np.mean(albedo_crop):.3f})")
+
+            return output
+
+        except Exception as e:
+            print(f"  Frame {frame_idx}: V3 PHYSICAL RENDER FAILED: {e}")
+            return None
 
     @staticmethod
     def _make_canonical_geometry_mask(
