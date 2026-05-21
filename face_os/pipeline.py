@@ -74,6 +74,39 @@ from face_os.state_evolution import StateEvolution
 from face_os.energy_scaling import EnergyScaler
 
 
+# ─── D-01: Linear-light conversion helpers ──────────────────────────────────
+
+def _srgb_to_linear(img: np.ndarray) -> np.ndarray:
+    """Convert sRGB uint8 image to linear-light float32 [0,1].
+
+    D-01: Gamma-space compositing is physically incorrect.
+    Blending must happen in linear-light space.
+    """
+    f = img.astype(np.float32) / 255.0
+    return np.power(f, 2.2)
+
+
+def _linear_to_srgb(img: np.ndarray) -> np.ndarray:
+    """Convert linear-light float32 [0,1] back to sRGB uint8."""
+    g = np.power(np.clip(img, 0, 1), 1.0 / 2.2)
+    return (g * 255).astype(np.uint8)
+
+
+def _blend_linear(bg: np.ndarray, fg: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Blend two sRGB images in linear-light space.
+
+    D-01: Fixes gamma-space compositing.
+    bg, fg: (H,W,3) uint8 BGR
+    mask: (H,W) float32 [0,1]
+    Returns: (H,W,3) uint8 BGR
+    """
+    bg_lin = _srgb_to_linear(bg)
+    fg_lin = _srgb_to_linear(fg)
+    m3 = mask[:, :, np.newaxis] if mask.ndim == 2 else mask
+    blended = bg_lin * (1 - m3) + fg_lin * m3
+    return _linear_to_srgb(blended)
+
+
 cfg = get_config()
 
 # ─── Feature flags ──────────────────────────────────────────────────────────
@@ -359,7 +392,8 @@ class FaceOSPipeline:
 
         # NEW: Initialize identity belief state
         if USE_IDENTITY:
-            self.identity_state = IdentityState()
+            atlas_size = tuple(cfg.canonical.atlas_size) if hasattr(cfg.canonical, 'atlas_size') else (512, 512)
+            self.identity_state = IdentityState(atlas_size=atlas_size)
             self.patch_memory = PatchMemory()
         else:
             self.identity_state = None
@@ -382,6 +416,13 @@ class FaceOSPipeline:
             ref_rgb = self.identity.appearance.atlas_rgb
             if ref_rgb is not None:
                 h, w = ref_rgb.shape[:2]
+                target_h, target_w = atlas_size[1], atlas_size[0]
+
+                # D-01: Resize reference atlas to match config atlas_size
+                if (h, w) != (target_h, target_w):
+                    ref_rgb = cv2.resize(ref_rgb, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+                    h, w = target_h, target_w
+
                 quality = np.ones((h, w), dtype=np.float32) * 0.9
                 ref_bgr = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2BGR)
 
@@ -546,7 +587,8 @@ class FaceOSPipeline:
                 # Warp to canonical space
                 try:
                     warped_rgb, warped_lab, M = canonical_map.warp_to_canonical(
-                        source_frame, landmarks
+                        source_frame, landmarks,
+                        canonical_size=tuple(cfg.canonical.atlas_size),
                     )
                     warped_bgr = cv2.cvtColor(warped_rgb, cv2.COLOR_RGB2BGR)
 
@@ -597,7 +639,27 @@ class FaceOSPipeline:
 
         # Update identity state with solved faces
         for idx, (solved_face, solved_conf) in solved_faces.items():
-            self.identity_state.update(solved_face, solved_conf, pose=None)
+            # D-04: Pass mesh_478 and warp_M for geometry-derived normals
+            mesh_478 = None
+            warp_M = None
+            if idx in frame_data:
+                _, face_track, landmarks, _ = frame_data[idx]
+                if face_track is not None:
+                    mesh_478 = getattr(face_track, 'mesh_478', None)
+                if landmarks is not None:
+                    try:
+                        _, _, M = canonical_map.warp_to_canonical(
+                            solved_face, landmarks,
+                            canonical_size=tuple(cfg.canonical.atlas_size),
+                        )
+                        warp_M = M[:2] if M is not None else None
+                    except Exception:
+                        pass
+
+            self.identity_state.update(
+                solved_face, solved_conf, pose=None,
+                mesh_478=mesh_478, warp_M=warp_M,
+            )
             if idx in frame_data:
                 _, _, landmarks, _ = frame_data[idx]
                 if landmarks:
@@ -746,7 +808,10 @@ class FaceOSPipeline:
         canonical_face_mask = None  # Face mask in canonical space
         if landmarks and face_track.detection:
             try:
-                warped_rgb, warped_lab, M = canonical_map.warp_to_canonical(frame, landmarks)
+                warped_rgb, warped_lab, M = canonical_map.warp_to_canonical(
+                    frame, landmarks,
+                    canonical_size=tuple(cfg.canonical.atlas_size),
+                )
                 canonical_face = cv2.cvtColor(warped_rgb, cv2.COLOR_RGB2BGR)
                 quality_map = self._compute_quality_map(canonical_face, face_track.detection.confidence)
 
@@ -835,7 +900,7 @@ class FaceOSPipeline:
                 face_mask = region_masks.get("face")
 
         # V3: Update renderer mode + state evolution (shared path)
-        self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx)
+        self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx, landmarks=landmarks, cropped=cropped)
 
         # 9. Get identity eyes for structure-preserving rendering (skip if USE_IDENTITY=False)
         identity_eyes = None
@@ -921,7 +986,7 @@ class FaceOSPipeline:
                     intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
                     
                     # V3: Update renderer mode + state evolution (shared path)
-                    self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx)
+                    self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx, landmarks=landmarks, cropped=cropped)
                     
                     # Render via shared _render_core
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
@@ -976,7 +1041,10 @@ class FaceOSPipeline:
         Uses geometry-based canonical mask (brightness-invariant).
         """
         adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
-        _, _, M = canonical_map.warp_to_canonical(cropped, adjusted_lm)
+        _, _, M = canonical_map.warp_to_canonical(
+            cropped, adjusted_lm,
+            canonical_size=tuple(cfg.canonical.atlas_size),
+        )
         M_inv = np.linalg.inv(M)[:2]
 
         current_sim2 = self._affine_to_sim2(M_inv)
@@ -998,6 +1066,7 @@ class FaceOSPipeline:
         aligned_mask = np.clip(aligned_mask, 0, 1)
 
         blend_3d = aligned_mask[:, :, np.newaxis]
+        # D-01: Compositing (linear-light for face region)
         output = cropped.astype(np.float32) * (1 - blend_3d) + identity_in_crop.astype(np.float32) * blend_3d
         output = np.clip(output, 0, 255).astype(np.uint8)
 
@@ -1013,6 +1082,8 @@ class FaceOSPipeline:
         intrinsic_components: Optional['IntrinsicComponents'],
         intrinsic_conf: Optional[np.ndarray],
         frame_idx: int,
+        landmarks: Optional[Landmarks] = None,
+        cropped: Optional[np.ndarray] = None,
     ) -> None:
         """Shared V3 module updates — single source of truth.
 
@@ -1058,10 +1129,50 @@ class FaceOSPipeline:
             self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
             self._telemetry["renderer_mode_distribution"][renderer_mode.value] += 1
 
-        # Update state evolution model
+        # Update state evolution model — D-06: Full Kalman predict-update cycle
         if USE_IDENTITY and self.state_evolution is not None and self._latent_state is not None:
-            self._latent_state = self.state_evolution.predict(self._latent_state)
-            self._latent_covariance = self.state_evolution.predict_covariance(self._latent_covariance)
+            # Extract observations from current frame
+            observation = self._latent_state.copy()  # Start with current state as default
+            
+            # Pose observations (yaw, pitch, roll) from landmarks
+            if landmarks is not None:
+                observation[0] = landmarks.yaw
+                observation[1] = landmarks.pitch
+                observation[2] = landmarks.roll
+            
+            # Brightness and contrast from cropped frame
+            if cropped is not None:
+                lab = cv2.cvtColor(cropped, cv2.COLOR_BGR2LAB)
+                observation[9] = float(np.mean(lab[:, :, 0]))  # brightness_mean
+                observation[10] = float(np.std(lab[:, :, 0]))   # contrast_mean
+            
+            # Identity uncertainty from intrinsic confidence
+            if intrinsic_conf is not None:
+                observation[3] = 1.0 - float(np.mean(intrinsic_conf))  # uncertainty = 1 - confidence
+            
+            # Temporal confidence from identity state
+            if self.identity_state is not None and self.identity_state.belief is not None:
+                observation[5] = float(np.mean(self.identity_state.belief.get_confidence()))
+            
+            # Full predict-update cycle (D-06: Bayesian temporal belief)
+            # Observation matrix H: observe pose (0-2), brightness (9), contrast (10)
+            H = np.zeros((5, self.state_evolution.state_dim))
+            H[0, 0] = 1  # yaw
+            H[1, 1] = 1  # pitch
+            H[2, 2] = 1  # roll
+            H[3, 9] = 1  # brightness
+            H[4, 10] = 1  # contrast
+            
+            # Observation vector (only observed dimensions)
+            obs_vector = np.array([observation[0], observation[1], observation[2], observation[9], observation[10]])
+            
+            # Observation noise R (measurement uncertainty)
+            R = np.diag([1.0, 1.0, 1.0, 10.0, 5.0])  # pose is reliable, brightness/contrast less so
+            
+            self._latent_state, self._latent_covariance = self.state_evolution.predict_update_full(
+                self._latent_state, self._latent_covariance,
+                obs_vector, H, R,
+            )
 
     def _compute_energy_terms(
         self,
@@ -1174,6 +1285,8 @@ class FaceOSPipeline:
                     output = self._composite_identity_to_crop(
                         cropped, identity_face, landmarks, crop_plan, frame_idx,
                     )
+                    # D-01: Post-sharpen identity composite path
+                    output = face_enhance._sharpen(output, amount=1.5, radius=1.0)
                     self._telemetry["alpha_fallback_frames"] += 1
                     if fallback_reason:
                         fb_dist = self._telemetry["fallback_reason_distribution"]
@@ -1192,6 +1305,8 @@ class FaceOSPipeline:
             identity_eyes=identity_eyes,
             eye_confidence=eye_confidence,
         )
+        # D-01: Post-sharpen last resort path
+        rendered = face_enhance._sharpen(rendered, amount=1.5, radius=1.0)
         # RULE 8: Track render timing
         render_time_ms = (_time.perf_counter() - _render_start) * 1000
         self._telemetry["render_time_sum_ms"] += render_time_ms
@@ -1230,7 +1345,8 @@ class FaceOSPipeline:
         try:
             # Warp intrinsic components to crop space
             _, _, M = canonical_map.warp_to_canonical(
-                cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks
+                cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks,
+                canonical_size=tuple(cfg.canonical.atlas_size),
             )
             M_inv = np.linalg.inv(M)[:2]
 
@@ -1305,7 +1421,7 @@ class FaceOSPipeline:
                 aligned_mask, (feather_ksize, feather_ksize), cfg.compositor.feather_pixels / 2
             )
 
-            # Blend rendered face with source
+            # D-01: Compositing
             conf_3d = feathered_mask[:, :, np.newaxis]
             blended = cropped.astype(np.float32) * (1 - conf_3d) + rendered_face.astype(np.float32) * conf_3d
             blended = np.clip(blended, 0, 255).astype(np.uint8)
@@ -1320,8 +1436,8 @@ class FaceOSPipeline:
                 identity_eyes=None, eye_confidence=0.0,
             )
 
-            # Post-sharpen
-            output = face_enhance._sharpen(rendered, amount=0.3, radius=0.8)
+            # Post-sharpen (D-01: amount=0.3 was too weak — 6.3 vs 274 expected)
+            output = face_enhance._sharpen(rendered, amount=1.5, radius=1.0)
 
             if frame_idx % 30 == 0:
                 print(f"  Frame {frame_idx}: V3 physical render (albedo mean={np.mean(albedo_crop):.3f})")
