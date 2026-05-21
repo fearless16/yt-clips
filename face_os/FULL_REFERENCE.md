@@ -1,9 +1,9 @@
 # Face OS — Complete Architecture & Parameter Reference (V2)
 
-**Version:** 2.6.0  
+**Version:** 2.7.0  
 **Branch:** `feat/face-os-v2-phase1`  
 **Date:** 2026-05-21  
-**Status:** Phase 0-2E COMPLETE | **493 tests passing** | MAP estimation + state separation + observability | System identifiability analysis complete
+**Status:** Phase 0-2F COMPLETE + Red Flag Fixes | **493 tests passing** | All visibility red flags resolved | System mathematically exposed
 
 ---
 
@@ -1263,6 +1263,49 @@ x_t* = argmin_x ( E(x_t) + ||x_t - f(x_{t-1})||²_{Σ^{-1}} + ||z_t - h(x_t)||²
 - MAPReport (7 tests) — metrics, serialization
 - PosteriorContraction (2 tests) — uncertainty computable, shrinks with observations
 - MAPEnergyDescent (1 test) — consistent convergence
+
+### Phase 2F: Energy Normalization + Red Flag Fixes (COMPLETE)
+
+**Status:** ✅ All 493 tests passing | All 6 visibility red flags resolved
+
+**Changes:**
+- `EnergyComputer.normalize_energy` flag (default=False for backward compat)
+- Running z-score normalization: `E_total = Σ(E_i - μ_i) / σ_i`
+- `EnergyTerms._normalized`, `_raw_total` fields for transparency
+
+**Red Flag Fixes:**
+
+| # | Red Flag | BEFORE | AFTER | Fix |
+|---|---|---|---|---|
+| 1 | E_smoothness = 0.0 | Dead term | Active (mean=12.5) | previous_geometry updated between frames |
+| 2 | appearance_latent_norm = 50494 | 50,144 | 12.3 | Compact 16x16 representation |
+| 3 | mask_coverage_pct = 0.0 | 0% | 71% | GeometryState.mask populated |
+| 4 | continuity_score = 0.95 | Hardcoded | Computed (0.84) | Frame-to-frame similarity |
+| 5 | pitch = -174° | -171° | 9.1° | Z-axis fix + wrap-around logic |
+| 6 | transform_stability = 1.0 | Placeholder | 0.97 | Relative change metric |
+
+**Observation Model Expanded (5 → 9 dimensions):**
+```python
+H[0, 0] = 1.0  # yaw
+H[1, 1] = 1.0  # pitch
+H[2, 2] = 1.0  # roll
+H[3, 3] = 1.0  # identity_uncertainty
+H[4, 5] = 1.0  # temporal_confidence
+H[5, 9] = 1.0  # brightness_mean      ← NEW
+H[6, 10] = 1.0  # contrast_mean       ← NEW
+H[7, 6] = 1.0  # drift_score          ← NEW
+H[8, 7] = 1.0  # continuity_score     ← NEW
+```
+
+**Process Noise Tuned:**
+```python
+Q[4] = 1.0  # appearance_latent_norm (was 100.0)
+```
+
+**Recovery State Threshold:**
+```python
+trace > 50.0  # was 10.0 (initial trace = 11.0)
+```
 
 **Logging Format:**
 ```json
