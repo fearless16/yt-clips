@@ -19,6 +19,7 @@ markers = [
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning:torch.*:",
+    "ignore:pkg_resources is deprecated as an API:UserWarning",
 ]
 log_cli = true
 log_cli_level = "INFO"
