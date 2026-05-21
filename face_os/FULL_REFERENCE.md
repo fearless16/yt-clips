@@ -3,20 +3,55 @@
 **Version:** 3.0.0  
 **Branch:** `feat/face-os-v2-phase1`  
 **Date:** 2026-05-21  
-**Status:** Phase 0-3D COMPLETE | **629 tests passing** | Physical foundation modules added | Architecture contradictions documented
+**Tests:** 723 passing, 0 failures  
+**Status:** V3 modules implemented with runtime telemetry for activation tracking
 
 ---
 
-## ⚠️ IMPORTANT: Architecture Status
+## ⚠️ IMPORTANT: Architecture Status — Honest Assessment
 
-**Current Reality:**
-- Face OS has **two parallel systems**: V0.5 (working pipeline) and V2 (subsystem architecture)
-- V3 modules (PhysicalRenderer, IntrinsicDecomposition, LieGroup) are **INTEGRATED into pipeline**
-- The **production pipeline now uses PhysicalRenderer** when intrinsic components are available
-- The **identity system now uses IntrinsicDecomposer** for albedo/shading/specular decomposition
-- **LieGroup transforms (SIM(2))** replace linear EMA for transform smoothing
-- DenseGeometry is **NOT integrated** (not needed for current rendering)
-- This document honestly documents both the **intended architecture** and the **actual implementation**
+### Status Legend
+
+| Status | Meaning |
+|--------|---------|
+| **IMPLEMENTED** | Code exists, tests pass |
+| **INTEGRATED** | Connected to pipeline via import/call |
+| **ACTIVE** | Used in production code path |
+| **VALIDATED** | Measurably improves metrics |
+| **DEFAULT** | Enabled by default, no flag needed |
+
+### Current V3 Module Status
+
+| Module | Status | Notes |
+|--------|--------|-------|
+| PhysicalRenderer | IMPLEMENTED, INTEGRATED | Code exists, connected to pipeline, but **activation depends on intrinsic availability** |
+| IntrinsicDecomposer | IMPLEMENTED, INTEGRATED | Code exists, connected to identity_state, but **may not produce usable output** |
+| LieGroup SIM(2) | IMPLEMENTED, INTEGRATED, ACTIVE | Replaces linear EMA in all 3 locations |
+| RendererMode | IMPLEMENTED, INTEGRATED, ACTIVE | Tracks which renderer path is used |
+| DenseGeometry | IMPLEMENTED | **NOT INTEGRATED** — not connected to pipeline |
+| IdentityManifold | IMPLEMENTED | **NOT INTEGRATED** — standalone module |
+
+### Critical Truth
+
+**The production pipeline may still be using alpha compositing for most/all frames.**
+
+Why:
+- IntrinsicDecomposer may not produce usable intrinsic components
+- RendererMode may stay in ALPHA_FALLBACK mode
+- PhysicalRenderer may fail and fall back to alpha compositing
+
+**We don't know which path is actually used without running the pipeline and checking telemetry.**
+
+### Runtime Telemetry
+
+The pipeline now tracks:
+- `physical_render_frames`: Frames using PhysicalRenderer
+- `alpha_fallback_frames`: Frames using alpha compositing
+- `intrinsic_success_frames`: Frames where intrinsic decomposition succeeded
+- `intrinsic_failure_frames`: Frames where intrinsic decomposition failed
+- `renderer_mode_transitions`: Number of renderer mode changes
+
+**To check which path is active:** Run the pipeline and call `pipeline.get_telemetry_report()`
 
 ---
 
@@ -49,7 +84,7 @@ Face OS enhances portrait videos by:
 
 ## 2. Architecture Status
 
-### Integrated V3 Architecture
+### Pipeline Architecture (Honest)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -61,28 +96,47 @@ Face OS enhances portrait videos by:
 │  │   Pass 2: Bidirectional solve (HQ frames repair)                     │  │
 │  │   Pass 3: Render (identity blend + enhance)                          │  │
 │  │                                                                      │  │
-│  │  V3 RENDERER: PhysicalRenderer (Lambertian + Blinn-Phong)            │  │
-│  │  V3 IDENTITY: IntrinsicDecomposer (albedo, shading, specular)        │  │
-│  │  V3 TRANSFORMS: LieGroup SIM(2) geodesic interpolation               │  │
-│  │  FALLBACK: Alpha compositing if intrinsic components unavailable     │  │
+│  │  ACTIVE RENDERER: Depends on runtime conditions                      │  │
+│  │    - If intrinsic available + confidence high → PhysicalRenderer     │  │
+│  │    - Otherwise → Alpha compositing (Y = M⊙Y_face + (1-M)⊙Y_bg)     │  │
+│  │                                                                      │  │
+│  │  ACTIVE IDENTITY: Depends on intrinsic decomposition                 │  │
+│  │    - If IntrinsicDecomposer succeeds → albedo/shading/specular       │  │
+│  │    - Otherwise → appearance_latent (RGB image)                       │  │
+│  │                                                                      │  │
+│  │  ACTIVE TRANSFORMS: LieGroup SIM(2) — ALWAYS ACTIVE                  │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  V3 Modules — INTEGRATED INTO PIPELINE                                      │
+│  V3 Modules — IMPLEMENTED, INTEGRATED, ACTIVATION CONDITIONAL               │
 │                                                                             │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐            │
 │  │ IntrinsicDecomp │→ │ PhysicalRenderer│  │ LieGroup        │            │
-│  │ (albedo,shade)  │  │ (Lambert+Phong) │  │ (SIM(2))        │            │
+│  │ IMPLEMENTED     │  │ IMPLEMENTED     │  │ ACTIVE          │            │
+│  │ INTEGRATED      │  │ INTEGRATED      │  │ (always used)   │            │
+│  │ ACTIVE: maybe   │  │ ACTIVE: maybe   │  │                 │            │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘            │
 │                                                                             │
-│  DenseGeometry: NOT INTEGRATED (not needed for current rendering)           │
+│  RendererMode: ACTIVE — tracks which path is used                          │
+│  DenseGeometry: IMPLEMENTED only — NOT INTEGRATED                          │
+│  IdentityManifold: IMPLEMENTED only — NOT INTEGRATED                       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. V3 Modules (Integrated)
+## 3. V3 Modules — Honest Status Assessment
+
+### Status Legend
+
+| Status | Meaning |
+|--------|---------|
+| **IMPLEMENTED** | Code exists, tests pass |
+| **INTEGRATED** | Connected to pipeline via import/call |
+| **ACTIVE** | Used in production code path |
+| **VALIDATED** | Measurably improves metrics |
+| **DEFAULT** | Enabled by default, no flag needed |
 
 ### 3.1 Intrinsic Decomposition (`intrinsic_decomposition.py`)
 
@@ -100,12 +154,19 @@ where:
 
 **Components:**
 - `IntrinsicDecomposer` — Retinex-inspired decomposition
-- `IntrinsicComponents` — albedo, shading, specular, normals, confidence
+- `IntrinsicComponents` — albedo, shading, specular, normals, confidence, uncertainty
 - `DecompositionConfig` — configurable parameters
 
 **Tests:** 26 tests
 
-**Status:** ✅ Integrated into `identity_state.py` — `query_intrinsic()` returns intrinsic components
+**Status:**
+- IMPLEMENTED: ✅ Code exists, tests pass
+- INTEGRATED: ✅ Connected to `identity_state.py` via `query_intrinsic()`
+- ACTIVE: ⚠️ **CONDITIONAL** — depends on whether decomposition produces usable output
+- VALIDATED: ❌ **NOT YET** — no metrics improvement measured
+- DEFAULT: ✅ Enabled by default
+
+**Telemetry:** `intrinsic_success_frames`, `intrinsic_failure_frames`
 
 ---
 
@@ -130,9 +191,16 @@ where:
 
 **Tests:** 26 tests
 
-**Status:** ✅ Integrated into `pipeline.py` — `_render_with_physical_renderer()` uses intrinsic components
+**Status:**
+- IMPLEMENTED: ✅ Code exists, tests pass
+- INTEGRATED: ✅ Connected to `pipeline.py` via `_render_with_physical_renderer()`
+- ACTIVE: ⚠️ **CONDITIONAL** — depends on RendererMode and intrinsic availability
+- VALIDATED: ❌ **NOT YET** — no metrics improvement measured
+- DEFAULT: ✅ Enabled by default (but may not activate)
 
-**Note:** Falls back to alpha compositing if intrinsic components unavailable.
+**Telemetry:** `physical_render_frames`, `alpha_fallback_frames`
+
+**Note:** Falls back to alpha compositing if intrinsic components unavailable or confidence low.
 
 ---
 
@@ -153,7 +221,14 @@ where:
 
 **Tests:** 23 tests
 
-**Status:** ❌ NOT integrated — not needed for current rendering (IntrinsicDecomposer provides normals)
+**Status:**
+- IMPLEMENTED: ✅ Code exists, tests pass
+- INTEGRATED: ❌ **NOT INTEGRATED** — not connected to pipeline
+- ACTIVE: ❌ **NOT ACTIVE** — not used in any code path
+- VALIDATED: ❌ **NOT VALIDATED** — no metrics measured
+- DEFAULT: ❌ **NOT DEFAULT** — not enabled
+
+**Decision:** Deferred — IntrinsicDecomposer provides normals from shading gradients instead.
 
 ---
 
@@ -172,7 +247,12 @@ where:
 
 **Tests:** 23 tests
 
-**Status:** ✅ Integrated into `pipeline.py` — replaces all 3 EMA smoothing locations with SIM(2) geodesic interpolation
+**Status:**
+- IMPLEMENTED: ✅ Code exists, tests pass
+- INTEGRATED: ✅ Connected to `pipeline.py` at 3 locations
+- ACTIVE: ✅ **ACTIVE** — replaces linear EMA in all 3 locations
+- VALIDATED: ⚠️ **PARTIAL** — improves interpolation math, but no metrics measured
+- DEFAULT: ✅ Enabled by default (always used)
 
 ---
 

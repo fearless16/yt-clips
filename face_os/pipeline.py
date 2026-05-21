@@ -147,6 +147,16 @@ class FaceOSPipeline:
         # V3: LieGroup transform state
         self._last_SIM2: Optional[SIM2Transform] = None
 
+        # V3: Runtime telemetry — tracks which paths are actually used
+        self._telemetry = {
+            "total_frames": 0,
+            "physical_render_frames": 0,      # Frames using PhysicalRenderer
+            "alpha_fallback_frames": 0,        # Frames using alpha compositing
+            "intrinsic_success_frames": 0,     # Frames where intrinsic decomposition succeeded
+            "intrinsic_failure_frames": 0,     # Frames where intrinsic decomposition failed
+            "renderer_mode_transitions": 0,    # Number of renderer mode changes
+        }
+
     @staticmethod
     def _affine_to_sim2(M_inv_2x3: np.ndarray) -> SIM2Transform:
         """Convert 2x3 affine matrix to SIM2Transform.
@@ -188,6 +198,24 @@ class FaceOSPipeline:
             [T.scale * c, -T.scale * s, T.tx],
             [T.scale * s,  T.scale * c, T.ty]
         ], dtype=np.float64)
+
+    def get_telemetry_report(self) -> dict:
+        """Get runtime telemetry report.
+
+        Returns:
+            Dictionary with telemetry data and derived metrics
+        """
+        total = self._telemetry["total_frames"]
+        if total == 0:
+            return {**self._telemetry, "physical_render_rate": 0.0, "alpha_fallback_rate": 0.0, "intrinsic_success_rate": 0.0}
+
+        return {
+            **self._telemetry,
+            "physical_render_rate": self._telemetry["physical_render_frames"] / total,
+            "alpha_fallback_rate": self._telemetry["alpha_fallback_frames"] / total,
+            "intrinsic_success_rate": self._telemetry["intrinsic_success_frames"] / total,
+            "intrinsic_failure_rate": self._telemetry["intrinsic_failure_frames"] / total,
+        }
 
     def enroll(
         self,
@@ -813,6 +841,9 @@ class FaceOSPipeline:
         When USE_IDENTITY=True: identity reconstruction with anchor correction.
         When USE_IDENTITY=False: simple enhancement (crop + sharpen + denoise).
         """
+        # Track total frames for telemetry
+        self._telemetry["total_frames"] += 1
+
         # Apply crop
         cropped = crop_planner.apply_crop(source_frame, crop_plan)
 
@@ -849,17 +880,26 @@ class FaceOSPipeline:
                     # V3: Query intrinsic components
                     intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
                     
+                    # Track intrinsic decomposition success
+                    if intrinsic_components is not None:
+                        self._telemetry["intrinsic_success_frames"] += 1
+                    else:
+                        self._telemetry["intrinsic_failure_frames"] += 1
+                    
                     # V3: Update renderer mode state
                     if self.renderer_mode_state is not None:
                         intrinsic_available = intrinsic_components is not None
                         avg_confidence = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
                         decomposition_error = intrinsic_components.reconstruction_error if intrinsic_components is not None else 1.0
                         
+                        prev_transitions = self.renderer_mode_state.transition_count
                         renderer_mode = self.renderer_mode_state.update(
                             intrinsic_available=intrinsic_available,
                             intrinsic_confidence=avg_confidence,
                             decomposition_error=decomposition_error,
                         )
+                        # Track mode transitions
+                        self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
                         
                         # Log mode changes
                         if self.renderer_mode_state.transition_count > 0 and frame_idx % 30 == 0:
@@ -878,12 +918,14 @@ class FaceOSPipeline:
                             landmarks, crop_plan, frame_idx, region_masks
                         )
                         if result is not None:
+                            self._telemetry["physical_render_frames"] += 1
                             return result
                     
                     # Fallback: Get raw identity (anchor-corrected) — compositor handles blending
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
                     solved_face = identity_face
                     solved_conf = identity_conf
+                    self._telemetry["alpha_fallback_frames"] += 1
 
                 # Warp solved face back to source crop space
                 _, _, M = canonical_map.warp_to_canonical(cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks)
