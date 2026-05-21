@@ -78,7 +78,7 @@ Face OS enhances portrait videos by:
 2. Estimating identity and temporal consistency
 3. Rendering enhanced output (9:16 portrait from 16:9 source)
 
-### Current Test Count: 723 tests, 0 failures
+### Current Test Count: 768 tests, 0 failures
 
 ---
 
@@ -266,12 +266,14 @@ where:
 
 **Status:**
 - IMPLEMENTED: ✅ Code exists, tests pass
-- INTEGRATED: ❌ **NOT INTEGRATED** — not connected to pipeline
+- INTEGRATED: ❌ **OFFICIALLY DE-SCOPED** — not needed for current rendering
 - ACTIVE: ❌ **NOT ACTIVE** — not used in any code path
 - VALIDATED: ❌ **NOT VALIDATED** — no metrics measured
 - DEFAULT: ❌ **NOT DEFAULT** — not enabled
 
-**Decision:** Deferred — IntrinsicDecomposer provides normals from shading gradients instead.
+**Decision:** DenseGeometry is officially de-scoped for V3.0. IntrinsicDecomposer provides normals from shading gradients instead. DenseGeometry may be revisited in V3.4 if needed.
+
+**Normals Source:** Normals are currently estimated from shading gradients via `IntrinsicDecomposer._estimate_normals()`, NOT from actual dense geometry. This is an approximation.
 
 ---
 
@@ -381,7 +383,7 @@ GeometryState    IdentityState    TemporalState    Output Frame
 
 ## 6. Test Suite
 
-### Test Files (629 tests total)
+### Test Files (768 tests total)
 
 | File | Tests | Status | Purpose |
 |------|-------|--------|---------|
@@ -392,12 +394,12 @@ GeometryState    IdentityState    TemporalState    Output Frame
 | test_phase2b_optimizer.py | 32 | ✅ | GaussNewton, LevenbergMarquardt |
 | test_phase2c_observability.py | 28 | ✅ | ObservabilityAnalyzer, DegeneracyReport |
 | test_phase2d_state_separation.py | 34 | ✅ | PhysicalState, BeliefState, MetaState |
-| test_phase2e_map_estimation.py | 19 | ✅ | MAPOptimizer, MAPReport |
+| test_phase2e_map_estimation.py | 19 | ✅ | LocalMAPApproximation, MAPReport |
 | test_phase2g_recovery_dynamics.py | 38 | ✅ | RecoveryTransitionMatrix, Bayesian inference |
-| **test_phase3a_intrinsic.py** | **26** | ✅ | **IntrinsicDecomposer (NEW)** |
-| **test_phase3b_physical_renderer.py** | **26** | ✅ | **PhysicalRenderer (NEW)** |
-| **test_phase3c_dense_geometry.py** | **23** | ✅ | **DenseGeometryEstimator (NEW)** |
-| **test_phase3d_lie_group.py** | **23** | ✅ | **SE2Transform, SIM2Transform (NEW)** |
+| test_phase3a_intrinsic.py | 26 | ✅ | IntrinsicDecomposer, albedo/shading/specular |
+| test_phase3b_physical_renderer.py | 26 | ✅ | PhysicallyInspiredRenderer, Lambertian, Blinn-Phong |
+| test_phase3c_dense_geometry.py | 23 | ✅ | DenseGeometryEstimator, icosphere mesh |
+| test_phase3d_lie_group.py | 23 | ✅ | SE2Transform, SIM2Transform, geodesic interpolation |
 | test_strict_regression.py | 26 | ✅ | Frame contract, mask stability |
 | test_v2_subsystems.py | 20 | ✅ | V2 subsystem isolation |
 | test_math_hardening.py | 37 | ✅ | 10 invariant classes |
@@ -412,7 +414,14 @@ GeometryState    IdentityState    TemporalState    Output Frame
 | test_neural_codec.py | 12 | ✅ | PersonalizedSpace, NeuralCodec |
 | test_hypothesis_matching.py | 4 | ✅ | Hypothesis space |
 | test_region_confidence.py | 4 | ✅ | Region confidence |
-| **Total** | **629** | **0 failures** | **All green** |
+| test_renderer_mode.py | 21 | ✅ | RendererMode state machine |
+| test_adversarial.py | 31 | ✅ | Adversarial robustness |
+| test_visibility_calibration.py | 16 | ✅ | Metric calibration |
+| test_identity_manifold.py | 26 | ✅ | Identity manifold topology |
+| test_mathematical_foundation.py | 25 | ✅ | State evolution, energy scaling, optimizer |
+| test_long_horizon.py | 9 | ✅ | 1000+ frame stability |
+| test_architectural_completeness.py | 10 | ✅ | Completeness tracking |
+| **Total** | **768** | **0 failures** | **All green** |
 
 ---
 
@@ -438,7 +447,9 @@ Processing time:      98.4s (3.8 fps)
 | V2.0.0 | 16.25 | 100% | 0.83 | 24.08 | 240 | 4 isolated subsystems |
 | V2.1.0 | 12.83 | 80.9% | 0.87 | 13.31 | 277 | Phase 1 hardening |
 | V2.8.0 | 12.8 | 80.9% | 0.87 | 13.3 | 531 | Probabilistic recovery |
-| **V3.0.0** | **12.8** | **80.9%** | **0.87** | **13.3** | **629** | **Physical foundation (not integrated)** |
+| **V3.0.0** | **12.8** | **80.9%** | **0.87** | **13.3** | **768** | **V3 integrated but runtime activation unknown** |
+
+**Note:** V3.0.0 metrics are SAME as V2.8.0 because V3 modules are integrated but runtime activation/contribution is unknown. Run pipeline with telemetry to measure actual contribution.
 
 **Note:** V3.0.0 metrics are SAME as V2.8.0 because V3 modules are not integrated.
 
@@ -472,7 +483,7 @@ Processing time:      98.4s (3.8 fps)
 
 #### 5. Version References Mixed — FIXED
 - All references updated to V3.0.0 consistently
-- Test counts updated to 629
+- Test counts updated to 768
 
 #### 6. Stale Metrics Tables — FIXED
 - All tables now reference V3.0.0
@@ -483,7 +494,7 @@ Processing time:      98.4s (3.8 fps)
 - Face detection: 80.9% ✅
 - Identity drift: 12.83 LAB ✅
 - Output contract: 1080x1920 uint8 ✅
-- All 629 tests passing ✅
+- All 768 tests passing ✅
 
 ---
 
@@ -696,7 +707,7 @@ output/face_os/
 ## How to Run Tests
 
 ```bash
-# Full test suite (629 tests)
+# Full test suite (768 tests)
 .venv/bin/python -m pytest tests/face_os/ -v
 
 # V3 modules only (98 tests)
