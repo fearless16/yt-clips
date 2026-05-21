@@ -10,6 +10,9 @@ Each energy term is a measurable float with a testable numeric range.
 Each subsystem emits its own energy contribution.
 No energy term may be hidden inside a black box.
 
+NOTE: Energy scaling is now available via EnergyScaler for normalized weighting.
+The raw energy terms are computed here, and can be scaled externally.
+
 CORE PHILOSOPHY:
     The system is a latent-state estimation problem, not an image-editing pipeline.
     Energy terms quantify how well the current state explains the observations.
@@ -33,6 +36,13 @@ from face_os.types import (
     TemporalMetrics,
     RendererMetrics,
 )
+
+# V3: Energy scaling (optional)
+try:
+    from face_os.energy_scaling import EnergyScaler, EnergyScalingConfig
+    HAS_ENERGY_SCALER = True
+except ImportError:
+    HAS_ENERGY_SCALER = False
 
 
 class EnergyComputer:
@@ -65,6 +75,14 @@ class EnergyComputer:
             "E_smoothness": {"sum": 0.0, "sum_sq": 0.0, "count": 0},
         }
         self._min_frames_for_norm = 10  # Wait this many frames before normalizing
+
+        # V3: Energy scaler for normalized weighting
+        self._energy_scaler = None
+        if HAS_ENERGY_SCALER and normalize_energy:
+            self._energy_scaler = EnergyScaler(EnergyScalingConfig(
+                normalization_method='zscore',
+                smoothing_factor=0.01,
+            ))
 
     def compute(
         self,
@@ -153,6 +171,66 @@ class EnergyComputer:
             renderer=rend_metrics,
             status="computed",
         )
+
+    def compute_scaled_energy(
+        self,
+        terms: EnergyTerms,
+        uncertainties: Optional[Dict[str, float]] = None,
+    ) -> float:
+        """Compute scaled energy using EnergyScaler.
+
+        E = sum_i lambda_i * E_hat_i
+
+        Args:
+            terms: Energy terms
+            uncertainties: Uncertainty per term (optional)
+
+        Returns:
+            Scaled energy value
+        """
+        if self._energy_scaler is None:
+            # No scaler: return raw total
+            return terms.E_total
+
+        # Convert to dict
+        raw_terms = {
+            "E_geom": terms.E_geom,
+            "E_identity": terms.E_identity,
+            "E_temporal": terms.E_temporal,
+            "E_photometric": terms.E_photometric,
+            "E_smoothness": terms.E_smoothness,
+        }
+
+        # Use default uncertainties if not provided
+        if uncertainties is None:
+            uncertainties = {name: 1.0 for name in raw_terms}
+
+        # Compute scaled energy
+        scaled = self._energy_scaler.compute_scaled_energy(raw_terms, uncertainties)
+        return scaled
+
+    def get_energy_stats(self) -> Dict[str, dict]:
+        """Get energy statistics.
+
+        Returns:
+            Dict of energy term statistics
+        """
+        if self._energy_scaler is not None:
+            return self._energy_scaler.get_stats()
+
+        # Manual stats
+        stats = {}
+        for key, val in self._energy_stats.items():
+            if val["count"] > 0:
+                mean = val["sum"] / val["count"]
+                variance = val["sum_sq"] / val["count"] - mean * mean
+                stats[key] = {
+                    "mean": mean,
+                    "variance": variance,
+                    "std": np.sqrt(max(variance, 0)),
+                    "count": val["count"],
+                }
+        return stats
 
     def _compute_E_geom(self, geo: GeometryState) -> float:
         """Geometry energy: landmark reprojection + mesh consistency + transform regularization.

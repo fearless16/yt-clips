@@ -1,6 +1,6 @@
 # AGENTS.md — Source of Truth
 
-Last updated: 2026-05-21 (Face OS V2.1.0 — Phase 1 Hardening Complete)
+Last updated: 2026-05-21 (Face OS V3.3 — Runtime Activation Validation Complete)
 
 ---
 
@@ -10,16 +10,16 @@ Three parallel systems in the codebase:
 
 1. **Legacy pipeline** (download → transcribe → highlight → export → SEO → upload) — working
 2. **Face OS V0.5 pipeline** (identity reconstruction via MediaPipe V4) — **220 tests passing, 0 failures**
-3. **Face OS V2 pipeline** (subsystem-based architecture) — **277 tests passing, 0 failures**
+3. **Face OS V3 pipeline** (subsystem-based + V3 modules) — **768 tests passing, 0 failures**
 
-### Face OS Test Suite (277 tests)
+### Face OS Test Suite (768 tests)
 
 | File | Tests | Status | Purpose |
 |---|---|---|---|
 | `test_strict_regression.py` | 26 | ✅ | Frame contract, mask stability, NaN/Inf, bidirectional frame size, EMA convergence |
 | `test_math_hardening.py` | 37 | ✅ | 10 invariant classes: UV roundtrip, transform det, temporal drift, flow shimmer, reprojection, lighting/pose invariance, mask topology, subpixel drift |
 | `test_v2_subsystems.py` | 20 | ✅ | V2 subsystem isolation, coordinate systems, mathematical invariants |
-| `test_phase1_hardening.py` | 37 | ✅ | **NEW** — Long-horizon drift (500 frames), system identifiability, renderer equation, VerificationGate, BeliefPixel properties |
+| `test_phase1_hardening.py` | 37 | ✅ | Long-horizon drift (500 frames), system identifiability, renderer equation, VerificationGate, BeliefPixel properties |
 | `test_detection.py` | 14 | ✅ | MediaPipe detection, poster rejection, identity matching, no-fallback |
 | `test_identity_state.py` | 17 | ✅ | Identity state, frequency decomposition, anchor correction |
 | `test_identity_state_fixes.py` | 5 | ✅ | LastUpdateFrame, region confidence |
@@ -31,7 +31,26 @@ Three parallel systems in the codebase:
 | `test_neural_codec.py` | 12 | ✅ | Neural codec, identity score |
 | `test_hypothesis_matching.py` | 4 | ✅ | Hypothesis space |
 | `test_region_confidence.py` | 4 | ✅ | Region confidence |
-| **Total** | **277** | **0 failures** | **All green** |
+| `test_renderer_mode.py` | 21 | ✅ | RendererMode state machine, hysteresis, transitions |
+| `test_adversarial.py` | 31 | ✅ | Pathological lighting, landmark corruption, transform singularities |
+| `test_visibility_calibration.py` | 16 | ✅ | VisibilityCalibrator, metric-truth correlation, drift detection |
+| `test_identity_manifold.py` | 26 | ✅ | IdentityManifold (Riemannian, d=16), exp/log maps, geodesic |
+| `test_mathematical_foundation.py` | 25 | ✅ | StateEvolution, EnergyScaler, OptimizationEngine |
+| `test_long_horizon.py` | 9 | ✅ | 1000-frame identity drift, transform stability, covariance bounded |
+| `test_architectural_completeness.py` | 10 | ✅ | Completeness levels, critical gaps identification |
+| `test_phase0_contract.py` | 28 | ✅ | FrameContract, EnergyReport, RendererReport, PhaseState |
+| `test_intrinsic_decomposition.py` | 26 | ✅ | IntrinsicDecomposer, Retinex decomposition, uncertainty |
+| `test_physical_renderer.py` | 26 | ✅ | PhysicallyInspiredRenderer, Lambertian + Blinn-Phong |
+| `test_dense_geometry.py` | 23 | ✅ | DenseGeometryEstimator (icosphere + RBF, de-scoped for V3) |
+| `test_lie_group.py` | 23 | ✅ | SE2Transform, SIM2Transform, geodesic interpolation |
+| `test_state_space.py` | 39 | ✅ | LatentState (11D), StateTransitionModel, StateSpaceEstimator |
+| `test_optimizer_architecture.py` | 32 | ✅ | GaussNewtonOptimizer, LevenbergMarquardtOptimizer |
+| `test_observability.py` | 28 | ✅ | ObservabilityAnalyzer, DegeneracyReport |
+| `test_state_separation.py` | 34 | ✅ | PhysicalState, BeliefState, MetaState, StateSeparator |
+| `test_map_estimation.py` | 19 | ✅ | MAPOptimizer, LocalMAPApproximation, MAPReport |
+| `test_energy_normalization.py` | 6 | ✅ | normalize_energy flag, z-score normalization |
+| `test_recovery_dynamics.py` | 38 | ✅ | RecoveryTransitionMatrix (5x5), Bayesian update |
+| **Total** | **768** | **0 failures** | **All green** |
 
 ### Phase 1 Hardening Tests (NEW)
 
@@ -172,6 +191,39 @@ Face OS V2 decomposes the pipeline into 4 isolated subsystems:
 ### ⚠️ Headroom Cropping — FIXED
 - `frame_analyzer._apply_top_padding()` positions face at ~30% from top
 
+### ✅ FIXED — V3 Modules Not Active in Forward-Only Path (Bug Class C)
+
+**Root Cause:** V3 module integration (IntrinsicDecomposer, PhysicalRenderer, RendererMode, StateEvolution) and their telemetry were ONLY implemented in `_render_frame_v2()`, which is only called during bidirectional mode's render pass. The forward-only path (`_process_frame_v2()`) handled rendering inline and completely bypassed all V3 modules.
+
+**Impact:** Despite being implemented, tested (768 tests), and "integrated", V3 modules had ZERO runtime activation in the primary processing path.
+
+**Fix:**
+- Added V3 intrinsic query (`identity_state.query_intrinsic()`) after identity query in `_process_frame_v2()`
+- Added RendererMode state machine update based on intrinsic availability
+- Added StateEvolution predict step each frame
+- Added PhysicalRenderer path (tried before legacy alpha compositing)
+- Added V3 telemetry tracking to `_process_frame_v2()`
+- Added `total_frames` telemetry to forward-only processing loop
+- Reset telemetry in `_reset_state()` for fresh per-clip stats
+- Fixed cv2.warpAffine collapsing (H, W, 1) shading to (H, W) by restoring channel dim
+
+**Runtime Validation Results (100 frames):**
+
+| Metric | Value | Status |
+|---|---|---|
+| IntrinsicDecomposer success rate | 100% | ✅ |
+| PhysicalRenderer activation rate | 96% | ✅ |
+| RendererMode: physical | 96% | ✅ |
+| RendererMode: hybrid | 0% | — |
+| RendererMode: alpha | 4% | — |
+| Avg intrinsic confidence | 0.758 | ✅ |
+| Avg decomposition error | 0.053 | ✅ |
+| RendererMode transitions | 1 | ✅ (stable) |
+
+**Tests:** All 768 tests pass (0 failures, 0 regressions)
+
+**IMPORTANT:** Any new V3 module integration must be added to BOTH `_process_frame_v2()` (forward-only path) and `_render_frame_v2()` (bidirectional render pass).
+
 ### ℹ️ Identity Face Not Used — ALREADY FIXED (prior session)
 - `_process_frame_v2` now does direct blend: `cropped * (1-mask) + identity_in_crop * mask`
 - `_render_frame_v2` does the same: `cropped * (1-conf_3d) + solved_in_crop * conf_3d`
@@ -283,7 +335,7 @@ tests/face_os/
 ## How to Run Tests
 
 ```bash
-# Full Face OS test suite (240 tests)
+# Full Face OS test suite (768 tests)
 .venv/bin/python -m pytest tests/face_os/ -v
 
 # Strict regression tests only (26 tests)
