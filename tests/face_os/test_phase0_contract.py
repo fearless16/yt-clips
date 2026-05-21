@@ -133,7 +133,7 @@ class TestEnergyTerms:
         d = terms.to_dict()
         assert d["E_geom"] == 1.0
         assert d["E_total"] == 15.0
-        assert len(d) == 6
+        assert len(d) == 8  # 6 original + E_total_raw + normalized
 
     def test_energy_terms_are_floats(self):
         """All energy terms must be floats."""

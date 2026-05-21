@@ -48,11 +48,23 @@ class EnergyComputer:
         anchor_lab: Optional[np.ndarray] = None,
         previous_geometry: Optional[GeometryState] = None,
         previous_identity: Optional[IdentityState] = None,
+        normalize_energy: bool = False,
     ):
         self.anchor_face = anchor_face
         self.anchor_lab = anchor_lab
         self.previous_geometry = previous_geometry
         self.previous_identity = previous_identity
+        self.normalize_energy = normalize_energy
+
+        # Running statistics for energy normalization
+        self._energy_stats = {
+            "E_geom": {"sum": 0.0, "sum_sq": 0.0, "count": 0},
+            "E_identity": {"sum": 0.0, "sum_sq": 0.0, "count": 0},
+            "E_temporal": {"sum": 0.0, "sum_sq": 0.0, "count": 0},
+            "E_photometric": {"sum": 0.0, "sum_sq": 0.0, "count": 0},
+            "E_smoothness": {"sum": 0.0, "sum_sq": 0.0, "count": 0},
+        }
+        self._min_frames_for_norm = 10  # Wait this many frames before normalizing
 
     def compute(
         self,
@@ -94,13 +106,37 @@ class EnergyComputer:
         terms.E_smoothness = self._compute_E_smoothness(geometry_state, identity_state)
 
         # === E_total: Sum of all terms ===
-        terms.E_total = (
-            terms.E_geom
-            + terms.E_identity
-            + terms.E_temporal
-            + terms.E_photometric
-            + terms.E_smoothness
-        )
+        # Update running statistics
+        raw_terms = {
+            "E_geom": terms.E_geom,
+            "E_identity": terms.E_identity,
+            "E_temporal": terms.E_temporal,
+            "E_photometric": terms.E_photometric,
+            "E_smoothness": terms.E_smoothness,
+        }
+        for key, val in raw_terms.items():
+            self._energy_stats[key]["sum"] += val
+            self._energy_stats[key]["sum_sq"] += val * val
+            self._energy_stats[key]["count"] += 1
+
+        # Normalize if enough frames accumulated
+        if self.normalize_energy and self._energy_stats["E_geom"]["count"] >= self._min_frames_for_norm:
+            normalized_terms = {}
+            for key, val in raw_terms.items():
+                stats = self._energy_stats[key]
+                mean = stats["sum"] / stats["count"]
+                variance = stats["sum_sq"] / stats["count"] - mean * mean
+                std = max(np.sqrt(max(variance, 1e-10)), 1e-6)
+                normalized_terms[key] = (val - mean) / std
+
+            # Normalized total: each term contributes equally
+            terms.E_total = sum(normalized_terms.values())
+            terms._normalized = True
+            terms._raw_total = sum(raw_terms.values())
+        else:
+            terms.E_total = sum(raw_terms.values())
+            terms._normalized = False
+            terms._raw_total = terms.E_total
 
         # Compute metrics
         geom_metrics = self._compute_geometry_metrics(geometry_state)
@@ -354,10 +390,23 @@ class EnergyComputer:
         )
 
     def _compute_identity_metrics(self, id_state: IdentityState) -> IdentityMetrics:
-        """Extract identity metrics for parameter-wise visibility."""
+        """Extract identity metrics for parameter-wise visibility.
+
+        appearance_latent_norm is computed from a compact representation:
+        resize to 16x16, normalize to [0,1], compute L2 norm.
+        This gives ~20-30 instead of ~50,000 for raw image norm.
+        """
         appearance_norm = 0.0
         if id_state.appearance_latent is not None:
-            appearance_norm = float(np.linalg.norm(id_state.appearance_latent.astype(np.float32)))
+            try:
+                face = id_state.appearance_latent
+                if face.ndim == 3 and face.shape[0] > 16 and face.shape[1] > 16:
+                    small = cv2.resize(face, (16, 16)).astype(np.float32) / 255.0
+                    appearance_norm = float(np.linalg.norm(small))
+                else:
+                    appearance_norm = float(np.linalg.norm(face.astype(np.float32))) / 255.0
+            except Exception:
+                appearance_norm = 0.0
 
         return IdentityMetrics(
             anchor_weights=id_state.anchor_weights,

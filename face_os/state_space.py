@@ -150,7 +150,7 @@ class ProcessNoiseModel:
         0.5,    # pitch
         0.3,    # roll
         0.01,   # identity_uncertainty
-        100.0,  # appearance_latent_norm
+        1.0,    # appearance_latent_norm (reduced from 100 — identity should be stable)
         0.02,   # temporal_confidence
         0.1,    # drift_score
         0.01,   # continuity_score
@@ -261,16 +261,24 @@ class ObservationModel:
     """Observation model: z_t = h(x_t) + δ_t.
 
     Maps latent state to observable quantities.
+    Now observes 9 of 11 state dimensions (added brightness, contrast, drift, continuity).
     """
 
+    # Observation dimension
+    OBS_DIM = 9
+
     def __init__(self):
-        # Observation noise covariance
+        # Observation noise covariance (9x9)
         self.R = np.diag([
             1.0,    # yaw observation noise
             1.0,    # pitch
             0.5,    # roll
-            0.05,   # confidence
             0.05,   # identity_uncertainty
+            0.05,   # temporal_confidence (confidence)
+            5.0,    # brightness_mean (high noise — lighting varies)
+            2.0,    # contrast_mean
+            0.1,    # drift_score
+            0.05,   # continuity_score
         ]).astype(np.float64)
 
     def observe(self, state: LatentState) -> Dict[str, float]:
@@ -286,8 +294,12 @@ class ObservationModel:
             "yaw": state.yaw,
             "pitch": state.pitch,
             "roll": state.roll,
-            "confidence": state.temporal_confidence,
             "identity_uncertainty": state.identity_uncertainty,
+            "confidence": state.temporal_confidence,
+            "brightness_mean": state.brightness_mean,
+            "contrast_mean": state.contrast_mean,
+            "drift_score": state.drift_score,
+            "continuity_score": state.continuity_score,
         }
 
     def residual(
@@ -309,8 +321,12 @@ class ObservationModel:
             observation.get("yaw", 0) - predicted["yaw"],
             observation.get("pitch", 0) - predicted["pitch"],
             observation.get("roll", 0) - predicted["roll"],
-            observation.get("confidence", 0) - predicted["confidence"],
             observation.get("identity_uncertainty", 0) - predicted["identity_uncertainty"],
+            observation.get("confidence", 0) - predicted["confidence"],
+            observation.get("brightness_mean", 128) - predicted["brightness_mean"],
+            observation.get("contrast_mean", 50) - predicted["contrast_mean"],
+            observation.get("drift_score", 0) - predicted["drift_score"],
+            observation.get("continuity_score", 1) - predicted["continuity_score"],
         ])
 
     def jacobian(self, state: LatentState) -> np.ndarray:
@@ -324,13 +340,18 @@ class ObservationModel:
         Returns:
             Jacobian matrix (obs_dim x state_dim)
         """
-        # Observation maps: yaw(0), pitch(1), roll(2), conf(5), id_unc(3)
-        H = np.zeros((5, LatentState.STATE_DIM))
+        # Observation maps: yaw(0), pitch(1), roll(2), id_unc(3), conf(5),
+        #                    brightness(9), contrast(10), drift(6), continuity(7)
+        H = np.zeros((self.OBS_DIM, LatentState.STATE_DIM))
         H[0, 0] = 1.0  # yaw
         H[1, 1] = 1.0  # pitch
         H[2, 2] = 1.0  # roll
-        H[3, 5] = 1.0  # temporal_confidence (observation = confidence)
-        H[4, 3] = 1.0  # identity_uncertainty
+        H[3, 3] = 1.0  # identity_uncertainty
+        H[4, 5] = 1.0  # temporal_confidence (observation = confidence)
+        H[5, 9] = 1.0  # brightness_mean
+        H[6, 10] = 1.0  # contrast_mean
+        H[7, 6] = 1.0  # drift_score
+        H[8, 7] = 1.0  # continuity_score
         return H
 
 
@@ -419,7 +440,8 @@ class StateSpaceEstimator:
         """Update state with observation.
 
         Args:
-            observation: Observation dict with yaw, pitch, roll, confidence, identity_uncertainty
+            observation: Observation dict with yaw, pitch, roll, confidence, identity_uncertainty,
+                         brightness_mean, contrast_mean, drift_score, continuity_score
 
         Returns:
             Updated state
@@ -432,22 +454,8 @@ class StateSpaceEstimator:
         S = H @ P @ H.T + R  # Innovation covariance
         K = P @ H.T @ np.linalg.inv(S)
 
-        # Compute residual
-        z = np.array([
-            observation.get("yaw", 0),
-            observation.get("pitch", 0),
-            observation.get("roll", 0),
-            observation.get("confidence", 1.0),
-            observation.get("identity_uncertainty", 0.5),
-        ])
-        h_x = np.array([
-            self.state.yaw,
-            self.state.pitch,
-            self.state.roll,
-            self.state.temporal_confidence,
-            self.state.identity_uncertainty,
-        ])
-        residual = z - h_x
+        # Compute residual using observation model
+        residual = self.observation.residual(self.state, observation)
 
         # Update state
         x = self.state.to_vector()
@@ -509,7 +517,12 @@ class StateSpaceEstimator:
         )
 
     def _update_recovery_state(self):
-        """Update recovery state based on occlusion and uncertainty."""
+        """Update recovery state based on occlusion and uncertainty.
+
+        Thresholds calibrated after process noise reduction (Q[4]: 100→1)
+        and observation model expansion (5→9 dimensions).
+        Initial trace ≈ 11.0, steady-state trace ≈ 15-25 with new parameters.
+        """
         trace = float(np.trace(self.state.covariance))
 
         if self._occlusion_count > 20:
@@ -518,7 +531,7 @@ class StateSpaceEstimator:
             self.state.recovery_state = "degraded"
         elif self._occlusion_count > 5:
             self.state.recovery_state = "uncertain"
-        elif trace > 10.0:
+        elif trace > 50.0:
             self.state.recovery_state = "recovering"
         else:
             self.state.recovery_state = "stable"

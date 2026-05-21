@@ -191,6 +191,8 @@ def run_pipeline_with_visibility(
             pose=pose or (0.0, 0.0, 0.0),
             geometry_confidence=face_track.detection.confidence if face_track and face_track.detection else 0.0,
             canonical_face=canonical_face,
+            mask=_make_canonical_geometry_mask(canonical_face.shape[:2]) if canonical_face is not None else None,
+            canonical_transform=M if canonical_face is not None else None,
         )
 
         # Build identity state type
@@ -203,10 +205,13 @@ def run_pipeline_with_visibility(
         )
 
         # Build temporal state
+        continuity_score = _compute_continuity_score(
+            canonical_face, energy_computer.previous_geometry.canonical_face if energy_computer.previous_geometry else None
+        )
         temp_state = TemporalState(
             temporal_confidence=face_track.detection.confidence if face_track and face_track.detection else 0.0,
             drift_score=identity_state.get_anchor_distance() if identity_state.is_initialized() else 0.0,
-            continuity_score=0.95,
+            continuity_score=continuity_score,
             pose=pose,
         )
 
@@ -215,6 +220,10 @@ def run_pipeline_with_visibility(
             frame_idx, geo_state, id_state, temp_state, source_frame=frame
         )
         logger.log_energy(energy_report)
+
+        # Update previous state for next frame's smoothness/stability computation
+        energy_computer.previous_geometry = geo_state
+        energy_computer.previous_identity = id_state
 
         # Build metrics snapshot
         metrics = energy_report.to_dict()
@@ -385,6 +394,22 @@ def _make_canonical_geometry_mask(shape):
     cv2.ellipse(mask, center, axes, 0, 0, 360, 1.0, -1)
     mask = cv2.GaussianBlur(mask, (11, 11), 3)
     return np.clip(mask, 0, 1).astype(np.float32)
+
+
+def _compute_continuity_score(current_face, previous_face):
+    """Compute frame-to-frame continuity from canonical face similarity."""
+    if current_face is None or previous_face is None:
+        return 1.0
+    try:
+        curr = current_face.astype(np.float32)
+        prev = previous_face.astype(np.float32)
+        if curr.shape != prev.shape:
+            return 0.5
+        diff = np.mean(np.abs(curr - prev))
+        continuity = max(0.0, 1.0 - diff / 50.0)
+        return float(np.clip(continuity, 0.0, 1.0))
+    except Exception:
+        return 0.5
 
 
 if __name__ == "__main__":
