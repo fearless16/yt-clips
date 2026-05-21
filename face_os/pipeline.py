@@ -155,6 +155,18 @@ class FaceOSPipeline:
             "intrinsic_success_frames": 0,     # Frames where intrinsic decomposition succeeded
             "intrinsic_failure_frames": 0,     # Frames where intrinsic decomposition failed
             "renderer_mode_transitions": 0,    # Number of renderer mode changes
+            # Activation details
+            "intrinsic_failure_reasons": {},   # Why intrinsic failed
+            "renderer_mode_distribution": {    # Time in each mode
+                "physical": 0,
+                "hybrid": 0,
+                "alpha": 0,
+            },
+            # Confidence distributions
+            "intrinsic_confidence_sum": 0.0,
+            "intrinsic_confidence_count": 0,
+            "decomposition_error_sum": 0.0,
+            "decomposition_error_count": 0,
         }
 
     @staticmethod
@@ -207,7 +219,30 @@ class FaceOSPipeline:
         """
         total = self._telemetry["total_frames"]
         if total == 0:
-            return {**self._telemetry, "physical_render_rate": 0.0, "alpha_fallback_rate": 0.0, "intrinsic_success_rate": 0.0}
+            return {
+                **self._telemetry,
+                "physical_render_rate": 0.0,
+                "alpha_fallback_rate": 0.0,
+                "intrinsic_success_rate": 0.0,
+                "intrinsic_failure_rate": 0.0,
+                "avg_intrinsic_confidence": 0.0,
+                "avg_decomposition_error": 0.0,
+            }
+
+        # Compute averages
+        avg_intrinsic_confidence = 0.0
+        if self._telemetry["intrinsic_confidence_count"] > 0:
+            avg_intrinsic_confidence = (
+                self._telemetry["intrinsic_confidence_sum"]
+                / self._telemetry["intrinsic_confidence_count"]
+            )
+
+        avg_decomposition_error = 0.0
+        if self._telemetry["decomposition_error_count"] > 0:
+            avg_decomposition_error = (
+                self._telemetry["decomposition_error_sum"]
+                / self._telemetry["decomposition_error_count"]
+            )
 
         return {
             **self._telemetry,
@@ -215,6 +250,8 @@ class FaceOSPipeline:
             "alpha_fallback_rate": self._telemetry["alpha_fallback_frames"] / total,
             "intrinsic_success_rate": self._telemetry["intrinsic_success_frames"] / total,
             "intrinsic_failure_rate": self._telemetry["intrinsic_failure_frames"] / total,
+            "avg_intrinsic_confidence": avg_intrinsic_confidence,
+            "avg_decomposition_error": avg_decomposition_error,
         }
 
     def enroll(
@@ -883,8 +920,22 @@ class FaceOSPipeline:
                     # Track intrinsic decomposition success
                     if intrinsic_components is not None:
                         self._telemetry["intrinsic_success_frames"] += 1
+                        # Track confidence
+                        avg_conf = float(np.mean(intrinsic_conf))
+                        self._telemetry["intrinsic_confidence_sum"] += avg_conf
+                        self._telemetry["intrinsic_confidence_count"] += 1
+                        # Track decomposition error
+                        self._telemetry["decomposition_error_sum"] += intrinsic_components.reconstruction_error
+                        self._telemetry["decomposition_error_count"] += 1
                     else:
                         self._telemetry["intrinsic_failure_frames"] += 1
+                        # Track failure reason
+                        reason = "not_initialized"
+                        if not self.identity_state.is_initialized():
+                            reason = "identity_not_initialized"
+                        self._telemetry["intrinsic_failure_reasons"][reason] = (
+                            self._telemetry["intrinsic_failure_reasons"].get(reason, 0) + 1
+                        )
                     
                     # V3: Update renderer mode state
                     if self.renderer_mode_state is not None:
@@ -900,6 +951,9 @@ class FaceOSPipeline:
                         )
                         # Track mode transitions
                         self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
+                        
+                        # Track mode distribution
+                        self._telemetry["renderer_mode_distribution"][renderer_mode.value] += 1
                         
                         # Log mode changes
                         if self.renderer_mode_state.transition_count > 0 and frame_idx % 30 == 0:

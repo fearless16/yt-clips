@@ -1,8 +1,10 @@
-"""Physical Renderer Module.
+"""Physically-Inspired Renderer Module.
 
-Physically-based rendering for face reconstruction.
+NOTE: This is a physically-INSPIRED renderer, NOT a fully physically-based renderer.
+It uses Lambertian diffuse + Blinn-Phong specular models, which are approximations.
+Full PBR would require: BRDF correctness, energy conservation, full illumination model.
 
-Rendering Equation:
+Rendering Equation (approximate):
     Y = ambient + diffuse + specular
 
 where:
@@ -11,10 +13,16 @@ where:
     specular = specular_power * max(0, N·H)^shininess
 
 Components:
-    N = surface normal (from normal map)
+    N = surface normal (from normal map, estimated from shading gradients)
     L = light direction
     V = view direction
     H = normalize(L + V) (half-vector)
+
+Limitations:
+    - Normals estimated from shading, not actual geometry
+    - No BRDF correctness
+    - No energy conservation
+    - Simplified illumination model
 
 References:
     - Lambertian diffuse model

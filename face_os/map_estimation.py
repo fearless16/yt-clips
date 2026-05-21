@@ -1,17 +1,28 @@
 """
-map_estimation.py — Joint MAP Estimation for Face OS.
+map_estimation.py — Local MAP Approximation for Face OS.
 
-Phase 2E: Joint MAP Estimation.
+NOTE: This is a LOCAL MAP approximation, NOT a full factor-graph MAP optimizer.
+It performs frame-local inference with short temporal reasoning.
+Full MAP would require: global factor graph, multi-frame bundle adjustment, 
+full posterior optimization.
 
-The MAP objective:
+Phase 2E: Local MAP Approximation.
+
+The local MAP objective:
     x_t* = argmin_x ( E(x_t) + ||x_t - f(x_{t-1})||²_{Σ^{-1}} + ||z_t - h(x_t)||²_{R^{-1}} )
 
-Unifies:
+Unifies (locally):
 - Energy terms
 - Dynamics (state transition)
 - Observations
 - Uncertainty (covariance-aware)
 - Optimization
+
+Limitations:
+- Frame-local inference (not global)
+- Short temporal reasoning (not full sequence)
+- No factor graph structure
+- No multi-frame bundle adjustment
 """
 
 from __future__ import annotations
