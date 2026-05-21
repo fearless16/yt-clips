@@ -220,6 +220,8 @@ class FaceOSPipeline:
             "shading_normal_frames": 0,
             # RULE 8: Fallback reason tracking
             "fallback_reason_distribution": {},
+            # D-01: Identity path failure tracking
+            "identity_path_failures": 0,
             # RULE 8: Timing telemetry
             "render_time_sum_ms": 0.0,
             "render_time_count": 0,
@@ -962,16 +964,21 @@ class FaceOSPipeline:
                 face_mask = region_masks.get("face")
 
         # ─── SIMPLE ENHANCEMENT MODE (no identity) ───────────────────────
+        # RULE C: All rendering must go through _render_core
         if not USE_IDENTITY:
-            enhancement_mask = None
-            if region_masks:
-                enhancement_mask = face_enhance._create_enhancement_mask(region_masks, cropped.shape)
-
-            rendered = face_enhance.render_frame(
-                cropped, enhancement_mask, region_masks,
-                identity_eyes=None, eye_confidence=0.0,
+            output = self._render_core(
+                cropped=cropped,
+                source_frame=source_frame,
+                intrinsic_components=None,
+                intrinsic_conf=None,
+                identity_face=None,
+                landmarks=landmarks,
+                crop_plan=crop_plan,
+                region_masks=region_masks,
+                face_mask=face_mask,
+                frame_idx=frame_idx,
             )
-            return rendered
+            return output
 
         # ─── IDENTITY RECONSTRUCTION MODE ────────────────────────────────
         # If we have a solved canonical face, warp it back to source space
@@ -1012,19 +1019,25 @@ class FaceOSPipeline:
 
             except Exception as e:
                 print(f"  Frame {frame_idx}: IDENTITY PATH FAILED: {e}")
+                # D-01: Track identity path failures in telemetry
+                self._telemetry["identity_path_failures"] = self._telemetry.get("identity_path_failures", 0) + 1
                 pass
 
-        # Fallback: structure-preserving rendering only
-        enhancement_mask = None
-        if region_masks:
-            enhancement_mask = face_enhance._create_enhancement_mask(region_masks, cropped.shape)
-
-        rendered = face_enhance.render_frame(
-            cropped, enhancement_mask, region_masks,
-            identity_eyes=None, eye_confidence=0.0,
+        # Fallback: route through _render_core (RULE C: single render core)
+        output = self._render_core(
+            cropped=cropped,
+            source_frame=source_frame,
+            intrinsic_components=None,
+            intrinsic_conf=None,
+            identity_face=None,
+            landmarks=landmarks,
+            crop_plan=crop_plan,
+            region_masks=region_masks,
+            face_mask=face_mask,
+            frame_idx=frame_idx,
         )
 
-        return rendered
+        return output
 
     def _composite_identity_to_crop(
         self,
@@ -1684,6 +1697,8 @@ class FaceOSPipeline:
             "renderer_mode_transitions": 0,
             "intrinsic_failure_reasons": {},
             "fallback_reason_distribution": {},
+            # D-01: Identity path failure tracking
+            "identity_path_failures": 0,
             "renderer_mode_distribution": {"physical": 0, "hybrid": 0, "alpha": 0},
             "intrinsic_confidence_sum": 0.0,
             "intrinsic_confidence_count": 0,
