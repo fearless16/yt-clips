@@ -1,9 +1,9 @@
 # Face OS — Complete Architecture & Parameter Reference (V2)
 
-**Version:** 2.1.0  
+**Version:** 2.2.0  
 **Branch:** `feat/face-os-v2-phase1`  
 **Date:** 2026-05-21  
-**Status:** V2 architecture complete | **240 tests passing** | 4 isolated subsystems | Phase 1 hardening in progress | System identifiability analysis complete
+**Status:** Phase 0 Contract Lockdown COMPLETE | **305 tests passing** | Energy framework + visibility logging | System identifiability analysis complete
 
 ---
 
@@ -602,14 +602,15 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 **Test clip:** `clips_test/test_clip.mp4` (640x360, 30fps, 345 frames)  
 **Reference:** `expectation.png` (941x1672, portrait)
 
-### Test Suite (V2.1.0)
+### Test Suite (V2.2.0)
 
 | File | Tests | Status | Purpose |
 |---|---|---|---|
 | `test_strict_regression.py` | 26 | ✅ All pass | Frame contract, mask stability, NaN/Inf, bidirectional size, EMA convergence |
 | `test_v2_subsystems.py` | 20 | ✅ All pass | V2 subsystem isolation, coordinate systems, mathematical invariants |
-| `test_math_hardening.py` | 37 | ✅ All pass | 10 invariant classes: UV roundtrip, transform det, temporal drift, flow shimmer, reprojection, lighting invariance, pose invariance, mask topology, subpixel drift, edge cases |
-| `test_phase1_hardening.py` | 37 | ✅ All pass | **NEW** — Long-horizon drift, system identifiability, renderer equation, VerificationGate |
+| `test_math_hardening.py` | 37 | ✅ All pass | 10 invariant classes: UV roundtrip, transform det, temporal drift, flow shimmer, reprojection, lighting/pose invariance, mask topology, subpixel drift, edge cases |
+| `test_phase1_hardening.py` | 37 | ✅ All pass | Long-horizon drift, system identifiability, renderer equation, VerificationGate |
+| `test_phase0_contract.py` | 28 | ✅ All pass | **NEW** — FrameContract, EnergyReport, RendererReport, PassReport, VisibilityLogger |
 | `test_detection.py` | 14 | ✅ All pass | MediaPipe tasks API, poster rejection, identity matching |
 | `test_quality_gates.py` | 13 | ✅ All pass | Procrustes, jitter, occupancy, SSIM, Laplacian |
 | `test_identity_state.py` | 17 | ✅ All pass | Identity state, frequency decomposition, hypotheses |
@@ -621,7 +622,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_neural_codec.py` | 12 | ✅ All pass | PersonalizedSpace, NeuralCodec, identity score |
 | `test_hypothesis_matching.py` | 4 | ✅ All pass | Hypothesis space, pose/expression selection |
 | `test_region_confidence.py` | 4 | ✅ All pass | Region confidence, semantic confidence |
-| **Total** | **277** | **0 failures** | **All green** |
+| **Total** | **305** | **0 failures** | **All green** |
 
 ### QC Metrics (Identity Mode, V2.1.0 — 345 frames, Phase 1 Hardening)
 
@@ -1064,15 +1065,57 @@ Where:
 
 **Current status:** Each subsystem optimizes locally. No joint optimization.
 
+### Phase 0: Contract Lockdown (COMPLETE)
+
+**Status:** ✅ All 305 tests passing (28 new Phase 0 tests)
+
+**Deliverables:**
+- `FrameContract` — output shape/dtype/value-range validation
+- `EnergyTerms` — 5 energy terms as measurable floats
+- `EnergyReport` — per-frame energy + all metrics
+- `RendererReport` — per-frame renderer contract validation
+- `PassReport` — before/after/delta logging (MANDATORY)
+- `GeometryMetrics`, `IdentityMetrics`, `TemporalMetrics`, `RendererMetrics`
+- `PhaseState` — current phase tracking
+
+**New Modules:**
+- `face_os/energy.py` — `EnergyComputer` with E_geom, E_identity, E_temporal, E_photometric, E_smoothness
+- `face_os/visibility.py` — `VisibilityLogger` for before/after/delta JSON logging
+
+**Parameter-wise Visibility (MANDATORY):**
+Every pass must expose:
+1. GeometryState: yaw/pitch/roll, det(A), mask_coverage%, transform_stability
+2. IdentityState: anchor_weights[], uncertainty, region_confidence{}, appearance_latent_norm
+3. TemporalState: temporal_confidence, drift_score, continuity_score
+4. Energy Terms: E_geom, E_identity, E_temporal, E_photometric, E_smoothness (exact float)
+5. Renderer: M_mean, Y_face_range, Y_bg_range, blend_weight_stats
+
+**Logging Format:**
+```json
+{
+  "pass_id": "phase2_transform_hardening",
+  "frame_id": 128,
+  "status": "accepted",
+  "before": {"det_A": 0.9931, "mask_coverage_pct": 61.4},
+  "after": {"det_A": 0.9994, "mask_coverage_pct": 61.5},
+  "delta": {"det_A": 0.0063, "mask_coverage_pct": 0.1},
+  "metrics": { ... }
+}
+```
+
+If visibility is missing, the change must be rejected.
+
 ---
 
-## File Structure (V2.0.0)
+## File Structure (V2.1.0)
 
 ```
 face_os/
 ├── __init__.py              # Package init
-├── types.py                 # Core data structures (includes GeometryState, IdentityState, TemporalState)
+├── types.py                 # Core data structures (GeometryState, IdentityState, TemporalState, FrameContract, EnergyReport, PassReport)
 ├── config.py                # YAML config loader
+├── energy.py                # NEW — EnergyComputer with 5 energy terms
+├── visibility.py            # NEW — VisibilityLogger for before/after/delta JSON
 ├── ingest.py                # Module 1: Video loading, frame reader
 ├── detect_track.py          # Module 2: MediaPipe tasks API + pose-aware gates
 ├── landmarks.py             # Module 3: 478-point landmarks + PnP pose
@@ -1096,7 +1139,10 @@ face_os/
     └── renderer.py              # Subsystem D — physically consistent rendering
 
 output/face_os/
-├── v2_test.mp4              # V2 pipeline output
+├── v05_phase1_test.mp4      # V0.5 pipeline output (345 frames)
+├── v05_phase1_test.qc.json  # QC report
+└── visibility/              # NEW — Pass/energy/renderer reports (JSON)
+```
 ├── v2_test.qc.json          # QC report
 └── ...
 
