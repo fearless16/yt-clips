@@ -78,7 +78,7 @@ Face OS enhances portrait videos by:
 2. Estimating identity and temporal consistency
 3. Rendering enhanced output (9:16 portrait from 16:9 source)
 
-### Current Test Count: 629 tests, 0 failures
+### Current Test Count: 723 tests, 0 failures
 
 ---
 
@@ -123,6 +123,49 @@ Face OS enhances portrait videos by:
 │  IdentityManifold: IMPLEMENTED only — NOT INTEGRATED                       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 2a. Runtime Telemetry Schema
+
+### TelemetryReport Format
+
+```json
+{
+  "frames_total": 345,
+  "physical_render_frames": 21,
+  "alpha_fallback_frames": 324,
+  "intrinsic_success_frames": 25,
+  "intrinsic_failure_frames": 320,
+  "renderer_mode_transitions": 18,
+  "physical_render_rate": 0.061,
+  "alpha_fallback_rate": 0.939,
+  "intrinsic_success_rate": 0.072,
+  "intrinsic_failure_rate": 0.928
+}
+```
+
+### How to Get Telemetry
+
+```python
+pipeline = FaceOSPipeline()
+# ... run pipeline ...
+report = pipeline.get_telemetry_report()
+print(report)
+```
+
+### What This Tells You
+
+| Metric | Meaning |
+|--------|---------|
+| `physical_render_rate` | % of frames using PhysicalRenderer |
+| `alpha_fallback_rate` | % of frames using alpha compositing |
+| `intrinsic_success_rate` | % of frames where IntrinsicDecomposer worked |
+| `intrinsic_failure_rate` | % of frames where IntrinsicDecomposer failed |
+
+**If `physical_render_rate` is low:** PhysicalRenderer is not activating. Check intrinsic decomposition quality.
+
+**If `intrinsic_failure_rate` is high:** IntrinsicDecomposer is not producing usable output. Check input quality.
 
 ---
 
@@ -459,18 +502,20 @@ Processing time:      98.4s (3.8 fps)
 
 | Gap | Current State | Required State | Effort |
 |-----|---------------|----------------|--------|
-| Identity manifold | Conceptual only | Topology, parameterization, geodesics | HIGH |
+| Identity manifold | ✅ Defined (identity_manifold.py) | Integrate into pipeline | MED |
+| State evolution | ❌ Missing | Explicit transition model | HIGH |
+| Energy scaling | ❌ Undefined | Normalized, adaptive weights | MED |
+| Optimizer architecture | ❌ Undefined | Convergence policy, scheduling | MED |
 | Observation model | Handcrafted, linear | Nonlinear, ambiguity-aware | HIGH |
-| Energy function | Engineered terms | Learned priors | HIGH |
-| MAP optimization | Local frame inference | Full factor graph | HIGH |
+| LocalMAPApproximation | Local frame inference | Full factor graph | HIGH |
 
 ### Tier 3: System Robustness
 
 | Gap | Current State | Required State | Effort |
 |-----|---------------|----------------|--------|
-| Bayesian temporal | Kalman-inspired | Full particle filtering | HIGH |
-| Recovery dynamics | Semi-heuristic | Learned transitions | MED |
-| Adversarial robustness | Partial | Full coverage | HIGH |
+| Bayesian temporal | Kalman-inspired | Epistemic/aleatoric split | HIGH |
+| Recovery dynamics | Semi-heuristic | Explicit state machine | MED |
+| Adversarial robustness | ✅ 31 tests | Expand coverage | MED |
 | Long-horizon memory | Short-window | Sequence-level | HIGH |
 
 ### Tier 4: Fundamental Limitations
@@ -478,36 +523,86 @@ Processing time:      98.4s (3.8 fps)
 | Gap | Description | Solvable? |
 |-----|-------------|-----------|
 | Observation ambiguity | Same image → multiple latent explanations | Partially (priors help) |
-| Computational complexity | MAP + Lie groups + dense geometry = explosion | Need profiling |
-| Visibility calibration | Visible ≠ correct | Need validation |
+| Computational complexity | LocalMAPApproximation + Lie groups = explosion | Need profiling |
+| Visibility calibration | ✅ Module exists | Need integration |
 
 ---
 
 ## 10. Roadmap
 
-### V3.1 — Integration (Next)
-1. Integrate IntrinsicDecomposer into pipeline
-2. Integrate PhysicalRenderer into pipeline
-3. Integrate DenseGeometryEstimator into pipeline
-4. Integrate LieGroup transforms into pipeline
-5. Validate metrics improvement
+### V3.1 — Runtime Validation (Current)
+1. ✅ Integrate IntrinsicDecomposer into pipeline — DONE
+2. ✅ Integrate PhysicalRenderer into pipeline — DONE
+3. ✅ Integrate LieGroup transforms into pipeline — DONE
+4. ⏳ Measure runtime activation rates — IN PROGRESS
+5. ⏳ Reduce alpha fallback rate — IN PROGRESS
+6. ⏳ Validate renderer contribution — IN PROGRESS
 
 ### V3.2 — Mathematical Completeness
-1. Define identity manifold properly
-2. Implement nonlinear observation model
-3. Add learned energy priors
-4. Build factor graph optimization
+1. ✅ Define identity manifold — DONE (identity_manifold.py)
+2. ⏳ Define state evolution equation — IN PROGRESS
+3. ⏳ Define energy scaling/normalization — IN PROGRESS
+4. ⏳ Define optimizer architecture — IN PROGRESS
+5. 🔲 Implement nonlinear observation model
+6. 🔲 Build factor graph optimization
 
 ### V3.3 — System Robustness
-1. Full Bayesian temporal reasoning
-2. Learned recovery dynamics
-3. Adversarial robustness suite
-4. Long-horizon memory
+1. ✅ Add adversarial tests — DONE (31 tests)
+2. ✅ Add visibility calibration — DONE
+3. ⏳ Full Bayesian temporal reasoning — IN PROGRESS
+4. ⏳ Learned recovery dynamics — IN PROGRESS
+5. ⏳ Long-horizon stability (1000+ frames) — IN PROGRESS
+
+### V3.4 — Dense Geometry Decision
+1. 🔲 Decide: integrate OR officially de-scope DenseGeometry
+2. 🔲 Document normal source and confidence
+3. 🔲 Add geometry-normal consistency checks
 
 ---
 
 ## File Structure (V3.0.0)
 
+```
+face_os/
+├── __init__.py
+├── types.py                    # Core data structures
+├── config.py                   # YAML config loader
+├── energy.py                   # EnergyComputer (5 terms)
+├── visibility.py               # VisibilityLogger
+├── ingest.py                   # Video loading
+├── detect_track.py             # MediaPipe detection + tracking
+├── landmarks.py                # 478-point landmarks + PnP
+├── canonical_map.py            # Canonical UV alignment
+├── crop_planner.py             # Reference-based crop planning
+├── temporal_solve.py           # Bidirectional temporal solver
+├── face_enhance.py             # Structure-preserving rendering
+├── identity_state.py           # Frequency decomposition + VerificationGate + IntrinsicDecomposer
+├── compositor.py               # Confidence-weighted compositing
+├── appearance_field.py         # AppearanceField
+├── neural_codec.py             # PersonalizedSpace + NeuralCodec
+├── pipeline.py                 # V0.5 Orchestrator (WORKING) + V3 telemetry
+├── pipeline_v2.py              # V2 Orchestrator (PARTIAL)
+├── face_detector.tflite        # MediaPipe model
+├── face_os_config.yaml         # Configuration
+├── intrinsic_decomposition.py  # IMPLEMENTED, INTEGRATED, CONDITIONAL ACTIVE
+├── physical_renderer.py        # IMPLEMENTED, INTEGRATED, CONDITIONAL ACTIVE
+├── dense_geometry.py           # IMPLEMENTED, NOT INTEGRATED
+├── lie_group.py                # IMPLEMENTED, INTEGRATED, ACTIVE
+├── renderer_mode.py            # IMPLEMENTED, INTEGRATED, ACTIVE
+├── visibility_calibration.py   # IMPLEMENTED, NOT INTEGRATED
+├── identity_manifold.py        # IMPLEMENTED, NOT INTEGRATED
+├── state_space.py              # Phase 2A — LatentState, Kalman filter
+├── optimizer.py                # Phase 2B — GaussNewton, LevenbergMarquardt
+├── observability.py            # Phase 2C — ObservabilityAnalyzer
+├── state_separation.py        # Phase 2D — PhysicalState, BeliefState, MetaState
+├── map_estimation.py           # Phase 2E — MAPOptimizer (LocalMAPApproximation)
+├── recovery_dynamics.py        # Phase 2G — RecoveryTransitionMatrix
+└── subsystems/                 # V2 Architecture (PARTIAL)
+    ├── __init__.py
+    ├── geometry_estimator.py
+    ├── identity_estimator.py
+    ├── temporal_estimator.py
+    └── renderer.py
 ```
 face_os/
 ├── __init__.py
