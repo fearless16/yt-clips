@@ -21,7 +21,7 @@ _DEFAULTS: Dict[str, Any] = {
 
     # ─── Detection & Tracking ──────────────────────────────────────────────
     "detection": {
-        "model": "hog",                       # hog (CPU) | cnn (GPU)
+        "model": "mediapipe",                  # mediapipe (V4, no dlib)
         "min_face_size": 60,                  # Minimum face size in pixels
         "detection_interval": 5,              # Detect every N frames (track in between)
         "max_lost_frames": 30,                # Frames before declaring face LOST
