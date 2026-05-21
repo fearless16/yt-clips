@@ -541,6 +541,11 @@ class IdentityState:
             liveness_threshold=cfg.verification_gate.liveness_threshold,
         )
 
+        # V3: Intrinsic Decomposition
+        from face_os.intrinsic_decomposition import IntrinsicDecomposer, IntrinsicComponents
+        self._intrinsic_decomposer = IntrinsicDecomposer()
+        self._intrinsic_components: Optional[IntrinsicComponents] = None
+
     def is_initialized(self) -> bool:
         return self.belief is not None and self.belief.initialized
 
@@ -549,6 +554,10 @@ class IdentityState:
         self._anchor_low = low.copy()
         self._anchor_high = high.copy()
         self._anchor_lab = cv2.cvtColor(reference_face, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+        # V3: Compute intrinsic components for anchor
+        reference_face_rgb = cv2.cvtColor(reference_face, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        self._anchor_intrinsic = self._intrinsic_decomposer.decompose(reference_face_rgb)
 
     def _apply_anchor_correction(self) -> None:
         if self._anchor_low is None or self.belief is None:
@@ -658,6 +667,10 @@ class IdentityState:
 
         low, high = self.freq.decompose(canonical_face)
         self.belief.update(low, high, quality_map, pose, region_mask=final_region_mask)
+
+        # V3: Compute intrinsic decomposition for this frame
+        canonical_face_rgb = cv2.cvtColor(canonical_face, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        self._intrinsic_components = self._intrinsic_decomposer.decompose(canonical_face_rgb)
 
         # Anchor correction removed from update - only apply at query time to preserve raw telemetry
 
@@ -806,6 +819,43 @@ class IdentityState:
             identity = cv2.cvtColor(np.clip(id_lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
 
         return identity, confidence
+
+    def query_intrinsic(
+        self,
+        quality_map: np.ndarray,
+    ) -> Tuple[Optional['IntrinsicComponents'], np.ndarray]:
+        """Query intrinsic decomposition components.
+
+        Returns intrinsic components (albedo, shading, specular, normals) + confidence.
+        Used by PhysicalRenderer for physically-based rendering.
+
+        Args:
+            quality_map: Per-pixel quality (H, W) float32
+
+        Returns:
+            (intrinsic_components, confidence_map) or (None, default_confidence) if not available
+        """
+        if not self.is_initialized() or self._intrinsic_components is None:
+            h, w = quality_map.shape[:2]
+            return None, np.ones((h, w), dtype=np.float32) * 0.5
+
+        # Get intrinsic components from last update
+        intrinsic = self._intrinsic_components
+
+        # Compute confidence from quality map
+        base_confidence = self.belief.get_confidence()
+        current_quality = np.clip(quality_map, 0, 1).astype(np.float32)
+        confidence = base_confidence * (0.9 + 0.1 * current_quality)
+
+        return intrinsic, confidence
+
+    def has_intrinsic(self) -> bool:
+        """Check if intrinsic decomposition is available."""
+        return self._intrinsic_components is not None
+
+    def get_anchor_intrinsic(self) -> Optional['IntrinsicComponents']:
+        """Get intrinsic components for anchor face."""
+        return getattr(self, '_anchor_intrinsic', None)
 
     def query_region(
         self,
