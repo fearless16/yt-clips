@@ -1,9 +1,9 @@
 # Face OS — Complete Architecture & Parameter Reference (V2)
 
-**Version:** 2.2.0  
+**Version:** 2.3.0  
 **Branch:** `feat/face-os-v2-phase1`  
 **Date:** 2026-05-21  
-**Status:** Phase 0 Contract Lockdown COMPLETE | **305 tests passing** | Energy framework + visibility logging | System identifiability analysis complete
+**Status:** Phase 0 + Phase 1 COMPLETE | **341 tests passing** | Energy framework validated | System identifiability analysis complete
 
 ---
 
@@ -602,7 +602,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 **Test clip:** `clips_test/test_clip.mp4` (640x360, 30fps, 345 frames)  
 **Reference:** `expectation.png` (941x1672, portrait)
 
-### Test Suite (V2.2.0)
+### Test Suite (V2.3.0)
 
 | File | Tests | Status | Purpose |
 |---|---|---|---|
@@ -610,7 +610,8 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_v2_subsystems.py` | 20 | ✅ All pass | V2 subsystem isolation, coordinate systems, mathematical invariants |
 | `test_math_hardening.py` | 37 | ✅ All pass | 10 invariant classes: UV roundtrip, transform det, temporal drift, flow shimmer, reprojection, lighting/pose invariance, mask topology, subpixel drift, edge cases |
 | `test_phase1_hardening.py` | 37 | ✅ All pass | Long-horizon drift, system identifiability, renderer equation, VerificationGate |
-| `test_phase0_contract.py` | 28 | ✅ All pass | **NEW** — FrameContract, EnergyReport, RendererReport, PassReport, VisibilityLogger |
+| `test_phase0_contract.py` | 28 | ✅ All pass | FrameContract, EnergyReport, RendererReport, PassReport, VisibilityLogger |
+| `test_phase1_energy.py` | 36 | ✅ All pass | **NEW** — Energy term existence, numeric range, delta regression, monotonicity |
 | `test_detection.py` | 14 | ✅ All pass | MediaPipe tasks API, poster rejection, identity matching |
 | `test_quality_gates.py` | 13 | ✅ All pass | Procrustes, jitter, occupancy, SSIM, Laplacian |
 | `test_identity_state.py` | 17 | ✅ All pass | Identity state, frequency decomposition, hypotheses |
@@ -622,7 +623,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_neural_codec.py` | 12 | ✅ All pass | PersonalizedSpace, NeuralCodec, identity score |
 | `test_hypothesis_matching.py` | 4 | ✅ All pass | Hypothesis space, pose/expression selection |
 | `test_region_confidence.py` | 4 | ✅ All pass | Region confidence, semantic confidence |
-| **Total** | **305** | **0 failures** | **All green** |
+| **Total** | **341** | **0 failures** | **All green** |
 
 ### QC Metrics (Identity Mode, V2.1.0 — 345 frames, Phase 1 Hardening)
 
@@ -1089,6 +1090,25 @@ Every pass must expose:
 3. TemporalState: temporal_confidence, drift_score, continuity_score
 4. Energy Terms: E_geom, E_identity, E_temporal, E_photometric, E_smoothness (exact float)
 5. Renderer: M_mean, Y_face_range, Y_bg_range, blend_weight_stats
+
+### Phase 1: Energy Function Reformulation (COMPLETE)
+
+**Status:** ✅ All 341 tests passing (36 new Phase 1 tests)
+
+**Tests Added (test_phase1_energy.py):**
+- EnergyTermExistence (7 tests) — all 5 terms exist as floats, E_total = sum
+- EnergyTermNumericRange (8 tests) — all terms non-negative, bounded <100
+- EnergyDeltaRegression (5 tests) — energy decreases with better state
+- EnergyMonotonicity (3 tests) — energy converges, does not diverge
+- EnergyReportPerFrame (6 tests) — all metrics sections present
+- EnergyFromSubsystems (7 tests) — each term depends on its subsystem
+
+**Exit Condition Met:**
+- ✅ Each subsystem emits its own energy contribution
+- ✅ Each energy term is a measurable float
+- ✅ Each term has a testable numeric range
+- ✅ No energy term is hidden inside a black box
+- ✅ EnergyReport per frame is computable
 
 **Logging Format:**
 ```json
