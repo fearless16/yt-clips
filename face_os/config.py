@@ -36,7 +36,7 @@ _DEFAULTS: Dict[str, Any] = {
 
     # ─── Canonical Face Mapping ────────────────────────────────────────────
     "canonical": {
-        "atlas_size": [512, 512],             # Canonical face resolution [W, H]
+        "atlas_size": [1024, 1024],             # Canonical face resolution [W, H]
         "alignment_mode": "similarity",       # similarity | affine | perspective
         "enrollment_frames": 30,              # Frames to average for enrollment
         "min_confidence_for_update": 0.7,     # Min detection confidence to update atlas
