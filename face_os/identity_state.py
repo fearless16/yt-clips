@@ -532,6 +532,13 @@ class IdentityState:
         self._anchor_strength = 0.35
         self._anchor_threshold = 25.0
 
+        # Intrinsic belief snapshots — immutable per observation
+        self._intrinsic_history: List[dict] = []
+        self._intrinsic_history_limit = 32
+        self._intrinsic_update_count = 0
+        self._intrinsic_best_score = float("-inf")
+        self._intrinsic_best_snapshot: Optional[dict] = None
+
         # Phase 4: Identity Hypotheses
         self.hypotheses = IdentityHypothesisSpace(max_hypotheses=10)
 
@@ -610,6 +617,89 @@ class IdentityState:
         current_mean = np.mean(current_lab, axis=(0, 1))
         return _lab_distance(anchor_mean, current_mean)
 
+    def _intrinsic_snapshot_score(
+        self,
+        snapshot: dict,
+        quality_map: Optional[np.ndarray] = None,
+    ) -> float:
+        """Score an intrinsic snapshot without mutating state.
+
+        Higher is better. We prefer:
+        - higher confidence
+        - lower reconstruction error
+        - fresher observations
+        - better current quality compatibility
+        """
+        components = snapshot.get("components")
+        if components is None:
+            return float("-inf")
+
+        quality_mean = float(snapshot.get("quality_mean", 0.0))
+        quality_map_mean = float(np.mean(quality_map)) if quality_map is not None else quality_mean
+        intrinsic_conf = snapshot.get("confidence_scalar", 0.0)
+        recon_error = float(getattr(components, "reconstruction_error", 1.0))
+        age = max(self._intrinsic_update_count - int(snapshot.get("update_index", 0)), 0)
+        age_factor = float(np.exp(-age / 24.0))
+
+        # Blend quality, confidence, and reconstruction fidelity.
+        base = 0.45 * quality_map_mean + 0.35 * float(intrinsic_conf) + 0.20 * max(0.0, 1.0 - min(recon_error, 1.0))
+        return float(base * age_factor)
+
+    def _store_intrinsic_snapshot(
+        self,
+        intrinsic_components,
+        quality_map: np.ndarray,
+        pose: Optional[Tuple[float, float, float]] = None,
+        mesh_478: Optional[np.ndarray] = None,
+        warp_M: Optional[np.ndarray] = None,
+    ) -> None:
+        """Store an immutable snapshot of intrinsic belief.
+
+        This prevents later frames from silently overwriting the earlier,
+        higher-confidence intrinsic state.
+        """
+        self._intrinsic_update_count += 1
+        quality_mean = float(np.mean(quality_map)) if quality_map is not None else 0.0
+        confidence_scalar = float(np.mean(getattr(intrinsic_components, "confidence", 0.0)))
+        snapshot = {
+            "update_index": self._intrinsic_update_count,
+            "components": intrinsic_components,
+            "quality_mean": quality_mean,
+            "confidence_scalar": confidence_scalar,
+            "pose": pose,
+            "mesh_478": mesh_478,
+            "warp_M": warp_M,
+        }
+        self._intrinsic_history.append(snapshot)
+        if len(self._intrinsic_history) > self._intrinsic_history_limit:
+            self._intrinsic_history = self._intrinsic_history[-self._intrinsic_history_limit:]
+
+        score = self._intrinsic_snapshot_score(snapshot, quality_map)
+        if score >= self._intrinsic_best_score:
+            self._intrinsic_best_score = score
+            self._intrinsic_best_snapshot = snapshot
+
+    def _select_intrinsic_snapshot(
+        self,
+        quality_map: Optional[np.ndarray] = None,
+    ) -> Optional[dict]:
+        """Select the best intrinsic snapshot for the current query.
+
+        Never mutates the stored history.
+        """
+        if not self._intrinsic_history:
+            return None
+
+        best_snapshot = None
+        best_score = float("-inf")
+        for snapshot in self._intrinsic_history:
+            score = self._intrinsic_snapshot_score(snapshot, quality_map)
+            if score > best_score:
+                best_score = score
+                best_snapshot = snapshot
+
+        return best_snapshot
+
     def update(
         self,
         canonical_face: np.ndarray,
@@ -679,10 +769,20 @@ class IdentityState:
         # V3: Compute intrinsic decomposition for this frame
         # Uses mesh-derived normals when mesh_478 + warp_M are available
         canonical_face_rgb = cv2.cvtColor(canonical_face, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        self._intrinsic_components = self._intrinsic_decomposer.decompose(
+        intrinsic_components = self._intrinsic_decomposer.decompose(
             canonical_face_rgb, mesh_478=mesh_478, warp_M=warp_M,
         )
+        self._intrinsic_components = intrinsic_components  # latest snapshot for backwards compatibility
         self._normal_source = self._intrinsic_decomposer._normal_source
+
+        # Store immutable intrinsic snapshot so later frames do not clobber earlier belief.
+        self._store_intrinsic_snapshot(
+            intrinsic_components=intrinsic_components,
+            quality_map=quality_map,
+            pose=pose,
+            mesh_478=mesh_478,
+            warp_M=warp_M,
+        )
 
         # Anchor correction removed from update - only apply at query time to preserve raw telemetry
 
@@ -854,15 +954,23 @@ class IdentityState:
         Returns:
             (albedo, confidence) both in canonical space, albedo in [0, 1] float32
         """
-        if not self.is_initialized() or self._intrinsic_components is None:
+        if not self.is_initialized():
             h, w = quality_map.shape[:2]
             return (
                 np.ones((h, w, 3), dtype=np.float32) * 0.5,
                 np.ones((h, w), dtype=np.float32) * 0.5,
             )
 
-        # Get intrinsic albedo from last decomposition
-        albedo = self._intrinsic_components.albedo.copy()
+        snapshot = self._select_intrinsic_snapshot(quality_map)
+        if snapshot is None or snapshot.get("components") is None:
+            h, w = quality_map.shape[:2]
+            return (
+                np.ones((h, w, 3), dtype=np.float32) * 0.5,
+                np.ones((h, w), dtype=np.float32) * 0.5,
+            )
+
+        intrinsic = snapshot["components"]
+        albedo = intrinsic.albedo.copy()
 
         # White-balance normalization (RULE 5)
         albedo = self._normalize_white_balance(albedo)
@@ -915,12 +1023,17 @@ class IdentityState:
         Returns:
             (intrinsic_components, confidence_map) or (None, default_confidence) if not available
         """
-        if not self.is_initialized() or self._intrinsic_components is None:
+        if not self.is_initialized():
             h, w = quality_map.shape[:2]
             return None, np.ones((h, w), dtype=np.float32) * 0.5
 
-        # Get intrinsic components from last update
-        intrinsic = self._intrinsic_components
+        # Select the best intrinsic snapshot without mutating stored state.
+        snapshot = self._select_intrinsic_snapshot(quality_map)
+        if snapshot is None or snapshot.get("components") is None:
+            h, w = quality_map.shape[:2]
+            return None, np.ones((h, w), dtype=np.float32) * 0.5
+
+        intrinsic = snapshot["components"]
 
         # RULE 5: Normalize albedo for white balance
         # This ensures identity is lighting-invariant
@@ -1110,4 +1223,8 @@ class IdentityState:
         self.belief = None
         self._pose_history.clear()
         self._intrinsic_components = None
+        self._intrinsic_history.clear()
+        self._intrinsic_update_count = 0
+        self._intrinsic_best_score = float("-inf")
+        self._intrinsic_best_snapshot = None
         # anchor is preserved (including _anchor_albedo)

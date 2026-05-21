@@ -272,6 +272,77 @@ class FaceOSPipeline:
             [T.scale * s,  T.scale * c, T.ty]
         ], dtype=np.float64)
 
+
+    @staticmethod
+    def _safe_mean_confidence(intrinsic_conf: Optional[np.ndarray]) -> float:
+        """Return a scalar confidence value from a confidence map or scalar."""
+        if intrinsic_conf is None:
+            return 0.0
+        arr = np.asarray(intrinsic_conf, dtype=np.float32)
+        if arr.size == 0:
+            return 0.0
+        return float(np.mean(arr))
+
+    def _commit_renderer_mode(
+        self,
+        intrinsic_components: Optional['IntrinsicComponents'],
+        intrinsic_conf: Optional[np.ndarray],
+    ) -> Optional[RendererMode]:
+        """Commit RendererMode exactly once from orchestration code.
+
+        Render functions must remain pure. This is the single source of truth
+        for renderer-mode transitions and telemetry accounting.
+        """
+        if not USE_IDENTITY or self.renderer_mode_state is None:
+            return None
+
+        intrinsic_available = intrinsic_components is not None
+        avg_confidence = self._safe_mean_confidence(intrinsic_conf)
+        decomposition_error = (
+            intrinsic_components.reconstruction_error
+            if intrinsic_components is not None
+            else 1.0
+        )
+
+        prev_mode = self.renderer_mode_state.current_mode
+        new_mode = self.renderer_mode_state.update(
+            intrinsic_available=intrinsic_available,
+            intrinsic_confidence=avg_confidence,
+            decomposition_error=decomposition_error,
+        )
+
+        if new_mode != prev_mode:
+            self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
+
+        self._telemetry["renderer_mode_distribution"][new_mode.value] += 1
+        return new_mode
+
+    def _merge_intrinsic_beliefs(
+        self,
+        current_components: Optional['IntrinsicComponents'],
+        current_conf: Optional[np.ndarray],
+        reference_components: Optional['IntrinsicComponents'] = None,
+        reference_conf: Optional[np.ndarray] = None,
+    ):
+        """Select the stronger intrinsic belief without mutating either source."""
+        current_scalar = self._safe_mean_confidence(current_conf)
+        reference_scalar = self._safe_mean_confidence(reference_conf)
+
+        if current_components is None and reference_components is None:
+            return None, None
+
+        if current_components is None:
+            return reference_components, reference_conf
+
+        if reference_components is None:
+            return current_components, current_conf
+
+        if reference_scalar > current_scalar:
+            return reference_components, reference_conf
+
+        return current_components, current_conf
+
+
     def get_telemetry_report(self) -> dict:
         """Get runtime telemetry report.
 
@@ -642,15 +713,14 @@ class FaceOSPipeline:
         hq_count = self.temporal_solver.solver.get_hq_frame_count()
         print(f"    Solved {len(solved_faces)} frames, {hq_count} HQ frames")
 
-        # Save forward pass's intrinsic state before bidirectional overwrites it
+        # Save forward-pass intrinsic belief for per-frame selection
         # D-06: Per-frame belief storage (not global mutable cache)
         self._frame_beliefs = {}
+        self._forward_intrinsic_components = None
+        self._forward_intrinsic_conf = None
         if self.identity_state is not None and self.identity_state._intrinsic_components is not None:
-            forward_conf = float(np.mean(self.identity_state.belief.get_confidence())) if self.identity_state.belief is not None else 0.0
-            self._frame_beliefs['forward'] = {
-                'intrinsic': self.identity_state._intrinsic_components,
-                'confidence': forward_conf,
-            }
+            self._forward_intrinsic_components = self.identity_state._intrinsic_components
+            self._forward_intrinsic_conf = float(np.mean(self.identity_state.belief.get_confidence())) if self.identity_state.belief is not None else 0.0
 
         # Update identity state with solved faces (bidirectional refinement)
         for idx, (solved_face, solved_conf) in solved_faces.items():
@@ -681,21 +751,6 @@ class FaceOSPipeline:
                     pose = (landmarks.yaw, landmarks.pitch, landmarks.roll)
                     self.patch_memory.update(solved_face, solved_conf, pose=pose, frame_idx=idx)
 
-        # D-06: Merge forward and bidirectional intrinsic states
-        # Store bidirectional belief, then select best per-frame
-        if self.identity_state is not None and self.identity_state._intrinsic_components is not None:
-            bidir_conf = float(np.mean(self.identity_state.belief.get_confidence())) if self.identity_state.belief is not None else 0.0
-            self._frame_beliefs['bidirectional'] = {
-                'intrinsic': self.identity_state._intrinsic_components,
-                'confidence': bidir_conf,
-            }
-            # Select best belief (highest confidence)
-            forward_conf = self._frame_beliefs.get('forward', {}).get('confidence', 0.0)
-            if forward_conf > bidir_conf:
-                self._frame_beliefs['selected'] = self._frame_beliefs['forward']
-            else:
-                self._frame_beliefs['selected'] = self._frame_beliefs['bidirectional']
-
         # === PASS 3: Render ===
         print("  Pass 3/3: Rendering...")
         output_w = cfg.crop.output_size[0] if hasattr(cfg.crop, 'output_size') else 1080
@@ -724,21 +779,45 @@ class FaceOSPipeline:
                     solved_face, solved_conf = solved_faces[frame_idx]
 
                 # D-06: Update renderer mode in orchestration layer (not in render)
-                # This is the single source of truth for mode transitions
+                # This is the single source of truth for mode transitions.
+                # Use the current solved-frame belief per frame, then compare against
+                # the stored forward-pass snapshot if it is stronger.
                 if USE_IDENTITY and self.identity_state is not None and self.identity_state.is_initialized():
-                    # Use selected belief (highest confidence from forward/bidirectional)
-                    selected = self._frame_beliefs.get('selected')
-                    if selected is not None:
-                        intrinsic_components = selected['intrinsic']
-                        # Use actual belief confidence, not fake tensor
-                        conf_scalar = selected['confidence']
-                        h, w = intrinsic_components.albedo.shape[:2]
-                        intrinsic_conf = np.ones((h, w), dtype=np.float32) * conf_scalar
-                    else:
-                        quality_map = self._compute_quality_map(solved_face, face_track.detection.confidence if face_track and face_track.detection else 0.5)
-                        intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
-                    
-                    self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx)
+                    quality_map = self._compute_quality_map(
+                        solved_face,
+                        face_track.detection.confidence if face_track and face_track.detection else 0.5,
+                    )
+                    current_intrinsic_components, current_intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
+
+                    selected_components = current_intrinsic_components
+                    selected_conf = current_intrinsic_conf
+
+                    if self._forward_intrinsic_components is not None and self._forward_intrinsic_conf is not None:
+                        forward_conf_map = None
+                        if current_intrinsic_conf is not None and current_intrinsic_conf.size > 0:
+                            forward_conf_map = np.ones_like(current_intrinsic_conf, dtype=np.float32) * self._forward_intrinsic_conf
+                        elif current_intrinsic_components is not None:
+                            h, w = current_intrinsic_components.albedo.shape[:2]
+                            forward_conf_map = np.ones((h, w), dtype=np.float32) * self._forward_intrinsic_conf
+
+                        selected_components, selected_conf = self._merge_intrinsic_beliefs(
+                            current_intrinsic_components,
+                            current_intrinsic_conf,
+                            self._forward_intrinsic_components,
+                            forward_conf_map,
+                        )
+
+                    # Persist per-frame belief for debugging / telemetry inspection
+                    self._frame_beliefs[frame_idx] = {
+                        "intrinsic": selected_components,
+                        "confidence": self._safe_mean_confidence(selected_conf),
+                    }
+
+                    # Commit renderer mode ONCE per frame from the selected belief
+                    self._commit_renderer_mode(selected_components, selected_conf)
+
+                    # Keep V3 telemetry/state evolution in sync
+                    self._update_v3_modules(selected_components, selected_conf, frame_idx)
 
                 # Render frame
                 result = self._render_frame_v2(
@@ -946,7 +1025,10 @@ class FaceOSPipeline:
                 region_masks = lm_module.create_region_masks(adjusted_lm, cropped.shape[:2])
                 face_mask = region_masks.get("face")
 
-        # V3: Update renderer mode + state evolution (shared path)
+        # V3: Commit renderer mode from the current frame belief (orchestration layer)
+        self._commit_renderer_mode(intrinsic_components, intrinsic_conf)
+
+        # V3: Update telemetry + temporal state (no renderer-mode mutation here)
         self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx, landmarks=landmarks, cropped=cropped)
 
         # 9. Get identity eyes for structure-preserving rendering (skip if USE_IDENTITY=False)
@@ -1144,7 +1226,9 @@ class FaceOSPipeline:
         """Shared V3 module updates — single source of truth.
 
         Called by BOTH _process_frame_v2() and _render_frame_v2().
-        Eliminates duplicate telemetry tracking and mode updates.
+
+        Eliminates duplicate telemetry tracking. Renderer mode is committed
+        only by orchestration code, not here.
 
         RULE 1: No rendering logic outside _render_core.
         RULE 8: All telemetry tracked here.
@@ -1171,19 +1255,7 @@ class FaceOSPipeline:
         else:
             self._telemetry["shading_normal_frames"] += 1
 
-        # Update renderer mode state
-        if USE_IDENTITY and self.renderer_mode_state is not None:
-            intrinsic_available = intrinsic_components is not None
-            avg_confidence = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
-            decomposition_error = intrinsic_components.reconstruction_error if intrinsic_components is not None else 1.0
-
-            renderer_mode = self.renderer_mode_state.update(
-                intrinsic_available=intrinsic_available,
-                intrinsic_confidence=avg_confidence,
-                decomposition_error=decomposition_error,
-            )
-            self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
-            self._telemetry["renderer_mode_distribution"][renderer_mode.value] += 1
+        # Renderer mode is committed only by orchestration code via _commit_renderer_mode().
 
         # Update state evolution model — D-06: Full Kalman predict-update cycle
         if USE_IDENTITY and self.state_evolution is not None and self._latent_state is not None:
@@ -1731,6 +1803,9 @@ class FaceOSPipeline:
         self._frame_count = 0
         self._last_M_inv = None
         self._last_good_crop_plan = None
+        self._frame_beliefs = {}
+        self._forward_intrinsic_components = None
+        self._forward_intrinsic_conf = None
         # Reset V3 telemetry for fresh per-clip stats
         self._telemetry = {
             "total_frames": 0,

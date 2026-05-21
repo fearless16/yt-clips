@@ -38,9 +38,9 @@ class RendererModeState:
     transition_count: int = 0
 
     # Thresholds for mode transitions
-    PHYSICAL_CONFIDENCE_THRESHOLD: float = 0.4  # Lowered from 0.6 to use PhysicalRenderer more
-    HYBRID_CONFIDENCE_THRESHOLD: float = 0.2    # Lowered from 0.3
-    MIN_FRAMES_BEFORE_TRANSITION: int = 0  # No hysteresis — use best mode immediately
+    PHYSICAL_CONFIDENCE_THRESHOLD: float = 0.6
+    HYBRID_CONFIDENCE_THRESHOLD: float = 0.3
+    MIN_FRAMES_BEFORE_TRANSITION: int = 5  # Original value — prevents thrashing
 
     def update(
         self,
