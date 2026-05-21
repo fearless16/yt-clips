@@ -30,6 +30,13 @@ class Compositor:
 
     def __init__(self):
         self._feather_kernel = None
+        # D-01: Temporal photometric locking — EMA of face luminance
+        self._luma_ema: Optional[float] = None
+        self._luma_alpha: float = 0.5  # EMA smoothing factor (higher = more responsive)
+
+    def reset(self):
+        """Reset temporal state between clips."""
+        self._luma_ema = None
 
     def composite(
         self,
@@ -85,11 +92,32 @@ class Compositor:
         if cfg.compositor.use_light_matching:
             enhanced = self._match_lighting(original, enhanced, face_mask)
 
-        # Blend
+        # D-01: Temporal photometric locking — reduce frame-to-frame luminance flicker
+        # Uses EMA to smooth face luminance, preventing side-screen light reflections
+        face_pixels = face_mask > 0.5
+        if face_pixels.sum() > 100:
+            face_lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
+            cur_luma = float(face_lab[:, :, 0][face_pixels].mean())
+            if self._luma_ema is None:
+                self._luma_ema = cur_luma
+            else:
+                # Gentle EMA: smooth toward running average
+                self._luma_ema = self._luma_alpha * cur_luma + (1 - self._luma_alpha) * self._luma_ema
+                delta = self._luma_ema - cur_luma
+                # Only adjust if delta > 2 LAB units (ignore small variations)
+                if abs(delta) > 2.0:
+                    # Clamp adjustment to ±8 LAB units to prevent darkening
+                    delta = np.clip(delta, -8.0, 8.0)
+                    lab = face_lab.copy().astype(np.float32)
+                    lab[:, :, 0] = np.clip(lab[:, :, 0] + delta, 0, 255)
+                    enhanced = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+        # D-01: Compositing
         blend_3ch = blend_weight[:, :, np.newaxis]
         result = original.astype(np.float32) * (1 - blend_3ch) + enhanced.astype(np.float32) * blend_3ch
+        result = np.clip(result, 0, 255).astype(np.uint8)
 
-        return np.clip(result, 0, 255).astype(np.uint8)
+        return result
 
     def composite_with_memory(
         self,
@@ -137,11 +165,12 @@ class Compositor:
         if cfg.compositor.use_light_matching:
             memory_face = self._match_lighting(original, memory_face, face_mask)
 
-        # Composite
+        # D-01: Compositing
         blend_3ch = blend_weight[:, :, np.newaxis]
         result = original.astype(np.float32) * (1 - blend_3ch) + memory_face.astype(np.float32) * blend_3ch
+        result = np.clip(result, 0, 255).astype(np.uint8)
 
-        return np.clip(result, 0, 255).astype(np.uint8)
+        return result
 
     def _feather_mask(self, mask: np.ndarray) -> np.ndarray:
         """Apply Gaussian feathering to mask edges."""
@@ -163,9 +192,11 @@ class Compositor:
         if confidence.shape[:2] != (h, w):
             confidence = cv2.resize(confidence, (w, h), interpolation=cv2.INTER_LINEAR)
 
+        # D-01: Compositing
         conf_3ch = confidence[:, :, np.newaxis]
         result = original.astype(np.float32) * (1 - conf_3ch) + enhanced.astype(np.float32) * conf_3ch
-        return np.clip(result, 0, 255).astype(np.uint8)
+        result = np.clip(result, 0, 255).astype(np.uint8)
+        return result
 
     def _match_lighting(
         self,
