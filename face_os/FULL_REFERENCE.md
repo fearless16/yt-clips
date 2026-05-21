@@ -2,7 +2,7 @@
 
 **Document Status:** Honest assessment of current implementation vs intended architecture  
 **Version:** 3.0.0  
-**Branch:** `feat/face-os-v2-phase1`  
+**Branch:** `fix/v3-audit-stabilization`  
 **Date:** 2026-05-21  
 **Tests:** 768 passing, 0 failures  
 
@@ -25,6 +25,21 @@ Face OS V3.0.0 has strong architecture language, strong test coverage, and worki
 | Avg decomposition error | 0.053 | ✅ |
 | RendererMode transitions | 1 | ✅ (stable) |
 | All 768 tests | 0 failures | ✅ |
+
+### ⚠️ Validation Dataset Limitations
+
+**These metrics are measured on a single controlled test clip (`test_clip.mp4`, 640x360, 30fps, 15s, 450 frames, frontal face, studio lighting).**
+
+Generalisation to the following scenarios has NOT been validated:
+- Difficult/occluded lighting (backlight, mixed colour temperature)
+- Profile / extreme yaw rotation (>45°)
+- Fast motion / motion blur
+- Partial occlusion (sunglasses, masks, hands)
+- High compression / low bitrate
+- Multiple skin tones and face shapes
+- Noisy webcam / low-light conditions
+
+**The 96% PhysicalRenderer / 100% IntrinsicDecomposer rates likely degrade significantly on harder clips. A benchmark suite covering these conditions is the highest priority next step.** See `AGAINST.md`.
 
 ### Status Legend
 
@@ -120,18 +135,16 @@ Face OS enhances portrait videos by:
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  V3 Modules — IMPLEMENTED, INTEGRATED, ACTIVATION CONDITIONAL               │
+│  V3 Modules — ACTIVE (96% physical, 100% intrinsic)                        │
 │                                                                             │
-│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐            │
-│  │ IntrinsicDecomp │→ │ PhysicalRenderer│  │ LieGroup        │            │
-│  │ IMPLEMENTED     │  │ IMPLEMENTED     │  │ ACTIVE          │            │
-│  │ INTEGRATED      │  │ INTEGRATED      │  │ (always used)   │            │
-│  │ ACTIVE: maybe   │  │ ACTIVE: maybe   │  │                 │            │
-│  └─────────────────┘  └─────────────────┘  └─────────────────┘            │
+│  ┌──────────────────────┐  ┌──────────────────────┐  ┌───────────────────┐ │
+│  │ IntrinsicDecomp      │→ │ PhysicalRenderer     │  │ LieGroup SIM(2)   │ │
+│  │ ✅ 100% success     │  │ ✅ 96% activation    │  │ ✅ always active │ │
+│  │ ⚠️ normals circular │  │ ⚠️ unvalidated       │  │ ⚠️ A/B pending   │ │
+│  └──────────────────────┘  └──────────────────────┘  └───────────────────┘ │
 │                                                                             │
-│  RendererMode: ACTIVE — tracks which path is used                          │
-│  DenseGeometry: IMPLEMENTED only — NOT INTEGRATED                          │
-│  IdentityManifold: IMPLEMENTED only — NOT INTEGRATED                       │
+│  StateEvolution: ✅ ACTIVE    RendererMode: ✅ ACTIVE                       │
+│  DenseGeometry: ❌ DE-SCOPED  IdentityManifold: ❌ NOT INTEGRATED           │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -292,7 +305,7 @@ where:
 - VALIDATED: ❌ **NOT VALIDATED** — no metrics measured
 - DEFAULT: ❌ **NOT DEFAULT** — not enabled
 
-**Decision:** DenseGeometry is officially de-scoped for V3.0. IntrinsicDecomposer provides normals from shading gradients instead. DenseGeometry may be revisited in V3.4 if needed.
+**Decision:** DenseGeometry is de-scoped for V3.0 — not yet justified by current metrics/perf tradeoff. Geometry normals from mesh WOULD help with normal circularity and specular quality, but integration cost currently outweighs benefit until renderer quality delta is proven against alpha compositing. DenseGeometry may be revisited in V3.4.
 
 **Normals Source:** Normals are currently estimated from shading gradients via `IntrinsicDecomposer._estimate_normals()`, NOT from actual dense geometry. This is an approximation.
 
@@ -348,15 +361,16 @@ Input: 16:9 source video + reference face images
 └───────────────┬───────────────┘
                 ▼
 ┌───────────────────────────────┐
-│  Render (ALPHA COMPOSITING)   │
-│  Y = M ⊙ Y_face + (1-M)⊙Y_bg │
+│  Render (PHYSICAL or FALLBACK)│
+│  Physical = Lambertian+Blinn  │
+│  Fallback = alpha compositing │
 │  + enhance (sharpen + denoise)│
 └───────────────┬───────────────┘
                 ▼
 Output: 9:16 enhanced video (1080x1920)
 ```
 
-### Actual Renderer (Alpha Compositing)
+### Legacy Alpha Fallback Renderer
 ```python
 # In pipeline.py:_render_frame_v2()
 cropped = source_frame[y1:y2, x1:x2]
@@ -367,13 +381,16 @@ rendered = cropped * (1 - mask_3d) + identity_in_crop * mask_3d
 
 **This is NOT physical rendering. It is alpha compositing.**
 
-### Actual Identity (Appearance-Based)
+### Hybrid Intrinsic/Appearance Identity
 ```python
-# In identity_state.py
-appearance_latent = canonical_face_image  # (256, 256, 3) uint8
+# In pipeline.py:_process_frame_v2()
+# Primary: intrinsic decomposition (albedo/shading/specular) when available
+intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
+# Fallback: appearance latent (RGB canonical face) when intrinsic unavailable
+identity_face, identity_confidence = self.identity_state.query(canonical_face, quality_map, pose=pose)
 ```
 
-**This is NOT intrinsic identity. It is appearance (RGB image).**
+**Identity is now hybrid: intrinsic (albedo/shading/specular) when decomposition succeeds, falling back to RGB appearance latent. The identity anchor is still RGB-entangled — albedo is not yet stored separately.**
 
 ---
 
@@ -468,11 +485,9 @@ Processing time:      98.4s (3.8 fps)
 | V2.0.0 | 16.25 | 100% | 0.83 | 24.08 | 240 | 4 isolated subsystems |
 | V2.1.0 | 12.83 | 80.9% | 0.87 | 13.31 | 277 | Phase 1 hardening |
 | V2.8.0 | 12.8 | 80.9% | 0.87 | 13.3 | 531 | Probabilistic recovery |
-| **V3.0.0** | **12.8** | **80.9%** | **0.87** | **13.3** | **768** | **V3 integrated but runtime activation unknown** |
+| **V3.0.0** | **12.8** | **80.9%** | **0.87** | **13.3** | **768** | **PhysicalRenderer 96%, IntrinsicDecomposer 100%** |
 
-**Note:** V3.0.0 metrics are SAME as V2.8.0 because V3 modules are integrated but runtime activation/contribution is unknown. Run pipeline with telemetry to measure actual contribution.
-
-**Note:** V3.0.0 metrics are SAME as V2.8.0 because V3 modules are not integrated.
+**Note:** V3.0.0 core metrics unchanged from V2.8.0 because PhysicalRenderer output quality has not yet been validated against alpha compositing. See [I-05](#i-05-sim2-benefit-not-measured-⚠️-partially-resolved).
 
 ---
 
@@ -500,7 +515,7 @@ Processing time:      98.4s (3.8 fps)
 #### 3. Geometry Contradiction — NOT FIXED
 - **Current:** 478 sparse landmarks
 - **Required:** Dense mesh
-- **Status:** ❌ DenseGeometry not integrated (not needed for current rendering)
+- **Status:** ❌ DenseGeometry not integrated (not yet justified by current metrics/perf tradeoff)
 
 #### 5. Version References Mixed — FIXED
 - All references updated to V3.0.0 consistently
@@ -530,7 +545,7 @@ Processing time:      98.4s (3.8 fps)
 | Renderer integration | ✅ ACTIVE | PhysicalRenderer at 96% (up from 0%) |
 | Identity integration | ✅ ACTIVE | IntrinsicDecomposer at 100% (up from 0%) |
 | Transform integration | ✅ ACTIVE | LieGroup SIM(2) in both paths |
-| Geometry integration | ❌ DE-SCOPED | DenseGeometry not needed (normals from shading) |
+| Geometry integration | ❌ DE-SCOPED | DenseGeometry not yet justified by current metrics/perf tradeoff |
 | State evolution | ✅ ACTIVE | Integrated into both paths |
 | Renderer mode | ✅ ACTIVE | Tracks physical/hybrid/alpha distribution |
 
@@ -748,44 +763,6 @@ face_os/
     ├── temporal_estimator.py
     └── renderer.py
 ```
-face_os/
-├── __init__.py
-├── types.py                    # Core data structures
-├── config.py                   # YAML config loader
-├── energy.py                   # EnergyComputer (5 terms)
-├── visibility.py               # VisibilityLogger
-├── ingest.py                   # Video loading
-├── detect_track.py             # MediaPipe detection + tracking
-├── landmarks.py                # 478-point landmarks + PnP
-├── canonical_map.py            # Canonical UV alignment
-├── crop_planner.py             # Reference-based crop planning
-├── temporal_solve.py           # Bidirectional temporal solver
-├── face_enhance.py             # Structure-preserving rendering
-├── identity_state.py           # Frequency decomposition + VerificationGate
-├── compositor.py               # Confidence-weighted compositing
-├── appearance_field.py         # AppearanceField
-├── neural_codec.py             # PersonalizedSpace + NeuralCodec
-├── pipeline.py                 # V0.5 Orchestrator (WORKING)
-├── pipeline_v2.py              # V2 Orchestrator (PARTIAL)
-├── face_detector.tflite        # MediaPipe model
-├── face_os_config.yaml         # Configuration
-├── intrinsic_decomposition.py  # V3 — IntrinsicDecomposer (NOT INTEGRATED)
-├── physical_renderer.py        # V3 — PhysicalRenderer (NOT INTEGRATED)
-├── dense_geometry.py           # V3 — DenseGeometryEstimator (NOT INTEGRATED)
-├── lie_group.py                # V3 — SE2Transform, SIM2Transform (NOT INTEGRATED)
-├── state_space.py              # Phase 2A — LatentState, Kalman filter
-├── optimizer.py                # Phase 2B — GaussNewton, LevenbergMarquardt
-├── observability.py            # Phase 2C — ObservabilityAnalyzer
-├── state_separation.py        # Phase 2D — PhysicalState, BeliefState, MetaState
-├── map_estimation.py           # Phase 2E — MAPOptimizer
-├── recovery_dynamics.py        # Phase 2G — RecoveryTransitionMatrix
-└── subsystems/                 # V2 Architecture (PARTIAL)
-    ├── __init__.py
-    ├── geometry_estimator.py
-    ├── identity_estimator.py
-    ├── temporal_estimator.py
-    └── renderer.py
-
 tests/face_os/
 ├── test_phase0_contract.py     # 28 tests
 ├── test_phase1_energy.py       # 36 tests
