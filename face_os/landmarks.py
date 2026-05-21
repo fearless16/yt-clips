@@ -175,6 +175,7 @@ def create_region_masks(
     face_mask[forehead_top:brow_top, face_left:face_right] = 255
 
     face_mask = cv2.GaussianBlur(face_mask.astype(np.float32) / 255.0, (11, 11), 3)
+    face_mask = np.clip(face_mask, 0, 1)  # GaussianBlur can produce values > 1
     masks["face"] = face_mask
 
     # Skin = face minus eyes, nose, mouth
@@ -193,4 +194,5 @@ def _elliptical_mask(h: int, w: int, cy: int, cx: int, ry: int, rx: int) -> np.n
     d = ((X - cx) / max(rx, 1)) ** 2 + ((Y - cy) / max(ry, 1)) ** 2
     mask = np.clip(1.0 - d, 0, 1)
     k = max(int(min(rx, ry) * 0.4) | 1, 3)
-    return cv2.GaussianBlur(mask, (k, k), max(k / 3, 1.0))
+    mask = cv2.GaussianBlur(mask, (k, k), max(k / 3, 1.0))
+    return np.clip(mask, 0, 1)  # GaussianBlur can produce values > 1
