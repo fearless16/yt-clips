@@ -639,7 +639,7 @@ class IdentityState:
         intrinsic_conf = snapshot.get("confidence_scalar", 0.0)
         recon_error = float(getattr(components, "reconstruction_error", 1.0))
         age = max(self._intrinsic_update_count - int(snapshot.get("update_index", 0)), 0)
-        age_factor = float(np.exp(-age / 24.0))
+        age_factor = float(np.exp(-age / 100.0))
 
         # Blend quality, confidence, and reconstruction fidelity.
         base = 0.45 * quality_map_mean + 0.35 * float(intrinsic_conf) + 0.20 * max(0.0, 1.0 - min(recon_error, 1.0))

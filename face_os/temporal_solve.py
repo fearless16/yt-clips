@@ -141,6 +141,58 @@ class BidirectionalSolver:
         self._hq_frames = hq
         return hq
 
+    def _score_reference_frame(
+        self,
+        frame_idx: int,
+        ref_idx: int,
+    ) -> float:
+        """Score a reference frame for repairing frame_idx.
+
+        Higher is better. We prefer:
+        - high quality
+        - close temporal distance
+        - similar pose
+        """
+        ref_quality = self._frame_qualities.get(ref_idx)
+        if ref_quality is None:
+            return float("-inf")
+
+        dist = abs(ref_idx - frame_idx)
+        temporal_weight = float(np.exp(-dist / max(self.lookahead, self.lookback, 1)))
+        pose_sim = self._pose_similarity(frame_idx, ref_idx)
+        quality = float(ref_quality.overall_quality)
+        return float(quality * temporal_weight * pose_sim)
+
+    def _select_best_reference(
+        self,
+        frame_idx: int,
+    ) -> Optional[int]:
+        """Select the best reference frame among current + HQ frames."""
+        if frame_idx not in self._canonical_faces:
+            return None
+
+        candidates = [frame_idx]
+
+        forward_hq = self._find_nearest_hq(frame_idx, direction='forward')
+        backward_hq = self._find_nearest_hq(frame_idx, direction='backward')
+        if forward_hq is not None:
+            candidates.append(forward_hq)
+        if backward_hq is not None:
+            candidates.append(backward_hq)
+
+        best_idx = None
+        best_score = float("-inf")
+        for idx in candidates:
+            score = self._score_reference_frame(frame_idx, idx)
+            if idx == frame_idx:
+                current_quality = self._frame_qualities.get(idx)
+                score = current_quality.overall_quality if current_quality is not None else score
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        return best_idx
+
     def solve_frame(
         self,
         frame_idx: int,
@@ -148,15 +200,11 @@ class BidirectionalSolver:
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Solve for the best reconstruction of a single frame.
 
-        Uses both forward and backward high-quality frames to
-        repair the current frame.
-
-        Args:
-            frame_idx: Frame to solve
-            canonical_shape: (H, W) of canonical face
-
-        Returns:
-            (reconstructed_face, confidence_map)
+        Beast-mode rule:
+        - Do NOT average multiple RGB frames together.
+        - Use the best reference frame to repair low-frequency appearance.
+        - Preserve high-frequency detail from the best available observation.
+        - Return a confidence map derived from support quality, not blur-prone averaging.
         """
         h, w = canonical_shape
 
@@ -165,61 +213,55 @@ class BidirectionalSolver:
 
         current = self._canonical_faces[frame_idx]
         current_quality = self._quality_maps.get(frame_idx, np.ones((h, w), dtype=np.float32) * 0.5)
-
-        # Find nearest HQ frames (forward and backward)
-        forward_hq = self._find_nearest_hq(frame_idx, direction='forward')
-        backward_hq = self._find_nearest_hq(frame_idx, direction='backward')
-
-        # If current frame is HQ, just use it
         fq = self._frame_qualities.get(frame_idx)
+
+        # If current frame is already high quality, keep it.
         if fq and fq.overall_quality >= 0.7:
-            return current, current_quality
+            return current, np.clip(current_quality, 0, 1).astype(np.float32)
 
-        # Accumulate weighted observations
-        accumulated = current.astype(np.float32) * current_quality[:, :, np.newaxis]
-        total_weight = current_quality.copy()
+        # Select the single best reference frame to avoid multi-frame blur accumulation.
+        best_ref = self._select_best_reference(frame_idx)
+        if best_ref is None or best_ref == frame_idx:
+            return current, np.clip(current_quality, 0, 1).astype(np.float32)
 
-        # Forward HQ frame contribution
-        if forward_hq is not None:
-            hq_face = self._canonical_faces.get(forward_hq)
-            hq_quality = self._quality_maps.get(forward_hq)
-            if hq_face is not None and hq_quality is not None:
-                # Weight: HQ quality / temporal distance
-                dist = abs(forward_hq - frame_idx)
-                temporal_weight = 1.0 / (1.0 + dist * 0.1)
+        ref_face = self._canonical_faces.get(best_ref)
+        ref_quality = self._quality_maps.get(best_ref)
+        if ref_face is None or ref_quality is None:
+            return current, np.clip(current_quality, 0, 1).astype(np.float32)
 
-                # Pose similarity bonus
-                pose_sim = self._pose_similarity(frame_idx, forward_hq)
-                weight = hq_quality * temporal_weight * pose_sim
+        # Quality-driven repair strength
+        best_quality_scalar = float(self._frame_qualities.get(best_ref).overall_quality) if self._frame_qualities.get(best_ref) else float(np.mean(ref_quality))
+        current_quality_scalar = float(fq.overall_quality) if fq is not None else float(np.mean(current_quality))
+        dist = abs(best_ref - frame_idx)
+        temporal_weight = float(np.exp(-dist / max(self.lookahead, self.lookback, 1)))
+        pose_sim = self._pose_similarity(frame_idx, best_ref)
+        repair_strength = np.clip(best_quality_scalar * temporal_weight * pose_sim, 0.0, 1.0)
 
-                accumulated += hq_face.astype(np.float32) * weight[:, :, np.newaxis]
-                total_weight += weight
+        # Preserve detail: mix low frequencies, keep high frequency from the best observation.
+        current_f = current.astype(np.float32)
+        ref_f = ref_face.astype(np.float32)
 
-        # Backward HQ frame contribution
-        if backward_hq is not None:
-            hq_face = self._canonical_faces.get(backward_hq)
-            hq_quality = self._quality_maps.get(backward_hq)
-            if hq_face is not None and hq_quality is not None:
-                dist = abs(backward_hq - frame_idx)
-                temporal_weight = 1.0 / (1.0 + dist * 0.1)
+        current_low = cv2.GaussianBlur(current_f, (0, 0), 2.0)
+        ref_low = cv2.GaussianBlur(ref_f, (0, 0), 2.0)
+        ref_high = ref_f - ref_low
 
-                pose_sim = self._pose_similarity(frame_idx, backward_hq)
-                weight = hq_quality * temporal_weight * pose_sim
+        # Repair low-frequency appearance mostly from the best reference.
+        low_mix = np.clip(0.2 + 0.8 * repair_strength, 0.0, 1.0)
+        repaired_low = current_low * (1.0 - low_mix) + ref_low * low_mix
 
-                accumulated += hq_face.astype(np.float32) * weight[:, :, np.newaxis]
-                total_weight += weight
+        # Keep the sharp detail from the best frame, but attenuate if reference is weak.
+        high_mix = np.clip(0.65 + 0.35 * repair_strength, 0.65, 1.0)
+        repaired_high = ref_high * high_mix
 
-        # Normalize
-        valid = total_weight > 0.01
-        result = np.zeros_like(accumulated)
-        if valid.any():
-            for c in range(3):
-                result[:, :, c][valid] = accumulated[:, :, c][valid] / total_weight[valid]
-
-        confidence = np.clip(total_weight, 0, 1).astype(np.float32)
+        result = repaired_low + repaired_high
         result = np.clip(result, 0, 255).astype(np.uint8)
 
+        # Confidence should reflect support, not pixel averaging.
+        confidence = np.maximum(current_quality, ref_quality * (0.5 + 0.5 * temporal_weight * pose_sim))
+        confidence = np.clip(confidence, 0, 1).astype(np.float32)
+
         return result, confidence
+
 
     def solve_all(
         self,

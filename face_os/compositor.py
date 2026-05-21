@@ -34,9 +34,10 @@ class Compositor:
         self._luma_ema: Optional[float] = None
         self._luma_alpha: float = 0.5  # EMA smoothing factor (higher = more responsive)
 
-    def reset(self):
-        """Reset temporal state between clips."""
+    def reset(self) -> None:
+        """Reset compositor state between clips."""
         self._luma_ema = None
+        self._feather_kernel = None
 
     def composite(
         self,
@@ -233,7 +234,3 @@ class Compositor:
             return cv2.cvtColor(tgt_lab, cv2.COLOR_LAB2BGR)
 
         return target
-
-    def reset(self) -> None:
-        """Reset compositor state."""
-        self._feather_kernel = None
