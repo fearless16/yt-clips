@@ -528,6 +528,7 @@ class IdentityState:
         self._anchor_low: Optional[np.ndarray] = None
         self._anchor_high: Optional[np.ndarray] = None
         self._anchor_lab: Optional[np.ndarray] = None
+        self._anchor_albedo: Optional[np.ndarray] = None  # I-05: lighting-invariant anchor
         self._anchor_strength = 0.35
         self._anchor_threshold = 25.0
 
@@ -558,6 +559,9 @@ class IdentityState:
         # V3: Compute intrinsic components for anchor
         reference_face_rgb = cv2.cvtColor(reference_face, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         self._anchor_intrinsic = self._intrinsic_decomposer.decompose(reference_face_rgb)
+
+        # I-05: Store anchor albedo separately (lighting-invariant)
+        self._anchor_albedo = self._normalize_white_balance(self._anchor_intrinsic.albedo)
 
     def _apply_anchor_correction(self) -> None:
         if self._anchor_low is None or self.belief is None:
@@ -828,6 +832,69 @@ class IdentityState:
 
         return identity, confidence
 
+    def query_albedo(
+        self,
+        quality_map: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Query lighting-invariant albedo identity.
+
+        I-05: Returns albedo (lighting-invariant) with anchor correction applied
+        in albedo space, NOT RGB space. This decouples identity from lighting.
+
+        Anchor correction flow:
+        1. Decompose current identity into intrinsic components
+        2. Extract albedo (lighting-invariant)
+        3. Apply white-balance normalization
+        4. Pull albedo toward anchor_albedo (not anchor_rgb)
+        5. Return corrected albedo + confidence
+
+        Args:
+            quality_map: Per-pixel quality (H, W) float32
+
+        Returns:
+            (albedo, confidence) both in canonical space, albedo in [0, 1] float32
+        """
+        if not self.is_initialized() or self._intrinsic_components is None:
+            h, w = quality_map.shape[:2]
+            return (
+                np.ones((h, w, 3), dtype=np.float32) * 0.5,
+                np.ones((h, w), dtype=np.float32) * 0.5,
+            )
+
+        # Get intrinsic albedo from last decomposition
+        albedo = self._intrinsic_components.albedo.copy()
+
+        # White-balance normalization (RULE 5)
+        albedo = self._normalize_white_balance(albedo)
+
+        # Anchor correction in albedo space (NOT RGB)
+        if self._anchor_albedo is not None:
+            anchor_mean = np.mean(self._anchor_albedo, axis=(0, 1))
+            albedo_mean = np.mean(albedo, axis=(0, 1))
+            drift = float(np.sqrt(np.sum((anchor_mean - albedo_mean) ** 2)))
+
+            if drift > 0.15:
+                lambda_base = cfg.identity_state.anchor_lambda_max
+            elif drift > 0.08:
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.93
+            elif drift > 0.03:
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.87
+            else:
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.80
+
+            lambda_clamped = np.clip(lambda_base, 0.60, cfg.identity_state.anchor_lambda_max)
+
+            # Pull albedo toward anchor albedo
+            albedo = (1 - lambda_clamped) * albedo + lambda_clamped * self._anchor_albedo
+            albedo = np.clip(albedo, 0, 1).astype(np.float32)
+
+        # Confidence from belief
+        base_confidence = self.belief.get_confidence()
+        current_quality = np.clip(quality_map, 0, 1).astype(np.float32)
+        confidence = base_confidence * (0.9 + 0.1 * current_quality)
+
+        return albedo, confidence
+
     def query_intrinsic(
         self,
         quality_map: np.ndarray,
@@ -836,6 +903,11 @@ class IdentityState:
 
         Returns intrinsic components (albedo, shading, specular, normals) + confidence.
         Used by PhysicalRenderer for physically-based rendering.
+
+        RULE 5: Returns albedo (lighting-invariant) separately from appearance.
+        This decouples identity from lighting.
+
+        I-05: Anchor correction is applied to albedo in albedo space (not RGB).
 
         Args:
             quality_map: Per-pixel quality (H, W) float32
@@ -850,12 +922,93 @@ class IdentityState:
         # Get intrinsic components from last update
         intrinsic = self._intrinsic_components
 
+        # RULE 5: Normalize albedo for white balance
+        # This ensures identity is lighting-invariant
+        normalized_albedo = self._normalize_white_balance(intrinsic.albedo)
+
+        # I-05: Apply anchor correction in albedo space
+        if self._anchor_albedo is not None:
+            anchor_mean = np.mean(self._anchor_albedo, axis=(0, 1))
+            albedo_mean = np.mean(normalized_albedo, axis=(0, 1))
+            drift = float(np.sqrt(np.sum((anchor_mean - albedo_mean) ** 2)))
+
+            if drift > 0.15:
+                lambda_base = cfg.identity_state.anchor_lambda_max
+            elif drift > 0.08:
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.93
+            elif drift > 0.03:
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.87
+            else:
+                lambda_base = cfg.identity_state.anchor_lambda_max * 0.80
+
+            lambda_clamped = np.clip(lambda_base, 0.60, cfg.identity_state.anchor_lambda_max)
+            normalized_albedo = (1 - lambda_clamped) * normalized_albedo + lambda_clamped * self._anchor_albedo
+            normalized_albedo = np.clip(normalized_albedo, 0, 1).astype(np.float32)
+
+        # Create corrected intrinsic copy with normalized albedo
+        from face_os.intrinsic_decomposition import IntrinsicComponents
+        corrected = IntrinsicComponents(
+            albedo=normalized_albedo,
+            shading=intrinsic.shading,
+            specular=intrinsic.specular,
+            normal_map=intrinsic.normal_map,
+            confidence=intrinsic.confidence,
+            reconstruction_error=intrinsic.reconstruction_error,
+            albedo_uncertainty=intrinsic.albedo_uncertainty,
+            shading_uncertainty=intrinsic.shading_uncertainty,
+            specular_uncertainty=intrinsic.specular_uncertainty,
+            decomposition_quality=intrinsic.decomposition_quality,
+        )
+
         # Compute confidence from quality map
         base_confidence = self.belief.get_confidence()
         current_quality = np.clip(quality_map, 0, 1).astype(np.float32)
         confidence = base_confidence * (0.9 + 0.1 * current_quality)
 
-        return intrinsic, confidence
+        return corrected, confidence
+
+    def _normalize_white_balance(self, albedo: np.ndarray) -> np.ndarray:
+        """Normalize albedo for white balance.
+
+        RULE 5: Removes color cast from lighting to isolate identity.
+        Uses gray-world assumption: mean of each channel should be equal.
+
+        Args:
+            albedo: Albedo map (H, W, 3) float32 [0, 1]
+
+        Returns:
+            White-balanced albedo (H, W, 3) float32 [0, 1]
+        """
+        # Gray-world white balance
+        mean_per_channel = np.mean(albedo, axis=(0, 1))
+        overall_mean = np.mean(mean_per_channel)
+        scale = overall_mean / (mean_per_channel + 1e-8)
+        normalized = albedo * scale[np.newaxis, np.newaxis, :]
+        return np.clip(normalized, 0, 1).astype(np.float32)
+
+    def _normalize_exposure(self, image: np.ndarray) -> np.ndarray:
+        """Normalize exposure to standard luminance.
+
+        RULE 5: Removes exposure variation from identity.
+
+        Args:
+            image: Image (H, W, 3) float32
+
+        Returns:
+            Exposure-normalized image (H, W, 3) float32
+        """
+        lab = cv2.cvtColor(
+            (np.clip(image, 0, 1) * 255).astype(np.uint8),
+            cv2.COLOR_BGR2LAB,
+        ).astype(np.float32)
+        L = lab[:, :, 0]
+        mean_L = np.mean(L)
+        target_L = 128.0  # Standard mid-gray
+        scale = target_L / (mean_L + 1e-8)
+        scale = np.clip(scale, 0.5, 2.0)
+        lab[:, :, 0] = np.clip(L * scale, 0, 255)
+        result = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+        return result.astype(np.float32) / 255.0
 
     def has_intrinsic(self) -> bool:
         """Check if intrinsic decomposition is available."""
@@ -956,4 +1109,5 @@ class IdentityState:
     def reset(self) -> None:
         self.belief = None
         self._pose_history.clear()
-        # anchor is preserved
+        self._intrinsic_components = None
+        # anchor is preserved (including _anchor_albedo)

@@ -22,6 +22,9 @@ from typing import Optional
 import numpy as np
 
 
+from face_os.lie_group import SIM2Transform
+
+
 @dataclass
 class StateEvolutionConfig:
     """Configuration for state evolution."""
@@ -283,6 +286,72 @@ class StateEvolution:
         updated_cov = IKH @ predicted_covariance @ IKH.T + K @ K.T
 
         return updated_cov
+
+    def predict_with_velocity(
+        self,
+        T_prev: 'SIM2Transform',
+        T_curr: 'SIM2Transform',
+    ) -> 'SIM2Transform':
+        """Constant-velocity prediction on SIM(2) using Lie algebra.
+
+        RULE 6: Implements T_hat(t+1) = T(t) * exp(v_t)
+        where v_t = log(T_t) - log(T_t-1)
+
+        This predicts the next transform by extrapolating the velocity
+        in Lie algebra space, then mapping back to the group.
+
+        Args:
+            T_prev: Previous transform T(t-1)
+            T_curr: Current transform T(t)
+
+        Returns:
+            Predicted transform T_hat(t+1)
+        """
+        # Velocity in Lie algebra: v_t = log(T_t) - log(T_{t-1})
+        v_prev = T_prev.log()
+        v_curr = T_curr.log()
+        velocity = v_curr - v_prev
+
+        # Predict: T_hat(t+1) = T(t) * exp(v_t)
+        T_velocity = SIM2Transform.exp(velocity)
+        T_predicted = T_curr.compose(T_velocity)
+
+        return T_predicted
+
+    def predict_update_full(
+        self,
+        state: np.ndarray,
+        covariance: np.ndarray,
+        observation: np.ndarray,
+        observation_matrix: np.ndarray,
+        observation_noise_cov: np.ndarray,
+    ) -> tuple:
+        """Full predict-update cycle.
+
+        RULE 6: StateEvolution must predict AND update (not just predict).
+
+        Args:
+            state: Current state
+            covariance: Current covariance
+            observation: Observation vector
+            observation_matrix: Observation matrix H
+            observation_noise_cov: Observation noise R
+
+        Returns:
+            (updated_state, updated_covariance)
+        """
+        # Predict
+        predicted_state = self.predict(state)
+        predicted_cov = self.predict_covariance(covariance)
+
+        # Update
+        innovation = self.compute_innovation(predicted_state, observation, observation_matrix)
+        S = self.compute_innovation_covariance(predicted_cov, observation_matrix, observation_noise_cov)
+        K = self.compute_kalman_gain(predicted_cov, observation_matrix, S)
+        updated_state = self.update_state(predicted_state, K, innovation)
+        updated_cov = self.update_covariance(predicted_cov, K, observation_matrix)
+
+        return updated_state, updated_cov
 
 
 @dataclass
