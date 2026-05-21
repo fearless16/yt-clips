@@ -369,7 +369,14 @@ class EnergyComputer:
                     diff = np.linalg.norm(
                         geo.canonical_transform - self.previous_geometry.canonical_transform
                     )
-                    transform_stability = max(0.0, 1.0 - diff)
+                    prev_norm = np.linalg.norm(self.previous_geometry.canonical_transform)
+                    if prev_norm > 1e-6:
+                        # Relative change: diff / prev_norm
+                        # Stability = 1.0 - relative_change (clamped to [0, 1])
+                        relative_change = diff / prev_norm
+                        transform_stability = max(0.0, 1.0 - relative_change)
+                    else:
+                        transform_stability = 1.0
                 except Exception:
                     transform_stability = 0.0
 

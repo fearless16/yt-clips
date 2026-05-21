@@ -110,9 +110,23 @@ def _estimate_pose_478(landmarks: Landmarks, frame_shape: Tuple[int, int]) -> No
         if success:
             rotation_mat, _ = cv2.Rodrigues(rotation_vec)
             angles, _, _, _, _, _ = cv2.RQDecomp3x3(rotation_mat)
-            landmarks.yaw = float(angles[1])
-            landmarks.pitch = float(angles[0])
-            landmarks.roll = float(angles[2])
+            yaw = float(angles[1])
+            pitch = float(angles[0])
+            roll = float(angles[2])
+
+            # Wrap-around fix: clamp pitch to [-90, 90] range
+            # RQDecomp3x3 can produce angles near ±180° due to Euler angle ambiguity
+            if abs(pitch) > 90:
+                if pitch > 0:
+                    pitch = 180.0 - pitch
+                else:
+                    pitch = -180.0 - pitch
+                # Flip yaw when pitch wraps
+                yaw = -yaw
+
+            landmarks.yaw = yaw
+            landmarks.pitch = pitch
+            landmarks.roll = roll
     except Exception:
         pass  # Keep default zeros
 
