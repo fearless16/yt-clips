@@ -184,6 +184,9 @@ class FaceOSPipeline:
         self._latent_state: Optional[np.ndarray] = None
         self._latent_covariance: Optional[np.ndarray] = None
 
+        # D-06: Per-frame belief storage (not global mutable cache)
+        self._frame_beliefs: dict = {}
+
         # V3: LieGroup transform state
         self._last_SIM2: Optional[SIM2Transform] = None
 
@@ -640,12 +643,14 @@ class FaceOSPipeline:
         print(f"    Solved {len(solved_faces)} frames, {hq_count} HQ frames")
 
         # Save forward pass's intrinsic state before bidirectional overwrites it
-        # D-06: Forward/bidirectional state separation
-        forward_intrinsic = None
-        forward_intrinsic_conf = None
+        # D-06: Per-frame belief storage (not global mutable cache)
+        self._frame_beliefs = {}
         if self.identity_state is not None and self.identity_state._intrinsic_components is not None:
-            forward_intrinsic = self.identity_state._intrinsic_components
-            forward_intrinsic_conf = float(np.mean(self.identity_state.belief.get_confidence())) if self.identity_state.belief is not None else 0.0
+            forward_conf = float(np.mean(self.identity_state.belief.get_confidence())) if self.identity_state.belief is not None else 0.0
+            self._frame_beliefs['forward'] = {
+                'intrinsic': self.identity_state._intrinsic_components,
+                'confidence': forward_conf,
+            }
 
         # Update identity state with solved faces (bidirectional refinement)
         for idx, (solved_face, solved_conf) in solved_faces.items():
@@ -677,16 +682,19 @@ class FaceOSPipeline:
                     self.patch_memory.update(solved_face, solved_conf, pose=pose, frame_idx=idx)
 
         # D-06: Merge forward and bidirectional intrinsic states
-        # Prefer highest confidence — never overwrite good state with worse
-        if (forward_intrinsic is not None
-            and self.identity_state._intrinsic_components is not None
-            and forward_intrinsic_conf is not None):
+        # Store bidirectional belief, then select best per-frame
+        if self.identity_state is not None and self.identity_state._intrinsic_components is not None:
             bidir_conf = float(np.mean(self.identity_state.belief.get_confidence())) if self.identity_state.belief is not None else 0.0
-            if forward_intrinsic_conf > bidir_conf:
-                # Forward state was better — restore it
-                self.identity_state._intrinsic_components = forward_intrinsic
-                if frame_idx % 30 == 0:
-                    print(f"    State merge: forward={forward_intrinsic_conf:.3f} > bidir={bidir_conf:.3f} — using forward")
+            self._frame_beliefs['bidirectional'] = {
+                'intrinsic': self.identity_state._intrinsic_components,
+                'confidence': bidir_conf,
+            }
+            # Select best belief (highest confidence)
+            forward_conf = self._frame_beliefs.get('forward', {}).get('confidence', 0.0)
+            if forward_conf > bidir_conf:
+                self._frame_beliefs['selected'] = self._frame_beliefs['forward']
+            else:
+                self._frame_beliefs['selected'] = self._frame_beliefs['bidirectional']
 
         # === PASS 3: Render ===
         print("  Pass 3/3: Rendering...")
@@ -714,6 +722,23 @@ class FaceOSPipeline:
                 solved_conf = None
                 if frame_idx in solved_faces:
                     solved_face, solved_conf = solved_faces[frame_idx]
+
+                # D-06: Update renderer mode in orchestration layer (not in render)
+                # This is the single source of truth for mode transitions
+                if USE_IDENTITY and self.identity_state is not None and self.identity_state.is_initialized():
+                    # Use selected belief (highest confidence from forward/bidirectional)
+                    selected = self._frame_beliefs.get('selected')
+                    if selected is not None:
+                        intrinsic_components = selected['intrinsic']
+                        # Use actual belief confidence, not fake tensor
+                        conf_scalar = selected['confidence']
+                        h, w = intrinsic_components.albedo.shape[:2]
+                        intrinsic_conf = np.ones((h, w), dtype=np.float32) * conf_scalar
+                    else:
+                        quality_map = self._compute_quality_map(solved_face, face_track.detection.confidence if face_track and face_track.detection else 0.5)
+                        intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
+                    
+                    self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx)
 
                 # Render frame
                 result = self._render_frame_v2(
@@ -1012,10 +1037,8 @@ class FaceOSPipeline:
                     # V3: Query intrinsic components
                     intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
                     
-                    # V3: Update renderer mode + state evolution (shared path)
-                    self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx, landmarks=landmarks, cropped=cropped)
-                    
                     # Render via shared _render_core
+                    # NOTE: Mode update happens in orchestration layer, not here
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
 
                     # Use _render_core for PhysicalRenderer → identity composite → enhance
