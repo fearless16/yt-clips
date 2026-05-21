@@ -1217,9 +1217,10 @@ class FaceOSPipeline:
         if intrinsic_components is not None:
             terms['E_photometric'] = float(intrinsic_components.decomposition_quality)
 
-        # Temporal energy: state evolution prediction error
-        if self._latent_state is not None:
-            terms['E_temporal'] = float(np.linalg.norm(self._latent_state))
+        # Temporal energy: state evolution prediction error (innovation)
+        # Use covariance trace as uncertainty measure, not raw state norm
+        if self._latent_covariance is not None:
+            terms['E_temporal'] = float(np.trace(self._latent_covariance))
 
         # Normalize all terms
         normalized_terms = {}
