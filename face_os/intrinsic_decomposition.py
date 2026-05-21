@@ -29,7 +29,7 @@ References:
 
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 from scipy.ndimage import gaussian_filter, laplace
@@ -136,19 +136,34 @@ class IntrinsicDecomposer:
         specular = max(0, Y - A * S)
     """
 
-    def __init__(self, config: Optional[DecompositionConfig] = None):
+    def __init__(self, config: Optional[DecompositionConfig] = None, use_mesh_normals: bool = True):
         """Initialize decomposer.
 
         Args:
             config: Decomposition configuration
+            use_mesh_normals: When True and mesh_478 is provided, derive normals
+                              from mesh geometry instead of shading gradients
         """
         self.config = config or DecompositionConfig()
+        self.use_mesh_normals = use_mesh_normals
+        self._normal_source = "mesh"  # "mesh" or "shading_gradient"
 
-    def decompose(self, image: np.ndarray) -> IntrinsicComponents:
+    def decompose(
+        self,
+        image: np.ndarray,
+        mesh_478: Optional[np.ndarray] = None,
+        warp_M: Optional[np.ndarray] = None,
+    ) -> IntrinsicComponents:
         """Decompose image into intrinsic components.
+
+        When mesh_478 is provided and use_mesh_normals is True, surface normals
+        are derived from mesh geometry instead of shading gradients, breaking
+        the circular shading→normals→shading dependency.
 
         Args:
             image: Input image (H, W, 3), float32, [0, 1]
+            mesh_478: Optional (478, 3) MediaPipe mesh for geometry normals
+            warp_M: Optional (2, 3) forward similarity warp (source→canonical)
 
         Returns:
             IntrinsicComponents with albedo, shading, specular, normals, confidence
@@ -158,17 +173,21 @@ class IntrinsicDecomposer:
 
         start_time = time.time()
 
-        # Step 1: Estimate illumination via bilateral filtering
+        # All paths need shading for albedo/specular estimation
         shading = self._estimate_shading(image)
-
-        # Step 2: Extract albedo via Retinex
         albedo = self._extract_albedo(image, shading)
-
-        # Step 3: Compute specular as residual
         specular = self._compute_specular(image, albedo, shading)
 
-        # Step 4: Estimate normals from shading gradient
-        normal_map = self._estimate_normals(shading)
+        # Step 4: Estimate normals — from mesh geometry or shading gradient
+        if (self.use_mesh_normals
+            and mesh_478 is not None
+            and len(mesh_478) >= 468
+            and warp_M is not None):
+            normal_map = self._estimate_normals_from_mesh(mesh_478, warp_M, image.shape[:2])
+            self._normal_source = "mesh"
+        else:
+            normal_map = self._estimate_normals(shading)
+            self._normal_source = "shading_gradient"
 
         # Step 5: Compute confidence
         confidence = self._compute_confidence(image, albedo, shading, specular)
@@ -200,6 +219,28 @@ class IntrinsicDecomposer:
             specular_uncertainty=specular_uncertainty.astype(np.float32),
             decomposition_quality=float(decomposition_quality),
         )
+
+    def _estimate_normals_from_mesh(
+        self,
+        mesh_478: np.ndarray,
+        warp_M: np.ndarray,
+        target_shape: Tuple[int, int],
+    ) -> np.ndarray:
+        """Estimate surface normals from MediaPipe 478-point mesh geometry.
+
+        Breaks the circular shading→normals→shading dependency by computing
+        normals from the 3D mesh topology (852 triangles) instead of shading gradients.
+
+        Args:
+            mesh_478: (478, 3) MediaPipe mesh in pixel+depth coordinates
+            warp_M: (2, 3) forward similarity transform (source→canonical)
+            target_shape: (H, W) of the canonical image
+
+        Returns:
+            (H, W, 3) normal map, unit vectors
+        """
+        from face_os.landmarks import mesh_normal_map
+        return mesh_normal_map(mesh_478, warp_M, target_shape[::-1])
 
     def _estimate_shading(self, image: np.ndarray) -> np.ndarray:
         """Estimate illumination via bilateral filtering.

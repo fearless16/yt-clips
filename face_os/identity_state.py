@@ -617,6 +617,8 @@ class IdentityState:
         face_bbox: Optional[Tuple[int, int, int, int]] = None,
         landmarks_pts: Optional[np.ndarray] = None,
         embedding: Optional[np.ndarray] = None,
+        mesh_478: Optional[np.ndarray] = None,
+        warp_M: Optional[np.ndarray] = None,
     ) -> bool:
         """Update identity state with new observation.
 
@@ -630,6 +632,8 @@ class IdentityState:
             face_bbox: (x, y, w, h) bounding box for verification
             landmarks_pts: (N, 2) or (N, 3) landmark coordinates for liveness
             embedding: Face embedding for identity check
+            mesh_478: Optional (478, 3) MediaPipe mesh for geometry normals
+            warp_M: Optional (2, 3) forward warp for normal projection
 
         Returns:
             True if update was applied, False if rejected by verification gate
@@ -669,8 +673,12 @@ class IdentityState:
         self.belief.update(low, high, quality_map, pose, region_mask=final_region_mask)
 
         # V3: Compute intrinsic decomposition for this frame
+        # Uses mesh-derived normals when mesh_478 + warp_M are available
         canonical_face_rgb = cv2.cvtColor(canonical_face, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        self._intrinsic_components = self._intrinsic_decomposer.decompose(canonical_face_rgb)
+        self._intrinsic_components = self._intrinsic_decomposer.decompose(
+            canonical_face_rgb, mesh_478=mesh_478, warp_M=warp_M,
+        )
+        self._normal_source = self._intrinsic_decomposer._normal_source
 
         # Anchor correction removed from update - only apply at query time to preserve raw telemetry
 
@@ -852,6 +860,15 @@ class IdentityState:
     def has_intrinsic(self) -> bool:
         """Check if intrinsic decomposition is available."""
         return self._intrinsic_components is not None
+
+    def get_normal_source(self) -> str:
+        """Get the source of surface normals from last decomposition.
+
+        Returns:
+            "mesh" if derived from 478-point mesh geometry,
+            "shading_gradient" if derived from shading (circular fallback)
+        """
+        return getattr(self, '_normal_source', 'mesh')
 
     def get_anchor_intrinsic(self) -> Optional['IntrinsicComponents']:
         """Get intrinsic components for anchor face."""

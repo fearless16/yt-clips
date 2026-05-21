@@ -211,6 +211,8 @@ def main():
             "renderer_mode_distribution", "avg_intrinsic_confidence",
             "avg_decomposition_error", "physical_render_rate", "alpha_fallback_rate",
             "intrinsic_success_rate", "intrinsic_failure_rate",
+            "mesh_normal_rate", "shading_normal_rate",
+            "mesh_normal_frames", "shading_normal_frames",
         ]
         missing = [k for k in expected_keys if k not in report]
         p9 = len(missing) == 0
@@ -221,6 +223,12 @@ def main():
         alpha_rate = report.get("alpha_fallback_rate", 0)
         p10 = alpha_rate < 0.5
         results.append(("V3-10 PhysicalRenderer dominant", f"Alpha fallback rate: {alpha_rate:.1%}", p10))
+
+        # Claim 11: Mesh-derived normals used (not shading-gradient circular)
+        mesh_rate = report.get("mesh_normal_rate", 0)
+        p11 = mesh_rate > 0.5
+        results.append(("V3-11 Geometry normals break circularity",
+                       f"Mesh normal rate: {mesh_rate:.1%} (vs {report.get('shading_normal_rate', 0):.1%} shading)", p11))
 
         # Print dashboard
         for claim_id, description, passed in results:

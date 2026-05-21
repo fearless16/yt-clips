@@ -189,9 +189,12 @@ class VisibilityCalibrator:
         metrics = metrics[-n:]
         truths = truths[-n:]
 
-        # Compute correlation
-        correlation = np.corrcoef(metrics, truths)[0, 1]
-        return float(correlation) if not np.isnan(correlation) else 0.0
+        # Compute correlation (suppress NaN warning from constant inputs)
+        with np.errstate(invalid='ignore'):
+            correlation = np.corrcoef(metrics, truths)[0, 1]
+        if np.isnan(correlation):
+            return 0.0
+        return float(correlation)
 
     def _compute_calibration_score(self, metric_name: str) -> float:
         """Compute calibration score.

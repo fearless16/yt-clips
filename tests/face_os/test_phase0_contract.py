@@ -66,8 +66,6 @@ class TestFrameContract:
         contract = FrameContract()
         frame = np.zeros((1920, 1080, 3), dtype=np.float32)
         frame[0, 0, 0] = np.nan
-        # Need to convert to uint8 first to test
-        frame_uint8 = np.clip(frame, 0, 255).astype(np.uint8)
         # NaN becomes 0 in uint8, so test with float contract
         contract_float = FrameContract(expected_dtype="float32", allow_nan=False)
         passed, reason = contract_float.validate(frame)

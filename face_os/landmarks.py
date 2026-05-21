@@ -9,6 +9,7 @@ Extracts facial landmarks and derives:
 V4: Uses MediaPipe 478-point mesh directly. NO DLIB.
 """
 
+from functools import lru_cache
 from typing import Optional, Tuple
 
 import cv2
@@ -211,3 +212,144 @@ def _elliptical_mask(h: int, w: int, cy: int, cx: int, ry: int, rx: int) -> np.n
     k = max(int(min(rx, ry) * 0.4) | 1, 3)
     mask = cv2.GaussianBlur(mask, (k, k), max(k / 3, 1.0))
     return np.clip(mask, 0, 1)  # GaussianBlur can produce values > 1
+
+
+# ─── Mesh-derived surface normals ─────────────────────────────────────────────
+
+_MESH_TRIANGLES: Optional[np.ndarray] = None
+
+
+def _get_mesh_triangles() -> np.ndarray:
+    """Get (852, 3) triangle vertex indices from MediaPipe 478-point mesh topology.
+
+    MediaPipe FACEMESH_TESSELATION provides 2556 edges, organized as
+    852 consecutive triples, each forming a triangle.
+    """
+    global _MESH_TRIANGLES
+    if _MESH_TRIANGLES is not None:
+        return _MESH_TRIANGLES
+    from mediapipe.tasks.python.vision.face_landmarker import FaceLandmarksConnections
+    connections = list(FaceLandmarksConnections.FACE_LANDMARKS_TESSELATION)
+    triangles = np.array([
+        (connections[i].start, connections[i + 1].start, connections[i + 2].start)
+        for i in range(0, len(connections), 3)
+    ], dtype=np.int32)
+    _MESH_TRIANGLES = triangles
+    return _MESH_TRIANGLES
+
+
+def compute_vertex_normals(mesh_478: np.ndarray) -> np.ndarray:
+    """Compute per-vertex surface normals from MediaPipe 478-point mesh.
+
+    Uses the known 852-triangle topology of the MediaPipe face mesh.
+    Normals are area-weighted (larger triangles contribute more to vertex normal).
+
+    Args:
+        mesh_478: (478, 3) array of (x, y, z) pixel+depth coordinates
+
+    Returns:
+        (478, 3) array of unit normal vectors in camera coordinate space
+    """
+    triangles = _get_mesh_triangles()
+
+    v0 = mesh_478[triangles[:, 0]]
+    v1 = mesh_478[triangles[:, 1]]
+    v2 = mesh_478[triangles[:, 2]]
+
+    # Face normals via cross product of triangle edges
+    e1 = v1 - v0
+    e2 = v2 - v0
+    face_normals = np.cross(e1, e2)
+    face_norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
+    face_normals = face_normals / (face_norms + 1e-10)
+
+    # Area-weighted vertex normals
+    vertex_normals = np.zeros((478, 3), dtype=np.float32)
+    weights = np.zeros(478, dtype=np.float32)
+    for i in range(len(triangles)):
+        w = face_norms[i, 0]
+        a, b, c = int(triangles[i, 0]), int(triangles[i, 1]), int(triangles[i, 2])
+        vertex_normals[a] += face_normals[i] * w
+        vertex_normals[b] += face_normals[i] * w
+        vertex_normals[c] += face_normals[i] * w
+        weights[a] += w
+        weights[b] += w
+        weights[c] += w
+
+    vertex_normals = vertex_normals / (weights[:, np.newaxis] + 1e-10)
+    norms = np.linalg.norm(vertex_normals, axis=1, keepdims=True)
+    vertex_normals = vertex_normals / (norms + 1e-10)
+
+    return vertex_normals
+
+
+def mesh_normal_map(
+    mesh_478: np.ndarray,
+    warp_M: np.ndarray,
+    canonical_size: Tuple[int, int] = (256, 256),
+) -> np.ndarray:
+    """Create dense normal map in canonical space from 478-point mesh.
+
+    Breaks the circular shading→normals→shading dependency by deriving
+    surface normals directly from the MediaPipe 478-point 3D mesh topology
+    instead of shading gradients.
+
+    Pipeline:
+      1. Compute per-vertex normals from mesh_478 triangle topology
+      2. Project mesh vertices to canonical positions using warp_M (forward warp)
+      3. Rotate vertex normals by the rotation component of the similarity warp
+      4. Interpolate dense (256, 256) normal map via Delaunay barycentric
+
+    Args:
+        mesh_478: (478, 3) mesh in pixel+depth coordinates
+        warp_M: (2, 3) forward similarity transform (source → canonical)
+        canonical_size: (w, h) of output normal map
+
+    Returns:
+        (h, w, 3) normal map, unit vectors, or zeros if mesh is invalid
+    """
+    h, w = canonical_size
+
+    if mesh_478 is None or len(mesh_478) < 468:
+        return np.zeros((h, w, 3), dtype=np.float32)
+
+    vertex_normals = compute_vertex_normals(mesh_478)
+
+    # Project mesh vertices to canonical positions using forward warp M
+    pts_2d = mesh_478[:, :2].astype(np.float32)
+    canonical_pts = cv2.transform(pts_2d.reshape(1, -1, 2), warp_M).reshape(-1, 2)
+
+    # Rotate normals by the similarity rotation component
+    s = np.sqrt(warp_M[0, 0] ** 2 + warp_M[1, 0] ** 2)
+    if s > 1e-6:
+        cos_t, sin_t = warp_M[0, 0] / s, warp_M[1, 0] / s
+        nx = cos_t * vertex_normals[:, 0] - sin_t * vertex_normals[:, 1]
+        ny = sin_t * vertex_normals[:, 0] + cos_t * vertex_normals[:, 1]
+        rotated_normals = np.stack([nx, ny, vertex_normals[:, 2]], axis=1)
+    else:
+        rotated_normals = vertex_normals
+
+    # Filter valid points (within canonical bounds)
+    valid = (
+        (canonical_pts[:, 0] >= 0) & (canonical_pts[:, 0] < w - 1) &
+        (canonical_pts[:, 1] >= 0) & (canonical_pts[:, 1] < h - 1)
+    )
+    if not np.any(valid):
+        return np.zeros((h, w, 3), dtype=np.float32)
+
+    pts_valid = canonical_pts[valid]
+    norms_valid = rotated_normals[valid]
+
+    # Interpolate dense normal map via Delaunay barycentric interpolation
+    from scipy.interpolate import griddata
+    xi, yi = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    normal_map = np.zeros((h, w, 3), dtype=np.float32)
+    for c in range(3):
+        interp = griddata(pts_valid, norms_valid[:, c], (xi, yi), method='linear')
+        normal_map[:, :, c] = np.nan_to_num(interp, nan=0.0)
+
+    # Renormalize to unit vectors
+    norms = np.linalg.norm(normal_map, axis=2, keepdims=True)
+    normal_map = normal_map / (norms + 1e-10)
+
+    return normal_map
