@@ -29,10 +29,10 @@ References:
 
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, laplace
+from scipy.ndimage import gaussian_filter
 
 
 @dataclass
@@ -136,19 +136,34 @@ class IntrinsicDecomposer:
         specular = max(0, Y - A * S)
     """
 
-    def __init__(self, config: Optional[DecompositionConfig] = None):
+    def __init__(self, config: Optional[DecompositionConfig] = None, use_mesh_normals: bool = True):
         """Initialize decomposer.
 
         Args:
             config: Decomposition configuration
+            use_mesh_normals: When True and mesh_478 is provided, derive normals
+                              from mesh geometry instead of shading gradients
         """
         self.config = config or DecompositionConfig()
+        self.use_mesh_normals = use_mesh_normals
+        self._normal_source = "mesh"  # "mesh" or "shading_gradient"
 
-    def decompose(self, image: np.ndarray) -> IntrinsicComponents:
+    def decompose(
+        self,
+        image: np.ndarray,
+        mesh_478: Optional[np.ndarray] = None,
+        warp_M: Optional[np.ndarray] = None,
+    ) -> IntrinsicComponents:
         """Decompose image into intrinsic components.
+
+        When mesh_478 is provided and use_mesh_normals is True, surface normals
+        are derived from mesh geometry instead of shading gradients, breaking
+        the circular shading→normals→shading dependency.
 
         Args:
             image: Input image (H, W, 3), float32, [0, 1]
+            mesh_478: Optional (478, 3) MediaPipe mesh for geometry normals
+            warp_M: Optional (2, 3) forward similarity warp (source→canonical)
 
         Returns:
             IntrinsicComponents with albedo, shading, specular, normals, confidence
@@ -158,17 +173,21 @@ class IntrinsicDecomposer:
 
         start_time = time.time()
 
-        # Step 1: Estimate illumination via bilateral filtering
+        # All paths need shading for albedo/specular estimation
         shading = self._estimate_shading(image)
-
-        # Step 2: Extract albedo via Retinex
         albedo = self._extract_albedo(image, shading)
-
-        # Step 3: Compute specular as residual
         specular = self._compute_specular(image, albedo, shading)
 
-        # Step 4: Estimate normals from shading gradient
-        normal_map = self._estimate_normals(shading)
+        # Step 4: Estimate normals — from mesh geometry or shading gradient
+        if (self.use_mesh_normals
+            and mesh_478 is not None
+            and len(mesh_478) >= 468
+            and warp_M is not None):
+            normal_map = self._estimate_normals_from_mesh(mesh_478, warp_M, image.shape[:2])
+            self._normal_source = "mesh"
+        else:
+            normal_map = self._estimate_normals(shading)
+            self._normal_source = "face_prior"
 
         # Step 5: Compute confidence
         confidence = self._compute_confidence(image, albedo, shading, specular)
@@ -200,6 +219,28 @@ class IntrinsicDecomposer:
             specular_uncertainty=specular_uncertainty.astype(np.float32),
             decomposition_quality=float(decomposition_quality),
         )
+
+    def _estimate_normals_from_mesh(
+        self,
+        mesh_478: np.ndarray,
+        warp_M: np.ndarray,
+        target_shape: Tuple[int, int],
+    ) -> np.ndarray:
+        """Estimate surface normals from MediaPipe 478-point mesh geometry.
+
+        Breaks the circular shading→normals→shading dependency by computing
+        normals from the 3D mesh topology (852 triangles) instead of shading gradients.
+
+        Args:
+            mesh_478: (478, 3) MediaPipe mesh in pixel+depth coordinates
+            warp_M: (2, 3) forward similarity transform (source→canonical)
+            target_shape: (H, W) of the canonical image
+
+        Returns:
+            (H, W, 3) normal map, unit vectors
+        """
+        from face_os.landmarks import mesh_normal_map
+        return mesh_normal_map(mesh_478, warp_M, target_shape[::-1])
 
     def _estimate_shading(self, image: np.ndarray) -> np.ndarray:
         """Estimate illumination via bilateral filtering.
@@ -304,37 +345,47 @@ class IntrinsicDecomposer:
         return specular
 
     def _estimate_normals(self, shading: np.ndarray) -> np.ndarray:
-        """Estimate surface normals from shading gradient.
+        """Estimate surface normals using a deterministic face-prior model.
 
-        Normal = normalize([-dS/dx, -dS/dy, 1])
+        BREAKS CIRCULARITY: Does NOT use shading gradients.
+        Uses a fixed ellipsoidal face-prior normal map based on canonical face geometry.
+        This is deterministic and brightness-invariant.
 
         Args:
-            shading: Shading estimate (H, W, 1)
+            shading: Shading estimate (H, W, 1) — used only for shape
 
         Returns:
             Normal map (H, W, 3), unit vectors
         """
-        shading_2d = shading[:, :, 0]
+        h, w = shading.shape[:2]
+        cy, cx = h / 2, w / 2
+        ry, rx = h * 0.45, w * 0.40
 
-        # Compute gradients
-        dy, dx = np.gradient(shading_2d)
+        Y, X = np.ogrid[:h, :w]
+        # Normalized coordinates [-1, 1]
+        nx = (X - cx) / max(rx, 1)
+        ny = (Y - cy) / max(ry, 1)
 
-        # Normal = [-dx, -dy, 1] (scaled)
-        scale = self.config.normal_scale
-        nx = -dx * scale
-        ny = -dy * scale
-        nz = np.ones_like(dx)
+        # Ellipsoidal face prior: z = sqrt(1 - x^2 - y^2)
+        r2 = nx**2 + ny**2
+        nz = np.sqrt(np.maximum(0, 1.0 - r2))
+
+        # Normal = [dx, dy, dz] for ellipsoid
+        # For ellipsoid x^2/a^2 + y^2/b^2 + z^2/c^2 = 1, normal is proportional to (x/a^2, y/b^2, z/c^2)
+        normal_x = nx / max(rx, 1)
+        normal_y = ny / max(ry, 1)
+        normal_z = nz / max(min(rx, ry), 1)
 
         # Normalize to unit vectors
-        norms = np.sqrt(nx**2 + ny**2 + nz**2)
-        nx = nx / (norms + 1e-8)
-        ny = ny / (norms + 1e-8)
-        nz = nz / (norms + 1e-8)
+        norms = np.sqrt(normal_x**2 + normal_y**2 + normal_z**2)
+        normal_x = normal_x / (norms + 1e-8)
+        normal_y = normal_y / (norms + 1e-8)
+        normal_z = normal_z / (norms + 1e-8)
 
         # Stack to (H, W, 3)
-        normal_map = np.stack([nx, ny, nz], axis=2)
+        normal_map = np.stack([normal_x, normal_y, normal_z], axis=2)
 
-        return normal_map
+        return normal_map.astype(np.float32)
 
     def _compute_confidence(
         self,

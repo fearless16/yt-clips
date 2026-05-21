@@ -641,6 +641,78 @@ class TestLandmarkCropConsistency:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# BUG CLASS H: Render Core — All paths must use _render_core
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestRenderCoreUsage:
+    """Both _process_frame_v2() and _render_frame_v2() must call _render_core().
+
+    _render_core() is the SINGLE source of truth for all rendering logic.
+    NO rendering logic may exist outside it.
+    """
+
+    def test_pipeline_has_render_core_method(self):
+        """FaceOSPipeline must have _render_core and _composite_identity_to_crop methods."""
+        from face_os.pipeline import FaceOSPipeline
+        assert hasattr(FaceOSPipeline, '_render_core'), "Missing _render_core"
+        assert hasattr(FaceOSPipeline, '_composite_identity_to_crop'), "Missing _composite_identity_to_crop"
+        assert callable(getattr(FaceOSPipeline, '_render_core')), "_render_core not callable"
+
+    def test_process_frame_v2_calls_render_core(self):
+        """_process_frame_v2 must contain a call to _render_core."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        source = inspect.getsource(FaceOSPipeline._process_frame_v2)
+        assert 'self._render_core(' in source, (
+            "_process_frame_v2 does not call _render_core"
+        )
+        assert 'self._composite_identity_to_crop(' not in source, (
+            "_process_frame_v2 directly calls _composite_identity_to_crop — must go through _render_core"
+        )
+        assert 'self._render_with_physical_renderer(' not in source, (
+            "_process_frame_v2 directly calls _render_with_physical_renderer — must go through _render_core"
+        )
+
+    def test_render_frame_v2_calls_render_core(self):
+        """_render_frame_v2 must contain a call to _render_core (not inline rendering)."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        source = inspect.getsource(FaceOSPipeline._render_frame_v2)
+        assert 'self._render_core(' in source, (
+            "_render_frame_v2 does not call _render_core"
+        )
+        # Must NOT contain warp+blend rendering logic (duplicated from _render_core)
+        assert 'self._composite_identity_to_crop(' not in source, (
+            "_render_frame_v2 directly calls _composite_identity_to_crop — must go through _render_core"
+        )
+        assert 'self._render_with_physical_renderer(' not in source, (
+            "_render_frame_v2 directly calls _render_with_physical_renderer — must go through _render_core"
+        )
+
+    def test_render_core_has_no_duplicate_paths(self):
+        """_render_core must contain the PhysicalRenderer dispatch and identity composite logic."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        source = inspect.getsource(FaceOSPipeline._render_core)
+        # Must contain PhysicalRenderer condition
+        assert 'RendererMode.PHYSICAL' in source or 'PHYSICAL' in source, (
+            "_render_core missing PhysicalRenderer dispatch"
+        )
+        # Must contain identity composite call
+        assert 'self._composite_identity_to_crop(' in source, (
+            "_render_core missing _composite_identity_to_crop call"
+        )
+
+    def test_telemetry_incremented_in_render_core(self):
+        """_render_core must track physical_render_frames and alpha_fallback_frames."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        source = inspect.getsource(FaceOSPipeline._render_core)
+        assert 'physical_render_frames' in source, "_render_core missing physical_render_frames telemetry"
+        assert 'alpha_fallback_frames' in source, "_render_core missing alpha_fallback_frames telemetry"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # BUG CLASS G: EMA Smoothing Stability
 # ═══════════════════════════════════════════════════════════════════════════════
 

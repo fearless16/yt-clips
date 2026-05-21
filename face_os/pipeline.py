@@ -71,6 +71,7 @@ from face_os.intrinsic_decomposition import IntrinsicComponents
 from face_os.lie_group import SIM2Transform, interpolate_sim2
 from face_os.renderer_mode import RendererMode, RendererModeState
 from face_os.state_evolution import StateEvolution
+from face_os.energy_scaling import EnergyScaler
 
 
 cfg = get_config()
@@ -153,6 +154,15 @@ class FaceOSPipeline:
         # V3: LieGroup transform state
         self._last_SIM2: Optional[SIM2Transform] = None
 
+        # V3.1: Energy scaler for normalized energy terms (I-07: default-on)
+        energy_cfg = getattr(cfg, 'energy', None)
+        self._normalize_energy = getattr(energy_cfg, 'normalize_energy', True) if energy_cfg else True
+        self._energy_method = getattr(energy_cfg, 'normalization_method', 'zscore') if energy_cfg else 'zscore'
+        from face_os.energy_scaling import EnergyScalingConfig
+        self.energy_scaler = EnergyScaler(EnergyScalingConfig(
+            normalization_method=self._energy_method if self._normalize_energy else 'none',
+        ))
+
         # V3: Runtime telemetry — tracks which paths are actually used
         self._telemetry = {
             "total_frames": 0,
@@ -173,6 +183,13 @@ class FaceOSPipeline:
             "intrinsic_confidence_count": 0,
             "decomposition_error_sum": 0.0,
             "decomposition_error_count": 0,
+            "mesh_normal_frames": 0,
+            "shading_normal_frames": 0,
+            # RULE 8: Fallback reason tracking
+            "fallback_reason_distribution": {},
+            # RULE 8: Timing telemetry
+            "render_time_sum_ms": 0.0,
+            "render_time_count": 0,
         }
 
     @staticmethod
@@ -233,6 +250,8 @@ class FaceOSPipeline:
                 "intrinsic_failure_rate": 0.0,
                 "avg_intrinsic_confidence": 0.0,
                 "avg_decomposition_error": 0.0,
+                "mesh_normal_rate": 0.0,
+                "shading_normal_rate": 0.0,
             }
 
         # Compute averages
@@ -250,14 +269,34 @@ class FaceOSPipeline:
                 / self._telemetry["decomposition_error_count"]
             )
 
+        # Compute fallback reason distribution as fractions
+        physical = self._telemetry["physical_render_frames"]
+        alpha = self._telemetry["alpha_fallback_frames"]
+        total_render = physical + alpha if (physical + alpha) > 0 else 1
+
+        mesh_normal = self._telemetry["mesh_normal_frames"]
+        shading_normal = self._telemetry["shading_normal_frames"]
+        total_normal = mesh_normal + shading_normal if (mesh_normal + shading_normal) > 0 else 1
+
         return {
             **self._telemetry,
-            "physical_render_rate": self._telemetry["physical_render_frames"] / total,
-            "alpha_fallback_rate": self._telemetry["alpha_fallback_frames"] / total,
+            "physical_render_rate": physical / total,
+            "alpha_fallback_rate": alpha / total,
             "intrinsic_success_rate": self._telemetry["intrinsic_success_frames"] / total,
             "intrinsic_failure_rate": self._telemetry["intrinsic_failure_frames"] / total,
             "avg_intrinsic_confidence": avg_intrinsic_confidence,
             "avg_decomposition_error": avg_decomposition_error,
+            "physical_render_fraction": physical / total_render,
+            "alpha_fallback_fraction": alpha / total_render,
+            "mesh_normal_rate": mesh_normal / total_normal,
+            "shading_normal_rate": shading_normal / total_normal,
+            # RULE 8: Timing telemetry
+            "avg_render_time_ms": (
+                self._telemetry["render_time_sum_ms"]
+                / max(self._telemetry["render_time_count"], 1)
+            ),
+            # RULE 7: Energy scaler stats
+            "energy_scaler_stats": self.energy_scaler.get_stats(),
         }
 
     def enroll(
@@ -751,11 +790,14 @@ class FaceOSPipeline:
                 embedding = face_track.detection.embedding if face_track.detection else None
 
                 # Update with verification gate
+                mesh_478 = getattr(face_track, 'mesh_478', None)
                 self.identity_state.update(
                     canonical_face, masked_quality, pose=pose,
                     face_bbox=face_bbox,
                     landmarks_pts=landmarks_pts,
                     embedding=embedding,
+                    mesh_478=mesh_478,
+                    warp_M=M[:2] if M is not None else None,
                 )
 
         # 5. Patch memory update (skip if USE_IDENTITY=False)
@@ -779,21 +821,6 @@ class FaceOSPipeline:
             # V3: Query intrinsic components
             intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
 
-            # Track intrinsic decomposition success for telemetry
-            if intrinsic_components is not None:
-                self._telemetry["intrinsic_success_frames"] += 1
-                avg_conf = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
-                self._telemetry["intrinsic_confidence_sum"] += avg_conf
-                self._telemetry["intrinsic_confidence_count"] += 1
-                self._telemetry["decomposition_error_sum"] += intrinsic_components.reconstruction_error
-                self._telemetry["decomposition_error_count"] += 1
-            else:
-                self._telemetry["intrinsic_failure_frames"] += 1
-                reason = "identity_not_initialized" if not self.identity_state.is_initialized() else "decomposition_failed"
-                self._telemetry["intrinsic_failure_reasons"][reason] = (
-                    self._telemetry["intrinsic_failure_reasons"].get(reason, 0) + 1
-                )
-
         # 7. Crop planning
         crop_plan = self.crop.plan_crop(frame.shape[:2], face_track, landmarks)
         cropped = crop_planner.apply_crop(frame, crop_plan)
@@ -807,29 +834,8 @@ class FaceOSPipeline:
                 region_masks = lm_module.create_region_masks(adjusted_lm, cropped.shape[:2])
                 face_mask = region_masks.get("face")
 
-        # V3: Update renderer mode state based on intrinsic availability
-        if USE_IDENTITY and self.renderer_mode_state is not None:
-            intrinsic_available = intrinsic_components is not None
-            avg_confidence = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
-            decomposition_error = intrinsic_components.reconstruction_error if intrinsic_components is not None else 1.0
-
-            renderer_mode = self.renderer_mode_state.update(
-                intrinsic_available=intrinsic_available,
-                intrinsic_confidence=avg_confidence,
-                decomposition_error=decomposition_error,
-            )
-            self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
-            self._telemetry["renderer_mode_distribution"][renderer_mode.value] += 1
-
-            if self.renderer_mode_state.transition_count > 0 and frame_idx % 30 == 0:
-                print(f"  Frame {frame_idx}: renderer_mode={renderer_mode.value} "
-                      f"confidence={avg_confidence:.3f} "
-                      f"transitions={self.renderer_mode_state.transition_count}")
-
-        # V3: Update state evolution model
-        if USE_IDENTITY and self.state_evolution is not None and self._latent_state is not None:
-            self._latent_state = self.state_evolution.predict(self._latent_state)
-            self._latent_covariance = self.state_evolution.predict_covariance(self._latent_covariance)
+        # V3: Update renderer mode + state evolution (shared path)
+        self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx)
 
         # 9. Get identity eyes for structure-preserving rendering (skip if USE_IDENTITY=False)
         identity_eyes = None
@@ -842,87 +848,21 @@ class FaceOSPipeline:
                 identity_eyes = left_eye
                 eye_confidence = (left_conf + right_conf) / 2
 
-        # 10. Render — V3 physical path or legacy enhancement
-        if (USE_IDENTITY
-            and intrinsic_components is not None
-            and self.physical_renderer is not None
-            and self.renderer_mode_state is not None
-            and self.renderer_mode_state.current_mode in [RendererMode.PHYSICAL, RendererMode.HYBRID]
-            and landmarks is not None):
-            result = self._render_with_physical_renderer(
-                frame, cropped, intrinsic_components, intrinsic_conf,
-                landmarks, crop_plan, frame_idx, region_masks,
-            )
-            if result is not None:
-                self._telemetry["physical_render_frames"] += 1
-                return result
-
-        # 11. Fallback: legacy rendering + identity compositing
-        enhancement_mask = None
-        if region_masks:
-            enhancement_mask = face_enhance._create_enhancement_mask(region_masks, cropped.shape)
-
-        rendered = face_enhance.render_frame(
-            cropped, enhancement_mask, region_masks,
+        # 10. Render — shared rendering core (PhysicalRenderer → identity composite → enhance)
+        output = self._render_core(
+            cropped=cropped,
+            source_frame=frame,
+            intrinsic_components=intrinsic_components,
+            intrinsic_conf=intrinsic_conf,
+            identity_face=identity_face,
+            landmarks=landmarks,
+            crop_plan=crop_plan,
+            region_masks=region_masks,
+            face_mask=face_mask,
+            frame_idx=frame_idx,
             identity_eyes=identity_eyes,
             eye_confidence=eye_confidence,
         )
-
-        # 12. Composite — USE IDENTITY FACE, NOT RENDERED
-        if identity_face is not None and face_mask is not None and landmarks is not None:
-            try:
-                adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
-                if adjusted_lm:
-                    _, _, M = canonical_map.warp_to_canonical(cropped, adjusted_lm)
-                    M_inv = np.linalg.inv(M)[:2]
-
-                    # V3: LieGroup geodesic interpolation (replaces linear EMA)
-                    current_sim2 = self._affine_to_sim2(M_inv)
-                    if self._last_SIM2 is not None:
-                        interpolated = interpolate_sim2(self._last_SIM2, current_sim2, 0.6)
-                        M_inv = self._sim2_to_affine(interpolated)
-                    self._last_SIM2 = current_sim2
-
-                    identity_in_crop = cv2.warpAffine(
-                        identity_face, M_inv, (cropped.shape[1], cropped.shape[0]),
-                        flags=cv2.INTER_LANCZOS4,
-                        borderMode=cv2.BORDER_REFLECT,
-                    )
-                    
-                    canonical_mask = self._make_canonical_geometry_mask(identity_face.shape[:2])
-                    aligned_mask = cv2.warpAffine(
-                        canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
-                        flags=cv2.INTER_LINEAR,
-                        borderMode=cv2.BORDER_CONSTANT,
-                        borderValue=0,
-                    )
-                    aligned_mask = np.clip(aligned_mask, 0, 1)
-
-                    conf = identity_confidence if identity_confidence is not None else np.ones((256, 256), dtype=np.float32) * 0.3
-                    if conf.shape[:2] != cropped.shape[:2]:
-                        conf = cv2.resize(conf, (cropped.shape[1], cropped.shape[0]))
-                    
-                    blend_weight = aligned_mask
-                    
-                    if frame_idx % 30 == 0:
-                        face_pixels = aligned_mask > 0.5
-                        if face_pixels.sum() > 0:
-                            face_blend = float(blend_weight[face_pixels].mean())
-                        else:
-                            face_blend = 0.0
-                        print(f"  Frame {frame_idx}: blend_weight face_mean={face_blend:.3f} identity_diff={np.mean(np.abs(cropped.astype(float)-identity_in_crop.astype(float))):.1f}")
-
-                    blend_3d = blend_weight[:, :, np.newaxis]
-                    output = cropped.astype(np.float32) * (1 - blend_3d) + identity_in_crop.astype(np.float32) * blend_3d
-                    output = np.clip(output, 0, 255).astype(np.uint8)
-                    self._telemetry["alpha_fallback_frames"] += 1
-                else:
-                    output = rendered
-            except Exception as e:
-                print(f"  Frame {frame_idx}: COMPOSITOR FAILED: {e}")
-                output = rendered
-        else:
-            output = rendered
 
         return output
 
@@ -980,143 +920,30 @@ class FaceOSPipeline:
                     # V3: Query intrinsic components
                     intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
                     
-                    # Track intrinsic decomposition success
-                    if intrinsic_components is not None:
-                        self._telemetry["intrinsic_success_frames"] += 1
-                        # Track confidence
-                        avg_conf = float(np.mean(intrinsic_conf))
-                        self._telemetry["intrinsic_confidence_sum"] += avg_conf
-                        self._telemetry["intrinsic_confidence_count"] += 1
-                        # Track decomposition error
-                        self._telemetry["decomposition_error_sum"] += intrinsic_components.reconstruction_error
-                        self._telemetry["decomposition_error_count"] += 1
-                    else:
-                        self._telemetry["intrinsic_failure_frames"] += 1
-                        # Track failure reason
-                        reason = "not_initialized"
-                        if not self.identity_state.is_initialized():
-                            reason = "identity_not_initialized"
-                        self._telemetry["intrinsic_failure_reasons"][reason] = (
-                            self._telemetry["intrinsic_failure_reasons"].get(reason, 0) + 1
-                        )
+                    # V3: Update renderer mode + state evolution (shared path)
+                    self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx)
                     
-                    # V3: Update renderer mode state
-                    if self.renderer_mode_state is not None:
-                        intrinsic_available = intrinsic_components is not None
-                        avg_confidence = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
-                        decomposition_error = intrinsic_components.reconstruction_error if intrinsic_components is not None else 1.0
-                        
-                        prev_transitions = self.renderer_mode_state.transition_count
-                        renderer_mode = self.renderer_mode_state.update(
-                            intrinsic_available=intrinsic_available,
-                            intrinsic_confidence=avg_confidence,
-                            decomposition_error=decomposition_error,
-                        )
-                        # Track mode transitions
-                        self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
-                        
-                        # Track mode distribution
-                        self._telemetry["renderer_mode_distribution"][renderer_mode.value] += 1
-                        
-                        # Log mode changes
-                        if self.renderer_mode_state.transition_count > 0 and frame_idx % 30 == 0:
-                            print(f"  Frame {frame_idx}: renderer_mode={renderer_mode.value} "
-                                  f"confidence={avg_confidence:.3f} "
-                                  f"transitions={self.renderer_mode_state.transition_count}")
-                    
-                    # V3: Update state evolution model
-                    if self.state_evolution is not None and self._latent_state is not None:
-                        # Predict next state
-                        self._latent_state = self.state_evolution.predict(self._latent_state)
-                        self._latent_covariance = self.state_evolution.predict_covariance(self._latent_covariance)
-                    
-                    # V3: Use PhysicalRenderer if mode allows
-                    if (intrinsic_components is not None 
-                        and self.physical_renderer is not None
-                        and self.renderer_mode_state is not None
-                        and self.renderer_mode_state.current_mode in [RendererMode.PHYSICAL, RendererMode.HYBRID]):
-                        # V3 PHYSICAL RENDERING PATH
-                        result = self._render_with_physical_renderer(
-                            source_frame, cropped, intrinsic_components, intrinsic_conf,
-                            landmarks, crop_plan, frame_idx, region_masks
-                        )
-                        if result is not None:
-                            self._telemetry["physical_render_frames"] += 1
-                            return result
-                    
-                    # Fallback: Get raw identity (anchor-corrected) — compositor handles blending
+                    # Render via shared _render_core
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
-                    solved_face = identity_face
-                    solved_conf = identity_conf
-                    self._telemetry["alpha_fallback_frames"] += 1
 
-                # Warp solved face back to source crop space
-                _, _, M = canonical_map.warp_to_canonical(cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks)
-                M_inv = np.linalg.inv(M)[:2]
+                    # Use _render_core for PhysicalRenderer → identity composite → enhance
+                    output = self._render_core(
+                        cropped=cropped,
+                        source_frame=source_frame,
+                        intrinsic_components=intrinsic_components,
+                        intrinsic_conf=intrinsic_conf,
+                        identity_face=identity_face,
+                        landmarks=landmarks,
+                        crop_plan=crop_plan,
+                        region_masks=region_masks,
+                        face_mask=face_mask,
+                        frame_idx=frame_idx,
+                    )
 
-                # V3: LieGroup geodesic interpolation (replaces linear EMA)
-                current_sim2 = self._affine_to_sim2(M_inv)
-                if self._last_SIM2 is not None:
-                    interpolated = interpolate_sim2(self._last_SIM2, current_sim2, 0.6)
-                    M_inv = self._sim2_to_affine(interpolated)
-                self._last_SIM2 = current_sim2
-
-                solved_in_crop = cv2.warpAffine(
-                    solved_face, M_inv, (cropped.shape[1], cropped.shape[0]),
-                    flags=cv2.INTER_LANCZOS4,
-                    borderMode=cv2.BORDER_REFLECT,
-                )
-
-                # Use geometry-based canonical mask (brightness-invariant)
-                canonical_mask = self._make_canonical_geometry_mask(solved_face.shape[:2])
-                # Warp mask back to crop space using SAME M_inv as content
-                aligned_mask = cv2.warpAffine(
-                    canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
-                    flags=cv2.INTER_LINEAR,
-                    borderMode=cv2.BORDER_CONSTANT,
-                    borderValue=0,
-                )
-                aligned_mask = np.clip(aligned_mask, 0, 1)
-                # Feather the aligned mask
-                feather_ksize = max(3, cfg.compositor.feather_pixels * 2 + 1)
-                feathered_mask = cv2.GaussianBlur(aligned_mask, (feather_ksize, feather_ksize), cfg.compositor.feather_pixels / 2)
-
-                # Blend solved identity with source
-                # FIX: Use feathered_mask directly as blend weight.
-                # Old approach: mask * conf → conf is in canonical space (mean=0.12) → invisible.
-                # New: mask already defines face boundary, use it directly.
-                if frame_idx % 30 == 0:
-                    face_pixels = feathered_mask > 0.5
-                    if face_pixels.sum() > 0:
-                        face_blend = float(feathered_mask[face_pixels].mean())
-                    else:
-                        face_blend = 0.0
-                    print(f"  Frame {frame_idx}: blend face_mean={face_blend:.3f} identity_diff={np.mean(np.abs(cropped.astype(float)-solved_in_crop.astype(float))):.1f}")
-
-                conf_3d = feathered_mask[:, :, np.newaxis]
-                blended = cropped.astype(np.float32) * (1 - conf_3d) + solved_in_crop.astype(np.float32) * conf_3d
-                blended = np.clip(blended, 0, 255).astype(np.uint8)
-
-                # Anchor correction already applied in query_identity() — do NOT apply again
-
-                # Apply structure-preserving rendering on top
-                enhancement_mask = None
-                if region_masks:
-                    enhancement_mask = face_enhance._create_enhancement_mask(region_masks, blended.shape)
-
-                rendered = face_enhance.render_frame(
-                    blended, enhancement_mask, region_masks,
-                    identity_eyes=None, eye_confidence=0.0,
-                )
-
-                # DON'T composite back with original — that would undo
-                # the anchor correction. The anchor-corrected + enhanced
-                # frame IS the final result.
-                output = rendered
-
-                # Post-sharpen to recover detail from low-res source
-                output = face_enhance._sharpen(output, amount=0.3, radius=0.8)
-                return output
+                    # Post-sharpen to recover detail from low-res source
+                    if output is not None:
+                        output = face_enhance._sharpen(output, amount=0.3, radius=0.8)
+                    return output
 
             except Exception as e:
                 print(f"  Frame {frame_idx}: IDENTITY PATH FAILED: {e}")
@@ -1132,6 +959,243 @@ class FaceOSPipeline:
             identity_eyes=None, eye_confidence=0.0,
         )
 
+        return rendered
+
+    def _composite_identity_to_crop(
+        self,
+        cropped: np.ndarray,
+        identity_face: np.ndarray,
+        landmarks: Landmarks,
+        crop_plan: CropPlan,
+        frame_idx: int,
+    ) -> np.ndarray:
+        """Warp identity face from canonical space to crop space and composite.
+
+        Shared rendering core — called by BOTH _process_frame_v2() and _render_frame_v2().
+        Uses LieGroup SIM(2) geodesic interpolation for M_inv smoothing.
+        Uses geometry-based canonical mask (brightness-invariant).
+        """
+        adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
+        _, _, M = canonical_map.warp_to_canonical(cropped, adjusted_lm)
+        M_inv = np.linalg.inv(M)[:2]
+
+        current_sim2 = self._affine_to_sim2(M_inv)
+        if self._last_SIM2 is not None:
+            interpolated = interpolate_sim2(self._last_SIM2, current_sim2, 0.6)
+            M_inv = self._sim2_to_affine(interpolated)
+        self._last_SIM2 = current_sim2
+
+        identity_in_crop = cv2.warpAffine(
+            identity_face, M_inv, (cropped.shape[1], cropped.shape[0]),
+            flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT,
+        )
+
+        canonical_mask = self._make_canonical_geometry_mask(identity_face.shape[:2])
+        aligned_mask = cv2.warpAffine(
+            canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
+            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+        )
+        aligned_mask = np.clip(aligned_mask, 0, 1)
+
+        blend_3d = aligned_mask[:, :, np.newaxis]
+        output = cropped.astype(np.float32) * (1 - blend_3d) + identity_in_crop.astype(np.float32) * blend_3d
+        output = np.clip(output, 0, 255).astype(np.uint8)
+
+        if frame_idx % 30 == 0:
+            face_pixels = aligned_mask > 0.5
+            face_blend = float(blend_3d[face_pixels].mean()) if face_pixels.sum() > 0 else 0.0
+            print(f"  Frame {frame_idx}: identity composite face_mean={face_blend:.3f}")
+
+        return output
+
+    def _update_v3_modules(
+        self,
+        intrinsic_components: Optional['IntrinsicComponents'],
+        intrinsic_conf: Optional[np.ndarray],
+        frame_idx: int,
+    ) -> None:
+        """Shared V3 module updates — single source of truth.
+
+        Called by BOTH _process_frame_v2() and _render_frame_v2().
+        Eliminates duplicate telemetry tracking and mode updates.
+
+        RULE 1: No rendering logic outside _render_core.
+        RULE 8: All telemetry tracked here.
+        """
+        # Track intrinsic decomposition telemetry
+        if intrinsic_components is not None:
+            self._telemetry["intrinsic_success_frames"] += 1
+            avg_conf = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
+            self._telemetry["intrinsic_confidence_sum"] += avg_conf
+            self._telemetry["intrinsic_confidence_count"] += 1
+            self._telemetry["decomposition_error_sum"] += intrinsic_components.reconstruction_error
+            self._telemetry["decomposition_error_count"] += 1
+        else:
+            self._telemetry["intrinsic_failure_frames"] += 1
+            reason = "identity_not_initialized" if not self.identity_state.is_initialized() else "decomposition_failed"
+            self._telemetry["intrinsic_failure_reasons"][reason] = (
+                self._telemetry["intrinsic_failure_reasons"].get(reason, 0) + 1
+            )
+
+        # Track normal source
+        normal_source = self.identity_state.get_normal_source()
+        if normal_source == "mesh":
+            self._telemetry["mesh_normal_frames"] += 1
+        else:
+            self._telemetry["shading_normal_frames"] += 1
+
+        # Update renderer mode state
+        if USE_IDENTITY and self.renderer_mode_state is not None:
+            intrinsic_available = intrinsic_components is not None
+            avg_confidence = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
+            decomposition_error = intrinsic_components.reconstruction_error if intrinsic_components is not None else 1.0
+
+            renderer_mode = self.renderer_mode_state.update(
+                intrinsic_available=intrinsic_available,
+                intrinsic_confidence=avg_confidence,
+                decomposition_error=decomposition_error,
+            )
+            self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
+            self._telemetry["renderer_mode_distribution"][renderer_mode.value] += 1
+
+        # Update state evolution model
+        if USE_IDENTITY and self.state_evolution is not None and self._latent_state is not None:
+            self._latent_state = self.state_evolution.predict(self._latent_state)
+            self._latent_covariance = self.state_evolution.predict_covariance(self._latent_covariance)
+
+    def _compute_energy_terms(
+        self,
+        intrinsic_components: Optional['IntrinsicComponents'],
+        identity_face: Optional[np.ndarray],
+        landmarks: Optional[Landmarks],
+        frame_idx: int,
+    ) -> dict:
+        """Compute and normalize energy terms.
+
+        RULE 7: Energy terms must be normalized to unit variance.
+        E_i_normalized = E_i / sigma_i^2
+
+        Returns:
+            Dict of energy term name -> normalized value
+        """
+        terms = {}
+
+        # Geometry energy: landmark stability
+        if landmarks is not None:
+            pose_mag = abs(landmarks.yaw) + abs(landmarks.pitch) + abs(landmarks.roll)
+            terms['E_geom'] = float(pose_mag / 180.0)
+
+        # Identity energy: intrinsic decomposition quality
+        if intrinsic_components is not None:
+            terms['E_identity'] = float(intrinsic_components.reconstruction_error)
+
+        # Photometric energy: reconstruction error
+        if intrinsic_components is not None:
+            terms['E_photometric'] = float(intrinsic_components.decomposition_quality)
+
+        # Temporal energy: state evolution prediction error
+        if self._latent_state is not None:
+            terms['E_temporal'] = float(np.linalg.norm(self._latent_state))
+
+        # Normalize all terms
+        normalized_terms = {}
+        for name, value in terms.items():
+            normalized_terms[name] = self.energy_scaler.normalize(name, value)
+
+        return normalized_terms
+
+    def _render_core(
+        self,
+        cropped: np.ndarray,
+        source_frame: np.ndarray,
+        intrinsic_components: Optional['IntrinsicComponents'],
+        intrinsic_conf: Optional[np.ndarray],
+        identity_face: Optional[np.ndarray],
+        landmarks: Optional[Landmarks],
+        crop_plan: CropPlan,
+        region_masks: Optional[dict],
+        face_mask: Optional[np.ndarray],
+        frame_idx: int,
+        identity_eyes: Optional[np.ndarray] = None,
+        eye_confidence: float = 0.0,
+    ) -> Optional[np.ndarray]:
+        """Shared rendering core — single source of truth for all rendering logic.
+
+        Called by BOTH _process_frame_v2() and _render_frame_v2().
+
+        Flow:
+          1. Try PhysicalRenderer if intrinsic available + mode allows
+          2. Fallback: identity composite (warp canonical face to crop + blend)
+          3. Last resort: enhancement-only (sharpen + denoise)
+        """
+        # Track why we skip PhysicalRenderer (for telemetry)
+        fallback_reason = None
+
+        # RULE 7: Compute and normalize energy terms
+        energy_terms = self._compute_energy_terms(
+            intrinsic_components, identity_face, landmarks, frame_idx
+        )
+
+        # RULE 8: Timing
+        import time as _time
+        _render_start = _time.perf_counter()
+
+        # 1. PhysicalRenderer
+        physical_possible = (intrinsic_components is not None
+                            and self.physical_renderer is not None
+                            and self.renderer_mode_state is not None
+                            and self.renderer_mode_state.current_mode in [RendererMode.PHYSICAL, RendererMode.HYBRID]
+                            and landmarks is not None)
+
+        if physical_possible:
+            result = self._render_with_physical_renderer(
+                source_frame, cropped, intrinsic_components, intrinsic_conf,
+                landmarks, crop_plan, frame_idx, region_masks,
+            )
+            if result is not None:
+                self._telemetry["physical_render_frames"] += 1
+                return result
+            else:
+                fallback_reason = "physical_renderer_failed"
+        else:
+            # Determine why PhysicalRenderer wasn't attempted
+            if intrinsic_components is None:
+                fallback_reason = "intrinsic_unavailable"
+            elif landmarks is None:
+                fallback_reason = "no_landmarks"
+            elif self.renderer_mode_state is None or self.renderer_mode_state.current_mode not in [RendererMode.PHYSICAL, RendererMode.HYBRID]:
+                fallback_reason = "renderer_mode_alpha"
+
+        # 2. Identity composite fallback
+        if identity_face is not None and face_mask is not None and landmarks is not None:
+            try:
+                adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
+                if adjusted_lm:
+                    output = self._composite_identity_to_crop(
+                        cropped, identity_face, landmarks, crop_plan, frame_idx,
+                    )
+                    self._telemetry["alpha_fallback_frames"] += 1
+                    if fallback_reason:
+                        fb_dist = self._telemetry["fallback_reason_distribution"]
+                        fb_dist[fallback_reason] = fb_dist.get(fallback_reason, 0) + 1
+                    return output
+            except Exception as e:
+                print(f"  Frame {frame_idx}: COMPOSITOR FAILED: {e}")
+
+        # 3. Last resort: enhancement only
+        enhancement_mask = None
+        if region_masks:
+            enhancement_mask = face_enhance._create_enhancement_mask(region_masks, cropped.shape)
+
+        rendered = face_enhance.render_frame(
+            cropped, enhancement_mask, region_masks,
+            identity_eyes=identity_eyes,
+            eye_confidence=eye_confidence,
+        )
+        # RULE 8: Track render timing
+        render_time_ms = (_time.perf_counter() - _render_start) * 1000
+        self._telemetry["render_time_sum_ms"] += render_time_ms
+        self._telemetry["render_time_count"] += 1
         return rendered
 
     def _render_with_physical_renderer(
@@ -1498,12 +1562,20 @@ class FaceOSPipeline:
             "intrinsic_failure_frames": 0,
             "renderer_mode_transitions": 0,
             "intrinsic_failure_reasons": {},
+            "fallback_reason_distribution": {},
             "renderer_mode_distribution": {"physical": 0, "hybrid": 0, "alpha": 0},
             "intrinsic_confidence_sum": 0.0,
             "intrinsic_confidence_count": 0,
             "decomposition_error_sum": 0.0,
             "decomposition_error_count": 0,
+            "mesh_normal_frames": 0,
+            "shading_normal_frames": 0,
+            # RULE 8: Timing telemetry
+            "render_time_sum_ms": 0.0,
+            "render_time_count": 0,
         }
+        # RULE 7: Reset energy scaler for fresh per-clip stats
+        self.energy_scaler.reset()
 
 
 # ─── CLI ────────────────────────────────────────────────────────────────────

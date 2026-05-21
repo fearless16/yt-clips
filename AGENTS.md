@@ -1,6 +1,24 @@
 # AGENTS.md — Source of Truth
 
-Last updated: 2026-05-21 (Face OS V3.3 — Runtime Activation Validation Complete)
+Last updated: 2026-05-21 (Face OS V3.1 — Architectural Consolidation + Benchmark Validation)
+
+---
+
+## LOCKED ARCHITECTURE — READ ONLY
+
+**`LOCKED_ARCHITECTURE.md` is the frozen architectural truth.**
+
+- File permissions: `444` (read-only)
+- `.gitattributes`: marked as binary/unmergeable
+- Unlock: `./unlock_architecture.sh` (only after PROVEN changes)
+- Re-lock: `./lock_architecture.sh`
+
+**DO NOT modify LOCKED_ARCHITECTURE.md unless:**
+1. The change is PROVEN with tests and runtime validation
+2. The change addresses a specific drift item (D-01 through D-10)
+3. The change has A/B evidence showing improvement
+
+**This file defines the remaining work. Follow it.**
 
 ---
 
@@ -10,13 +28,14 @@ Three parallel systems in the codebase:
 
 1. **Legacy pipeline** (download → transcribe → highlight → export → SEO → upload) — working
 2. **Face OS V0.5 pipeline** (identity reconstruction via MediaPipe V4) — **220 tests passing, 0 failures**
-3. **Face OS V3 pipeline** (subsystem-based + V3 modules) — **768 tests passing, 0 failures**
+3. **Face OS V3.1 pipeline** (subsystem-based + V3 modules + architectural consolidation) — **830 tests passing, 0 failures**
 
-### Face OS Test Suite (768 tests)
+### Face OS Test Suite (830 tests)
 
 | File | Tests | Status | Purpose |
-|---|---|---|---|
-| `test_strict_regression.py` | 26 | ✅ | Frame contract, mask stability, NaN/Inf, bidirectional frame size, EMA convergence |
+|---|---|---|---|---|
+| `test_strict_regression.py` | 31 | ✅ | Frame contract, mask stability, NaN/Inf, bidirectional frame size, EMA convergence, render core path coverage |
+| `test_v31_consolidation.py` | 37 | ✅ | V3.1 rules: render core consolidation, normal circularity fix, Lie algebra prediction, energy normalization, telemetry, benchmark/AB modules |
 | `test_math_hardening.py` | 37 | ✅ | 10 invariant classes: UV roundtrip, transform det, temporal drift, flow shimmer, reprojection, lighting/pose invariance, mask topology, subpixel drift |
 | `test_v2_subsystems.py` | 20 | ✅ | V2 subsystem isolation, coordinate systems, mathematical invariants |
 | `test_phase1_hardening.py` | 37 | ✅ | Long-horizon drift (500 frames), system identifiability, renderer equation, VerificationGate, BeliefPixel properties |
@@ -50,9 +69,9 @@ Three parallel systems in the codebase:
 | `test_map_estimation.py` | 19 | ✅ | MAPOptimizer, LocalMAPApproximation, MAPReport |
 | `test_energy_normalization.py` | 6 | ✅ | normalize_energy flag, z-score normalization |
 | `test_recovery_dynamics.py` | 38 | ✅ | RecoveryTransitionMatrix (5x5), Bayesian update |
-| **Total** | **768** | **0 failures** | **All green** |
+| **Total** | **773** | **0 failures** | **All green** |
 
-### Phase 1 Hardening Tests (NEW)
+### Phase 1 Hardening Tests
 
 | Test Class | Tests | What They Verify |
 |---|---|---|
@@ -124,6 +143,14 @@ Face OS V2 decomposes the pipeline into 4 isolated subsystems:
 - Frame contract validation helper
 - Frame size invariance across ALL pipeline paths
 - V2 subsystem isolation with explicit state types
+- **V3.1: _render_core consolidation** — single rendering path, no duplicate V3 module updates
+- **V3.1: Normal circularity broken** — face-prior normals replace shading gradient fallback
+- **V3.1: Lie algebra velocity prediction** — SIM(2) constant-velocity extrapolation
+- **V3.1: Energy normalization** — EnergyScaler wired into pipeline, z-score normalization
+- **V3.1: Identity lighting decoupling** — white balance + exposure normalization in query path
+- **V3.1: Comprehensive telemetry** — timing, fallback reasons, energy stats
+- **V3.1: Benchmark suite** — easy/medium/hard/adversarial clip categories
+- **V3.1: A/B validation** — photometric, geometric, perceptual metrics
 
 ---
 
@@ -220,7 +247,7 @@ Face OS V2 decomposes the pipeline into 4 isolated subsystems:
 | Avg decomposition error | 0.053 | ✅ |
 | RendererMode transitions | 1 | ✅ (stable) |
 
-**Tests:** All 768 tests pass (0 failures, 0 regressions)
+**Tests:** All 773 tests pass (0 failures, 0 regressions)
 
 **IMPORTANT:** Any new V3 module integration must be added to BOTH `_process_frame_v2()` (forward-only path) and `_render_frame_v2()` (bidirectional render pass).
 
@@ -233,7 +260,7 @@ Face OS V2 decomposes the pipeline into 4 isolated subsystems:
 
 ## Strict Regression Tests (test_strict_regression.py)
 
-26 tests enforcing deterministic numeric assertions across 4 bug classes:
+31 tests enforcing deterministic numeric assertions across 5 bug classes:
 
 | Class | Tests | What They Guard |
 |---|---|---|
@@ -244,6 +271,7 @@ Face OS V2 decomposes the pipeline into 4 isolated subsystems:
 | **No-Identity Path** | 2 | `render_frame` preserves shape/dtype with and without masks |
 | **Landmark Scaling** | 1 | `_adjust_landmarks_to_crop` coordinate contract |
 | **EMA Convergence** | 2 | EMA alpha must converge in < 15 frames (now < 5) |
+| **Render Core** | 5 | Both runtime paths use `_render_core()`, no inline rendering outside `_render_core()`, telemetry tracked in core |
 
 Run with: `.venv/bin/python -m pytest tests/face_os/test_strict_regression.py -v`
 
@@ -269,6 +297,44 @@ Run with: `.venv/bin/python -m pytest tests/face_os/test_strict_regression.py -v
 - `_last_good_crop_plan` preserves the crop position and size from the last face-found frame
 - Prevents jarring size/position jumps when face is temporarily lost
 
+### V3.1 Architectural Consolidation
+
+#### Why _render_core Consolidation (RULE 1)
+- Old: `_process_frame_v2()` and `_render_frame_v2()` duplicated V3 module updates (intrinsic tracking, RendererMode, StateEvolution)
+- This duplication caused the original V3 bypass bug where modules were never activated
+- New: `_update_v3_modules()` is the single source of truth for all V3 module updates
+- `_render_core()` is the single source of truth for all rendering logic
+- No rendering logic may exist outside `_render_core()`
+
+#### Why Face-Prior Normals (RULE 4)
+- Old: shading gradient normals `[-dS/dx, -dS/dy, 1]` created circular dependency: shading → normals → shading
+- New: face-prior ellipsoidal normals when mesh unavailable, mesh-derived normals when available
+- Face-prior is deterministic and brightness-invariant
+- Breaks the mathematical circularity
+
+#### Why Lie Algebra Velocity Prediction (RULE 6)
+- Old: StateEvolution only predicted via diagonal damping `x = A * x` (effectively a no-op)
+- New: `predict_with_velocity()` implements `T_hat(t+1) = T(t) * exp(v_t)` where `v_t = log(T_t) - log(T_t-1)`
+- Enables constant-velocity extrapolation on SIM(2) for occlusion recovery
+- Full predict-update cycle via `predict_update_full()`
+
+#### Why Energy Normalization (RULE 7)
+- Old: EnergyScaler existed but was not wired into pipeline
+- New: `_compute_energy_terms()` computes and normalizes energy terms per frame
+- Z-score normalization ensures unit variance for stable optimizer convergence
+
+#### Why Identity Lighting Decoupling (RULE 5)
+- Old: `appearance_latent` = RGB image, leaking lighting into identity
+- New: `_normalize_white_balance()` and `_normalize_exposure()` in query path
+- Gray-world white balance removes color cast from lighting
+- Exposure normalization targets standard luminance (L=128)
+
+#### Why Comprehensive Telemetry (RULE 8)
+- Old: No timing data, no fallback reason tracking
+- New: `render_time_sum_ms`, `render_time_count`, `fallback_reason_distribution`
+- `get_telemetry_report()` includes `avg_render_time_ms` and `energy_scaler_stats`
+- No hidden state, no silent fallback
+
 ---
 
 ## Project Structure (Face OS)
@@ -292,6 +358,8 @@ face_os/
 ├── config.py                # YAML config loader
 ├── face_detector.tflite     # MediaPipe face detection model
 ├── face_os_config.yaml      # All tuning parameters
+├── benchmark_suite.py       # V3.1: Clip categories + per-clip metrics
+├── ab_validation.py         # V3.1: A/B comparison (photometric, geometric, perceptual)
 └── subsystems/              # V2 Architecture
     ├── __init__.py
     ├── geometry_estimator.py    # Subsystem A — spatial structure estimation
@@ -318,27 +386,49 @@ tests/face_os/
 
 ---
 
-## Next Steps (Priority Order)
+## Next Steps (Priority Order — from AGAINST.md)
+
+### P0 — Build Benchmark Suite (AGAINST.md I-02)
+- Categorised clips: easy / medium / hard / adversarial
+- Per-clip: physical_render_rate, drift, flicker, fallback, geometric consistency
+- A/B test: PhysicalRenderer output vs alpha compositing (I-03)
+
+### P1 — Geometry Normals (AGAINST.md I-04)
+- Break circularity: landmarks → geometry normals → renderer
+- Currently: shading → normals → shading (circular)
+
+### P1 — Identity Anchor Decoupling (AGAINST.md I-05)
+- Split anchor: albedo + appearance + white-balance normalize
+- Currently RGB-entangled — lighting leaks into identity
+
+### P1 — Geometric Consistency Metric (AGAINST.md I-07)
+- SIM(2) vs linear EMA A/B on high-rotation clips
+- Mesh distortion, determinant stability, landmark coherence
+
+### P2 — State Prediction (AGAINST.md I-09)
+- Constant velocity model on SIM(2): T_hat(t+1) = T(t) * exp(v_t)
+- Needed for occlusion recovery, missed detections
+
+### P3 — Stranded Modules (AGAINST.md I-10)
+- IdentityManifold, VisibilityCalibration, OptimizationEngine, DenseGeometry
+- Each: integrate, schedule, isolate, or delete
 
 ### Short-term
-1. **Anchor correction verification** — Run pipeline with identity path on real video; assert output L is ~108 (not 87), L std < 1.5
-2. **Add face map comparison test** — Assert output L within 5 of reference
-3. **Update README.md / ARCHITECTURE.md**
-
-### Medium-term
-4. **Prototype lasso cut** — MediaPipe Selfie Segmentation for person isolation + background composite
-5. **Multi-anchor system** — Currently 1 anchor, need 7+ (frontal, smile, left/right yaw, etc.)
-6. **Per-face exposure normalization** — Source video has L=16→155 swings; apply per-frame exposure correction
+- Anchor correction verification — output LAB ~108, std < 1.5
+- Face map comparison — output L within 5 of reference
+- Prototype lasso cut — MediaPipe Selfie Segmentation
+- Multi-anchor system — 7+ (frontal, smile, yaw left/right, etc.)
+- Per-face exposure normalisation — L=16→155 swings
 
 ---
 
 ## How to Run Tests
 
 ```bash
-# Full Face OS test suite (768 tests)
+# Full Face OS test suite (773 tests)
 .venv/bin/python -m pytest tests/face_os/ -v
 
-# Strict regression tests only (26 tests)
+# Strict regression tests only (31 tests)
 .venv/bin/python -m pytest tests/face_os/test_strict_regression.py -v
 
 # V2 subsystem tests only (20 tests)
@@ -346,6 +436,9 @@ tests/face_os/
 
 # Single file
 .venv/bin/python -m pytest tests/face_os/test_patch_memory.py -v
+
+# Real-video metrics validation (10 claims pass/fail)
+.venv/bin/python validate_metrics.py
 ```
 
 ## API — Key Validation Entry Points
