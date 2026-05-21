@@ -1326,126 +1326,131 @@ class FaceOSPipeline:
     ) -> Optional[np.ndarray]:
         """Render using V3 PhysicalRenderer with intrinsic decomposition.
 
-        Uses albedo, shading, specular, and normals from IntrinsicDecomposer
-        instead of alpha compositing.
+        ARCHITECTURE CORRECTION: Decompose source frame directly in output space.
+        NOT warp from canonical space. Canonical space is for alignment + latent indexing only.
 
-        Args:
-            source_frame: Original source frame
-            cropped: Cropped source frame
-            intrinsic_components: IntrinsicComponents from identity state
-            intrinsic_conf: Confidence map from identity state
-            landmarks: Face landmarks
-            crop_plan: Crop plan
-            frame_idx: Frame index
-            region_masks: Region masks dict
-
-        Returns:
-            Rendered frame or None on failure
+        Flow:
+          1. Decompose source crop directly (output-space decomposition)
+          2. Render in output space using PhysicalRenderer
+          3. Single composite
         """
         try:
-            # Warp intrinsic components to crop space
-            _, _, M = canonical_map.warp_to_canonical(
-                cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks,
-                canonical_size=tuple(cfg.canonical.atlas_size),
-            )
-            M_inv = np.linalg.inv(M)[:2]
-
-            # V3: LieGroup geodesic interpolation (replaces linear EMA)
-            current_sim2 = self._affine_to_sim2(M_inv)
-            if self._last_SIM2 is not None:
-                interpolated = interpolate_sim2(self._last_SIM2, current_sim2, 0.6)
-                M_inv = self._sim2_to_affine(interpolated)
-            self._last_SIM2 = current_sim2
-
-            # Warp albedo to crop space
-            albedo_crop = cv2.warpAffine(
-                intrinsic_components.albedo, M_inv, (cropped.shape[1], cropped.shape[0]),
-                flags=cv2.INTER_LANCZOS4,
-                borderMode=cv2.BORDER_REFLECT,
-            )
-
-            # Warp shading to crop space
-            shading_crop = cv2.warpAffine(
-                intrinsic_components.shading, M_inv, (cropped.shape[1], cropped.shape[0]),
-                flags=cv2.INTER_LANCZOS4,
-                borderMode=cv2.BORDER_REFLECT,
-            )
-            # cv2.warpAffine collapses (H, W, 1) to (H, W) - restore channel dim
-            if shading_crop.ndim == 2:
-                shading_crop = shading_crop[:, :, np.newaxis]
-
-            # Warp normal map to crop space
-            normal_map_crop = cv2.warpAffine(
-                intrinsic_components.normal_map, M_inv, (cropped.shape[1], cropped.shape[0]),
-                flags=cv2.INTER_LANCZOS4,
-                borderMode=cv2.BORDER_REFLECT,
-            )
-
-            # Warp specular to crop space
-            specular_crop = cv2.warpAffine(
-                intrinsic_components.specular, M_inv, (cropped.shape[1], cropped.shape[0]),
-                flags=cv2.INTER_LANCZOS4,
-                borderMode=cv2.BORDER_REFLECT,
-            )
-
-            # Estimate lighting from shading
+            # D-01: Decompose source frame directly in output space
+            # NOT from canonical space — that was the architectural drift
+            source_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            
+            # Use identity's anchor albedo to guide decomposition
+            anchor_albedo = None
+            if self.identity_state is not None and self.identity_state._anchor_albedo is not None:
+                anchor_albedo = self.identity_state._anchor_albedo
+            
+            # Decompose source directly (output-space, not canonical-space)
+            source_decomposer = self.identity_state._intrinsic_decomposer
+            source_intrinsic = source_decomposer.decompose(source_rgb)
+            
+            # Warp anchor albedo to source crop space for correction
+            if anchor_albedo is not None:
+                _, _, M = canonical_map.warp_to_canonical(
+                    cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks,
+                    canonical_size=tuple(cfg.canonical.atlas_size),
+                )
+                M_inv = np.linalg.inv(M)[:2]
+                
+                # Warp anchor to crop space
+                anchor_crop = cv2.warpAffine(
+                    anchor_albedo, M_inv, (cropped.shape[1], cropped.shape[0]),
+                    flags=cv2.INTER_LANCZOS4,
+                    borderMode=cv2.BORDER_REFLECT,
+                )
+                
+                # Apply anchor correction to source albedo
+                anchor_mean = np.mean(anchor_crop, axis=(0, 1))
+                source_mean = np.mean(source_intrinsic.albedo, axis=(0, 1))
+                drift = float(np.sqrt(np.sum((anchor_mean - source_mean) ** 2)))
+                
+                if drift > 0.05:
+                    lambda_corr = min(0.3, drift * 2.0)
+                    source_intrinsic.albedo = (
+                        (1 - lambda_corr) * source_intrinsic.albedo
+                        + lambda_corr * anchor_crop
+                    )
+                    source_intrinsic.albedo = np.clip(source_intrinsic.albedo, 0, 1).astype(np.float32)
+            
+            # Estimate lighting from source shading
             lighting = LightingModel(
-                ambient=float(np.mean(shading_crop)) * 0.3,
-                diffuse_intensity=float(np.mean(shading_crop)) * 0.8,
+                ambient=float(np.mean(source_intrinsic.shading)) * 0.3,
+                diffuse_intensity=float(np.mean(source_intrinsic.shading)) * 0.8,
             )
-
-            # Render with PhysicalRenderer
+            
+            # Render in output space using PhysicalRenderer
             rendered_output = self.physical_renderer.render(
-                albedo=albedo_crop,
-                normal_map=normal_map_crop,
-                shading=shading_crop,
+                albedo=source_intrinsic.albedo,
+                normal_map=source_intrinsic.normal_map,
+                shading=source_intrinsic.shading,
                 lighting=lighting,
             )
-
+            
             # Convert from [0,1] to [0,255] uint8
             rendered_face = (rendered_output.rendered * 255).astype(np.uint8)
-
-            # Create mask for blending
-            canonical_mask = self._make_canonical_geometry_mask(intrinsic_components.albedo.shape[:2])
+            
+            # Create face mask from landmarks
+            adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
+            if adjusted_lm is None:
+                return None
+            
+            _, _, M_mask = canonical_map.warp_to_canonical(
+                cropped, adjusted_lm,
+                canonical_size=tuple(cfg.canonical.atlas_size),
+            )
+            M_inv_mask = np.linalg.inv(M_mask)[:2]
+            
+            canonical_mask = self._make_canonical_geometry_mask(
+                tuple(cfg.canonical.atlas_size)[::-1]
+            )
             aligned_mask = cv2.warpAffine(
-                canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
+                canonical_mask, M_inv_mask, (cropped.shape[1], cropped.shape[0]),
                 flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=0,
             )
             aligned_mask = np.clip(aligned_mask, 0, 1)
-
+            
             # Feather the mask
             feather_ksize = max(3, cfg.compositor.feather_pixels * 2 + 1)
             feathered_mask = cv2.GaussianBlur(
                 aligned_mask, (feather_ksize, feather_ksize), cfg.compositor.feather_pixels / 2
             )
-
-            # D-01: Compositing
+            
+            # Single composite in output space
             conf_3d = feathered_mask[:, :, np.newaxis]
             blended = cropped.astype(np.float32) * (1 - conf_3d) + rendered_face.astype(np.float32) * conf_3d
             blended = np.clip(blended, 0, 255).astype(np.uint8)
 
-            # Apply structure-preserving rendering on top
-            enhancement_mask = None
-            if region_masks:
-                enhancement_mask = face_enhance._create_enhancement_mask(region_masks, blended.shape)
-
-            rendered = face_enhance.render_frame(
-                blended, enhancement_mask, region_masks,
-                identity_eyes=None, eye_confidence=0.0,
-            )
-
-            # Post-sharpen (D-01: amount=0.3 was too weak — 6.3 vs 274 expected)
-            output = face_enhance._sharpen(rendered, amount=1.5, radius=1.0)
-
+            # D-01: Detail residual injection — preserve source HF detail
+            # The decomposition produces blurry albedo. Inject HF from source.
+            face_mask_bool = feathered_mask > 0.3
+            if face_mask_bool.sum() > 100:
+                # Extract HF from source (sharp detail)
+                source_hf = cropped.astype(np.float32) - cv2.GaussianBlur(cropped, (0, 0), 2.0).astype(np.float32)
+                
+                # Extract LF from rendered (appearance)
+                rendered_lf = cv2.GaussianBlur(blended, (0, 0), 2.0).astype(np.float32)
+                
+                # Combine: LF from rendered + HF from source
+                detail_strength = 0.9
+                mask3 = (feathered_mask * detail_strength)[:, :, np.newaxis]
+                output = rendered_lf + source_hf * mask3
+                output = np.clip(output, 0, 255).astype(np.uint8)
+            else:
+                output = blended
+            
             if frame_idx % 30 == 0:
-                print(f"  Frame {frame_idx}: V3 physical render (albedo mean={np.mean(albedo_crop):.3f})")
-
+                print(f"  Frame {frame_idx}: output-space render (albedo mean={np.mean(source_intrinsic.albedo):.3f})")
+            
             return output
 
         except Exception as e:
-            print(f"  Frame {frame_idx}: V3 PHYSICAL RENDER FAILED: {e}")
+            print(f"  Frame {frame_idx}: OUTPUT-SPACE RENDER FAILED: {e}")
             return None
 
     @staticmethod
