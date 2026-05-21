@@ -1,34 +1,20 @@
-"""Physically-Inspired Renderer Module.
 
-NOTE: This is a physically-INSPIRED renderer, NOT a fully physically-based renderer.
-It uses Lambertian diffuse + Blinn-Phong specular models, which are approximations.
-Full PBR would require: BRDF correctness, energy conservation, full illumination model.
+"""Physically-inspired renderer module for Face OS.
 
-Rendering Equation (approximate):
-    Y = ambient + diffuse + specular
+This version keeps the public API but fixes the most damaging drift:
 
-where:
-    ambient = albedo * ambient_intensity
-    diffuse = albedo * diffuse_intensity * max(0, N·L)
-    specular = specular_power * max(0, N·H)^shininess
+- removes per-pixel shading re-multiplication of all terms
+- uses shading only as a global irradiance prior, not a second lighting pass
+- computes rendering error against an optional observed target (or zero if absent)
+- keeps output in linear-light float space until final consumer converts if needed
+- preserves a clean separation between albedo, normals, lighting, and diagnostics
 
-Components:
-    N = surface normal (from normal map, estimated from shading gradients)
-    L = light direction
-    V = view direction
-    H = normalize(L + V) (half-vector)
-
-Limitations:
-    - Normals estimated from shading, not actual geometry
-    - No BRDF correctness
-    - No energy conservation
-    - Simplified illumination model
-
-References:
-    - Lambertian diffuse model
-    - Blinn-Phong specular model
-    - Physically-based rendering (Pharr, Jakob, Humphreys)
+NOTE:
+This is still physically-inspired, not full physically-based rendering.
+It is intended to be stable, testable, and pipeline-friendly.
 """
+
+from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
@@ -37,70 +23,74 @@ from typing import Optional
 import numpy as np
 
 
+def _as_float_image(img: np.ndarray) -> np.ndarray:
+    arr = np.asarray(img, dtype=np.float32)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise ValueError(f"Expected (H, W, 3) image, got {arr.shape}")
+    return np.clip(arr, 0.0, 1.0) if arr.max(initial=0.0) <= 1.5 else np.clip(arr / 255.0, 0.0, 1.0)
+
+
+def _normalize_vec(v: np.ndarray, default: Optional[np.ndarray] = None) -> np.ndarray:
+    arr = np.asarray(v, dtype=np.float64).reshape(-1)
+    n = float(np.linalg.norm(arr))
+    if n <= 1e-8:
+        if default is None:
+            default = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        return default.astype(np.float64)
+    return (arr / n).astype(np.float64)
+
+
+def _ensure_normal_map(normal_map: np.ndarray) -> np.ndarray:
+    arr = np.asarray(normal_map, dtype=np.float32)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise ValueError(f"Expected (H, W, 3) normal map, got {arr.shape}")
+    nrm = np.linalg.norm(arr, axis=2, keepdims=True)
+    nrm = np.where(nrm > 1e-8, nrm, 1.0)
+    return arr / nrm
+
+
+def _ensure_shading(shading: np.ndarray, shape_hw: tuple[int, int]) -> np.ndarray:
+    arr = np.asarray(shading, dtype=np.float32)
+    if arr.ndim == 2:
+        arr = arr[:, :, np.newaxis]
+    if arr.ndim != 3 or arr.shape[2] not in (1, 3):
+        raise ValueError(f"Expected shading map (H, W, 1/3), got {arr.shape}")
+    if arr.shape[:2] != shape_hw:
+        raise ValueError(f"Shading shape {arr.shape[:2]} does not match expected {shape_hw}")
+    if arr.shape[2] == 3:
+        arr = np.mean(arr, axis=2, keepdims=True)
+    return np.clip(arr, 0.0, 1.0)
+
+
 @dataclass
 class LightingModel:
     """Lighting model configuration."""
 
-    # Ambient intensity
     ambient: float = 0.1
-
-    # Main light direction (normalized)
-    diffuse_direction: np.ndarray = field(
-        default_factory=lambda: np.array([0.3, 0.3, 0.9])
-    )
-
-    # Diffuse intensity
+    diffuse_direction: np.ndarray = field(default_factory=lambda: np.array([0.3, 0.3, 0.9], dtype=np.float64))
     diffuse_intensity: float = 0.8
-
-    # Specular power (shininess)
     specular_power: float = 32.0
-
-    # Specular intensity
     specular_intensity: float = 0.3
-
-    # Spherical harmonics coefficients (9 coefficients)
-    spherical_harmonics: np.ndarray = field(
-        default_factory=lambda: np.zeros(9)
-    )
+    spherical_harmonics: np.ndarray = field(default_factory=lambda: np.zeros(9, dtype=np.float32))
 
     def __post_init__(self):
-        """Normalize light direction."""
-        norm = np.linalg.norm(self.diffuse_direction)
-        if norm > 0:
-            self.diffuse_direction = self.diffuse_direction / norm
-        else:
-            self.diffuse_direction = np.array([0.0, 0.0, 1.0])
-
-        # Clamp negative values
-        self.ambient = max(0, self.ambient)
-        self.diffuse_intensity = max(0, self.diffuse_intensity)
-        self.specular_power = max(0, self.specular_power)
-        self.specular_intensity = max(0, self.specular_intensity)
+        self.diffuse_direction = _normalize_vec(self.diffuse_direction)
+        self.ambient = max(0.0, float(self.ambient))
+        self.diffuse_intensity = max(0.0, float(self.diffuse_intensity))
+        self.specular_power = max(0.0, float(self.specular_power))
+        self.specular_intensity = max(0.0, float(self.specular_intensity))
 
 
 @dataclass
 class PhysicalRenderConfig:
-    """Configuration for physical renderer."""
+    """Configuration for the physically-inspired renderer."""
 
-    # Diffuse weight
     diffuse_weight: float = 0.7
-
-    # Specular weight
     specular_weight: float = 0.2
-
-    # Ambient weight
     ambient_weight: float = 0.1
-
-    # Energy conservation limit (output <= input * limit)
     energy_conservation_limit: float = 0.95
-
-    # Shininess for specular
     shininess: float = 32.0
-
-    # Use spherical harmonics for ambient
     use_spherical_harmonics: bool = False
-
-    # Output clamping
     clamp_output: bool = True
 
 
@@ -108,20 +98,12 @@ class PhysicalRenderConfig:
 class PhysicalRenderOutput:
     """Physical rendering output."""
 
-    # Rendered image: (H, W, 3)
     rendered: np.ndarray
-
-    # Diffuse component: (H, W, 3)
     diffuse_component: np.ndarray
-
-    # Specular component: (H, W, 3)
     specular_component: np.ndarray
-
-    # Ambient component: (H, W, 3)
     ambient_component: np.ndarray
-
-    # Rendering error: ||Y_observed - Y_rendered||
     rendering_error: float
+    render_time_ms: float = 0.0
 
 
 @dataclass
@@ -133,7 +115,6 @@ class RenderReport:
     render_time_ms: float
 
     def to_dict(self) -> dict:
-        """Convert to dictionary."""
         return {
             "frame_idx": self.frame_idx,
             "render_time_ms": self.render_time_ms,
@@ -145,24 +126,20 @@ class RenderReport:
 
 
 class PhysicalRenderer:
-    """Physically-based renderer.
+    """Physically-inspired renderer.
 
-    Rendering equation:
+    Rendering equation (approximate):
         Y = ambient + diffuse + specular
 
-    where:
-        ambient = albedo * ambient_intensity
-        diffuse = albedo * diffuse_intensity * max(0, N·L)
-        specular = specular_power * max(0, N·H)^shininess
+    Important correction:
+    - shading is NOT multiplied into every term pixel-by-pixel.
+    - shading is used as a global irradiance prior so the renderer
+      does not double-apply illumination from the decomposition stage.
     """
 
     def __init__(self, config: Optional[PhysicalRenderConfig] = None):
-        """Initialize renderer.
-
-        Args:
-            config: Renderer configuration
-        """
         self.config = config or PhysicalRenderConfig()
+        self._last_report: Optional[RenderReport] = None
 
     def render(
         self,
@@ -171,101 +148,95 @@ class PhysicalRenderer:
         shading: np.ndarray,
         lighting: Optional[LightingModel] = None,
         view_direction: Optional[np.ndarray] = None,
+        observed: Optional[np.ndarray] = None,
+        frame_idx: Optional[int] = None,
     ) -> PhysicalRenderOutput:
-        """Render face with physical lighting model.
+        """Render face with a physically-inspired lighting model."""
 
-        Args:
-            albedo: Albedo map (H, W, 3), [0, 1]
-            normal_map: Normal map (H, W, 3), unit vectors
-            shading: Shading map (H, W, 1), [0, 1]
-            lighting: Lighting model (default: standard lighting)
-            view_direction: View direction (default: [0, 0, 1])
+        start_time = time.perf_counter()
 
-        Returns:
-            PhysicalRenderOutput with rendered image and components
-        """
-        if albedo.ndim != 3 or albedo.shape[2] != 3:
-            raise ValueError(f"Expected (H, W, 3) albedo, got {albedo.shape}")
+        albedo = _as_float_image(albedo)
+        normal_map = _ensure_normal_map(normal_map)
+        shading = _ensure_shading(shading, albedo.shape[:2])
 
-        start_time = time.time()
+        if albedo.shape[:2] != normal_map.shape[:2]:
+            raise ValueError(
+                f"Albedo shape {albedo.shape[:2]} does not match normal map shape {normal_map.shape[:2]}"
+            )
 
-        # Default lighting
         if lighting is None:
             lighting = LightingModel()
 
-        # Default view direction (camera looking at face)
         if view_direction is None:
-            view_direction = np.array([0.0, 0.0, 1.0])
-        else:
-            view_direction = np.array(view_direction, dtype=np.float64)
-            norm = np.linalg.norm(view_direction)
-            if norm > 0:
-                view_direction = view_direction / norm
-            else:
-                view_direction = np.array([0.0, 0.0, 1.0])
+            view_direction = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        view_direction = _normalize_vec(view_direction)
 
-        H, W, _ = albedo.shape
+        # Global irradiance prior from shading, not per-pixel re-lighting.
+        irradiance = float(np.mean(shading))
+        irradiance = float(np.clip(irradiance, 0.25, 1.50))
 
-        # Compute lighting components
-        ambient = self._compute_ambient(albedo, lighting, shading)
-        diffuse = self._compute_diffuse(albedo, normal_map, lighting, shading)
-        specular = self._compute_specular(
-            normal_map, lighting, view_direction, shading
-        )
+        ambient = self._compute_ambient(albedo, lighting, irradiance)
+        diffuse = self._compute_diffuse(albedo, normal_map, lighting, irradiance)
+        specular = self._compute_specular(normal_map, lighting, view_direction, irradiance)
 
-        # Combine components
         rendered = (
             self.config.ambient_weight * ambient
             + self.config.diffuse_weight * diffuse
             + self.config.specular_weight * specular
         )
 
-        # Energy conservation: clamp output
         if self.config.clamp_output:
-            rendered = np.clip(rendered, 0, 1)
+            rendered = np.clip(rendered, 0.0, 1.0)
 
-        # Compute rendering error (self-reconstruction)
-        reconstruction = (
-            self.config.ambient_weight * ambient
-            + self.config.diffuse_weight * diffuse
-            + self.config.specular_weight * specular
-        )
-        rendering_error = float(np.mean(np.abs(rendered - reconstruction)))
+        rendered = self._apply_energy_conservation(albedo, rendered)
 
-        render_time = (time.time() - start_time) * 1000
+        if observed is not None:
+            observed_f = _as_float_image(observed)
+            if observed_f.shape != rendered.shape:
+                raise ValueError(
+                    f"Observed image shape {observed_f.shape} does not match rendered shape {rendered.shape}"
+                )
+            rendering_error = self.compute_rendering_error(observed_f, rendered)
+        else:
+            rendering_error = 0.0
 
-        return PhysicalRenderOutput(
+        render_time_ms = (time.perf_counter() - start_time) * 1000.0
+
+        output = PhysicalRenderOutput(
             rendered=rendered.astype(np.float32),
             diffuse_component=diffuse.astype(np.float32),
             specular_component=specular.astype(np.float32),
             ambient_component=ambient.astype(np.float32),
-            rendering_error=rendering_error,
+            rendering_error=float(rendering_error),
+            render_time_ms=float(render_time_ms),
         )
+
+        if frame_idx is not None:
+            self._last_report = RenderReport(
+                frame_idx=int(frame_idx),
+                output=output,
+                render_time_ms=float(render_time_ms),
+            )
+
+        return output
 
     def _compute_ambient(
         self,
         albedo: np.ndarray,
         lighting: LightingModel,
-        shading: np.ndarray,
+        irradiance: float,
     ) -> np.ndarray:
         """Compute ambient component.
 
-        ambient = albedo * ambient_intensity * shading
-
-        Args:
-            albedo: Albedo map (H, W, 3)
-            lighting: Lighting model
-            shading: Shading map (H, W, 1)
-
-        Returns:
-            Ambient component (H, W, 3)
+        Ambient is a global term; it should not re-apply the full shading map.
         """
-        # Ambient = albedo * ambient_intensity
-        ambient = albedo * lighting.ambient
+        ambient = albedo * lighting.ambient * irradiance
 
-        # Modulate by shading
-        shading_3ch = np.repeat(shading, 3, axis=2)
-        ambient = ambient * shading_3ch
+        if lighting.spherical_harmonics is not None and self.config.use_spherical_harmonics:
+            # Soft low-order bias only, not a second lighting field.
+            sh = np.asarray(lighting.spherical_harmonics, dtype=np.float32).reshape(-1)
+            sh_scale = float(np.clip(np.mean(np.abs(sh)), 0.0, 1.0))
+            ambient = ambient * (0.9 + 0.1 * sh_scale)
 
         return ambient
 
@@ -274,32 +245,12 @@ class PhysicalRenderer:
         albedo: np.ndarray,
         normal_map: np.ndarray,
         lighting: LightingModel,
-        shading: np.ndarray,
+        irradiance: float,
     ) -> np.ndarray:
-        """Compute Lambertian diffuse component.
-
-        diffuse = albedo * diffuse_intensity * max(0, N·L)
-
-        Args:
-            albedo: Albedo map (H, W, 3)
-            normal_map: Normal map (H, W, 3), unit vectors
-            lighting: Lighting model
-            shading: Shading map (H, W, 1)
-
-        Returns:
-            Diffuse component (H, W, 3)
-        """
-        # N·L (dot product of normal and light direction)
-        N_dot_L = np.sum(normal_map * lighting.diffuse_direction, axis=2)
-        N_dot_L = np.maximum(N_dot_L, 0)  # Clamp negative
-
-        # Diffuse = albedo * intensity * N·L
-        diffuse = albedo * lighting.diffuse_intensity * N_dot_L[:, :, np.newaxis]
-
-        # Modulate by shading
-        shading_3ch = np.repeat(shading, 3, axis=2)
-        diffuse = diffuse * shading_3ch
-
+        """Compute Lambertian diffuse component."""
+        N_dot_L = np.sum(normal_map * lighting.diffuse_direction[np.newaxis, np.newaxis, :], axis=2)
+        N_dot_L = np.maximum(N_dot_L, 0.0)
+        diffuse = albedo * lighting.diffuse_intensity * N_dot_L[:, :, np.newaxis] * irradiance
         return diffuse
 
     def _compute_specular(
@@ -307,108 +258,74 @@ class PhysicalRenderer:
         normal_map: np.ndarray,
         lighting: LightingModel,
         view_direction: np.ndarray,
-        shading: np.ndarray,
+        irradiance: float,
     ) -> np.ndarray:
-        """Compute Blinn-Phong specular component.
+        """Compute Blinn-Phong specular component."""
+        half_vec = _normalize_vec(lighting.diffuse_direction + view_direction)
+        N_dot_H = np.sum(normal_map * half_vec[np.newaxis, np.newaxis, :], axis=2)
+        N_dot_H = np.maximum(N_dot_H, 0.0)
 
-        H = normalize(L + V)
-        specular = specular_power * max(0, N·H)^shininess
-
-        Args:
-            normal_map: Normal map (H, W, 3), unit vectors
-            lighting: Lighting model
-            view_direction: View direction (3,)
-            shading: Shading map (H, W, 1)
-
-        Returns:
-            Specular component (H, W, 3)
-        """
-        # Half-vector: H = normalize(L + V)
-        H = lighting.diffuse_direction + view_direction
-        H_norm = np.linalg.norm(H)
-        if H_norm > 0:
-            H = H / H_norm
-        else:
-            H = np.array([0.0, 0.0, 1.0])
-
-        # N·H (dot product of normal and half-vector)
-        N_dot_H = np.sum(normal_map * H, axis=2)
-        N_dot_H = np.maximum(N_dot_H, 0)  # Clamp negative
-
-        # Specular = intensity * (N·H)^shininess
-        specular_2d = lighting.specular_intensity * np.power(
-            N_dot_H, self.config.shininess
-        )
-
-        # Expand to 3 channels
-        specular = specular_2d[:, :, np.newaxis] * np.ones((1, 1, 3))
-
-        # Modulate by shading
-        shading_3ch = np.repeat(shading, 3, axis=2)
-        specular = specular * shading_3ch
-
+        shininess = float(self.config.shininess if self.config.shininess > 0 else lighting.specular_power)
+        spec_scalar = lighting.specular_intensity * np.power(N_dot_H, shininess) * irradiance
+        specular = np.repeat(spec_scalar[:, :, np.newaxis], 3, axis=2)
         return specular
+
+    def _apply_energy_conservation(self, albedo: np.ndarray, rendered: np.ndarray) -> np.ndarray:
+        """Clamp/suppress output when output energy exceeds the configured limit."""
+        input_energy = float(np.mean(albedo))
+        output_energy = float(np.mean(rendered))
+
+        if input_energy <= 1e-8 or output_energy <= 1e-8:
+            return rendered
+
+        ratio = output_energy / input_energy
+        if ratio > self.config.energy_conservation_limit:
+            scale = self.config.energy_conservation_limit / ratio
+            rendered = rendered * scale
+
+        if self.config.clamp_output:
+            rendered = np.clip(rendered, 0.0, 1.0)
+        return rendered
 
     def render_with_intrinsic(
         self,
-        intrinsic_components: 'IntrinsicComponents',
+        intrinsic_components: "IntrinsicComponents",
         lighting: Optional[LightingModel] = None,
         view_direction: Optional[np.ndarray] = None,
+        observed: Optional[np.ndarray] = None,
+        frame_idx: Optional[int] = None,
     ) -> PhysicalRenderOutput:
-        """Render using intrinsic decomposition components.
-
-        Args:
-            intrinsic_components: IntrinsicComponents from decomposition
-            lighting: Lighting model
-            view_direction: View direction
-
-        Returns:
-            PhysicalRenderOutput
-        """
+        """Render using intrinsic decomposition components."""
         return self.render(
             albedo=intrinsic_components.albedo,
             normal_map=intrinsic_components.normal_map,
             shading=intrinsic_components.shading,
             lighting=lighting,
             view_direction=view_direction,
+            observed=observed,
+            frame_idx=frame_idx,
         )
 
-    def compute_rendering_error(
-        self,
-        observed: np.ndarray,
-        rendered: np.ndarray,
-    ) -> float:
-        """Compute rendering error: ||Y_observed - Y_rendered||.
+    def compute_rendering_error(self, observed: np.ndarray, rendered: np.ndarray) -> float:
+        """Compute mean absolute error against an observed frame."""
+        observed_f = _as_float_image(observed)
+        rendered_f = _as_float_image(rendered)
+        if observed_f.shape != rendered_f.shape:
+            raise ValueError(
+                f"Observed image shape {observed_f.shape} does not match rendered shape {rendered_f.shape}"
+            )
+        return float(np.mean(np.abs(observed_f - rendered_f)))
 
-        Args:
-            observed: Observed image (H, W, 3)
-            rendered: Rendered image (H, W, 3)
-
-        Returns:
-            Mean absolute error
-        """
-        return float(np.mean(np.abs(observed - rendered)))
-
-    def compute_energy_conservation(
-        self,
-        albedo: np.ndarray,
-        rendered: np.ndarray,
-    ) -> float:
-        """Compute energy conservation ratio.
-
-        ratio = mean(rendered) / mean(albedo)
-
-        Args:
-            albedo: Albedo map (H, W, 3)
-            rendered: Rendered image (H, W, 3)
-
-        Returns:
-            Energy conservation ratio [0, 1]
-        """
-        input_energy = np.mean(albedo)
-        output_energy = np.mean(rendered)
-
-        if input_energy > 0:
-            return float(output_energy / input_energy)
-        else:
+    def compute_energy_conservation(self, albedo: np.ndarray, rendered: np.ndarray) -> float:
+        """Compute output/input energy ratio."""
+        albedo_f = _as_float_image(albedo)
+        rendered_f = _as_float_image(rendered)
+        input_energy = float(np.mean(albedo_f))
+        output_energy = float(np.mean(rendered_f))
+        if input_energy <= 1e-8:
             return 0.0
+        return float(output_energy / input_energy)
+
+    def get_last_report(self) -> Optional[RenderReport]:
+        """Return the last per-frame report if available."""
+        return self._last_report
