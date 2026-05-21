@@ -1,9 +1,9 @@
 # Face OS — Complete Architecture & Parameter Reference (V2)
 
-**Version:** 2.5.0  
+**Version:** 2.6.0  
 **Branch:** `feat/face-os-v2-phase1`  
 **Date:** 2026-05-21  
-**Status:** Phase 0 + Phase 1 + Phase 2A + Phase 2B COMPLETE | **412 tests passing** | Optimizer architecture | System identifiability analysis complete
+**Status:** Phase 0-2E COMPLETE | **493 tests passing** | MAP estimation + state separation + observability | System identifiability analysis complete
 
 ---
 
@@ -602,7 +602,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 **Test clip:** `clips_test/test_clip.mp4` (640x360, 30fps, 345 frames)  
 **Reference:** `expectation.png` (941x1672, portrait)
 
-### Test Suite (V2.5.0)
+### Test Suite (V2.6.0)
 
 | File | Tests | Status | Purpose |
 |---|---|---|---|
@@ -613,7 +613,10 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_phase0_contract.py` | 28 | ✅ All pass | FrameContract, EnergyReport, RendererReport, PassReport, VisibilityLogger |
 | `test_phase1_energy.py` | 36 | ✅ All pass | Energy term existence, numeric range, delta regression, monotonicity |
 | `test_phase2a_state_space.py` | 39 | ✅ All pass | LatentState, StateTransition, ProcessNoise, Observation, StateSpaceEstimator |
-| `test_phase2b_optimizer.py` | 32 | ✅ All pass | **NEW** — GaussNewton, LevenbergMarquardt, convergence, singularity, rollback |
+| `test_phase2b_optimizer.py` | 32 | ✅ All pass | GaussNewton, LevenbergMarquardt, convergence, singularity, rollback |
+| `test_phase2c_observability.py` | 28 | ✅ All pass | ObservabilityAnalyzer, DegeneracyReport, lighting/pose/identity ambiguity |
+| `test_phase2d_state_separation.py` | 34 | ✅ All pass | PhysicalState, BeliefState, MetaState, SeparatedState, StateSeparator |
+| `test_phase2e_map_estimation.py` | 19 | ✅ All pass | MAPOptimizer, MAPReport, posterior contraction, energy descent |
 | `test_detection.py` | 14 | ✅ All pass | MediaPipe tasks API, poster rejection, identity matching |
 | `test_quality_gates.py` | 13 | ✅ All pass | Procrustes, jitter, occupancy, SSIM, Laplacian |
 | `test_identity_state.py` | 17 | ✅ All pass | Identity state, frequency decomposition, hypotheses |
@@ -625,7 +628,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_neural_codec.py` | 12 | ✅ All pass | PersonalizedSpace, NeuralCodec, identity score |
 | `test_hypothesis_matching.py` | 4 | ✅ All pass | Hypothesis space, pose/expression selection |
 | `test_region_confidence.py` | 4 | ✅ All pass | Region confidence, semantic confidence |
-| **Total** | **412** | **0 failures** | **All green** |
+| **Total** | **493** | **0 failures** | **All green** |
 
 ### QC Metrics (Identity Mode, V2.1.0 — 345 frames, Phase 1 Hardening)
 
@@ -1196,6 +1199,70 @@ Every pass must expose:
 - ✅ Stopping conditions (gradient norm, step norm, max iterations)
 - ✅ Numerical stability (conditioning threshold, damping adaptation)
 - ✅ Rollback policy (energy increase detection)
+
+### Phase 2C: Observability Analysis (COMPLETE)
+
+**Status:** ✅ All 440 tests passing (28 new Phase 2C tests)
+
+**New Module:** `face_os/observability.py`
+
+**Components:**
+- `ObservabilityAnalyzer` — computes O = [H; HF; HF²; ...]
+- `ObservabilityReport` — rank, observable/degenerate dimensions, condition number
+- `DegeneracyReport` — lighting/pose/identity/temporal ambiguity
+
+**Tests Added:**
+- ObservabilityAnalyzer (7 tests) — matrix, rank, dimensions, condition
+- ObservabilityReport (8 tests) — metrics, serialization
+- FullRankObservability (3 tests) — full observability, bounded rank
+- PartialObservability (1 test) — reduced under occlusion
+- LightingAmbiguity (2 tests) — lighting/albedo ambiguity
+- PoseDegeneracy (2 tests) — extreme pose detection
+- IdentityAmbiguity (2 tests) — high uncertainty detection
+- JacobianConditioning (3 tests) — finite, positive, shape
+
+### Phase 2D: State Separation (COMPLETE)
+
+**Status:** ✅ All 474 tests passing (34 new Phase 2D tests)
+
+**New Module:** `face_os/state_separation.py`
+
+**Components:**
+- `PhysicalState` — geometry, pose, lighting, appearance (no uncertainty)
+- `BeliefState` — covariance, uncertainty, confidence, innovation (no physical)
+- `MetaState` — recovery, degradation, reset, health (no physical/belief)
+- `SeparatedState` — physical + belief + meta
+- `StateSeparator` — separate/merge LatentState ↔ SeparatedState
+
+**Tests Added:**
+- PhysicalState (7 tests) — geometry, lighting, appearance, isolation
+- BeliefState (8 tests) — covariance, uncertainty, innovation, isolation
+- MetaState (9 tests) — recovery, degradation, reset, health, bounded
+- SeparatedState (6 tests) — composition, to_latent, from_latent
+- StateSeparator (4 tests) — separate, merge, roundtrip
+
+### Phase 2E: Joint MAP Estimation (COMPLETE)
+
+**Status:** ✅ All 493 tests passing (19 new Phase 2E tests)
+
+**New Module:** `face_os/map_estimation.py`
+
+**Components:**
+- `MAPConfig` — dynamics_weight, observation_weight, energy_weight
+- `MAPOptimizer` — `x_t* = argmin(E(x) + ||x-f(x_prev)||²_{Σ^{-1}} + ||z-h(x)||²_{R^{-1}})`
+- `MAPReport` — energy, posterior_uncertainty, convergence_trajectory, innovation_norm
+
+**MAP Objective:**
+```
+x_t* = argmin_x ( E(x_t) + ||x_t - f(x_{t-1})||²_{Σ^{-1}} + ||z_t - h(x_t)||²_{R^{-1}} )
+```
+
+**Tests Added:**
+- MAPConfig (4 tests) — dynamics_weight, observation_weight, energy_weight
+- MAPOptimizer (5 tests) — convergence, energy descent, bounded iterations
+- MAPReport (7 tests) — metrics, serialization
+- PosteriorContraction (2 tests) — uncertainty computable, shrinks with observations
+- MAPEnergyDescent (1 test) — consistent convergence
 
 **Logging Format:**
 ```json
