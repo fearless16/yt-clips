@@ -639,7 +639,27 @@ class FaceOSPipeline:
 
         # Update identity state with solved faces
         for idx, (solved_face, solved_conf) in solved_faces.items():
-            self.identity_state.update(solved_face, solved_conf, pose=None)
+            # D-04: Pass mesh_478 and warp_M for geometry-derived normals
+            mesh_478 = None
+            warp_M = None
+            if idx in frame_data:
+                _, face_track, landmarks, _ = frame_data[idx]
+                if face_track is not None:
+                    mesh_478 = getattr(face_track, 'mesh_478', None)
+                if landmarks is not None:
+                    try:
+                        _, _, M = canonical_map.warp_to_canonical(
+                            solved_face, landmarks,
+                            canonical_size=tuple(cfg.canonical.atlas_size),
+                        )
+                        warp_M = M[:2] if M is not None else None
+                    except Exception:
+                        pass
+
+            self.identity_state.update(
+                solved_face, solved_conf, pose=None,
+                mesh_478=mesh_478, warp_M=warp_M,
+            )
             if idx in frame_data:
                 _, _, landmarks, _ = frame_data[idx]
                 if landmarks:
