@@ -602,7 +602,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 **Test clip:** `clips_test/test_clip.mp4` (640x360, 30fps, 345 frames)  
 **Reference:** `expectation.png` (941x1672, portrait)
 
-### Test Suite (V2.6.0)
+### Test Suite (V2.8.0)
 
 | File | Tests | Status | Purpose |
 |---|---|---|---|
@@ -631,7 +631,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_region_confidence.py` | 4 | ✅ All pass | Region confidence, semantic confidence |
 | **Total** | **531** | **0 failures** | **All green** |
 
-### QC Metrics (Identity Mode, V2.1.0 — 345 frames, Phase 1 Hardening)
+### QC Metrics (Identity Mode, V2.8.0 — 345 frames, Phase 2G Complete)
 
 ```
 Face detection rate:  80.9%   (target >80%) ✅
@@ -676,6 +676,7 @@ Sharpness:            123.1  ✅
 | V4.1 (simple mode) | 19.3 | 100% | 0.76 | 123.1 | No identity, clean enhancement |
 | V2.0.0 (subsystems) | 16.25 | 100% | 0.83 | 24.08 | 4 isolated subsystems, 240 tests |
 | **V2.1.0 (Phase 1)** | **12.83** | **80.9%** | **0.87** | **13.31** | **345 frames, 277 tests, Phase 1 hardening** |
+| **V2.8.0 (Phase 2G)** | **12.8** | **80.9%** | **0.87** | **13.3** | **531 tests, probabilistic recovery, all red flags fixed** |
 | Target | <5 | >80% | <5 | >10 | — |
 
 ---
@@ -766,7 +767,7 @@ The `test_math_hardening.py` + `test_v2_subsystems.py` suites enforce 57 determi
 | Total Frames | 345 | 345 | ✅ PASS |
 | Duration | ~11.5s | 11.5s | ✅ PASS |
 
-### 10.2 Quality Metrics (V2.1.0 — Phase 1 Hardening)
+### 10.2 Quality Metrics (V2.8.0 — Phase 2G Complete)
 
 | Parameter | Target | Actual | Status |
 |---|---|---|---|
@@ -899,7 +900,7 @@ The `test_math_hardening.py` + `test_v2_subsystems.py` suites enforce 57 determi
 
 ---
 
-## 12. System Identifiability Analysis (V2.1.0)
+## 12. System Identifiability Analysis (V2.8.0)
 
 ### The Core Problem
 
@@ -1359,7 +1360,7 @@ If visibility is missing, the change must be rejected.
 
 ---
 
-## File Structure (V2.1.0)
+## File Structure (V2.8.0)
 
 ```
 face_os/
@@ -1454,7 +1455,7 @@ tests/face_os/
 ## How to Run
 
 ```bash
-# Full Face OS test suite (240 tests)
+# Full Face OS test suite (531 tests)
 .venv/bin/python -m pytest tests/face_os/ -v
 
 # Strict regression tests only (26 tests)
