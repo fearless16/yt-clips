@@ -1,0 +1,5 @@
+# LOCKED_ARCHITECTURE.md — DO NOT MODIFY
+# This file is the frozen architectural truth. Changes require explicit unlock.
+LOCKED_ARCHITECTURE.md binary
+LOCKED_ARCHITECTURE.md -diff
+LOCKED_ARCHITECTURE.md -merge

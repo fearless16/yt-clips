@@ -71,6 +71,7 @@ from face_os.intrinsic_decomposition import IntrinsicComponents
 from face_os.lie_group import SIM2Transform, interpolate_sim2
 from face_os.renderer_mode import RendererMode, RendererModeState
 from face_os.state_evolution import StateEvolution
+from face_os.energy_scaling import EnergyScaler
 
 
 cfg = get_config()
@@ -153,6 +154,15 @@ class FaceOSPipeline:
         # V3: LieGroup transform state
         self._last_SIM2: Optional[SIM2Transform] = None
 
+        # V3.1: Energy scaler for normalized energy terms (I-07: default-on)
+        energy_cfg = getattr(cfg, 'energy', None)
+        self._normalize_energy = getattr(energy_cfg, 'normalize_energy', True) if energy_cfg else True
+        self._energy_method = getattr(energy_cfg, 'normalization_method', 'zscore') if energy_cfg else 'zscore'
+        from face_os.energy_scaling import EnergyScalingConfig
+        self.energy_scaler = EnergyScaler(EnergyScalingConfig(
+            normalization_method=self._energy_method if self._normalize_energy else 'none',
+        ))
+
         # V3: Runtime telemetry — tracks which paths are actually used
         self._telemetry = {
             "total_frames": 0,
@@ -175,6 +185,11 @@ class FaceOSPipeline:
             "decomposition_error_count": 0,
             "mesh_normal_frames": 0,
             "shading_normal_frames": 0,
+            # RULE 8: Fallback reason tracking
+            "fallback_reason_distribution": {},
+            # RULE 8: Timing telemetry
+            "render_time_sum_ms": 0.0,
+            "render_time_count": 0,
         }
 
     @staticmethod
@@ -275,6 +290,13 @@ class FaceOSPipeline:
             "alpha_fallback_fraction": alpha / total_render,
             "mesh_normal_rate": mesh_normal / total_normal,
             "shading_normal_rate": shading_normal / total_normal,
+            # RULE 8: Timing telemetry
+            "avg_render_time_ms": (
+                self._telemetry["render_time_sum_ms"]
+                / max(self._telemetry["render_time_count"], 1)
+            ),
+            # RULE 7: Energy scaler stats
+            "energy_scaler_stats": self.energy_scaler.get_stats(),
         }
 
     def enroll(
@@ -799,28 +821,6 @@ class FaceOSPipeline:
             # V3: Query intrinsic components
             intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
 
-            # Track intrinsic decomposition success for telemetry
-            if intrinsic_components is not None:
-                self._telemetry["intrinsic_success_frames"] += 1
-                avg_conf = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
-                self._telemetry["intrinsic_confidence_sum"] += avg_conf
-                self._telemetry["intrinsic_confidence_count"] += 1
-                self._telemetry["decomposition_error_sum"] += intrinsic_components.reconstruction_error
-                self._telemetry["decomposition_error_count"] += 1
-            else:
-                self._telemetry["intrinsic_failure_frames"] += 1
-                reason = "identity_not_initialized" if not self.identity_state.is_initialized() else "decomposition_failed"
-                self._telemetry["intrinsic_failure_reasons"][reason] = (
-                    self._telemetry["intrinsic_failure_reasons"].get(reason, 0) + 1
-                )
-
-            # Track normal source (mesh vs shading gradient)
-            normal_source = self.identity_state.get_normal_source()
-            if normal_source == "mesh":
-                self._telemetry["mesh_normal_frames"] += 1
-            else:
-                self._telemetry["shading_normal_frames"] += 1
-
         # 7. Crop planning
         crop_plan = self.crop.plan_crop(frame.shape[:2], face_track, landmarks)
         cropped = crop_planner.apply_crop(frame, crop_plan)
@@ -834,29 +834,8 @@ class FaceOSPipeline:
                 region_masks = lm_module.create_region_masks(adjusted_lm, cropped.shape[:2])
                 face_mask = region_masks.get("face")
 
-        # V3: Update renderer mode state based on intrinsic availability
-        if USE_IDENTITY and self.renderer_mode_state is not None:
-            intrinsic_available = intrinsic_components is not None
-            avg_confidence = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
-            decomposition_error = intrinsic_components.reconstruction_error if intrinsic_components is not None else 1.0
-
-            renderer_mode = self.renderer_mode_state.update(
-                intrinsic_available=intrinsic_available,
-                intrinsic_confidence=avg_confidence,
-                decomposition_error=decomposition_error,
-            )
-            self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
-            self._telemetry["renderer_mode_distribution"][renderer_mode.value] += 1
-
-            if self.renderer_mode_state.transition_count > 0 and frame_idx % 30 == 0:
-                print(f"  Frame {frame_idx}: renderer_mode={renderer_mode.value} "
-                      f"confidence={avg_confidence:.3f} "
-                      f"transitions={self.renderer_mode_state.transition_count}")
-
-        # V3: Update state evolution model
-        if USE_IDENTITY and self.state_evolution is not None and self._latent_state is not None:
-            self._latent_state = self.state_evolution.predict(self._latent_state)
-            self._latent_covariance = self.state_evolution.predict_covariance(self._latent_covariance)
+        # V3: Update renderer mode + state evolution (shared path)
+        self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx)
 
         # 9. Get identity eyes for structure-preserving rendering (skip if USE_IDENTITY=False)
         identity_eyes = None
@@ -941,55 +920,8 @@ class FaceOSPipeline:
                     # V3: Query intrinsic components
                     intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
                     
-                    # Track intrinsic decomposition success
-                    if intrinsic_components is not None:
-                        self._telemetry["intrinsic_success_frames"] += 1
-                        # Track confidence
-                        avg_conf = float(np.mean(intrinsic_conf))
-                        self._telemetry["intrinsic_confidence_sum"] += avg_conf
-                        self._telemetry["intrinsic_confidence_count"] += 1
-                        # Track decomposition error
-                        self._telemetry["decomposition_error_sum"] += intrinsic_components.reconstruction_error
-                        self._telemetry["decomposition_error_count"] += 1
-                    else:
-                        self._telemetry["intrinsic_failure_frames"] += 1
-                        # Track failure reason
-                        reason = "not_initialized"
-                        if not self.identity_state.is_initialized():
-                            reason = "identity_not_initialized"
-                        self._telemetry["intrinsic_failure_reasons"][reason] = (
-                            self._telemetry["intrinsic_failure_reasons"].get(reason, 0) + 1
-                        )
-                    
-                    # V3: Update renderer mode state
-                    if self.renderer_mode_state is not None:
-                        intrinsic_available = intrinsic_components is not None
-                        avg_confidence = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
-                        decomposition_error = intrinsic_components.reconstruction_error if intrinsic_components is not None else 1.0
-                        
-                        prev_transitions = self.renderer_mode_state.transition_count
-                        renderer_mode = self.renderer_mode_state.update(
-                            intrinsic_available=intrinsic_available,
-                            intrinsic_confidence=avg_confidence,
-                            decomposition_error=decomposition_error,
-                        )
-                        # Track mode transitions
-                        self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
-                        
-                        # Track mode distribution
-                        self._telemetry["renderer_mode_distribution"][renderer_mode.value] += 1
-                        
-                        # Log mode changes
-                        if self.renderer_mode_state.transition_count > 0 and frame_idx % 30 == 0:
-                            print(f"  Frame {frame_idx}: renderer_mode={renderer_mode.value} "
-                                  f"confidence={avg_confidence:.3f} "
-                                  f"transitions={self.renderer_mode_state.transition_count}")
-                    
-                    # V3: Update state evolution model
-                    if self.state_evolution is not None and self._latent_state is not None:
-                        # Predict next state
-                        self._latent_state = self.state_evolution.predict(self._latent_state)
-                        self._latent_covariance = self.state_evolution.predict_covariance(self._latent_covariance)
+                    # V3: Update renderer mode + state evolution (shared path)
+                    self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx)
                     
                     # Render via shared _render_core
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
@@ -1076,6 +1008,102 @@ class FaceOSPipeline:
 
         return output
 
+    def _update_v3_modules(
+        self,
+        intrinsic_components: Optional['IntrinsicComponents'],
+        intrinsic_conf: Optional[np.ndarray],
+        frame_idx: int,
+    ) -> None:
+        """Shared V3 module updates — single source of truth.
+
+        Called by BOTH _process_frame_v2() and _render_frame_v2().
+        Eliminates duplicate telemetry tracking and mode updates.
+
+        RULE 1: No rendering logic outside _render_core.
+        RULE 8: All telemetry tracked here.
+        """
+        # Track intrinsic decomposition telemetry
+        if intrinsic_components is not None:
+            self._telemetry["intrinsic_success_frames"] += 1
+            avg_conf = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
+            self._telemetry["intrinsic_confidence_sum"] += avg_conf
+            self._telemetry["intrinsic_confidence_count"] += 1
+            self._telemetry["decomposition_error_sum"] += intrinsic_components.reconstruction_error
+            self._telemetry["decomposition_error_count"] += 1
+        else:
+            self._telemetry["intrinsic_failure_frames"] += 1
+            reason = "identity_not_initialized" if not self.identity_state.is_initialized() else "decomposition_failed"
+            self._telemetry["intrinsic_failure_reasons"][reason] = (
+                self._telemetry["intrinsic_failure_reasons"].get(reason, 0) + 1
+            )
+
+        # Track normal source
+        normal_source = self.identity_state.get_normal_source()
+        if normal_source == "mesh":
+            self._telemetry["mesh_normal_frames"] += 1
+        else:
+            self._telemetry["shading_normal_frames"] += 1
+
+        # Update renderer mode state
+        if USE_IDENTITY and self.renderer_mode_state is not None:
+            intrinsic_available = intrinsic_components is not None
+            avg_confidence = float(np.mean(intrinsic_conf)) if intrinsic_conf is not None else 0.0
+            decomposition_error = intrinsic_components.reconstruction_error if intrinsic_components is not None else 1.0
+
+            renderer_mode = self.renderer_mode_state.update(
+                intrinsic_available=intrinsic_available,
+                intrinsic_confidence=avg_confidence,
+                decomposition_error=decomposition_error,
+            )
+            self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
+            self._telemetry["renderer_mode_distribution"][renderer_mode.value] += 1
+
+        # Update state evolution model
+        if USE_IDENTITY and self.state_evolution is not None and self._latent_state is not None:
+            self._latent_state = self.state_evolution.predict(self._latent_state)
+            self._latent_covariance = self.state_evolution.predict_covariance(self._latent_covariance)
+
+    def _compute_energy_terms(
+        self,
+        intrinsic_components: Optional['IntrinsicComponents'],
+        identity_face: Optional[np.ndarray],
+        landmarks: Optional[Landmarks],
+        frame_idx: int,
+    ) -> dict:
+        """Compute and normalize energy terms.
+
+        RULE 7: Energy terms must be normalized to unit variance.
+        E_i_normalized = E_i / sigma_i^2
+
+        Returns:
+            Dict of energy term name -> normalized value
+        """
+        terms = {}
+
+        # Geometry energy: landmark stability
+        if landmarks is not None:
+            pose_mag = abs(landmarks.yaw) + abs(landmarks.pitch) + abs(landmarks.roll)
+            terms['E_geom'] = float(pose_mag / 180.0)
+
+        # Identity energy: intrinsic decomposition quality
+        if intrinsic_components is not None:
+            terms['E_identity'] = float(intrinsic_components.reconstruction_error)
+
+        # Photometric energy: reconstruction error
+        if intrinsic_components is not None:
+            terms['E_photometric'] = float(intrinsic_components.decomposition_quality)
+
+        # Temporal energy: state evolution prediction error
+        if self._latent_state is not None:
+            terms['E_temporal'] = float(np.linalg.norm(self._latent_state))
+
+        # Normalize all terms
+        normalized_terms = {}
+        for name, value in terms.items():
+            normalized_terms[name] = self.energy_scaler.normalize(name, value)
+
+        return normalized_terms
+
     def _render_core(
         self,
         cropped: np.ndarray,
@@ -1102,6 +1130,15 @@ class FaceOSPipeline:
         """
         # Track why we skip PhysicalRenderer (for telemetry)
         fallback_reason = None
+
+        # RULE 7: Compute and normalize energy terms
+        energy_terms = self._compute_energy_terms(
+            intrinsic_components, identity_face, landmarks, frame_idx
+        )
+
+        # RULE 8: Timing
+        import time as _time
+        _render_start = _time.perf_counter()
 
         # 1. PhysicalRenderer
         physical_possible = (intrinsic_components is not None
@@ -1155,6 +1192,10 @@ class FaceOSPipeline:
             identity_eyes=identity_eyes,
             eye_confidence=eye_confidence,
         )
+        # RULE 8: Track render timing
+        render_time_ms = (_time.perf_counter() - _render_start) * 1000
+        self._telemetry["render_time_sum_ms"] += render_time_ms
+        self._telemetry["render_time_count"] += 1
         return rendered
 
     def _render_with_physical_renderer(
@@ -1529,7 +1570,12 @@ class FaceOSPipeline:
             "decomposition_error_count": 0,
             "mesh_normal_frames": 0,
             "shading_normal_frames": 0,
+            # RULE 8: Timing telemetry
+            "render_time_sum_ms": 0.0,
+            "render_time_count": 0,
         }
+        # RULE 7: Reset energy scaler for fresh per-clip stats
+        self.energy_scaler.reset()
 
 
 # ─── CLI ────────────────────────────────────────────────────────────────────

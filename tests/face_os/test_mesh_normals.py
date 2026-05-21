@@ -157,10 +157,10 @@ class TestIntrinsicDecomposerNormalSource:
     def test_normal_source_tracked(self):
         """Decomposer must track which normal source was used."""
         decomposer = IntrinsicDecomposer()
-        # Without mesh, falls back to shading gradient
+        # Without mesh, falls back to face-prior normals (not circular shading)
         image = np.random.rand(64, 64, 3).astype(np.float32)
         result = decomposer.decompose(image)
-        assert decomposer._normal_source == "shading_gradient"
+        assert decomposer._normal_source == "face_prior"
         # With mesh, should use mesh
         mesh = np.zeros((478, 3), dtype=np.float32)
         mesh[:, 0] = np.random.randint(0, 32, 478).astype(np.float32)
@@ -170,21 +170,21 @@ class TestIntrinsicDecomposerNormalSource:
         assert decomposer._normal_source == "mesh"
 
     def test_shading_gradient_fallback_when_no_mesh(self):
-        """Without mesh_478, must fall back to shading-gradient normals."""
+        """Without mesh_478, must fall back to face-prior normals (deterministic, not circular)."""
         decomposer = IntrinsicDecomposer()
         image = np.random.rand(32, 32, 3).astype(np.float32)
         result = decomposer.decompose(image)
-        assert decomposer._normal_source == "shading_gradient"
+        assert decomposer._normal_source == "face_prior"
         assert result.normal_map.shape == (32, 32, 3)
 
     def test_can_disable_mesh_normals(self):
-        """use_mesh_normals=False forces shading-gradient normals."""
+        """use_mesh_normals=False forces face-prior normals."""
         decomposer = IntrinsicDecomposer(use_mesh_normals=False)
         image = np.random.rand(32, 32, 3).astype(np.float32)
         mesh = np.zeros((478, 3), dtype=np.float32)
         warp_M = np.eye(2, 3, dtype=np.float32)
         result = decomposer.decompose(image, mesh_478=mesh, warp_M=warp_M)
-        assert decomposer._normal_source == "shading_gradient"
+        assert decomposer._normal_source == "face_prior"
 
 
 class TestPipelineTelemetry:

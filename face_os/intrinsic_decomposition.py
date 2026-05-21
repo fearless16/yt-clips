@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, laplace
+from scipy.ndimage import gaussian_filter
 
 
 @dataclass
@@ -187,7 +187,7 @@ class IntrinsicDecomposer:
             self._normal_source = "mesh"
         else:
             normal_map = self._estimate_normals(shading)
-            self._normal_source = "shading_gradient"
+            self._normal_source = "face_prior"
 
         # Step 5: Compute confidence
         confidence = self._compute_confidence(image, albedo, shading, specular)
@@ -345,37 +345,47 @@ class IntrinsicDecomposer:
         return specular
 
     def _estimate_normals(self, shading: np.ndarray) -> np.ndarray:
-        """Estimate surface normals from shading gradient.
+        """Estimate surface normals using a deterministic face-prior model.
 
-        Normal = normalize([-dS/dx, -dS/dy, 1])
+        BREAKS CIRCULARITY: Does NOT use shading gradients.
+        Uses a fixed ellipsoidal face-prior normal map based on canonical face geometry.
+        This is deterministic and brightness-invariant.
 
         Args:
-            shading: Shading estimate (H, W, 1)
+            shading: Shading estimate (H, W, 1) — used only for shape
 
         Returns:
             Normal map (H, W, 3), unit vectors
         """
-        shading_2d = shading[:, :, 0]
+        h, w = shading.shape[:2]
+        cy, cx = h / 2, w / 2
+        ry, rx = h * 0.45, w * 0.40
 
-        # Compute gradients
-        dy, dx = np.gradient(shading_2d)
+        Y, X = np.ogrid[:h, :w]
+        # Normalized coordinates [-1, 1]
+        nx = (X - cx) / max(rx, 1)
+        ny = (Y - cy) / max(ry, 1)
 
-        # Normal = [-dx, -dy, 1] (scaled)
-        scale = self.config.normal_scale
-        nx = -dx * scale
-        ny = -dy * scale
-        nz = np.ones_like(dx)
+        # Ellipsoidal face prior: z = sqrt(1 - x^2 - y^2)
+        r2 = nx**2 + ny**2
+        nz = np.sqrt(np.maximum(0, 1.0 - r2))
+
+        # Normal = [dx, dy, dz] for ellipsoid
+        # For ellipsoid x^2/a^2 + y^2/b^2 + z^2/c^2 = 1, normal is proportional to (x/a^2, y/b^2, z/c^2)
+        normal_x = nx / max(rx, 1)
+        normal_y = ny / max(ry, 1)
+        normal_z = nz / max(min(rx, ry), 1)
 
         # Normalize to unit vectors
-        norms = np.sqrt(nx**2 + ny**2 + nz**2)
-        nx = nx / (norms + 1e-8)
-        ny = ny / (norms + 1e-8)
-        nz = nz / (norms + 1e-8)
+        norms = np.sqrt(normal_x**2 + normal_y**2 + normal_z**2)
+        normal_x = normal_x / (norms + 1e-8)
+        normal_y = normal_y / (norms + 1e-8)
+        normal_z = normal_z / (norms + 1e-8)
 
         # Stack to (H, W, 3)
-        normal_map = np.stack([nx, ny, nz], axis=2)
+        normal_map = np.stack([normal_x, normal_y, normal_z], axis=2)
 
-        return normal_map
+        return normal_map.astype(np.float32)
 
     def _compute_confidence(
         self,
