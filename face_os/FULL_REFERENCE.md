@@ -1,9 +1,9 @@
 # Face OS — Complete Architecture & Parameter Reference (V2)
 
-**Version:** 2.7.0  
+**Version:** 2.8.0  
 **Branch:** `feat/face-os-v2-phase1`  
 **Date:** 2026-05-21  
-**Status:** Phase 0-2F COMPLETE + Red Flag Fixes | **493 tests passing** | All visibility red flags resolved | System mathematically exposed
+**Status:** Phase 0-2G COMPLETE | **531 tests passing** | Probabilistic recovery dynamics | All visibility red flags resolved
 
 ---
 
@@ -617,6 +617,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_phase2c_observability.py` | 28 | ✅ All pass | ObservabilityAnalyzer, DegeneracyReport, lighting/pose/identity ambiguity |
 | `test_phase2d_state_separation.py` | 34 | ✅ All pass | PhysicalState, BeliefState, MetaState, SeparatedState, StateSeparator |
 | `test_phase2e_map_estimation.py` | 19 | ✅ All pass | MAPOptimizer, MAPReport, posterior contraction, energy descent |
+| `test_phase2g_recovery_dynamics.py` | 38 | ✅ All pass | RecoveryTransitionMatrix, ProbabilisticRecoveryState, RecoveryDynamics |
 | `test_detection.py` | 14 | ✅ All pass | MediaPipe tasks API, poster rejection, identity matching |
 | `test_quality_gates.py` | 13 | ✅ All pass | Procrustes, jitter, occupancy, SSIM, Laplacian |
 | `test_identity_state.py` | 17 | ✅ All pass | Identity state, frequency decomposition, hypotheses |
@@ -628,7 +629,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_neural_codec.py` | 12 | ✅ All pass | PersonalizedSpace, NeuralCodec, identity score |
 | `test_hypothesis_matching.py` | 4 | ✅ All pass | Hypothesis space, pose/expression selection |
 | `test_region_confidence.py` | 4 | ✅ All pass | Region confidence, semantic confidence |
-| **Total** | **493** | **0 failures** | **All green** |
+| **Total** | **531** | **0 failures** | **All green** |
 
 ### QC Metrics (Identity Mode, V2.1.0 — 345 frames, Phase 1 Hardening)
 
@@ -1306,6 +1307,40 @@ Q[4] = 1.0  # appearance_latent_norm (was 100.0)
 ```python
 trace > 50.0  # was 10.0 (initial trace = 11.0)
 ```
+
+### Phase 2G: Probabilistic Recovery Dynamics (COMPLETE)
+
+**Status:** ✅ All 531 tests passing (38 new Phase 2G tests)
+
+**New Module:** `face_os/recovery_dynamics.py`
+
+**Components:**
+- `RecoveryTransitionMatrix` — 5x5 state transition probabilities P(x_meta,t | x_meta,t-1)
+- `ProbabilisticRecoveryState` — soft state with probabilities + entropy
+- `RecoveryDynamics` — predict-update cycle with Bayesian inference
+- `RecoveryReport` — per-frame recovery metrics
+
+**Transition Matrix:**
+```
+           STABLE  UNCERTAIN  DEGRADED  RECOVERING  RESET
+STABLE      0.95     0.05      0.00      0.00      0.00
+UNCERTAIN   0.30     0.50      0.20      0.00      0.00
+DEGRADED    0.00     0.20      0.50      0.30      0.00
+RECOVERING  0.30     0.00      0.20      0.50      0.00
+RESET       0.00     0.00      0.00      0.50      0.50
+```
+
+**Key Design:**
+- Soft sigmoid-based likelihoods (no hard thresholds)
+- Uniform prior for Bayesian update (allows state shifts)
+- Entropy tracking for uncertainty quantification
+- Steady-state convergence guaranteed
+
+**Tests Added:**
+- RecoveryTransitionMatrix (10 tests) — shape, row sums, steady state
+- ProbabilisticRecoveryState (11 tests) — probabilities, entropy, dominant state
+- RecoveryDynamics (13 tests) — predict, update, step, entropy tracking
+- TransitionDynamics (4 tests) — persistence, recovery, entropy bounds
 
 **Logging Format:**
 ```json
