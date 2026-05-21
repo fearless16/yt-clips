@@ -639,7 +639,15 @@ class FaceOSPipeline:
         hq_count = self.temporal_solver.solver.get_hq_frame_count()
         print(f"    Solved {len(solved_faces)} frames, {hq_count} HQ frames")
 
-        # Update identity state with solved faces
+        # Save forward pass's intrinsic state before bidirectional overwrites it
+        # D-06: Forward/bidirectional state separation
+        forward_intrinsic = None
+        forward_intrinsic_conf = None
+        if self.identity_state is not None and self.identity_state._intrinsic_components is not None:
+            forward_intrinsic = self.identity_state._intrinsic_components
+            forward_intrinsic_conf = float(np.mean(self.identity_state.belief.get_confidence())) if self.identity_state.belief is not None else 0.0
+
+        # Update identity state with solved faces (bidirectional refinement)
         for idx, (solved_face, solved_conf) in solved_faces.items():
             # D-04: Pass mesh_478 and warp_M for geometry-derived normals
             mesh_478 = None
@@ -667,6 +675,18 @@ class FaceOSPipeline:
                 if landmarks:
                     pose = (landmarks.yaw, landmarks.pitch, landmarks.roll)
                     self.patch_memory.update(solved_face, solved_conf, pose=pose, frame_idx=idx)
+
+        # D-06: Merge forward and bidirectional intrinsic states
+        # Prefer highest confidence — never overwrite good state with worse
+        if (forward_intrinsic is not None
+            and self.identity_state._intrinsic_components is not None
+            and forward_intrinsic_conf is not None):
+            bidir_conf = float(np.mean(self.identity_state.belief.get_confidence())) if self.identity_state.belief is not None else 0.0
+            if forward_intrinsic_conf > bidir_conf:
+                # Forward state was better — restore it
+                self.identity_state._intrinsic_components = forward_intrinsic
+                if frame_idx % 30 == 0:
+                    print(f"    State merge: forward={forward_intrinsic_conf:.3f} > bidir={bidir_conf:.3f} — using forward")
 
         # === PASS 3: Render ===
         print("  Pass 3/3: Rendering...")
