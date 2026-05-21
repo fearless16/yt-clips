@@ -173,6 +173,8 @@ class FaceOSPipeline:
             "intrinsic_confidence_count": 0,
             "decomposition_error_sum": 0.0,
             "decomposition_error_count": 0,
+            "mesh_normal_frames": 0,
+            "shading_normal_frames": 0,
         }
 
     @staticmethod
@@ -233,6 +235,8 @@ class FaceOSPipeline:
                 "intrinsic_failure_rate": 0.0,
                 "avg_intrinsic_confidence": 0.0,
                 "avg_decomposition_error": 0.0,
+                "mesh_normal_rate": 0.0,
+                "shading_normal_rate": 0.0,
             }
 
         # Compute averages
@@ -255,6 +259,10 @@ class FaceOSPipeline:
         alpha = self._telemetry["alpha_fallback_frames"]
         total_render = physical + alpha if (physical + alpha) > 0 else 1
 
+        mesh_normal = self._telemetry["mesh_normal_frames"]
+        shading_normal = self._telemetry["shading_normal_frames"]
+        total_normal = mesh_normal + shading_normal if (mesh_normal + shading_normal) > 0 else 1
+
         return {
             **self._telemetry,
             "physical_render_rate": physical / total,
@@ -265,6 +273,8 @@ class FaceOSPipeline:
             "avg_decomposition_error": avg_decomposition_error,
             "physical_render_fraction": physical / total_render,
             "alpha_fallback_fraction": alpha / total_render,
+            "mesh_normal_rate": mesh_normal / total_normal,
+            "shading_normal_rate": shading_normal / total_normal,
         }
 
     def enroll(
@@ -758,11 +768,14 @@ class FaceOSPipeline:
                 embedding = face_track.detection.embedding if face_track.detection else None
 
                 # Update with verification gate
+                mesh_478 = getattr(face_track, 'mesh_478', None)
                 self.identity_state.update(
                     canonical_face, masked_quality, pose=pose,
                     face_bbox=face_bbox,
                     landmarks_pts=landmarks_pts,
                     embedding=embedding,
+                    mesh_478=mesh_478,
+                    warp_M=M[:2] if M is not None else None,
                 )
 
         # 5. Patch memory update (skip if USE_IDENTITY=False)
@@ -800,6 +813,13 @@ class FaceOSPipeline:
                 self._telemetry["intrinsic_failure_reasons"][reason] = (
                     self._telemetry["intrinsic_failure_reasons"].get(reason, 0) + 1
                 )
+
+            # Track normal source (mesh vs shading gradient)
+            normal_source = self.identity_state.get_normal_source()
+            if normal_source == "mesh":
+                self._telemetry["mesh_normal_frames"] += 1
+            else:
+                self._telemetry["shading_normal_frames"] += 1
 
         # 7. Crop planning
         crop_plan = self.crop.plan_crop(frame.shape[:2], face_track, landmarks)
@@ -1507,6 +1527,8 @@ class FaceOSPipeline:
             "intrinsic_confidence_count": 0,
             "decomposition_error_sum": 0.0,
             "decomposition_error_count": 0,
+            "mesh_normal_frames": 0,
+            "shading_normal_frames": 0,
         }
 
 
