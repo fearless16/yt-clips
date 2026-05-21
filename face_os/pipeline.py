@@ -697,15 +697,28 @@ class FaceOSPipeline:
                     if conf.shape[:2] != cropped.shape[:2]:
                         conf = cv2.resize(conf, (cropped.shape[1], cropped.shape[0]))
                     
-                    # CRITICAL: Use identity_in_crop (anchor-corrected, warped to crop space)
-                    output = self.compositor.composite(
-                        cropped, identity_in_crop,
-                        confidence=ConfidenceMap(combined=conf),
-                        face_mask=aligned_mask,
-                    )
+                    # FIX: Use aligned_mask as primary blend weight.
+                    # The old approach multiplied mask * conf, but conf is in canonical space
+                    # (15% face, 85% zeros) → mean=0.12 → nearly invisible identity.
+                    # aligned_mask already defines the face boundary — use it directly.
+                    blend_weight = aligned_mask  # 0-1, feathered at edges
+                    
+                    if frame_idx % 30 == 0:
+                        face_pixels = aligned_mask > 0.5
+                        if face_pixels.sum() > 0:
+                            face_blend = float(blend_weight[face_pixels].mean())
+                        else:
+                            face_blend = 0.0
+                        print(f"  Frame {frame_idx}: blend_weight face_mean={face_blend:.3f} identity_diff={np.mean(np.abs(cropped.astype(float)-identity_in_crop.astype(float))):.1f}")
+
+                    # Direct blend: source * (1-mask) + identity * mask
+                    blend_3d = blend_weight[:, :, np.newaxis]
+                    output = cropped.astype(np.float32) * (1 - blend_3d) + identity_in_crop.astype(np.float32) * blend_3d
+                    output = np.clip(output, 0, 255).astype(np.uint8)
                 else:
                     output = rendered
-            except Exception:
+            except Exception as e:
+                print(f"  Frame {frame_idx}: COMPOSITOR FAILED: {e}")
                 output = rendered
         else:
             output = rendered
@@ -798,15 +811,19 @@ class FaceOSPipeline:
                 feather_ksize = max(3, cfg.compositor.feather_pixels * 2 + 1)
                 feathered_mask = cv2.GaussianBlur(aligned_mask, (feather_ksize, feather_ksize), cfg.compositor.feather_pixels / 2)
 
-                # Blend solved identity with source using confidence
-                if solved_conf is not None:
-                    conf = cv2.resize(solved_conf, (cropped.shape[1], cropped.shape[0]))
-                else:
-                    conf = np.ones(cropped.shape[:2], dtype=np.float32) * 0.5
+                # Blend solved identity with source
+                # FIX: Use feathered_mask directly as blend weight.
+                # Old approach: mask * conf → conf is in canonical space (mean=0.12) → invisible.
+                # New: mask already defines face boundary, use it directly.
+                if frame_idx % 30 == 0:
+                    face_pixels = feathered_mask > 0.5
+                    if face_pixels.sum() > 0:
+                        face_blend = float(feathered_mask[face_pixels].mean())
+                    else:
+                        face_blend = 0.0
+                    print(f"  Frame {frame_idx}: blend face_mean={face_blend:.3f} identity_diff={np.mean(np.abs(cropped.astype(float)-solved_in_crop.astype(float))):.1f}")
 
-                # Blend weight = aligned_mask * confidence (mask spatially aligned with content)
-                blend_weight = feathered_mask * conf
-                conf_3d = blend_weight[:, :, np.newaxis]
+                conf_3d = feathered_mask[:, :, np.newaxis]
                 blended = cropped.astype(np.float32) * (1 - conf_3d) + solved_in_crop.astype(np.float32) * conf_3d
                 blended = np.clip(blended, 0, 255).astype(np.uint8)
 
@@ -831,7 +848,8 @@ class FaceOSPipeline:
                 output = face_enhance._sharpen(output, amount=0.3, radius=0.8)
                 return output
 
-            except Exception:
+            except Exception as e:
+                print(f"  Frame {frame_idx}: IDENTITY PATH FAILED: {e}")
                 pass
 
         # Fallback: structure-preserving rendering only
