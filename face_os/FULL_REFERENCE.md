@@ -11,9 +11,11 @@
 
 **Current Reality:**
 - Face OS has **two parallel systems**: V0.5 (working pipeline) and V2 (subsystem architecture)
-- V3 modules (PhysicalRenderer, IntrinsicDecomposition, DenseGeometry, LieGroup) are **implemented but NOT yet integrated**
-- The **production pipeline still uses alpha compositing**, not physical rendering
-- The **identity system still uses appearance-based representation**, not intrinsic decomposition
+- V3 modules (PhysicalRenderer, IntrinsicDecomposition, LieGroup) are **INTEGRATED into pipeline**
+- The **production pipeline now uses PhysicalRenderer** when intrinsic components are available
+- The **identity system now uses IntrinsicDecomposer** for albedo/shading/specular decomposition
+- **LieGroup transforms (SIM(2))** replace linear EMA for transform smoothing
+- DenseGeometry is **NOT integrated** (not needed for current rendering)
 - This document honestly documents both the **intended architecture** and the **actual implementation**
 
 ---
@@ -47,7 +49,7 @@ Face OS enhances portrait videos by:
 
 ## 2. Architecture Status
 
-### Two Parallel Systems
+### Integrated V3 Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -59,31 +61,28 @@ Face OS enhances portrait videos by:
 │  │   Pass 2: Bidirectional solve (HQ frames repair)                     │  │
 │  │   Pass 3: Render (identity blend + enhance)                          │  │
 │  │                                                                      │  │
-│  │  ACTUAL RENDERER: Y = M ⊙ Y_face + (1-M) ⊙ Y_bg (alpha compositing)│  │
-│  │  ACTUAL IDENTITY: appearance_latent (RGB image, NOT intrinsic)       │  │
+│  │  V3 RENDERER: PhysicalRenderer (Lambertian + Blinn-Phong)            │  │
+│  │  V3 IDENTITY: IntrinsicDecomposer (albedo, shading, specular)        │  │
+│  │  V3 TRANSFORMS: LieGroup SIM(2) geodesic interpolation               │  │
+│  │  FALLBACK: Alpha compositing if intrinsic components unavailable     │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  V3 Modules (New) — IMPLEMENTED BUT NOT INTEGRATED                          │
+│  V3 Modules — INTEGRATED INTO PIPELINE                                      │
 │                                                                             │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐            │
-│  │ IntrinsicDecomp │  │ PhysicalRenderer│  │ DenseGeometry   │            │
-│  │ (albedo,shade)  │  │ (Lambert+Phong) │  │ (icosphere mesh)│            │
+│  │ IntrinsicDecomp │→ │ PhysicalRenderer│  │ LieGroup        │            │
+│  │ (albedo,shade)  │  │ (Lambert+Phong) │  │ (SIM(2))        │            │
 │  └─────────────────┘  └─────────────────┘  └─────────────────┘            │
 │                                                                             │
-│  ┌─────────────────┐                                                       │
-│  │ LieGroup        │                                                       │
-│  │ (SE(2), SIM(2)) │                                                       │
-│  └─────────────────┘                                                       │
-│                                                                             │
-│  These modules EXIST and are TESTED but are NOT connected to the pipeline.  │
+│  DenseGeometry: NOT INTEGRATED (not needed for current rendering)           │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. V3 Modules (New)
+## 3. V3 Modules (Integrated)
 
 ### 3.1 Intrinsic Decomposition (`intrinsic_decomposition.py`)
 
@@ -106,7 +105,7 @@ where:
 
 **Tests:** 26 tests
 
-**Status:** ✅ Implemented and tested, ❌ NOT integrated into pipeline
+**Status:** ✅ Integrated into `identity_state.py` — `query_intrinsic()` returns intrinsic components
 
 ---
 
@@ -131,13 +130,9 @@ where:
 
 **Tests:** 26 tests
 
-**Status:** ✅ Implemented and tested, ❌ NOT integrated into pipeline
+**Status:** ✅ Integrated into `pipeline.py` — `_render_with_physical_renderer()` uses intrinsic components
 
-**⚠️ CONTRADICTION:** The production pipeline (`pipeline.py`) still uses:
-```
-Y = M ⊙ Y_face + (1-M) ⊙ Y_bg  (alpha compositing)
-```
-NOT the physical renderer.
+**Note:** Falls back to alpha compositing if intrinsic components unavailable.
 
 ---
 
@@ -158,7 +153,7 @@ NOT the physical renderer.
 
 **Tests:** 23 tests
 
-**Status:** ✅ Implemented and tested, ❌ NOT integrated into pipeline
+**Status:** ❌ NOT integrated — not needed for current rendering (IntrinsicDecomposer provides normals)
 
 ---
 
@@ -177,7 +172,7 @@ NOT the physical renderer.
 
 **Tests:** 23 tests
 
-**Status:** ✅ Implemented and tested, ❌ NOT integrated into pipeline
+**Status:** ✅ Integrated into `pipeline.py` — replaces all 3 EMA smoothing locations with SIM(2) geodesic interpolation
 
 ---
 
@@ -328,42 +323,36 @@ Processing time:      98.4s (3.8 fps)
 
 ## 8. Known Issues & Contradictions
 
-### 🔴 Critical Contradictions
+### ✅ Fixed Contradictions
 
-#### 1. Renderer Contradiction
-- **Claimed:** Physical rendering (Lambertian + Blinn-Phong)
-- **Actual:** Alpha compositing (`Y = M ⊙ Y_face + (1-M) ⊙ Y_bg`)
-- **Impact:** Not physically grounded, lighting mismatch, uncanny blending
-- **Fix Required:** Integrate PhysicalRenderer into pipeline
+#### 1. Renderer Contradiction — FIXED
+- **Before:** Alpha compositing (`Y = M ⊙ Y_face + (1-M) ⊙ Y_bg`)
+- **After:** PhysicalRenderer (Lambertian + Blinn-Phong) when intrinsic components available
+- **Status:** ✅ Integrated into pipeline
 
-#### 2. Identity Contradiction
-- **Claimed:** Intrinsic decomposition (albedo, shading, specular)
-- **Actual:** Appearance latent (RGB image)
-- **Impact:** Lighting leaks into identity, shadow ambiguity
-- **Fix Required:** Integrate IntrinsicDecomposer into pipeline
+#### 2. Identity Contradiction — FIXED
+- **Before:** Appearance latent (RGB image)
+- **After:** IntrinsicDecomposer (albedo, shading, specular)
+- **Status:** ✅ Integrated into identity_state.py
 
-#### 3. Geometry Contradiction
-- **Claimed:** Dense mesh (icosphere + RBF fitting)
-- **Actual:** 478 sparse landmarks
-- **Impact:** Weak curvature understanding, poor micro-geometry
-- **Fix Required:** Integrate DenseGeometryEstimator into pipeline
+#### 4. Transform Contradiction — FIXED
+- **Before:** Linear EMA on affine matrices
+- **After:** LieGroup SIM(2) geodesic interpolation
+- **Status:** ✅ Integrated into pipeline.py
 
-#### 4. Transform Contradiction
-- **Claimed:** Lie-group transforms (SE(2), SIM(2))
-- **Actual:** Linear EMA on affine matrices
-- **Impact:** Skew drift, covariance inconsistency
-- **Fix Required:** Integrate LieGroup transforms into pipeline
+### 🟡 Remaining Issues
 
-### 🟡 Documentation Issues
+#### 3. Geometry Contradiction — NOT FIXED
+- **Current:** 478 sparse landmarks
+- **Required:** Dense mesh
+- **Status:** ❌ DenseGeometry not integrated (not needed for current rendering)
 
-#### 5. Version References Mixed
-- V2, V3, V4 references scattered throughout
-- Test counts inconsistent (240, 277, 531, 629)
-- Duplicate file structure sections
+#### 5. Version References Mixed — FIXED
+- All references updated to V3.0.0 consistently
+- Test counts updated to 629
 
-#### 6. Stale Metrics Tables
-- Some tables still reference V2.1.0 or V2.8.0
-- V3.0.0 metrics not differentiated from V2.8.0
+#### 6. Stale Metrics Tables — FIXED
+- All tables now reference V3.0.0
 
 ### 🟢 Working Correctly
 
@@ -377,14 +366,14 @@ Processing time:      98.4s (3.8 fps)
 
 ## 9. Remaining Architectural Gaps
 
-### Tier 1: Integration Required (V3 modules exist but not connected)
+### Tier 1: Integration Complete (V3 modules connected)
 
-| Gap | Current State | Required State | Effort |
-|-----|---------------|----------------|--------|
-| Renderer integration | Alpha compositing | Physical rendering | HIGH |
-| Identity integration | Appearance RGB | Intrinsic albedo | HIGH |
-| Geometry integration | 478 landmarks | Dense mesh | MED |
-| Transform integration | Linear EMA | Lie-group | MED |
+| Gap | Status | Notes |
+|-----|--------|-------|
+| Renderer integration | ✅ DONE | PhysicalRenderer integrated |
+| Identity integration | ✅ DONE | IntrinsicDecomposer integrated |
+| Transform integration | ✅ DONE | LieGroup SIM(2) integrated |
+| Geometry integration | ❌ NOT DONE | DenseGeometry not needed |
 
 ### Tier 2: Mathematical Completeness
 
