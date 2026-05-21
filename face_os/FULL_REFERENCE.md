@@ -1,9 +1,9 @@
 # Face OS — Complete Architecture & Parameter Reference (V2)
 
-**Version:** 2.0.0  
-**Branch:** `main`  
+**Version:** 2.1.0  
+**Branch:** `feat/face-os-v2-phase1`  
 **Date:** 2026-05-21  
-**Status:** V2 architecture complete | **240 tests passing** | 4 isolated subsystems | V0.5 pipeline preserved | Frame-size invariant | Mask stability fixed
+**Status:** V2 architecture complete | **240 tests passing** | 4 isolated subsystems | Phase 1 hardening in progress | System identifiability analysis complete
 
 ---
 
@@ -602,13 +602,14 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 **Test clip:** `clips_test/test_clip.mp4` (640x360, 30fps, 345 frames)  
 **Reference:** `expectation.png` (941x1672, portrait)
 
-### Test Suite (V2.0.0)
+### Test Suite (V2.1.0)
 
 | File | Tests | Status | Purpose |
 |---|---|---|---|
 | `test_strict_regression.py` | 26 | ✅ All pass | Frame contract, mask stability, NaN/Inf, bidirectional size, EMA convergence |
-| `test_v2_subsystems.py` | 20 | ✅ All pass | **NEW** — V2 subsystem isolation, coordinate systems, mathematical invariants |
+| `test_v2_subsystems.py` | 20 | ✅ All pass | V2 subsystem isolation, coordinate systems, mathematical invariants |
 | `test_math_hardening.py` | 37 | ✅ All pass | 10 invariant classes: UV roundtrip, transform det, temporal drift, flow shimmer, reprojection, lighting invariance, pose invariance, mask topology, subpixel drift, edge cases |
+| `test_phase1_hardening.py` | 37 | ✅ All pass | **NEW** — Long-horizon drift, system identifiability, renderer equation, VerificationGate |
 | `test_detection.py` | 14 | ✅ All pass | MediaPipe tasks API, poster rejection, identity matching |
 | `test_quality_gates.py` | 13 | ✅ All pass | Procrustes, jitter, occupancy, SSIM, Laplacian |
 | `test_identity_state.py` | 17 | ✅ All pass | Identity state, frequency decomposition, hypotheses |
@@ -620,7 +621,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_neural_codec.py` | 12 | ✅ All pass | PersonalizedSpace, NeuralCodec, identity score |
 | `test_hypothesis_matching.py` | 4 | ✅ All pass | Hypothesis space, pose/expression selection |
 | `test_region_confidence.py` | 4 | ✅ All pass | Region confidence, semantic confidence |
-| **Total** | **240** | **0 failures** | **All green** |
+| **Total** | **277** | **0 failures** | **All green** |
 
 ### QC Metrics (Identity Mode, V2.0.0 — 50 frames)
 
@@ -874,6 +875,181 @@ The `test_math_hardening.py` + `test_v2_subsystems.py` suites enforce 57 determi
 
 ---
 
+## 12. System Identifiability Analysis (V2.1.0)
+
+### The Core Problem
+
+V2 architecture isolates subsystems. But the underlying math is still entangled.
+
+The observation model:
+```
+y_t = R(g_t, a_t, l_t, e_t, c_t)
+```
+
+Where geometry (g), lighting (l), appearance (a), expression (e), and camera (c) are **strongly entangled** in the observation space. Architectural separation ≠ mathematical separation.
+
+### Issue 1: IdentityState Is Not Intrinsic
+
+**Current:** `appearance_latent` = 256x256x3 uint8 BGR image (anchor-corrected canonical face)
+
+**Problem:** This is appearance-space, not intrinsic identity-space. Pores become lighting, beard becomes shadow, wrinkles become illumination.
+
+**Correct formulation:**
+```
+a_t = (A_t, D_t)
+```
+Where:
+- `A_t` = intrinsic albedo (lighting-invariant)
+- `D_t` = geometric micro-detail residual
+
+**Current status:** Both treated as same tensor. No albedo/specular decomposition.
+
+### Issue 2: Temporal Estimator Is Not Bayesian
+
+**Current:** Scalar confidence values (`temporal_confidence: float`, `drift_score: float`)
+
+**Problem:** `confidence = 0.83` means nothing mathematically. No variance, no distribution, no Bayesian update.
+
+**Correct formulation:**
+```
+p(x_t | y_{1:t})
+```
+With:
+- Belief state (mean + covariance)
+- Uncertainty propagation
+- Measurement update
+- Prediction update
+
+**Current status:** `motion_field` is uniform pose-delta vector, not optical flow. No probabilistic reasoning.
+
+### Issue 3: Renderer Is Not Physically Consistent
+
+**Current:** `Y = M ⊙ Y_face + (1-M) ⊙ Y_bg` — alpha-blend compositing
+
+**Problem:** Illumination, shading, skin scattering, specularity are NOT linear under alpha blending. This causes:
+- LAB drift survives
+- Uncanny face energy
+- Identity "floats"
+
+**Correct formulation:**
+```
+Y = R(G, A, L, V)
+```
+Where:
+- `G` = geometry
+- `A` = albedo
+- `L` = illumination
+- `V` = view direction
+
+**Current status:** Image compositing, not rendering.
+
+### Issue 4: Transforms Not Lie-Group Constrained
+
+**Current:** `M_inv = 0.4 * last + 0.6 * new` — linear interpolation on affine matrices
+
+**Problem:** Small EMA updates on affine matrices ≠ valid geometric interpolation. Causes:
+- Subtle skew drift
+- Non-rigid accumulation
+- Temporal wobble
+
+**Correct math:** Transforms should evolve on SE(2), SIM(2), SE(3) using:
+- Exponential maps
+- Logarithmic interpolation
+- Geodesic averaging
+
+**Current status:** Illegal geometry interpolation (even if determinant tests pass).
+
+### Issue 5: Identity Anchors Are Discrete
+
+**Current:** `anchor_basis = [identity_face]`, `anchor_weights = [1.0]` — single anchor
+
+**Problem:** Face manifold is continuous. Discrete anchors produce:
+- Interpolation discontinuities
+- Mode switching
+- Identity popping
+
+**Correct solution:** Identity should live on continuous latent manifold `M_identity`. Anchor basis should only initialize local charts.
+
+**Current status:** `IdentityHypothesisSpace` uses discrete pose/expression bins, not continuous manifold.
+
+### Issue 6: Geometry Estimator Is Landmark-Centric
+
+**Current:** 478 MediaPipe landmarks → sparse constraints
+
+**Problem:** Landmarks are sparse constraints, not geometry. Missing:
+- Surface normals
+- Dense correspondence
+- Curvature continuity
+- Volumetric structure
+
+**Correct direction:** Dense mesh fitting, differentiable morphable model, or neural implicit geometry.
+
+### Test Coverage Gaps
+
+| Category | Status | Details |
+|---|---|---|
+| Long-horizon consistency (500+ frames) | **ABSENT** | Max 50 frames tested |
+| System identifiability | **ABSENT** | No test verifies two faces produce distinguishable states |
+| Identity drift under adversarial input | **WEAK** | 20-30 frame tests only |
+| End-to-end pipeline integration | **ABSENT** | All tests are component-level |
+| V2 subsystem cross-data-flow | **ABSENT** | No test chains GeometryState→IdentityState→TemporalState→Renderer |
+| VerificationGate | **ABSENT** | Zero tests |
+| Renderer blending equation | **ABSENT** | Never tested with known inputs |
+| Numerical stability in solver | **ABSENT** | Division by near-zero untested |
+
+---
+
+## 13. Phase 1 Roadmap: Mathematical Hardening
+
+### Goal
+
+Transform V2 from "well-engineered classical CV pipeline" to "mathematically consistent reconstruction system."
+
+### Phase 1A — Testable Now (This Sprint)
+
+| Test | Target | Status |
+|---|---|---|
+| Long-horizon identity drift (500 frames) | Identity stays within 10 LAB of anchor | In progress |
+| System identifiability (two faces) | Different faces → distinguishable identity states | In progress |
+| Renderer blending equation | `Y = M * Y_face + (1-M) * Y_bg` verified with known inputs | In progress |
+| VerificationGate coverage | All 3 checks tested (pixels, embedding, liveness) | In progress |
+| Renderer with actual identity data | Identity path exercised (not just empty states) | In progress |
+
+### Phase 1B — Mathematical Foundations (Next Sprint)
+
+| Change | Description | Priority |
+|---|---|---|
+| Lie-group transforms | SE(2)/SIM(2) geodesic interpolation instead of linear EMA | High |
+| Bayesian temporal state | (mean, covariance) belief instead of scalar confidence | High |
+| Albedo/specular decomposition | Split `appearance_latent` into intrinsic albedo + shading | Medium |
+| Continuous identity manifold | Replace discrete anchors with learned latent space | Medium |
+
+### Phase 1C — Architectural Leap (Future)
+
+| Change | Description | Priority |
+|---|---|---|
+| Energy function formulation | Each subsystem contributes `E_term`, solve jointly | High |
+| Physical renderer | `Y = R(G, A, L, V)` instead of compositing | High |
+| Dense geometry | Mesh fitting or neural implicit geometry | Medium |
+| Full-video optimization | `p(x_{1:T} | y_{1:T})` — solve entire video jointly | Low |
+
+### Energy Function Target
+
+```python
+E = E_geom + E_identity + E_temporal + E_photometric + E_smoothness
+```
+
+Where:
+- `E_geom` = landmark reprojection + mesh regularization
+- `E_identity` = anchor consistency + albedo smoothness
+- `E_temporal` = frame-to-frame coherence + drift penalty
+- `E_photometric` = appearance matching + shading consistency
+- `E_smoothness` = spatial + temporal smoothness priors
+
+**Current status:** Each subsystem optimizes locally. No joint optimization.
+
+---
+
 ## File Structure (V2.0.0)
 
 ```
@@ -972,6 +1148,9 @@ tests/face_os/
 
 # V2 subsystem tests only (20 tests)
 .venv/bin/python -m pytest tests/face_os/test_v2_subsystems.py -v
+
+# Phase 1 hardening tests (long-horizon, identifiability, renderer, verification gate)
+.venv/bin/python -m pytest tests/face_os/test_phase1_hardening.py -v
 
 # Run V0.5 pipeline
 .venv/bin/python -m face_os.pipeline --video clips_test/test_clip.mp4 --reference expectation.png --photos photos/ --output output.mp4
