@@ -1,9 +1,9 @@
-# Face OS — Complete Architecture & Parameter Reference (V2)
+# Face OS — Complete Architecture & Parameter Reference (V3)
 
-**Version:** 2.8.0  
+**Version:** 3.0.0  
 **Branch:** `feat/face-os-v2-phase1`  
 **Date:** 2026-05-21  
-**Status:** Phase 0-2G COMPLETE | **531 tests passing** | Probabilistic recovery dynamics | All visibility red flags resolved
+**Status:** Phase 0-3D COMPLETE | **629 tests passing** | Physical foundation | Intrinsic decomposition | Dense geometry | Lie-group transforms
 
 ---
 
@@ -38,6 +38,16 @@
 | **Renderer** | Mixed in pipeline | Subsystem D | Equation: `Y = M ⊙ Y_face + (1 - M) ⊙ Y_bg` |
 | **Pipeline Orchestrator** | `pipeline.py` only | `pipeline.py` + `pipeline_v2.py` | V0.5 preserved, V2 parallel |
 | **Tests** | 220 | 240 | +20 V2 subsystem isolation tests |
+
+### V2 → V3 Changes (Physical Foundation)
+
+| Component | V2 | V3 | Why Changed |
+|---|---|---|---|
+| **Renderer** | Alpha compositing | Physical rendering (Lambertian + Blinn-Phong) | Illumination transport, not pasting |
+| **Identity** | Appearance space (RGB) | Intrinsic decomposition (albedo, shading, specular) | Lighting-invariant identity |
+| **Geometry** | 478 sparse landmarks | Dense mesh (icosphere + RBF fitting) | Full geometry, normals, UV |
+| **Transforms** | Linear EMA on matrices | Lie-group (SE(2), SIM(2)) | No skew/flip, geodesic interpolation |
+| **Tests** | 531 | 629 | +98 Phase 3A-3D tests |
 
 ### V3 → V4 Changes (Preserved in V2)
 
@@ -618,6 +628,10 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_phase2d_state_separation.py` | 34 | ✅ All pass | PhysicalState, BeliefState, MetaState, SeparatedState, StateSeparator |
 | `test_phase2e_map_estimation.py` | 19 | ✅ All pass | MAPOptimizer, MAPReport, posterior contraction, energy descent |
 | `test_phase2g_recovery_dynamics.py` | 38 | ✅ All pass | RecoveryTransitionMatrix, ProbabilisticRecoveryState, RecoveryDynamics |
+| `test_phase3a_intrinsic.py` | 26 | ✅ All pass | IntrinsicDecomposer, albedo/shading/specular separation |
+| `test_phase3b_physical_renderer.py` | 26 | ✅ All pass | PhysicalRenderer, Lambertian diffuse, Blinn-Phong specular |
+| `test_phase3c_dense_geometry.py` | 23 | ✅ All pass | DenseGeometryEstimator, icosphere mesh, RBF fitting |
+| `test_phase3d_lie_group.py` | 23 | ✅ All pass | SE2Transform, SIM2Transform, geodesic interpolation |
 | `test_detection.py` | 14 | ✅ All pass | MediaPipe tasks API, poster rejection, identity matching |
 | `test_quality_gates.py` | 13 | ✅ All pass | Procrustes, jitter, occupancy, SSIM, Laplacian |
 | `test_identity_state.py` | 17 | ✅ All pass | Identity state, frequency decomposition, hypotheses |
@@ -629,7 +643,7 @@ python -m face_os.pipeline --video input.mp4 --no-identity -o output.mp4
 | `test_neural_codec.py` | 12 | ✅ All pass | PersonalizedSpace, NeuralCodec, identity score |
 | `test_hypothesis_matching.py` | 4 | ✅ All pass | Hypothesis space, pose/expression selection |
 | `test_region_confidence.py` | 4 | ✅ All pass | Region confidence, semantic confidence |
-| **Total** | **531** | **0 failures** | **All green** |
+| **Total** | **629** | **0 failures** | **All green** |
 
 ### QC Metrics (Identity Mode, V2.8.0 — 345 frames, Phase 2G Complete)
 
@@ -1360,8 +1374,46 @@ If visibility is missing, the change must be rejected.
 
 ---
 
-## File Structure (V2.8.0)
+## File Structure (V3.0.0)
 
+```
+face_os/
+├── __init__.py              # Package init
+├── types.py                 # Core data structures (GeometryState, IdentityState, TemporalState, FrameContract, EnergyReport, PassReport)
+├── config.py                # YAML config loader
+├── energy.py                # EnergyComputer with 5 energy terms
+├── visibility.py            # VisibilityLogger for before/after/delta JSON
+├── ingest.py                # Module 1: Video loading, frame reader
+├── detect_track.py          # Module 2: MediaPipe tasks API + pose-aware gates
+├── landmarks.py             # Module 3: 478-point landmarks + PnP pose
+├── canonical_map.py         # Module 4: Canonical UV alignment
+├── crop_planner.py          # Module 5: Reference-based crop planning
+├── temporal_solve.py        # Module 6: Bidirectional temporal solver
+├── face_enhance.py          # Module 7: Structure-preserving rendering
+├── identity_state.py        # Module 8: Frequency decomposition + VerificationGate
+├── compositor.py            # Module 9: Confidence-weighted compositing
+├── appearance_field.py      # AppearanceField + DynamicAppearanceField
+├── neural_codec.py          # PersonalizedSpace + NeuralCodec
+├── pipeline.py              # V0.5 Orchestrator (USE_IDENTITY flag)
+├── pipeline_v2.py           # V2 Orchestrator (subsystem-based architecture)
+├── face_detector.tflite     # MediaPipe face detection model
+├── face_os_config.yaml      # All tuning parameters
+├── intrinsic_decomposition.py  # V3 — IntrinsicDecomposer (albedo, shading, specular)
+├── physical_renderer.py        # V3 — PhysicalRenderer (Lambertian + Blinn-Phong)
+├── dense_geometry.py           # V3 — DenseGeometryEstimator (icosphere mesh, RBF fitting)
+├── lie_group.py                # V3 — SE2Transform, SIM2Transform (geodesic interpolation)
+├── state_space.py              # Phase 2A — LatentState, StateTransitionModel, ObservationModel
+├── optimizer.py                # Phase 2B — GaussNewtonOptimizer, LevenbergMarquardtOptimizer
+├── observability.py            # Phase 2C — ObservabilityAnalyzer, DegeneracyReport
+├── state_separation.py        # Phase 2D — PhysicalState, BeliefState, MetaState
+├── map_estimation.py           # Phase 2E — MAPOptimizer, MAPReport
+├── recovery_dynamics.py        # Phase 2G — RecoveryTransitionMatrix, ProbabilisticRecoveryState
+└── subsystems/              # V2 Architecture
+    ├── __init__.py
+    ├── geometry_estimator.py    # Subsystem A — spatial structure estimation
+    ├── identity_estimator.py    # Subsystem B — stable identity representation
+    ├── temporal_estimator.py    # Subsystem C — temporal consistency
+    └── renderer.py              # Subsystem D — physically consistent rendering
 ```
 face_os/
 ├── __init__.py              # Package init
