@@ -900,7 +900,7 @@ class FaceOSPipeline:
                 face_mask = region_masks.get("face")
 
         # V3: Update renderer mode + state evolution (shared path)
-        self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx)
+        self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx, landmarks=landmarks, cropped=cropped)
 
         # 9. Get identity eyes for structure-preserving rendering (skip if USE_IDENTITY=False)
         identity_eyes = None
@@ -986,7 +986,7 @@ class FaceOSPipeline:
                     intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
                     
                     # V3: Update renderer mode + state evolution (shared path)
-                    self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx)
+                    self._update_v3_modules(intrinsic_components, intrinsic_conf, frame_idx, landmarks=landmarks, cropped=cropped)
                     
                     # Render via shared _render_core
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
@@ -1082,6 +1082,8 @@ class FaceOSPipeline:
         intrinsic_components: Optional['IntrinsicComponents'],
         intrinsic_conf: Optional[np.ndarray],
         frame_idx: int,
+        landmarks: Optional[Landmarks] = None,
+        cropped: Optional[np.ndarray] = None,
     ) -> None:
         """Shared V3 module updates — single source of truth.
 
@@ -1127,10 +1129,50 @@ class FaceOSPipeline:
             self._telemetry["renderer_mode_transitions"] = self.renderer_mode_state.transition_count
             self._telemetry["renderer_mode_distribution"][renderer_mode.value] += 1
 
-        # Update state evolution model
+        # Update state evolution model — D-06: Full Kalman predict-update cycle
         if USE_IDENTITY and self.state_evolution is not None and self._latent_state is not None:
-            self._latent_state = self.state_evolution.predict(self._latent_state)
-            self._latent_covariance = self.state_evolution.predict_covariance(self._latent_covariance)
+            # Extract observations from current frame
+            observation = self._latent_state.copy()  # Start with current state as default
+            
+            # Pose observations (yaw, pitch, roll) from landmarks
+            if landmarks is not None:
+                observation[0] = landmarks.yaw
+                observation[1] = landmarks.pitch
+                observation[2] = landmarks.roll
+            
+            # Brightness and contrast from cropped frame
+            if cropped is not None:
+                lab = cv2.cvtColor(cropped, cv2.COLOR_BGR2LAB)
+                observation[9] = float(np.mean(lab[:, :, 0]))  # brightness_mean
+                observation[10] = float(np.std(lab[:, :, 0]))   # contrast_mean
+            
+            # Identity uncertainty from intrinsic confidence
+            if intrinsic_conf is not None:
+                observation[3] = 1.0 - float(np.mean(intrinsic_conf))  # uncertainty = 1 - confidence
+            
+            # Temporal confidence from identity state
+            if self.identity_state is not None and self.identity_state.belief is not None:
+                observation[5] = float(np.mean(self.identity_state.belief.get_confidence()))
+            
+            # Full predict-update cycle (D-06: Bayesian temporal belief)
+            # Observation matrix H: observe pose (0-2), brightness (9), contrast (10)
+            H = np.zeros((5, self.state_evolution.state_dim))
+            H[0, 0] = 1  # yaw
+            H[1, 1] = 1  # pitch
+            H[2, 2] = 1  # roll
+            H[3, 9] = 1  # brightness
+            H[4, 10] = 1  # contrast
+            
+            # Observation vector (only observed dimensions)
+            obs_vector = np.array([observation[0], observation[1], observation[2], observation[9], observation[10]])
+            
+            # Observation noise R (measurement uncertainty)
+            R = np.diag([1.0, 1.0, 1.0, 10.0, 5.0])  # pose is reliable, brightness/contrast less so
+            
+            self._latent_state, self._latent_covariance = self.state_evolution.predict_update_full(
+                self._latent_state, self._latent_covariance,
+                obs_vector, H, R,
+            )
 
     def _compute_energy_terms(
         self,
