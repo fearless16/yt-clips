@@ -333,7 +333,7 @@ class FaceOSPipelineV2:
         # === PASS 2: Bidirectional solve ===
         print("  Pass 2/3: Bidirectional temporal solve...")
         solved_faces = self.temporal_estimator.solve_bidirectional()
-        hq_count = self.temporal_estimator.temporal_solver.get_hq_frame_count()
+        hq_count = self.temporal_estimator.temporal_solver.solver.get_hq_frame_count()
         print(f"    Solved {len(solved_faces)} frames, {hq_count} HQ frames")
 
         # Update identity state with solved faces
