@@ -55,7 +55,7 @@ def get_drive_service():
         ]
         for colab_drive in paths_to_check:
             if colab_drive.exists():
-                log.info(f"🚀 Colab detected ({colab_drive.name}). Prioritizing Filesystem Sync.")
+                log.info("Colab detected (%s). Prioritizing Filesystem Sync.", colab_drive.name)
                 os.environ["COLAB_SYNC_PATH"] = str(colab_drive)
                 return FILESYSTEM_MODE
 
@@ -115,7 +115,7 @@ def get_drive_service():
             credentials.refresh(Request())
         log.info("✅ Using gcloud Application Default Credentials")
     except Exception as e:
-        log.debug(f"ADC validation failed: {e}")
+        log.debug("ADC validation failed: %s", e)
         credentials = None
 
     # ─── Method 2: Saved OAuth token.json ────────────────────────────────────
@@ -154,14 +154,18 @@ def get_drive_service():
 def find_or_create_folder(
     service, name: str, parent_id: Optional[str] = None
 ) -> str:
-    """Find a folder by name (under optional parent), or create it. Handles duplicates."""
+    """Find a folder by name (under optional parent), or create it.
+
+    Enforces no duplicate folders: if multiple folders with the same name
+    exist, keeps the newest and trashes the older ones.
+    """
     query = (
-        f"name = '{name}' and "
-        f"mimeType = 'application/vnd.google-apps.folder' and "
-        f"trashed = false"
+        "name = '%s' and "
+        "mimeType = 'application/vnd.google-apps.folder' and "
+        "trashed = false" % name
     )
     if parent_id:
-        query += f" and '{parent_id}' in parents"
+        query += " and '%s' in parents" % parent_id
 
     results = service.files().list(
         q=query, spaces="drive", fields="files(id, name, createdTime)"
@@ -171,12 +175,22 @@ def find_or_create_folder(
     if items:
         if len(items) > 1:
             items.sort(key=lambda x: x.get("createdTime", ""), reverse=True)
+            keep = items[0]
+            duplicates = items[1:]
             log.warning(
-                f"⚠ Multiple folders named '{name}' found. Using newest (ID: {items[0]['id']})"
+                "Duplicate folders named '%s' found — trashing %d older copies, keeping %s",
+                name, len(duplicates), keep["id"],
             )
+            for dup in duplicates:
+                try:
+                    service.files().update(
+                        fileId=dup["id"], body={"trashed": True}
+                    ).execute()
+                    log.info("Trashed duplicate folder '%s' (id=%s)", name, dup["id"])
+                except Exception as e:
+                    log.warning("Failed to trash duplicate %s: %s", dup["id"], e)
         return items[0]["id"]
 
-    # Create folder
     metadata = {
         "name": name,
         "mimeType": "application/vnd.google-apps.folder",
@@ -186,5 +200,5 @@ def find_or_create_folder(
 
     folder = service.files().create(body=metadata, fields="id").execute()
     folder_id = folder.get("id")
-    log.info("📁 Created Drive folder: %s (id=%s)", name, folder_id)
+    log.info("Created Drive folder: %s (id=%s)", name, folder_id)
     return folder_id
