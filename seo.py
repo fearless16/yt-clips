@@ -1,11 +1,12 @@
-"""seo.py — Per-clip sequential SEO generation for Indian cricket live Shorts.
+"""seo.py — Per-clip SEO generation for Indian cricket live Shorts.
 
-One AI call per clip with retry + backoff. No batching = no 429 storms.
+Uses parallel fastest-first model racing: fires the fastest available models
+concurrently and takes the first valid JSON response. No backoff — on failure
+the next tier of models is tried immediately. Falls back to template SEO.
 """
 import json
 import re
 import time
-import traceback
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -830,21 +831,20 @@ def _attempt_seo_generation(
     video_title: str = "",
     scorecard: str = "",
 ) -> Dict:
-    """Inner generation loop with retries. Returns SEO result dict."""
-    backoff = [0, 30, 60, 120]
-    for attempt, delay in enumerate(backoff):
-        if delay:
-            log.info("[%s] SEO retry %d — waiting %ds...", clip_id, attempt, delay)
-            time.sleep(delay)
+    """Generate SEO with parallel model racing. Fires fastest available models
+    concurrently and takes the first valid response. No backoff — on failure
+    the next tier of models is tried immediately.
+    """
+    response_text = ai.generate_fastest_first(prompt, system_instruction=_SYSTEM)
+    if response_text:
         try:
-            response_text = ai.generate_text(prompt, system_instruction=_SYSTEM)
             data = _parse_json_response(response_text)
             if not data:
                 raise ValueError("No JSON in response")
 
             # Get raw AI search terms
             ai_terms = data.get("search_terms", [])
-            
+
             # Rank and optimize tags using all intelligence sources
             optimized_tags = _rank_and_optimize_tags(
                 ai_terms=ai_terms,
@@ -860,23 +860,20 @@ def _attempt_seo_generation(
                 "description": data.get("description", ""),
                 "hashtags": data.get("hashtags", ["#IPL2026", "#Cricket", "#Shorts"]),
                 "search_terms": optimized_tags,
-                "tags": optimized_tags,  # YouTube API tags field
+                "tags": optimized_tags,
             }, fallback_terms=trend_topics)
 
-            # Consolidate: search terms → description + hashtags (SEO consistency)
             result = _consolidate_seo(
                 result["title"], result["description"],
                 result["hashtags"], result["search_terms"]
             )
 
-            # Inject viral hooks and CTAs
             result = _inject_viral_elements(
                 result["title"],
                 result["description"],
                 result["hashtags"]
             )
             result["clip_id"] = clip_id
-            # Track which model/provider generated this
             result["_generated_by_provider"] = ai.get_used_provider()
             result["_generated_by_model"] = ai.get_used_model()
 
@@ -886,16 +883,9 @@ def _attempt_seo_generation(
                      sum(len(t) + 1 for t in result.get("search_terms", [])))
             return result
 
-        except Exception as e:
-            msg = str(e)
-            if "429" in msg or "593" in msg:
-                log.warning("[%s] Rate limited (attempt %d): %s", clip_id, attempt + 1, msg)
-                continue
-            log.error("[%s] SEO error (attempt %d): %s\n%s", clip_id, attempt + 1, msg, traceback.format_exc())
-            if attempt < len(backoff) - 1:
-                continue
+        except Exception:
+            log.warning("[%s] AI response valid but parsing failed, falling back", clip_id)
 
-    # ── Fallback: Template-based SEO (no AI needed) ─────────────────────────
     log.warning("[%s] AI failed, using template fallback", clip_id)
     result = _generate_template_seo(
         clip_id=clip_id,
@@ -905,7 +895,6 @@ def _attempt_seo_generation(
         trend_topics=trend_topics,
     )
 
-    # Inject viral elements
     result = _inject_viral_elements(
         result["title"],
         result["description"],
