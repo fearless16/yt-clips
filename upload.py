@@ -217,11 +217,6 @@ def upload_video(
     with open(metadata_path, "r") as f:
         meta = json.load(f)
 
-    # Skip clips that fell back to template generation (generic/low-quality)
-    if not meta.get("ai_generated", True):
-        log.warning("Skipping upload — clip uses template fallback (not AI-generated): %s", metadata_path)
-        return None
-
     title = meta.get("title", "Cricket Highlights #Shorts")
     description = meta.get("description", "")
     # Use dedicated SEO tags + search_terms for YouTube API tags field

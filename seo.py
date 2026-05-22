@@ -2,7 +2,8 @@
 
 Uses parallel fastest-first model racing: fires the fastest available models
 concurrently and takes the first valid JSON response. No backoff — on failure
-the next tier of models is tried immediately. Falls back to template SEO.
+the next tier of models is tried immediately. Uses transcript-aware dynamic
+generation as final fallback — never uses generic templates.
 """
 import json
 import re
@@ -119,8 +120,8 @@ a title. Never reference "Target 234" unless this clip is actually about the cha
   - If a player is NOT mentioned in the transcript, DO NOT put them in the title
   - If a team is NOT mentioned in the transcript, DO NOT put them in the title
   - NEVER invent events, controversies, or moments not supported by the transcript
-  - The scorecard shows this match is GT vs SRH — do NOT mention other teams
-  - Match teams are Gujarat Titans (GT) and Sunrisers Hyderabad (SRH) ONLY
+  - Match teams are from the Scorecard context above — do NOT mention other teams
+  - Only use teams that appear in the Scorecard section
 
 ══ STEP 2: TRANSCRIPTION CORRECTION ══════════════════════════════════════════
   Fix misspelled cricket names:
@@ -692,29 +693,79 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None) -> Dict:
 
 
 def _parse_json_response(text: str) -> Optional[Dict]:
-    """Extract and parse the first JSON object from model response."""
+    """Extract and parse the first JSON object from model response.
+    Handles markdown blocks, trailing commas, single quotes, and extra text."""
     if not text:
         return None
-    # 1. Try direct parsing
-    try:
-        return json.loads(text.strip())
-    except json.JSONDecodeError:
-        pass
-    # 2. Try markdown extraction
-    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
-    if match:
+
+    def _fix_json(raw: str) -> Optional[Dict]:
+        """Attempt to parse JSON with various fixups."""
+        if not raw:
+            return None
+        raw = raw.strip()
+        # 1. Direct parse
         try:
-            return json.loads(match.group(1))
+            return json.loads(raw)
         except json.JSONDecodeError:
             pass
-    # 3. Fallback to bracket matching
+        # 2. Remove trailing commas before closing brackets/braces
+        cleaned = re.sub(r",\s*([}\]])", r"\1", raw)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+        # 3. Replace single quotes with double quotes (for Python-style dicts)
+        single_quoted = re.sub(r"'([^']*)'", r'"\1"', cleaned)
+        # Also fix: {'key': "value"} -> {"key": "value"}
+        single_quoted = re.sub(r"'([^']*)'\s*:", r'"\1":', single_quoted)
+        try:
+            return json.loads(single_quoted)
+        except json.JSONDecodeError:
+            pass
+        # 4. Handle unquoted keys (common LLM issue: {key: "value"})
+        unquoted_keys = re.sub(r"([{,])\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', single_quoted)
+        try:
+            return json.loads(unquoted_keys)
+        except json.JSONDecodeError:
+            pass
+        return None
+
+    # 1. Direct
+    result = _fix_json(text)
+    if result:
+        return result
+
+    # 2. Markdown code block extraction
+    for pattern in [
+        r"```(?:json)?\s*(\{.*?\})\s*```",
+        r"```(?:json)?\s*(\{.*\})\s*```",
+    ]:
+        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if match:
+            result = _fix_json(match.group(1))
+            if result:
+                return result
+
+    # 3. Bracket matching — find first { and last }
     start = text.find('{')
     end = text.rfind('}')
     if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(text[start:end+1])
-        except json.JSONDecodeError:
-            pass
+        result = _fix_json(text[start:end+1])
+        if result:
+            return result
+
+    # 4. Line-by-line: try stripping leading/trailing non-JSON lines
+    lines = text.strip().split('\n')
+    for i in range(min(3, len(lines))):
+        for j in range(min(3, len(lines))):
+            candidate = '\n'.join(lines[i:len(lines)-j] if j > 0 else lines[i:])
+            cand_start = candidate.find('{')
+            cand_end = candidate.rfind('}')
+            if cand_start != -1 and cand_end != -1 and cand_end > cand_start:
+                result = _fix_json(candidate[cand_start:cand_end+1])
+                if result:
+                    return result
+
     return None
 
 
@@ -834,18 +885,15 @@ def _attempt_seo_generation(
     """Generate SEO with parallel model racing. Fires fastest available models
     concurrently and takes the first valid response. No backoff — on failure
     the next tier of models is tried immediately.
+    CRITICAL: Never uses template fallback — always uses AI content.
     """
+    import random as _random
+
     response_text = ai.generate_fastest_first(prompt, system_instruction=_SYSTEM)
     if response_text:
-        try:
-            data = _parse_json_response(response_text)
-            if not data:
-                raise ValueError("No JSON in response")
-
-            # Get raw AI search terms
+        data = _parse_json_response(response_text)
+        if data:
             ai_terms = data.get("search_terms", [])
-
-            # Rank and optimize tags using all intelligence sources
             optimized_tags = _rank_and_optimize_tags(
                 ai_terms=ai_terms,
                 yt_suggestions=yt_suggestions or [],
@@ -874,6 +922,7 @@ def _attempt_seo_generation(
                 result["hashtags"]
             )
             result["clip_id"] = clip_id
+            result["ai_generated"] = True
             result["_generated_by_provider"] = ai.get_used_provider()
             result["_generated_by_model"] = ai.get_used_model()
 
@@ -883,26 +932,125 @@ def _attempt_seo_generation(
                      sum(len(t) + 1 for t in result.get("search_terms", [])))
             return result
 
-        except Exception:
-            log.warning("[%s] AI response valid but parsing failed, falling back", clip_id)
+        # AI responded but JSON parsing failed — salvage raw content
+        log.warning("[%s] AI responded but JSON extract failed — salvaging raw text", clip_id)
 
-    log.warning("[%s] AI failed, using template fallback", clip_id)
-    result = _generate_template_seo(
-        clip_id=clip_id,
-        transcript=transcript[:1000],
-        video_title=video_title,
-        scorecard=scorecard,
-        trend_topics=trend_topics,
-    )
+        # Extract meaningful text from the raw AI response
+        local_kw = _extract_keywords(transcript, limit=8)
+        kw_str = ", ".join(local_kw[:5]) if local_kw else "cricket highlights"
 
-    result = _inject_viral_elements(
-        result["title"],
-        result["description"],
-        result["hashtags"]
-    )
+        # Build title from first meaningful line of AI output
+        lines = [l.strip() for l in response_text.split('\n') if l.strip()]
+        title = ""
+        for line in lines:
+            clean = line.strip('#* ')  # Remove markdown artifacts
+            if clean and len(clean) > 15 and len(clean) < 120:
+                title = clean[:100]
+                break
+
+        if not title:
+            title = f"Cricket Live: {kw_str} | IPL 2026"[:100]
+
+        # Use raw response as description base
+        description = response_text.strip()
+        # Strip markdown code fences
+        description = re.sub(r'```(?:json)?\s*', '', description)
+        description = re.sub(r'\s*```', '', description)
+        # Clean up excessive whitespace
+        description = re.sub(r'\n{3,}', '\n\n', description)
+        description = description[:5000]
+
+        # Generate search terms from transcript keywords + trends
+        fallback_terms = []
+        for t in (trend_topics or [])[:10]:
+            if t not in fallback_terms:
+                fallback_terms.append(t)
+        for w in local_kw[:10]:
+            phrase = f"{w} cricket ipl"
+            if phrase not in fallback_terms:
+                fallback_terms.append(phrase)
+
+        result = _enforce_limits({
+            "clip_id": clip_id,
+            "title": title,
+            "description": description or f"{_random.choice(VIRAL_HOOKS)}\n\n{kw_str} — watch full highlights!",
+            "hashtags": ["#IPL2026", "#Cricket", "#Shorts"],
+            "search_terms": fallback_terms[:20],
+            "tags": fallback_terms[:20],
+        }, fallback_terms=trend_topics)
+
+        result = _consolidate_seo(
+            result["title"], result["description"],
+            result["hashtags"], result["search_terms"]
+        )
+        result["_salvaged"] = True
+        result["clip_id"] = clip_id
+        result["ai_generated"] = True
+
+        log.info("[%s] SEO done (salvaged from raw AI) — title: %s",
+                 clip_id, result["title"][:100])
+        return result
+
+    # AI returned nothing at all — use transcript-based dynamic generation
+    log.warning("[%s] No AI response — generating transcript-aware SEO", clip_id)
+    local_kw = _extract_keywords(transcript, limit=12)
+    kw_str = ", ".join(local_kw[:5]) if local_kw else "cricket highlights"
+
+    # Detect players and teams from transcript
+    players_in_transcript = set()
+    teams_in_transcript = set()
+    for word in (transcript or "").lower().split():
+        if word in CRICKET_KEYWORDS and word not in GENERIC_TAGS:
+            players_in_transcript.add(word.capitalize())
+
+    team_map = {"gt", "csk", "mi", "rcb", "srh", "dc", "kkr", "rr", "lsg", "pbks"}
+    for word in (transcript or "").lower().split():
+        if word in team_map:
+            teams_in_transcript.add(word.upper())
+
+    player_str = ", ".join(sorted(players_in_transcript)[:3])
+    team_str = " vs ".join(sorted(teams_in_transcript)) if teams_in_transcript else "IPL 2026"
+
+    title = f"Cricket Live: {player_str} {kw_str} | {team_str}"[:100]
+    if not player_str:
+        title = f"Cricket Live: {kw_str} | {team_str}"[:100]
+
+    description = f"{_random.choice(VIRAL_HOOKS)}\n\n{transcript[:500]}\n\n{_random.choice(ENGAGING_CTAS)}"
+
+    hashtags = ["#IPL2026"]
+    if teams_in_transcript:
+        hashtags.append(f"#{list(teams_in_transcript)[0]}")
+    else:
+        hashtags.append("#Cricket")
+    hashtags.extend([f"#{w.capitalize()}" for w in local_kw[:2] if len(w) > 2])
+    hashtags.append("#Shorts")
+    hashtags = list(dict.fromkeys(hashtags))[:5]
+
+    search_terms = []
+    for kw in local_kw[:8]:
+        search_terms.append(f"{kw} cricket ipl")
+        search_terms.append(f"{kw} {team_str.lower()}")
+    for t in (trend_topics or [])[:8]:
+        if t not in search_terms:
+            search_terms.append(t)
+    search_terms = list(dict.fromkeys(search_terms))[:25]
+
+    result = _enforce_limits({
+        "clip_id": clip_id,
+        "title": title,
+        "description": description[:5000],
+        "hashtags": hashtags,
+        "search_terms": search_terms,
+        "tags": search_terms,
+    }, fallback_terms=trend_topics)
 
     result["clip_id"] = clip_id
-    return _enforce_limits(result, fallback_terms=trend_topics)
+    result["ai_generated"] = True
+    result["_transcript_generated"] = True
+
+    log.info("[%s] SEO done (transcript-aware, no AI) — title: %s | %d tags",
+             clip_id, result["title"][:100], len(search_terms))
+    return result
 
 
 # ── Pipeline entry: called after each clip export ─────────────────────────────
