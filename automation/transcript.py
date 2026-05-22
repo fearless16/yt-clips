@@ -1,5 +1,21 @@
 """transcript.py — Cached YouTube transcript fetcher.
-Priority: youtube-transcript-api → yt-dlp VTT → empty."""
+
+Priority order:
+    1. youtube-transcript-api (Python library, JSON)
+    2. yt-dlp (VTT subtitle download, parsed)
+    3. empty result with source="unavailable"
+
+Results cached 1h in TRANSCRIPT_CACHE.
+
+Usage::
+
+    from .transcript import fetch, _extract_video_id
+
+    data = fetch("https://youtu.be/dQw4w9WgXcQ")
+    data["segments"]  # -> [{"start": 0.0, "end": 5.0, "text": "..."}]
+    data["source"]    # -> "api" | "vtt" | "unavailable"
+"""
+
 import re
 import json
 from pathlib import Path
@@ -8,6 +24,11 @@ from ._cache import TRANSCRIPT_CACHE
 
 
 def _extract_video_id(url: str) -> str | None:
+    """Extract the 11-char YouTube video ID from a URL.
+
+    Supports: youtu.be/ID, watch?v=ID, shorts/ID, embed/ID, youtube.com/v/ID.
+    Returns None if no ID found.
+    """
     patterns = [
         r"(?:youtu\.be/)([a-zA-Z0-9_-]{11})",
         r"(?:watch\?v=)([a-zA-Z0-9_-]{11})",
@@ -22,7 +43,22 @@ def _extract_video_id(url: str) -> str | None:
     return None
 
 
+def _vtt_timestamp_to_seconds(ts: str) -> float:
+    """Convert a VTT timestamp (MM:SS.mmm or HH:MM:SS.mmm) to seconds."""
+    parts = ts.split(":")
+    if len(parts) == 3:
+        h, m, s = parts
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    m, s = parts
+    return int(m) * 60 + float(s)
+
+
 def _parse_vtt(text: str) -> list[dict]:
+    """Parse VTT subtitle text into segment dicts.
+
+    Each segment: {"start": float, "end": float, "text": str}.
+    HTML tags (<c>, </c>) are stripped.
+    """
     segments = []
     block_pattern = re.compile(
         r"(\d{2}:\d{2}\.\d{3})\s+-->\s+(\d{2}:\d{2}\.\d{3})\s*\n(.+?)(?=\n\n|\n\d{2}|\Z)",
@@ -41,16 +77,8 @@ def _parse_vtt(text: str) -> list[dict]:
     return segments
 
 
-def _vtt_timestamp_to_seconds(ts: str) -> float:
-    parts = ts.split(":")
-    if len(parts) == 3:
-        h, m, s = parts
-        return int(h) * 3600 + int(m) * 60 + float(s)
-    m, s = parts
-    return int(m) * 60 + float(s)
-
-
 def _fetch_via_api(video_id: str) -> dict | None:
+    """Fetch transcript via youtube-transcript-api. Returns None on failure."""
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
@@ -71,6 +99,7 @@ def _fetch_via_api(video_id: str) -> dict | None:
 
 
 def _fetch_via_ytdlp(video_id: str) -> dict | None:
+    """Fetch transcript via yt-dlp (VTT download). Returns None on failure."""
     import subprocess
     import tempfile
     try:
@@ -104,6 +133,19 @@ def _fetch_via_ytdlp(video_id: str) -> dict | None:
 
 
 def fetch(url: str, output_path: str | None = None) -> dict:
+    """Fetch transcript for *url*.
+
+    Tries youtube-transcript-api first, then yt-dlp VTT fallback.
+    Results cached 1h per video_id.
+
+    Args:
+        url: YouTube video URL (standard, short, shorts, or embed).
+        output_path: Optional path to write JSON transcript file.
+
+    Returns:
+        dict with keys: segments, language, source.
+        source is "api", "vtt", or "unavailable".
+    """
     video_id = _extract_video_id(url)
     if not video_id:
         return {"segments": [], "language": "unknown", "source": "unavailable"}

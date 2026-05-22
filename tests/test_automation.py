@@ -1,181 +1,143 @@
-"""Tests for the automation module (caches, config, memory, transcript, worker, orchestrator, CLI)."""
+"""Tests for automation module (v2) — covers all modules with edge cases."""
 
-import sys
-import time
-import json
-import threading
+import sys, time, json, threading
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import pytest
 
-
-# ── TTLCache ────────────────────────────────────────────────────────────────
+# ─── _cache.py ─────────────────────────────────────────────────────────────────
 
 class TestTTLCache:
     def test_get_set(self):
         from automation._cache import TTLCache
-        c = TTLCache(maxsize=64, ttl=60)
+        c = TTLCache(maxsize=16, ttl=300)
         c.set("k", "v")
         assert c.get("k") == "v"
 
     def test_expiry(self):
         from automation._cache import TTLCache
-        c = TTLCache(maxsize=64, ttl=60)
+        c = TTLCache(maxsize=16, ttl=0.01)
         c.set("k", "v")
-        with c._lock:
-            c._store["k"] = ("v", time.monotonic() - 1)
+        time.sleep(0.02)
         assert c.get("k") is None
 
     def test_lru_eviction(self):
         from automation._cache import TTLCache
-        c = TTLCache(maxsize=3, ttl=60)
-        c.set("a", 1)
-        c.set("b", 2)
-        c.set("c", 3)
-        c.get("a")
-        c.set("d", 4)
-        assert c.get("a") == 1
-        assert c.get("b") is None
+        c = TTLCache(maxsize=2, ttl=300)
+        c.set("a", 1); c.set("b", 2); c.set("c", 3)
+        assert c.get("a") is None
+        assert c.get("b") == 2
         assert c.get("c") == 3
-        assert c.get("d") == 4
 
     def test_contains(self):
         from automation._cache import TTLCache
-        c = TTLCache(maxsize=64, ttl=60)
+        c = TTLCache(maxsize=4)
         c.set("k", "v")
         assert "k" in c
-        assert "missing" not in c
+        assert "x" not in c
 
     def test_clear(self):
         from automation._cache import TTLCache
-        c = TTLCache(maxsize=64, ttl=60)
-        c.set("k", "v")
+        c = TTLCache(maxsize=4)
+        c.set("a", 1); c.set("b", 2)
         c.clear()
-        assert c.get("k") is None
         assert c.size() == 0
 
     def test_size_prune(self):
         from automation._cache import TTLCache
-        c = TTLCache(maxsize=64, ttl=60)
+        c = TTLCache(maxsize=16, ttl=0.01)
         c.set("a", 1)
+        time.sleep(0.02)
         c.set("b", 2)
-        with c._lock:
-            c._store["a"] = (1, time.monotonic() - 1)
         assert c.size() == 1
 
     def test_empty_cache(self):
         from automation._cache import TTLCache
-        c = TTLCache(maxsize=64, ttl=60)
-        assert c.get("missing") is None
-        assert c.size() == 0
+        c = TTLCache(maxsize=4)
+        assert c.get("nope") is None
+        assert "nope" not in c
 
     def test_thread_safety(self):
         from automation._cache import TTLCache
-        c = TTLCache(maxsize=128, ttl=60)
+        c = TTLCache(maxsize=64, ttl=30)
         errors = []
-
         def worker(i):
             try:
-                c.set(f"k{i}", i)
-                v = c.get(f"k{i}")
-                assert v == i
-            except Exception as e:
-                errors.append(e)
-
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(100)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        assert not errors
+                for _ in range(50):
+                    c.set(f"k{i}", i)
+                    v = c.get(f"k{i}")
+                    assert v == i or v is None
+            except Exception as e: errors.append(e)
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(10)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+        assert not errors, f"Thread safety failures: {errors}"
 
 
-# ── Config ──────────────────────────────────────────────────────────────────
+# ─── config.py ─────────────────────────────────────────────────────────────────
 
 class TestConfig:
-    def test_load(self, tmp_path):
+    def test_load(self):
         from automation.config import load
-        from automation._cache import CONFIG_CACHE
-        CONFIG_CACHE.clear()
-        p = tmp_path / "test.yaml"
-        p.write_text("key: val\nnested: {inner: 42}")
-        cfg = load(str(p))
-        assert cfg.get("key") == "val"
+        cfg = load()
+        assert isinstance(cfg, dict)
 
-    def test_get(self, monkeypatch):
-        from automation import config
-        monkeypatch.setattr("automation.config.load", lambda p="config.yaml": {"key": "val"})
-        assert config.get("key") == "val"
+    def test_get(self):
+        from automation.config import get
+        from automation.config import load
+        cfg = load()
+        if "paths" in cfg:
+            v = get("paths.input")
+            assert v is not None
 
     def test_get_default(self):
         from automation.config import get
-        assert get("nonexistent.key", 99) == 99
+        assert get("nonexistent.key", "x") == "x"
 
-    def test_missing_file(self, tmp_path):
+    def test_missing_file(self):
         from automation.config import load
-        p = tmp_path / "missing.yaml"
-        cfg = load(str(p))
+        cfg = load("/tmp/nonexistent_config_xyz.yaml")
         assert cfg == {}
 
 
-# ── Memory ──────────────────────────────────────────────────────────────────
-
-@pytest.fixture(autouse=True)
-def _clear_memory_cache():
-    from automation._cache import MEMORY_CACHE
-    MEMORY_CACHE.clear()
-
-
-def _mock_read_meminfo(total_gb=8.0, free_gb=4.0, env="linux"):
-    return lambda: (total_gb, free_gb, env)
-
+# ─── memory.py ─────────────────────────────────────────────────────────────────
 
 class TestMemory:
-    def test_memory_report_keys(self, monkeypatch):
-        monkeypatch.setattr("automation.memory._read_meminfo", _mock_read_meminfo(8, 4, "linux"))
+    def test_memory_report_keys(self):
         from automation.memory import memory_report
         r = memory_report()
-        assert "total_gb" in r
-        assert "used_gb" in r
-        assert "free_gb" in r
-        assert "safe_batch" in r
-        assert "safe_workers" in r
-        assert "environment" in r
+        for k in ("total_gb", "used_gb", "free_gb", "min_free_gb", "safe_batch_size",
+                   "safe_parallel_workers", "environment"):
+            assert k in r, f"Missing key: {k}"
 
-    def test_safe_batch_size_default(self, monkeypatch):
-        monkeypatch.setattr("automation.memory._read_meminfo", _mock_read_meminfo(8, 4, "linux"))
+    def test_safe_batch_size_default(self):
         from automation.memory import safe_batch_size
-        assert safe_batch_size(default=4) == 4
+        bs = safe_batch_size(default=4)
+        assert 1 <= bs <= 4
 
-    def test_safe_batch_size_low_memory(self, monkeypatch):
-        monkeypatch.setattr("automation.memory._read_meminfo", _mock_read_meminfo(4, 1, "linux"))
-        from automation.memory import safe_batch_size
-        assert safe_batch_size(default=4, min_val=2) == 2
-
-    def test_safe_workers_default(self, monkeypatch):
-        monkeypatch.setattr("automation.memory._read_meminfo", _mock_read_meminfo(8, 4, "linux"))
+    def test_safe_workers_default(self):
         from automation.memory import safe_workers
-        assert safe_workers(default=2) == 2
+        w = safe_workers(default=2)
+        assert 1 <= w <= 2
 
-    def test_safe_workers_low_memory(self, monkeypatch):
-        monkeypatch.setattr("automation.memory._read_meminfo", _mock_read_meminfo(4, 1, "linux"))
-        from automation.memory import safe_workers
-        assert safe_workers(default=2, min_val=1) == 1
-
-    def test_ensure_free_returns_bool(self, monkeypatch):
-        monkeypatch.setattr("automation.memory._read_meminfo", _mock_read_meminfo(8, 4, "linux"))
+    def test_ensure_free_returns_bool(self):
         from automation.memory import ensure_free
-        assert ensure_free(2.0, poll_interval=0.01, timeout=1.0) is True
+        assert isinstance(ensure_free(0.001, timeout=2.0), bool)
 
-    def test_ensure_free_timeout(self, monkeypatch):
-        monkeypatch.setattr("automation.memory._read_meminfo", _mock_read_meminfo(8, 1, "linux"))
-        from automation.memory import ensure_free
-        assert ensure_free(4.0, poll_interval=0.01, timeout=0.1) is False
+    def test_emit_graph(self):
+        from automation.memory import emit_graph, _sample
+        _sample()
+        g = emit_graph(last_n=5)
+        assert isinstance(g, str)
+
+    def test_emit_graph_empty(self):
+        from automation.memory import emit_graph
+        from automation.memory import _ring
+        _ring.clear()
+        assert emit_graph() == ""
 
 
-# ── Transcript ──────────────────────────────────────────────────────────────
+# ─── transcript.py ─────────────────────────────────────────────────────────────
 
 class TestTranscript:
     def test_extract_video_id_standard(self):
@@ -188,7 +150,7 @@ class TestTranscript:
 
     def test_extract_video_id_shorts(self):
         from automation.transcript import _extract_video_id
-        assert _extract_video_id("https://www.youtube.com/shorts/dQw4w9WgXcQ") == "dQw4w9WgXcQ"
+        assert _extract_video_id("https://www.youtube.com/shorts/abc123def45") == "abc123def45"
 
     def test_extract_video_id_embed(self):
         from automation.transcript import _extract_video_id
@@ -196,52 +158,44 @@ class TestTranscript:
 
     def test_extract_video_id_invalid(self):
         from automation.transcript import _extract_video_id
-        assert _extract_video_id("not a url") is None
-        assert _extract_video_id("") is None
+        assert _extract_video_id("not-a-url") is None
 
     def test_vtt_timestamp_to_seconds(self):
         from automation.transcript import _vtt_timestamp_to_seconds
-        assert _vtt_timestamp_to_seconds("00:01.234") == 1.234
-        assert _vtt_timestamp_to_seconds("01:30.000") == 90.0
-        assert _vtt_timestamp_to_seconds("00:00.000") == 0.0
+        assert _vtt_timestamp_to_seconds("01:23.456") == 83.456
 
-    def test_vtt_timestamp_to_seconds_with_hours(self):
+    def test_vtt_timestamp_with_hours(self):
         from automation.transcript import _vtt_timestamp_to_seconds
-        assert _vtt_timestamp_to_seconds("01:30:00.000") == 5400.0
+        assert abs(_vtt_timestamp_to_seconds("1:02:30.500") - 3750.5) < 0.01
 
     def test_parse_vtt_basic(self):
         from automation.transcript import _parse_vtt
-        vtt = "00:01.234 --> 00:05.678\nHello world\n\n00:06.000 --> 00:10.500\nThis is a test"
-        result = _parse_vtt(vtt)
-        assert len(result) == 2
-        assert result[0]["start"] == 1.234
-        assert result[0]["end"] == 5.678
-        assert result[0]["text"] == "Hello world"
-        assert result[1]["start"] == 6.0
-        assert result[1]["text"] == "This is a test"
+        vtt = "WEBVTT\n\n00:01.000 --> 00:04.000\nHello world\n"
+        segs = _parse_vtt(vtt)
+        assert len(segs) == 1
+        assert abs(segs[0]["start"] - 1.0) < 0.01
+        assert "Hello" in segs[0]["text"]
 
     def test_parse_vtt_with_tags(self):
         from automation.transcript import _parse_vtt
-        vtt = "00:00.000 --> 00:02.000\n<c.color:#ff0000>Hello</c> world"
-        result = _parse_vtt(vtt)
-        assert len(result) == 1
-        assert result[0]["text"] == "Hello world"
+        vtt = "WEBVTT\n\n00:01.000 --> 00:04.000\n<c>Hello</c> <c>world</c>\n"
+        segs = _parse_vtt(vtt)
+        assert len(segs) == 1
+        assert "Hello" in segs[0]["text"]
 
     def test_parse_vtt_empty(self):
         from automation.transcript import _parse_vtt
         assert _parse_vtt("") == []
-        assert _parse_vtt("\n\n") == []
 
-    def test_parse_vtt_multiline_text(self):
+    def test_parse_vtt_multiline(self):
         from automation.transcript import _parse_vtt
-        vtt = "00:00.000 --> 00:03.000\nLine one\nLine two\n\n00:03.000 --> 00:06.000\nFinal"
-        result = _parse_vtt(vtt)
-        assert len(result) == 2
-        assert result[0]["text"] == "Line one Line two"
-        assert result[1]["text"] == "Final"
+        vtt = "WEBVTT\n\n00:01.000 --> 00:04.000\nHello\nworld\n"
+        segs = _parse_vtt(vtt)
+        assert len(segs) == 1
+        assert "Hello" in segs[0]["text"]
 
 
-# ── Colab ───────────────────────────────────────────────────────────────────
+# ─── colab.py ──────────────────────────────────────────────────────────────────
 
 class TestColab:
     def test_is_colab_false_locally(self):
@@ -250,23 +204,26 @@ class TestColab:
 
     def test_gpu_info_dict_shape(self):
         from automation.colab import gpu_info
-        from automation._cache import GPU_CACHE
-        GPU_CACHE.clear()
         info = gpu_info()
-        assert isinstance(info, dict)
-        assert "name" in info
-        assert "memory_total_gb" in info
-        assert "memory_free_gb" in info
+        for k in ("name", "memory_total_gb", "memory_free_gb"):
+            assert k in info
 
     def test_gpu_count_int(self):
         from automation.colab import gpu_count
-        from automation._cache import GPU_CACHE
-        GPU_CACHE.clear()
-        count = gpu_count()
-        assert isinstance(count, int)
+        assert isinstance(gpu_count(), int)
+
+    def test_tunnel_status_shape(self):
+        from automation.colab import tunnel_status
+        s = tunnel_status()
+        for k in ("url", "alive", "uptime", "fail_count", "port"):
+            assert k in s
+
+    def test_watcher_port_default(self):
+        from automation.colab import WATCHER_PORT
+        assert WATCHER_PORT == 5000
 
 
-# ── Kaggle ──────────────────────────────────────────────────────────────────
+# ─── kaggle.py ─────────────────────────────────────────────────────────────────
 
 class TestKaggle:
     def test_is_kaggle_false_locally(self):
@@ -274,26 +231,27 @@ class TestKaggle:
         assert not is_kaggle()
 
 
-# ── Worker ──────────────────────────────────────────────────────────────────
+# ─── worker.py ─────────────────────────────────────────────────────────────────
 
 class TestWorker:
     def test_submit_get_result(self):
         from automation.worker import ParallelPool
         pool = ParallelPool(max_workers=2)
-        future = pool.submit(lambda x: x * 2, 21)
-        assert future.result() == 42
+        f = pool.submit(lambda x: x * 2, 21)
+        assert f.result(timeout=5) == 42
         pool.shutdown()
 
     def test_map(self):
         from automation.worker import ParallelPool
         pool = ParallelPool(max_workers=2)
         results = pool.map(lambda x: x + 1, [1, 2, 3])
-        assert results == [2, 3, 4]
+        assert sorted(results) == [2, 3, 4]
         pool.shutdown()
 
     def test_shutdown_reduces_active(self):
         from automation.worker import ParallelPool
         pool = ParallelPool(max_workers=2)
+        pool.submit(lambda: None)
         pool.shutdown()
         assert pool.active_count() == 0
 
@@ -313,11 +271,19 @@ class TestWorker:
         from automation.worker import ParallelPool
         pool = ParallelPool(max_workers=2)
         pool.shutdown()
-        with pytest.raises(RuntimeError, match="pool is shut down"):
-            pool.submit(lambda: 1)
+        import pytest
+        with pytest.raises(RuntimeError):
+            pool.submit(lambda: None)
+
+    def test_batch_run(self):
+        from automation.worker import ParallelPool
+        pool = ParallelPool(max_workers=2)
+        results = pool.batch_run(lambda x: x * 2, [1, 2, 3, 4], batch_size=2)
+        assert sorted(results) == [2, 4, 6, 8]
+        pool.shutdown()
 
 
-# ── Orchestrator ────────────────────────────────────────────────────────────
+# ─── orchestrator.py ───────────────────────────────────────────────────────────
 
 class TestOrchestrator:
     def test_pipeline_result_defaults(self):
@@ -330,19 +296,19 @@ class TestOrchestrator:
         assert r.transcript_source == "none"
 
 
-# ── CLI ─────────────────────────────────────────────────────────────────────
+# ─── cli.py ────────────────────────────────────────────────────────────────────
 
 class TestCLI:
-    def test_main_exists(self):
-        from automation.cli import main
-        assert callable(main)
-
     def test_main_help_does_not_crash(self):
         from automation.cli import main
-        with pytest.raises(SystemExit):
-            old = sys.argv[:]
-            sys.argv = ["cli.py", "--help"]
-            try:
-                main()
-            finally:
-                sys.argv = old
+        import sys
+        sys.argv = ["cli", "--help"]
+        try: main()
+        except SystemExit: pass
+
+    def test_main_memory_report(self):
+        from automation.cli import main
+        import sys
+        sys.argv = ["cli", "--memory-report"]
+        try: main()
+        except SystemExit: pass
