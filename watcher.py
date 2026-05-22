@@ -169,7 +169,7 @@ def process_queue():
         print(f"  PROCESSING: {url}")
         print(f"{'='*55}\n")
 
-        cmd = [sys.executable, "pipeline.py", url] + flags
+        cmd = [sys.executable, "-m", "automation.cli", url] + flags
         result = None
         try:
             result = subprocess.run(cmd, env=env)
