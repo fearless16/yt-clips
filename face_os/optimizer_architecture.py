@@ -14,6 +14,17 @@ This module provides:
 - Divergence detection and recovery
 """
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# STRANDED MODULE — Status: SCHEDULED (D-10 / I-10)
+#
+# This module is fully implemented and tested but has ZERO runtime integration.
+# It is NOT called by pipeline.py or any runtime path.
+#
+# Decision: SCHEDULED for integration in Phase C (Probabilistic Runtime)
+# Action: Keep code + tests. Do not modify until integration phase.
+# Tests: test_optimizer_architecture.py (32 tests), test_observability.py (28 tests)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 from dataclasses import dataclass
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
