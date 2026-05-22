@@ -592,3 +592,251 @@ def run_ab_test_intrinsic_vs_rgb(
     metrics_b = compute_all_metrics(frames_rgb, reference)
 
     return compare_approaches("IntrinsicRendering", "RGBFallback", metrics_a, metrics_b)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# D-02: Pipeline-Level A/B Comparison
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class ABComparator:
+    """D-02: Pipeline-level A/B comparison framework.
+
+    ACTIVE != GOOD. Must prove PhysicalRenderer improves output over alpha compositing.
+    Runs the pipeline twice with different render modes and compares metrics.
+    """
+
+    def compare_render_methods(
+        self,
+        pipeline,
+        video_path: str,
+        max_frames: int = 100,
+    ) -> dict:
+        """A/B compare PhysicalRenderer vs alpha compositing.
+
+        D-02: ACTIVE != GOOD. Must prove PhysicalRenderer improves output.
+
+        Runs pipeline twice:
+        1. With PhysicalRenderer enabled (default)
+        2. With PhysicalRenderer forced to alpha mode
+
+        Compares:
+        - Photometric: LAB drift, lighting consistency, temporal luminance stability
+        - Geometric: Procrustes consistency, mesh coherence, landmark stability
+        - Perceptual: SSIM, temporal smoothness
+
+        Args:
+            pipeline: FaceOSPipeline instance
+            video_path: Path to input video
+            max_frames: Maximum frames to process per run
+
+        Returns:
+            Dict with per-metric comparison and winner
+        """
+        import cv2
+
+        # Run 1: PhysicalRenderer enabled (default)
+        frames_physical, landmarks_physical, transforms_physical = self._run_pipeline(
+            pipeline, video_path, max_frames, use_physical=True
+        )
+
+        # Run 2: Alpha compositing (PhysicalRenderer disabled)
+        frames_alpha, landmarks_alpha, transforms_alpha = self._run_pipeline(
+            pipeline, video_path, max_frames, use_physical=False
+        )
+
+        # Compute metrics for both
+        metrics_physical = compute_all_metrics(
+            frames_physical,
+            landmarks_list=landmarks_physical,
+            transforms=transforms_physical,
+        )
+        metrics_alpha = compute_all_metrics(
+            frames_alpha,
+            landmarks_list=landmarks_alpha,
+            transforms=transforms_alpha,
+        )
+
+        # Compute SSIM between corresponding frames
+        if frames_physical and frames_alpha:
+            ssim_scores = []
+            for fa, fb in zip(frames_physical, frames_alpha):
+                ssim_scores.append(compute_ssim(fa, fb))
+            metrics_physical.ssim = float(np.mean(ssim_scores)) if ssim_scores else 0.0
+
+        # Compare
+        comparison = compare_approaches(
+            "PhysicalRenderer", "AlphaCompositing",
+            metrics_physical, metrics_alpha,
+        )
+
+        return {
+            "comparison": comparison.to_dict(),
+            "metrics_physical": metrics_physical.to_dict(),
+            "metrics_alpha": metrics_alpha.to_dict(),
+            "frames_processed": len(frames_physical),
+            "winner": comparison.winner,
+            "improvement_pct": comparison.improvement_pct,
+        }
+
+    def _run_pipeline(
+        self,
+        pipeline,
+        video_path: str,
+        max_frames: int,
+        use_physical: bool,
+    ) -> tuple:
+        """Run pipeline and collect output frames, landmarks, transforms.
+
+        Args:
+            pipeline: FaceOSPipeline instance
+            video_path: Path to input video
+            max_frames: Max frames to process
+            use_physical: True for PhysicalRenderer, False for alpha compositing
+
+        Returns:
+            (frames, landmarks_list, transforms_list)
+        """
+        import cv2
+
+        # Save original state and configure
+        original_mode = getattr(pipeline, '_force_alpha_mode', False)
+        pipeline._force_alpha_mode = not use_physical
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            pipeline._force_alpha_mode = original_mode
+            return [], [], []
+
+        frames = []
+        landmarks_list = []
+        transforms_list = []
+        frame_idx = 0
+
+        while len(frames) < max_frames:
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            try:
+                result = pipeline.process_frame(frame, frame_idx=frame_idx)
+                if result is not None:
+                    output_frame = result.get('frame', frame)
+                    frames.append(output_frame)
+                    lm = result.get('landmarks')
+                    if lm is not None:
+                        landmarks_list.append(lm)
+                    tf = result.get('transform')
+                    if tf is not None:
+                        transforms_list.append(tf)
+            except Exception:
+                pass
+
+            frame_idx += 1
+
+        cap.release()
+        pipeline._force_alpha_mode = original_mode
+        return frames, landmarks_list, transforms_list
+
+    def benchmark_report(
+        self,
+        comparison_result: dict,
+    ) -> str:
+        """Generate markdown benchmark report from A/B comparison.
+
+        Args:
+            comparison_result: Output from compare_render_methods()
+
+        Returns:
+            Markdown-formatted benchmark report
+        """
+        comp = comparison_result.get("comparison", {})
+        m_phys = comparison_result.get("metrics_physical", {})
+        m_alpha = comparison_result.get("metrics_alpha", {})
+        winner = comparison_result.get("winner", "unknown")
+        improvement = comparison_result.get("improvement_pct", 0.0)
+        n_frames = comparison_result.get("frames_processed", 0)
+
+        lines = [
+            "# A/B Validation Report: PhysicalRenderer vs Alpha Compositing",
+            "",
+            f"**Frames processed:** {n_frames}",
+            f"**Winner:** {winner}",
+            f"**Improvement:** {improvement:.1f}%",
+            "",
+            "## Photometric Metrics",
+            "",
+            "| Metric | PhysicalRenderer | AlphaCompositing | Better |",
+            "|--------|-----------------|------------------|--------|",
+        ]
+
+        photometric_metrics = [
+            ("LAB Drift", "lab_drift", "lower"),
+            ("Luminance Consistency", "luminance_consistency", "higher"),
+            ("Brightness Stability", "temporal_brightness_stability", "higher"),
+        ]
+
+        for name, key, direction in photometric_metrics:
+            val_p = m_phys.get(key, 0.0)
+            val_a = m_alpha.get(key, 0.0)
+            if direction == "lower":
+                better = "Physical" if val_p < val_a else "Alpha"
+            else:
+                better = "Physical" if val_p > val_a else "Alpha"
+            lines.append(f"| {name} | {val_p:.4f} | {val_a:.4f} | {better} |")
+
+        lines.extend([
+            "",
+            "## Geometric Metrics",
+            "",
+            "| Metric | PhysicalRenderer | AlphaCompositing | Better |",
+            "|--------|-----------------|------------------|--------|",
+        ])
+
+        geometric_metrics = [
+            ("Procrustes Consistency", "procrustes_consistency", "higher"),
+            ("Landmark Coherence", "landmark_coherence", "higher"),
+            ("Transform Stability", "transform_determinant_stability", "higher"),
+        ]
+
+        for name, key, direction in geometric_metrics:
+            val_p = m_phys.get(key, 0.0)
+            val_a = m_alpha.get(key, 0.0)
+            if direction == "lower":
+                better = "Physical" if val_p < val_a else "Alpha"
+            else:
+                better = "Physical" if val_p > val_a else "Alpha"
+            lines.append(f"| {name} | {val_p:.4f} | {val_a:.4f} | {better} |")
+
+        lines.extend([
+            "",
+            "## Perceptual Metrics",
+            "",
+            "| Metric | PhysicalRenderer | AlphaCompositing | Better |",
+            "|--------|-----------------|------------------|--------|",
+        ])
+
+        perceptual_metrics = [
+            ("SSIM", "ssim", "higher"),
+            ("Temporal Smoothness", "temporal_smoothness", "higher"),
+        ]
+
+        for name, key, direction in perceptual_metrics:
+            val_p = m_phys.get(key, 0.0)
+            val_a = m_alpha.get(key, 0.0)
+            if direction == "lower":
+                better = "Physical" if val_p < val_a else "Alpha"
+            else:
+                better = "Physical" if val_p > val_a else "Alpha"
+            lines.append(f"| {name} | {val_p:.4f} | {val_a:.4f} | {better} |")
+
+        lines.extend([
+            "",
+            "## Verdict",
+            "",
+            f"**{winner}** wins with **{improvement:.1f}%** improvement.",
+            "",
+            "D-02: ACTIVE != GOOD. This report proves (or disproves) that",
+            "PhysicalRenderer improves output quality over alpha compositing.",
+        ])
+
+        return "\n".join(lines)

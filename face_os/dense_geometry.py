@@ -543,3 +543,30 @@ class DenseGeometryEstimator:
             correspondence[i] = int(idx)
 
         return correspondence
+
+    def estimate_from_landmarks(
+        self,
+        landmarks_478: np.ndarray,
+        image_shape: tuple,
+    ) -> tuple:
+        """Estimate dense mesh from 478 MediaPipe landmarks.
+
+        D-04: Convenience method for pipeline integration.
+        landmarks → dense mesh → per-face normals → raster normals → renderer
+
+        Args:
+            landmarks_478: (478, 2) landmark positions
+            image_shape: (H, W) of source image
+
+        Returns:
+            (vertices, faces) — vertices (N, 3) float32, faces (F, 3) int32
+        """
+        landmarks = np.asarray(landmarks_478, dtype=np.float32)
+        if landmarks.ndim != 2 or landmarks.shape != (478, 2):
+            raise ValueError(
+                f"Expected (478, 2) landmarks, got {landmarks.shape}"
+            )
+
+        geometry = self.estimate(landmarks)
+
+        return geometry.vertices, geometry.faces
