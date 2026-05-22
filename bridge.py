@@ -132,7 +132,7 @@ def _push_via_tunnel(job: dict) -> bool:
             timeout=10,
         )
         if response.status_code in (200, 202):
-            log.info("✅ Job received by Kaggle Tunnel instantly!")
+            log.info("✅ Job received by remote tunnel instantly!")
             return True
         else:
             log.warning(f"⚠️ Tunnel returned error {response.status_code}")

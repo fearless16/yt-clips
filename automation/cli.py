@@ -40,9 +40,12 @@ def main():
     p.add_argument("--skip-highlight", action="store_true")
     p.add_argument("--skip-export", action="store_true")
     p.add_argument("--skip-seo", action="store_true")
+    p.add_argument("--skip-sync", action="store_true")
+    p.add_argument("--skip-tests", action="store_true")
     p.add_argument("--sample-minutes", type=int)
     p.add_argument("--sync-from-drive", action="store_true")
-    p.add_argument("--mode")
+    p.add_argument("--mode", choices=["face_mapper", "ref_grade"], default=None,
+                   help='Enhancement mode: "face_mapper" or "ref_grade"')
     args = p.parse_args()
 
     actions = [
@@ -99,7 +102,17 @@ def main():
 
     if args.remote:
         from bridge import push_job
-        flags = [f"--{f}" for f in ["sync", "upload", "schedule"] if getattr(args, f.replace("-", "_"))]
+        flag_names = [
+            "sync", "upload", "schedule",
+            "skip-download", "skip-transcribe", "skip-highlight",
+            "skip-export", "skip-seo", "skip-sync", "skip-tests",
+            "sync-from-drive",
+        ]
+        flags = ["--%s" % f for f in flag_names if getattr(args, f.replace("-", "_"))]
+        if args.sample_minutes is not None:
+            flags.extend(["--sample-minutes", str(args.sample_minutes)])
+        if args.mode:
+            flags.extend(["--mode", args.mode])
         push_job(args.remote, flags)
         return
 
@@ -116,7 +129,9 @@ def main():
         url=args.url,
         skip_download=args.skip_download, skip_transcribe=args.skip_transcribe,
         skip_highlight=args.skip_highlight, skip_export=args.skip_export,
-        skip_seo=args.skip_seo, auto_sync=args.sync, auto_upload=args.upload,
+        skip_seo=args.skip_seo, skip_sync=args.skip_sync,
+        skip_tests=args.skip_tests,
+        auto_sync=args.sync, auto_upload=args.upload,
         auto_schedule=args.schedule, sample_minutes=args.sample_minutes,
         sync_from_drive=args.sync_from_drive, mode=args.mode,
     )

@@ -81,21 +81,54 @@ def _parse_vtt(text: str) -> list[dict]:
 
 
 def _fetch_via_api(video_id: str) -> dict | None:
-    """Fetch transcript via youtube-transcript-api. Returns None on failure."""
+    """Fetch transcript via youtube-transcript-api. Returns None on failure.
+
+    Tries English first, then any available language (auto-generated or manual).
+    Supports youtube-transcript-api v1.x API.
+    """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
         return None
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        try:
-            transcript = transcript_list.find_transcript(["en", "en-US", "en-GB"])
-        except Exception:
-            transcript = transcript_list.find_generated_transcript(["en", "en-US", "en-GB"])
-        segments = [
-            {"start": s["start"], "end": s["start"] + s["duration"], "text": s["text"]}
-            for s in transcript.fetch()
-        ]
+        api = YouTubeTranscriptApi()
+        transcript_list = api.list(video_id)
+
+        # Try English first (manual > generated)
+        transcript = None
+        for lang in ["en", "en-US", "en-GB"]:
+            try:
+                transcript = transcript_list.find_transcript([lang])
+                break
+            except Exception:
+                continue
+        if transcript is None:
+            for lang in ["en", "en-US", "en-GB"]:
+                try:
+                    transcript = transcript_list.find_generated_transcript([lang])
+                    break
+                except Exception:
+                    continue
+
+        # Fallback: use whatever language is available (Hindi, auto-generated, etc.)
+        if transcript is None:
+            try:
+                transcript = next(iter(transcript_list))
+            except StopIteration:
+                return None
+
+        raw = transcript.fetch()
+        # v1.x returns FetchedTranscript with .snippets
+        if hasattr(raw, "snippets"):
+            segments = [
+                {"start": s.start, "end": s.start + s.duration, "text": s.text}
+                for s in raw.snippets
+            ]
+        else:
+            segments = [
+                {"start": s["start"], "end": s["start"] + s["duration"], "text": s["text"]}
+                for s in raw
+            ]
         return {"segments": segments, "language": transcript.language_code, "source": "api"}
     except Exception:
         return None
