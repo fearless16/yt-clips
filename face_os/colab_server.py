@@ -215,6 +215,40 @@ def reset():
     return jsonify({"status": "reset"})
 
 
+@app.route("/execute", methods=["POST"])
+def execute():
+    """Execute a shell command on Colab.
+
+    JSON body:
+        command: shell command to run
+        timeout: timeout in seconds (default 60)
+
+    Returns:
+        JSON with stdout, stderr, returncode
+    """
+    import subprocess
+    data = request.get_json(force=True) if request.is_json else request.form
+    command = data.get("command")
+    if not command:
+        return jsonify({"error": "No command provided"}), 400
+
+    timeout = int(data.get("timeout", 60))
+    try:
+        r = subprocess.run(
+            command, shell=True, capture_output=True, text=True, timeout=timeout,
+            cwd="/content/yt-clips"
+        )
+        return jsonify({
+            "stdout": r.stdout[-4000:] if len(r.stdout) > 4000 else r.stdout,
+            "stderr": r.stderr[-2000:] if len(r.stderr) > 2000 else r.stderr,
+            "returncode": r.returncode,
+        })
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": f"Timeout after {timeout}s"}), 408
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     print(f"Face OS Colab Server starting on port {port}")
