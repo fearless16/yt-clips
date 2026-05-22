@@ -58,7 +58,8 @@ from face_os import canonical_map
 from face_os import crop_planner
 from face_os import face_enhance
 from face_os import compositor
-from face_os.compositor import photometric_lock, reset_photometric_lock
+from face_os.compositor import _blend_linear
+from face_os.photometric import photometric_lock, reset_photometric_lock
 from face_os import export_qc
 
 # NEW modules
@@ -78,37 +79,7 @@ from face_os.energy_scaling import EnergyScaler
 from face_os.subsystems import GeometryEstimator, IdentityEstimator, TemporalEstimator, FaceRenderer
 
 
-# ─── D-01: Linear-light conversion helpers ──────────────────────────────────
-
-def _srgb_to_linear(img: np.ndarray) -> np.ndarray:
-    """Convert sRGB uint8 image to linear-light float32 [0,1].
-
-    D-01: Gamma-space compositing is physically incorrect.
-    Blending must happen in linear-light space.
-    """
-    f = img.astype(np.float32) / 255.0
-    return np.power(f, 2.2)
-
-
-def _linear_to_srgb(img: np.ndarray) -> np.ndarray:
-    """Convert linear-light float32 [0,1] back to sRGB uint8."""
-    g = np.power(np.clip(img, 0, 1), 1.0 / 2.2)
-    return (g * 255).astype(np.uint8)
-
-
-def _blend_linear(bg: np.ndarray, fg: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Blend two sRGB images in linear-light space.
-
-    D-01: Fixes gamma-space compositing.
-    bg, fg: (H,W,3) uint8 BGR
-    mask: (H,W) float32 [0,1]
-    Returns: (H,W,3) uint8 BGR
-    """
-    bg_lin = _srgb_to_linear(bg)
-    fg_lin = _srgb_to_linear(fg)
-    m3 = mask[:, :, np.newaxis] if mask.ndim == 2 else mask
-    blended = bg_lin * (1 - m3) + fg_lin * m3
-    return _linear_to_srgb(blended)
+cfg = get_config()
 
 
 cfg = get_config()

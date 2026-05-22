@@ -7,7 +7,8 @@ Submodules:
     config       Cached YAML config loader
     env          Colab/Kaggle detection, GPU queries
     memory       RAM tracker with ring buffer, sparkline, backpressure
-    transcript   YouTube transcript fetcher (API → yt-dlp fallback)
+    transcript   YouTube transcript fetcher + LLM formatter
+    scoring      LLM output quality scoring + evaluation
     watcher      Watcher subprocess lifecycle
     tunnel       Always-up TunnelKeeper daemon
     worker       ParallelPool with Semaphore throttle

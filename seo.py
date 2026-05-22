@@ -13,24 +13,32 @@ from utils.config import load_config
 from utils.logger import get_logger
 from utils.ai_client import AIClient
 from trends import TEAM_MAPPINGS
-from seo_learner import enhance_seo_prompt, generate_performance_report, learn_from_clip_performance, get_best_model, run_auto_benchmark
+from automation._cache import TTLCache
+
+SUGGEST_CACHE = TTLCache(maxsize=16, ttl=600)
+TREND_CACHE = TTLCache(maxsize=4, ttl=300)
 
 cfg = load_config()
 log = get_logger("seo", cfg["logging"]["log_file"], cfg["logging"]["level"])
 ai = AIClient()
 
-# ── Auto-benchmark: if enabled, discover best model on startup ──────────────
-if cfg.get("ai", {}).get("auto_benchmark", False):
-    try:
-        log.info("🔬 Auto-benchmark enabled — discovering best model...")
-        run_auto_benchmark()
-        best_provider, best_model = get_best_model()
-        if best_provider and best_model:
-            log.info("⚡ Applying best model: %s/%s", best_provider, best_model)
-            ai._provider = best_provider
-            ai._model = best_model
-    except Exception as e:
-        log.warning("Auto-benchmark failed: %s", e)
+
+def _maybe_auto_benchmark():
+    """Lazy auto-benchmark: runs once on first SEO call if enabled in config."""
+    if not getattr(_maybe_auto_benchmark, "_done", False):
+        _maybe_auto_benchmark._done = True
+        if cfg.get("ai", {}).get("auto_benchmark", False):
+            try:
+                from seo_learner import run_auto_benchmark, get_best_model
+                log.info("Auto-benchmark enabled — discovering best model...")
+                run_auto_benchmark()
+                best_provider, best_model = get_best_model()
+                if best_provider and best_model:
+                    log.info("Applying best model: %s/%s", best_provider, best_model)
+                    ai._provider = best_provider
+                    ai._model = best_model
+            except Exception as e:
+                log.warning("Auto-benchmark failed: %s", e)
 
 STOP_WORDS = {
     "i","me","my","you","your","we","our","they","their","this","that","these","those",
@@ -727,34 +735,40 @@ def generate_clip_seo(
     Retries up to 3 times with exponential backoff on 429/593.
     provider_override/model_override: allow dynamic model selection for A/B testing.
     """
+    _maybe_auto_benchmark()
     trend_topics = trend_topics or []
     local_kw_list = _extract_keywords(transcript)
     local_kw = ", ".join(local_kw_list)
-    
-    # Harvest YouTube autocomplete suggestions (multi-query)
-    yt_suggestions = []
-    try:
-        from trends import fetch_enhanced_clip_suggestions
-        yt_suggestions = fetch_enhanced_clip_suggestions(
-            local_kw_list, teams=teams, match_type="ipl"
-        )
-        log.info("🔍 YouTube suggestions harvested: %d terms", len(yt_suggestions))
-    except Exception as e:
-        log.warning("Enhanced suggest failed, falling back: %s", e)
+
+    # Harvest YouTube autocomplete suggestions (multi-query, cached)
+    cache_key = "suggest:" + ":".join(sorted(local_kw_list)[:5])
+    yt_suggestions = SUGGEST_CACHE.get(cache_key)
+    if yt_suggestions is None:
+        yt_suggestions = []
+        try:
+            from trends import fetch_enhanced_clip_suggestions
+            yt_suggestions = fetch_enhanced_clip_suggestions(
+                local_kw_list, teams=teams, match_type="ipl"
+            )
+            log.info("YouTube suggestions harvested: %d terms", len(yt_suggestions))
+        except Exception as e:
+            log.warning("Enhanced suggest failed, falling back: %s", e)
+            try:
+                from trends import fetch_clip_specific_suggestions
+                yt_suggestions = fetch_clip_specific_suggestions(local_kw_list)
+            except Exception:
+                pass
+
+        # Also fetch clip-specific suggestions as fallback
         try:
             from trends import fetch_clip_specific_suggestions
-            yt_suggestions = fetch_clip_specific_suggestions(local_kw_list)
-        except Exception:
-            pass
+            clip_suggestions = fetch_clip_specific_suggestions(local_kw_list)
+            if clip_suggestions:
+                yt_suggestions = list(dict.fromkeys(yt_suggestions + clip_suggestions))
+        except Exception as e:
+            log.warning("Could not fetch clip-specific suggestions: %s", e)
 
-    # Also fetch clip-specific suggestions as fallback
-    try:
-        from trends import fetch_clip_specific_suggestions
-        clip_suggestions = fetch_clip_specific_suggestions(local_kw_list)
-        if clip_suggestions:
-            yt_suggestions = list(dict.fromkeys(yt_suggestions + clip_suggestions))
-    except Exception as e:
-        log.warning("Could not fetch clip-specific suggestions: %s", e)
+        SUGGEST_CACHE.set(cache_key, yt_suggestions)
 
     trend_str = ", ".join(trend_topics) or "IPL 2026, cricket live"
     yt_suggest_str = ", ".join(yt_suggestions[:15]) or "No suggestions available"
@@ -774,7 +788,8 @@ def generate_clip_seo(
         clip_id=clip_id,
     )
     
-    # Enhance prompt with learned insights from performance data
+    # Enhance prompt with learned insights from performance data (lazy import)
+    from seo_learner import enhance_seo_prompt
     prompt = enhance_seo_prompt(prompt)
 
     # Apply dynamic model override if set (used by self-learner for A/B testing)
@@ -923,10 +938,11 @@ def generate_seo_for_exported_clip(
         log.debug("[%s] Waiting %.0fs before SEO call...", clip_id, inter_clip_pause)
         time.sleep(inter_clip_pause)
 
-    # Apply best model from learner (if available)
+    # Apply best model from learner (if available, lazy import)
     provider_override = None
     model_override = None
     try:
+        from seo_learner import get_best_model
         best_prov, best_mod = get_best_model()
         if best_prov and best_mod:
             provider_override = best_prov
@@ -985,9 +1001,15 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
         except Exception:
             pass
 
-    # Fetch trend context ONCE for the whole session
-    log.info("Fetching trend context...")
-    trend = get_trending_context(domain="cricket", region="IN", video_title=video_title)
+    # Fetch trend context ONCE for the whole session (cached)
+    trend_cache_key = f"trend:{video_title[:50]}"
+    trend = TREND_CACHE.get(trend_cache_key)
+    if trend is None:
+        log.info("Fetching trend context...")
+        trend = get_trending_context(domain="cricket", region="IN", video_title=video_title)
+        TREND_CACHE.set(trend_cache_key, trend)
+    else:
+        log.info("Using cached trend context")
     live_stream_url = live_stream_url or trend.get("live_stream_url", "")
     scorecard = trend.get("scorecard", "")
     trend_topics = trend.get("topics", [])

@@ -13,6 +13,9 @@ from typing import Dict, List, Tuple, Optional
 
 from utils.config import load_config
 from utils.logger import get_logger
+from automation._cache import TTLCache
+
+PERF_CACHE = TTLCache(maxsize=2, ttl=60)
 
 cfg = load_config()
 log = get_logger("seo_learner", cfg["logging"]["log_file"], cfg["logging"]["level"])
@@ -30,25 +33,32 @@ class SEOLearner:
         self.learned_insights = self._load_performance_data()
 
     def _load_performance_data(self) -> Dict:
-        """Load historical performance data."""
-        if self.performance_db.exists():
-            try:
-                with open(self.performance_db, "r") as f:
-                    return json.load(f)
-            except Exception as e:
-                log.warning(f"Failed to load SEO performance data: {e}")
-        return {
-            "clips": [],  # List of clip performance records
-            "title_patterns": {},  # What title structures work best
-            "hooks_performance": {},  # Which hooks drive engagement
-            "ctas_performance": {},  # Which CTAs drive action
-            "hashtag_performance": {},  # Which hashtags boost discovery
-            "model_performance": {},  # Which models/providers perform best
-            "benchmark_history": [],  # History of auto-benchmark runs
-            "current_best_provider": None,  # Dynamically selected best provider
+        """Load historical performance data (cached 60s)."""
+        cached = PERF_CACHE.get("perf_data")
+        if cached is not None:
+            return cached
+        default = {
+            "clips": [],
+            "title_patterns": {},
+            "hooks_performance": {},
+            "ctas_performance": {},
+            "hashtag_performance": {},
+            "model_performance": {},
+            "benchmark_history": [],
+            "current_best_provider": None,
             "current_best_model": None,
             "last_updated": None
         }
+        if self.performance_db.exists():
+            try:
+                with open(self.performance_db, "r") as f:
+                    data = json.load(f)
+                    PERF_CACHE.set("perf_data", data)
+                    return data
+            except Exception as e:
+                log.warning("Failed to load SEO performance data: %s", e)
+        PERF_CACHE.set("perf_data", default)
+        return default
 
     def _save_performance_data(self):
         """Save performance data to disk."""
@@ -473,23 +483,31 @@ class SEOLearner:
         return base_prompt + enhancement
 
 
-# Global instance for easy access
-seo_learner = SEOLearner()
+# Lazy singleton — created on first access, no module-level side effects
+_seo_learner_instance = None
 
-learn_from_clip_performance = seo_learner.record_performance
-get_seo_improvement_suggestions = seo_learner.get_seo_improvement_suggestions
-get_best_model = seo_learner.get_best_model
-run_auto_benchmark = seo_learner.run_auto_benchmark
+
+def _get_learner() -> SEOLearner:
+    global _seo_learner_instance
+    if _seo_learner_instance is None:
+        _seo_learner_instance = SEOLearner()
+    return _seo_learner_instance
+
+
+learn_from_clip_performance = lambda *a, **kw: _get_learner().record_performance(*a, **kw)
+get_seo_improvement_suggestions = lambda *a, **kw: _get_learner().get_seo_improvement_suggestions(*a, **kw)
+get_best_model = lambda *a, **kw: _get_learner().get_best_model(*a, **kw)
+run_auto_benchmark = lambda *a, **kw: _get_learner().run_auto_benchmark(*a, **kw)
 
 
 def enhance_seo_prompt(base_prompt: str) -> str:
     """Enhance SEO prompt with learned insights."""
-    return seo_learner.update_prompt_with_learnings(base_prompt)
+    return _get_learner().update_prompt_with_learnings(base_prompt)
 
 
 def generate_performance_report() -> str:
     """Generate a report of what we've learned from performance data."""
-    learner = seo_learner
+    learner = _get_learner()
     if not learner.learned_insights["clips"]:
         return "No performance data collected yet."
 

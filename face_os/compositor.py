@@ -1,16 +1,17 @@
 """
 compositor.py — Module 9: Confidence-Weighted Compositor.
 
-Composites the enhanced face back onto the cropped frame using
-per-pixel confidence from the Identity Memory Atlas.
+This module is intentionally kept thin.
 
-Core principle:
-  - High confidence pixels: use the accumulated/enhanced face (stable, clean)
-  - Low confidence pixels: use the original frame (noisy but authentic)
-  - Edge blending: smooth transition between face and background
+Architecture rule:
+- Geometry, identity, temporal, and photometric correction happen upstream.
+- The compositor performs only the final blend into output space.
 
-This prevents artifacts where enhancement creates visible seams
-between the face region and the background.
+Core behavior:
+- High-confidence face pixels come from the enhanced face.
+- Low-confidence pixels come from the original crop.
+- Mask edges are feathered for a smooth transition.
+- Blending happens in linear-light space, not gamma space.
 """
 
 from typing import Optional
@@ -25,177 +26,100 @@ from face_os.types import ConfidenceMap, EnhancementMask
 cfg = get_config()
 
 
-# ─── D-01: Linear-light compositing helpers ─────────────────────────────────
+# ---------------------------------------------------------------------------
+# Linear-light compositing helpers
+# ---------------------------------------------------------------------------
 
 def _srgb_to_linear(img: np.ndarray) -> np.ndarray:
-    """Convert sRGB uint8 image to linear-light float32 [0,1].
+    """
+    Convert an 8-bit sRGB/BGR image to linear-light float32 in [0, 1].
 
-    D-01: Gamma-space compositing is physically incorrect.
-    Blending must happen in linear-light space.
+    Compositing in gamma space is visually incorrect, because the blend
+    weights do not correspond to physical light intensities.
     """
     f = img.astype(np.float32) / 255.0
-    return np.power(f, 2.2)
+    return np.power(np.clip(f, 0.0, 1.0), 2.2)
 
 
 def _linear_to_srgb(img: np.ndarray) -> np.ndarray:
-    """Convert linear-light float32 [0,1] back to sRGB uint8."""
-    g = np.power(np.clip(img, 0, 1), 1.0 / 2.2)
-    return (g * 255).astype(np.uint8)
+    """
+    Convert a linear-light float32 image in [0, 1] back to uint8 sRGB/BGR.
+    """
+    g = np.power(np.clip(img, 0.0, 1.0), 1.0 / 2.2)
+    return (g * 255.0).astype(np.uint8)
 
 
 def _blend_linear(bg: np.ndarray, fg: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Blend two sRGB images in linear-light space.
-
-    D-01: Fixes gamma-space compositing.
-    bg, fg: (H,W,3) uint8 BGR
-    mask: (H,W) float32 [0,1]
-    Returns: (H,W,3) uint8 BGR
     """
+    Blend two images in linear-light space.
+
+    Args:
+        bg: Background image, shape (H, W, 3), uint8 BGR.
+        fg: Foreground image, shape (H, W, 3), uint8 BGR.
+        mask: Blend mask, shape (H, W), float in [0, 1].
+
+    Returns:
+        Blended image, shape (H, W, 3), uint8 BGR.
+    """
+    if bg.shape != fg.shape:
+        raise ValueError(f"bg and fg must have the same shape, got {bg.shape} vs {fg.shape}")
+
+    if bg.ndim != 3 or bg.shape[2] != 3:
+        raise ValueError(f"bg must be HxWx3, got {bg.shape}")
+
+    if fg.ndim != 3 or fg.shape[2] != 3:
+        raise ValueError(f"fg must be HxWx3, got {fg.shape}")
+
+    if mask.ndim != 2:
+        raise ValueError(f"mask must be 2D (H, W), got {mask.shape}")
+
+    if bg.shape[:2] != mask.shape[:2]:
+        raise ValueError(
+            f"mask spatial size must match images, got mask={mask.shape[:2]} "
+            f"and images={bg.shape[:2]}"
+        )
+
     bg_lin = _srgb_to_linear(bg)
     fg_lin = _srgb_to_linear(fg)
-    m3 = mask[:, :, np.newaxis] if mask.ndim == 2 else mask
-    blended = bg_lin * (1 - m3) + fg_lin * m3
+
+    # Expand mask to 3 channels and clamp it to a valid blend range.
+    m3 = np.clip(mask.astype(np.float32), 0.0, 1.0)[:, :, np.newaxis]
+
+    blended = bg_lin * (1.0 - m3) + fg_lin * m3
     return _linear_to_srgb(blended)
 
 
-# ─── D-01c: Multi-band compositing (Laplacian pyramid) ──────────────────────
-
-def multiband_blend(
-    bg: np.ndarray,
-    fg: np.ndarray,
-    mask: np.ndarray,
-    levels: int = 4,
-) -> np.ndarray:
-    """Multi-band compositing via Laplacian pyramid blending.
-
-    D-01c: Single-band alpha blending destroys frequency bands.
-    Laplacian pyramid blends each frequency band independently.
-
-    Args:
-        bg: Background (H, W, 3) uint8 BGR
-        fg: Foreground (H, W, 3) uint8 BGR
-        mask: Blend mask (H, W) float32 [0,1]
-        levels: Number of pyramid levels
-
-    Returns:
-        Blended result (H, W, 3) uint8 BGR
-    """
-    bg_f = bg.astype(np.float32)
-    fg_f = fg.astype(np.float32)
-
-    # Build Gaussian pyramids
-    gp_bg = [bg_f]
-    gp_fg = [fg_f]
-    gp_mask = [mask.astype(np.float32)]
-
-    for _i in range(levels):
-        gp_bg.append(cv2.pyrDown(gp_bg[-1]))
-        gp_fg.append(cv2.pyrDown(gp_fg[-1]))
-        gp_mask.append(cv2.pyrDown(gp_mask[-1]))
-
-    # Build Laplacian pyramids for bg and fg
-    lp_bg = [gp_bg[levels]]
-    lp_fg = [gp_fg[levels]]
-
-    for i in range(levels, 0, -1):
-        up_bg = cv2.pyrUp(gp_bg[i], dstsize=(gp_bg[i - 1].shape[1], gp_bg[i - 1].shape[0]))
-        up_fg = cv2.pyrUp(gp_fg[i], dstsize=(gp_fg[i - 1].shape[1], gp_fg[i - 1].shape[0]))
-        lp_bg.append(gp_bg[i - 1] - up_bg)
-        lp_fg.append(gp_fg[i - 1] - up_fg)
-
-    # Blend each Laplacian level using the corresponding mask level
-    blended_lp = []
-    for i in range(levels + 1):
-        m = gp_mask[levels - i] if i < levels else gp_mask[0]
-        # Ensure mask has 3 channels
-        m3 = m[:, :, np.newaxis] if m.ndim == 2 else m
-        # Ensure spatial dimensions match
-        if m3.shape[:2] != lp_bg[i].shape[:2]:
-            m3 = cv2.resize(m3, (lp_bg[i].shape[1], lp_bg[i].shape[0]), interpolation=cv2.INTER_LINEAR)
-            if m3.ndim == 2:
-                m3 = m3[:, :, np.newaxis]
-        blended_lp.append(lp_bg[i] * (1 - m3) + lp_fg[i] * m3)
-
-    # Reconstruct from blended pyramid
-    result = blended_lp[0]
-    for i in range(1, levels + 1):
-        result = cv2.pyrUp(result, dstsize=(blended_lp[i].shape[1], blended_lp[i].shape[0]))
-        result = result + blended_lp[i]
-
-    return np.clip(result, 0, 255).astype(np.uint8)
-
-
-# Module-level state for photometric locking
-_prev_luminance: Optional[float] = None
-_luminance_ema_alpha: float = 0.5
-_luminance_clamp: float = 8.0  # LAB units
-
-
-def reset_photometric_lock() -> None:
-    """Reset photometric lock state between clips."""
-    global _prev_luminance
-    _prev_luminance = None
-
-
-def photometric_lock(frame: np.ndarray, mask: Optional[np.ndarray] = None) -> np.ndarray:
-    """Temporal photometric locking via luminance EMA.
-
-    D-01: Prevents temporal photometric instability by locking
-    frame luminance to a running average.
-
-    Args:
-        frame: Input frame (H, W, 3) uint8 BGR
-        mask: Optional face mask (H, W) float32 [0,1]. If provided,
-              luminance is computed only within the mask.
-
-    Returns:
-        Photometrically locked frame (H, W, 3) uint8 BGR
-    """
-    global _prev_luminance
-
-    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-    l_channel = lab[:, :, 0].astype(np.float32)
-
-    if mask is not None and mask.max() > 0.01:
-        face_pixels = mask > 0.5
-        if face_pixels.sum() < 100:
-            return frame
-        current_luma = float(l_channel[face_pixels].mean())
-    else:
-        current_luma = float(l_channel.mean())
-
-    if _prev_luminance is None:
-        _prev_luminance = current_luma
-        return frame
-
-    _prev_luminance = (
-        _luminance_ema_alpha * current_luma
-        + (1 - _luminance_ema_alpha) * _prev_luminance
-    )
-
-    delta = _prev_luminance - current_luma
-    if abs(delta) < 2.0:
-        return frame
-
-    delta = np.clip(delta, -_luminance_clamp, _luminance_clamp)
-
-    lab_out = lab.astype(np.float32)
-    lab_out[:, :, 0] = np.clip(l_channel + delta, 0, 255)
-    return cv2.cvtColor(lab_out.astype(np.uint8), cv2.COLOR_LAB2BGR)
-
+# ---------------------------------------------------------------------------
+# Compositor
+# ---------------------------------------------------------------------------
 
 class Compositor:
-    """Composites enhanced face onto the frame using confidence blending."""
+    """
+    Thin final assembly layer for face compositing.
 
-    def __init__(self):
+    Responsibilities:
+    - Feather the face mask.
+    - Blend enhanced face into original crop.
+    - Use confidence as a per-pixel mixing weight.
+    - Keep all photometric stabilization upstream.
+
+    Non-responsibilities:
+    - No temporal EMA state.
+    - No lighting matching.
+    - No multi-band restoration.
+    - No geometry correction.
+    """
+
+    def __init__(self) -> None:
         self._feather_kernel = None
-        # D-01: Temporal photometric locking — EMA of face luminance
-        self._luma_ema: Optional[float] = None
-        self._luma_alpha: float = 0.5  # EMA smoothing factor (higher = more responsive)
 
     def reset(self) -> None:
-        """Reset compositor state between clips."""
-        self._luma_ema = None
+        """
+        Reset compositor-local state between clips.
+
+        This compositor does not maintain temporal luminance memory.
+        Any photometric locking should happen upstream in a dedicated module.
+        """
         self._feather_kernel = None
 
     def composite(
@@ -206,121 +130,129 @@ class Compositor:
         enhancement_mask: Optional[EnhancementMask] = None,
         face_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Composite enhanced face onto original frame.
+        """
+        Composite an enhanced face back onto the original crop.
 
-        Strategy:
-        1. Use face_mask to define the blending region
-        2. Use confidence to weight enhanced vs original
-        3. Feather edges for smooth transition
-        4. Match lighting between face and background
+        Blend strategy:
+        1. Use the face mask to define the face region.
+        2. Feather mask edges for a smooth transition.
+        3. Modulate by confidence when available.
+        4. Blend in linear-light space.
 
         Args:
-            original: Original cropped frame (BGR)
-            enhanced: Enhanced frame (BGR)
-            confidence: Per-pixel confidence from memory atlas
-            enhancement_mask: Region masks for enhancement
-            face_mask: Binary face mask (H, W) float [0, 1]
+            original: Original cropped frame, shape (H, W, 3), uint8 BGR.
+            enhanced: Enhanced cropped frame, shape (H, W, 3), uint8 BGR.
+            confidence: Per-pixel confidence map from memory atlas.
+            enhancement_mask: Optional container for region masks.
+            face_mask: Optional explicit face mask, shape (H, W), float [0, 1].
 
         Returns:
-            Composited frame (BGR)
+            Composited frame, shape (H, W, 3), uint8 BGR.
         """
         if face_mask is None and enhancement_mask is not None:
             face_mask = enhancement_mask.face_mask
 
+        if original.shape != enhanced.shape:
+            raise ValueError(
+                f"original and enhanced must have the same shape, got "
+                f"{original.shape} vs {enhanced.shape}"
+            )
+
+        # No mask means there is no local face region to composite.
+        # In that case, either use global confidence blending or return the enhanced crop.
         if face_mask is None:
-            # No face mask — blend globally based on confidence
-            if confidence and confidence.combined is not None:
-                conf = confidence.combined
-                h, w = original.shape[:2]
-                if conf.shape[:2] != (h, w):
-                    conf = cv2.resize(conf, (w, h), interpolation=cv2.INTER_LINEAR)
-                return _blend_linear(original, enhanced, conf)
+            if confidence is not None and confidence.combined is not None:
+                return self._blend_by_confidence(original, enhanced, confidence.combined)
             return enhanced
 
-        # Feather the face mask edges (inlined)
-        feather = cfg.compositor.feather_pixels
-        if feather > 0:
-            ksize = max(3, feather * 2 + 1)
-            feathered = cv2.GaussianBlur(face_mask, (ksize, ksize), feather / 2)
-        else:
-            feathered = face_mask
-
-        # Compute blend weight
+        # Build a smooth face-region mask.
+        feathered = self._feather_mask(face_mask)
         blend_weight = feathered.copy()
 
-        # Modulate by confidence if available
-        if confidence and confidence.combined is not None:
-            conf_resized = cv2.resize(
-                confidence.combined,
-                (blend_weight.shape[1], blend_weight.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-            blend_weight = blend_weight * conf_resized
+        # Confidence further modulates the face region if it exists.
+        if confidence is not None and confidence.combined is not None:
+            conf = confidence.combined
+            if conf.shape[:2] != blend_weight.shape[:2]:
+                conf = cv2.resize(
+                    conf,
+                    (blend_weight.shape[1], blend_weight.shape[0]),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+            blend_weight = blend_weight * conf
 
-        # Optional: match lighting between face region and background
-        if cfg.compositor.use_light_matching:
-            enhanced = self._match_lighting(original, enhanced, face_mask)
+        # Final assembly step only.
+        return _blend_linear(original, enhanced, blend_weight)
 
-        # D-01: Temporal photometric locking — reduce frame-to-frame luminance flicker
-        # Uses EMA to smooth face luminance, preventing side-screen light reflections
-        face_pixels = face_mask > 0.5
-        if face_pixels.sum() > 100:
-            face_lab = cv2.cvtColor(enhanced, cv2.COLOR_BGR2LAB)
-            cur_luma = float(face_lab[:, :, 0][face_pixels].mean())
-            if self._luma_ema is None:
-                self._luma_ema = cur_luma
-            else:
-                # Gentle EMA: smooth toward running average
-                self._luma_ema = self._luma_alpha * cur_luma + (1 - self._luma_alpha) * self._luma_ema
-                delta = self._luma_ema - cur_luma
-                # Only adjust if delta > 2 LAB units (ignore small variations)
-                if abs(delta) > 2.0:
-                    # Clamp adjustment to ±8 LAB units to prevent darkening
-                    delta = np.clip(delta, -8.0, 8.0)
-                    lab = face_lab.copy().astype(np.float32)
-                    lab[:, :, 0] = np.clip(lab[:, :, 0] + delta, 0, 255)
-                    enhanced = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
-
-        # D-01: Compositing — linear-light or multi-band
-        if getattr(cfg.compositor, 'blend_mode', 'linear') == 'multiband':
-            result = multiband_blend(original, enhanced, blend_weight)
-        else:
-            result = _blend_linear(original, enhanced, blend_weight)
-
-        return result
-
-    def _match_lighting(
+    def composite_with_memory(
         self,
-        reference: np.ndarray,
-        target: np.ndarray,
-        mask: np.ndarray,
+        original: np.ndarray,
+        memory_face: np.ndarray,
+        confidence: ConfidenceMap,
+        face_mask: np.ndarray,
     ) -> np.ndarray:
-        """Match lighting between face region and background.
-
-        Computes the mean brightness difference between the face region
-        in the original and enhanced frames, and adjusts the enhanced
-        frame to match.
         """
-        if mask.max() < 0.01:
-            return target
+        Composite using a stable memory face.
 
-        # Compute mean brightness in face region for both frames
-        ref_lab = cv2.cvtColor(reference, cv2.COLOR_BGR2LAB).astype(np.float32)
-        tgt_lab = cv2.cvtColor(target, cv2.COLOR_BGR2LAB).astype(np.float32)
+        The memory face is assumed to be an upstream product:
+        identity estimation, temporal stabilization, and photometric correction
+        must already have been handled before this method is called.
 
-        mask_bool = mask > 0.5
-        if mask_bool.sum() < 100:
-            return target
+        Args:
+            original: Original cropped frame, shape (H, W, 3), uint8 BGR.
+            memory_face: Stable face image from memory atlas, shape (H, W, 3).
+            confidence: Per-pixel confidence map.
+            face_mask: Face region mask, shape (H, W), float [0, 1].
 
-        ref_mean = float(np.mean(ref_lab[:, :, 0][mask_bool]))
-        tgt_mean = float(np.mean(tgt_lab[:, :, 0][mask_bool]))
+        Returns:
+            Composited frame, shape (H, W, 3), uint8 BGR.
+        """
+        if memory_face is None:
+            return original
 
-        # Adjust target brightness to match reference
-        diff = ref_mean - tgt_mean
-        if abs(diff) > 5:  # Only adjust if significant difference
-            adjustment = diff * 0.3  # Partial adjustment
-            tgt_lab[:, :, 0] += adjustment
-            tgt_lab = np.clip(tgt_lab, 0, 255).astype(np.uint8)
-            return cv2.cvtColor(tgt_lab, cv2.COLOR_LAB2BGR)
+        h, w = original.shape[:2]
+        if memory_face.shape[:2] != (h, w):
+            memory_face = cv2.resize(memory_face, (w, h), interpolation=cv2.INTER_LANCZOS4)
 
-        return target
+        conf = confidence.combined
+        if conf is None:
+            conf = np.full((h, w), 0.5, dtype=np.float32)
+        elif conf.shape[:2] != (h, w):
+            conf = cv2.resize(conf, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        feathered = self._feather_mask(face_mask)
+        blend_weight = np.clip(feathered * conf, 0.0, 1.0)
+
+        return _blend_linear(original, memory_face, blend_weight)
+
+    def _feather_mask(self, mask: np.ndarray) -> np.ndarray:
+        """
+        Feather mask edges using Gaussian blur.
+
+        Feathering is used only to soften the transition boundary.
+        It should not be used as a substitute for topology or geometry.
+        """
+        feather = int(cfg.compositor.feather_pixels)
+        if feather <= 0:
+            return np.clip(mask.astype(np.float32), 0.0, 1.0)
+
+        # Gaussian kernel size must be odd and at least 3.
+        ksize = max(3, feather * 2 + 1)
+        blurred = cv2.GaussianBlur(mask.astype(np.float32), (ksize, ksize), feather / 2)
+        return np.clip(blurred, 0.0, 1.0)
+
+    def _blend_by_confidence(
+        self,
+        original: np.ndarray,
+        enhanced: np.ndarray,
+        confidence: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Blend the entire frame using a confidence map.
+
+        This is the fallback path when no explicit face mask is available.
+        """
+        h, w = original.shape[:2]
+        if confidence.shape[:2] != (h, w):
+            confidence = cv2.resize(confidence, (w, h), interpolation=cv2.INTER_LINEAR)
+
+        return _blend_linear(original, enhanced, confidence)

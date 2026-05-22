@@ -301,13 +301,15 @@ class TestContrastPreservation:
 
     def test_photometric_lock_dampens_brightness_jumps(self):
         """photometric_lock should dampen sudden brightness changes."""
-        from face_os.compositor import photometric_lock, reset_photometric_lock
+        from face_os.photometric import photometric_lock, reset_photometric_lock
 
         reset_photometric_lock()
 
+        # Frame 1: normal brightness
         frame1 = np.full((64, 64, 3), 128, dtype=np.uint8)
-        photometric_lock(frame1)
+        result1 = photometric_lock(frame1)
 
+        # Frame 2: sudden brightness jump
         frame2 = np.full((64, 64, 3), 200, dtype=np.uint8)
         result2 = photometric_lock(frame2)
 
@@ -428,7 +430,7 @@ class TestTemporalStability:
 
     def test_photometric_lock_temporal_stability(self):
         """photometric_lock should produce smooth output over gradual changes."""
-        from face_os.compositor import photometric_lock, reset_photometric_lock
+        from face_os.photometric import photometric_lock, reset_photometric_lock
 
         reset_photometric_lock()
 
