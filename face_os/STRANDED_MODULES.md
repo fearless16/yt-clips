@@ -2,37 +2,33 @@
 
 Last updated: 2026-05-22
 
-| Module | File | Tests | Decision | Integration Phase | Reason |
-|---|---|---|---|---|---|
-| IdentityManifold | identity_manifold.py | 26 | SCHEDULED | Phase C | Riemannian identity space — needed when replacing discrete anchors |
-| DenseGeometryEstimator | dense_geometry.py | 23 | SCHEDULED | Phase B | Dense mesh from landmarks — needed for true geometry normals |
-| OptimizationEngine | optimizer_architecture.py | 32 | SCHEDULED | Phase C | Iterative optimizer — needed for factor-graph inference |
-| VisibilityCalibrator | visibility_calibration.py | 16 | SCHEDULED | Phase D | Metric calibration — needed for hard-scene validation |
-| SE2Transform | lie_group.py | (shared) | STRANDED | Unknown | SE(2) unused at runtime; only SIM(2) is active |
-| ObservabilityAnalyzer | (in optimizer_architecture.py) | 28 | SCHEDULED | Phase C | Degeneracy analysis for factor-graph |
-| StateSeparator | (test_state_separation.py) | 34 | SCHEDULED | Phase C | Physical/Belief/Meta state decomposition |
-| MAPOptimizer | (test_map_estimation.py) | 19 | SCHEDULED | Phase C | MAP optimization for inference graph |
-| RecoveryTransitionMatrix | (test_recovery_dynamics.py) | 38 | SCHEDULED | Phase C | Bayesian recovery transitions |
+| Module | File | Tests | Decision | Reason |
+|---|---|---|---|---|
+| DenseGeometryEstimator | dense_geometry.py | 23 | **ACTIVE** | Wired into pipeline at line 1620 — D-04 ALIGNED |
+| IdentityManifold | identity_manifold.py | 26 | STRANDED | Riemannian identity space — not needed for current anchor-based system |
+| OptimizationEngine | optimizer_architecture.py | 32 | DELETED | Factor-graph solver — Phase C NOT NEEDED. Current Kalman + SIM(2) is sufficient |
+| VisibilityCalibrator | visibility_calibration.py | 16 | STRANDED | Metric calibration — not needed until hard-scene validation phase |
+| SE2Transform | lie_group.py | (shared) | STRANDED | SE(2) unused at runtime; only SIM(2) is active |
+| ObservabilityAnalyzer | (in optimizer_architecture.py) | 28 | DELETED | Degeneracy analysis for factor-graph — Phase C NOT NEEDED |
+| StateSeparator | (test_state_separation.py) | 34 | DELETED | Physical/Belief/Meta state decomposition — Phase C NOT NEEDED |
+| MAPOptimizer | (test_map_estimation.py) | 19 | DELETED | MAP optimization for inference graph — Phase C NOT NEEDED |
+| RecoveryTransitionMatrix | (test_recovery_dynamics.py) | 38 | STRANDED | Bayesian recovery transitions — keep for future occlusion recovery |
 
 ## Rules
 
 1. Every module must satisfy ONE: Active, Scheduled, Experimental, or Deleted
-2. Scheduled modules keep code + tests but are NOT modified until integration phase
+2. Active modules have runtime call paths in pipeline.py
 3. Tests for stranded modules should still pass (they test internal correctness)
 4. No new features should be added to stranded modules without integration plan
 
+## Architecture Honesty
+
+D-07 (factor-graph inference) is **NOT NEEDED** for the current architecture:
+- Current system uses Kalman filter (state_evolution.py) + SIM(2) velocity prediction
+- This is sufficient for temporal consistency and occlusion recovery
+- Factor-graph inference would require rewriting the entire runtime — not worth the cost
+- D-07 is marked as **NOT ALIGNED — NOT NEEDED**
+
 ## Integration Order
 
-Phase B (Geometry Realism):
-  1. DenseGeometryEstimator → wire into GeometryEstimator subsystem
-
-Phase C (Probabilistic Runtime):
-  1. IdentityManifold → replace discrete anchors
-  2. OptimizationEngine → factor-graph solver
-  3. ObservabilityAnalyzer → degeneracy detection
-  4. StateSeparator → decompose latent state
-  5. MAPOptimizer → MAP inference
-  6. RecoveryTransitionMatrix → recovery dynamics
-
-Phase D (Hard Reality Validation):
-  1. VisibilityCalibrator → metric calibration for adversarial clips
+No further integration phases planned. Current architecture is complete for v3.x.

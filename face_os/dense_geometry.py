@@ -22,13 +22,12 @@ References:
 """
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# STRANDED MODULE — Status: SCHEDULED (D-10 / I-10)
+# ACTIVE MODULE — D-04 ALIGNED
 #
-# This module is fully implemented and tested but has ZERO runtime integration.
-# It is NOT called by pipeline.py or any runtime path.
+# This module is called from pipeline.py at line 1620:
+#   dense_geometry = self._dense_geometry.estimate(landmarks.points[:, :2])
 #
-# Decision: SCHEDULED for integration in Phase B (Geometry Realism)
-# Action: Keep code + tests. Do not modify until integration phase.
+# Integration: DenseGeometryEstimator.estimate() → PhysicalRenderer.render_with_mesh()
 # Tests: test_dense_geometry.py (23 tests)
 # ═══════════════════════════════════════════════════════════════════════════════
 

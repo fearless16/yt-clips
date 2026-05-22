@@ -37,7 +37,7 @@ class FaceRenderer:
         self._config = config
 
     def render(self, albedo, normal_map, shading, lighting) -> Optional[np.ndarray]:
-        """Render using physical renderer.
+        """Render using physical renderer with intrinsic normal map.
 
         Args:
             albedo: (H, W, 3) float32 [0,1]
@@ -59,5 +59,34 @@ class FaceRenderer:
                 lighting=lighting,
             )
             return result.rendered
+        except Exception:
+            return None
+
+    def render_with_mesh(self, albedo, mesh_vertices, mesh_faces, lighting,
+                         image_shape: tuple) -> Optional[np.ndarray]:
+        """Render using mesh-derived normals (true geometry).
+
+        Args:
+            albedo: (H, W, 3) float32 [0,1]
+            mesh_vertices: (N, 3) mesh vertex positions
+            mesh_faces: (F, 3) face indices
+            lighting: LightingModel
+            image_shape: (H, W) output size
+
+        Returns:
+            Rendered frame (H, W, 3) float32 [0,1] or None
+        """
+        if self._renderer is None:
+            return None
+
+        try:
+            result = self._renderer.render_with_mesh(
+                albedo=albedo,
+                mesh_vertices=mesh_vertices,
+                mesh_faces=mesh_faces,
+                lighting=lighting,
+                image_shape=image_shape,
+            )
+            return result.rendered if hasattr(result, 'rendered') else result
         except Exception:
             return None

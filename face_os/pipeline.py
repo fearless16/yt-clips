@@ -58,7 +58,7 @@ from face_os import canonical_map
 from face_os import crop_planner
 from face_os import face_enhance
 from face_os import compositor
-from face_os.compositor import _blend_linear
+from face_os.compositor import _blend_linear, multiband_blend
 from face_os.photometric import photometric_lock, reset_photometric_lock
 from face_os import export_qc
 
@@ -210,6 +210,9 @@ class FaceOSPipeline:
 
         # D-08: Per-frame telemetry log (every frame exposed as JSON)
         self._frame_telemetry_log: list = []
+
+        # D-02: A/B validation — render mode override (None = use default, 'alpha' = force alpha)
+        self.render_mode_override: Optional[str] = None
 
         # D-10: Subsystem wrappers (thin delegation, not replacement)
         self._geometry_estimator = GeometryEstimator(config=cfg)
@@ -565,6 +568,43 @@ class FaceOSPipeline:
             return self._process_bidirectional(video_path, output_path, max_frames, meta)
         else:
             return self._process_forward(video_path, output_path, max_frames, meta)
+
+    def process_frame(self, frame: np.ndarray, frame_idx: int = 0) -> dict:
+        """Process a single frame and return result dict.
+
+        Public API for A/B validation and testing.
+        Wraps _process_frame_v2 with face detection.
+
+        Args:
+            frame: Input frame (H, W, 3) uint8 BGR
+            frame_idx: Frame index
+
+        Returns:
+            Dict with keys: 'frame' (output ndarray), 'landmarks', 'transform', 'render_path'
+        """
+        # Detect face
+        face_track = None
+        detections = detect_track.detect_faces(frame)
+        if detections:
+            face_track = self.tracker.update(detections, frame_idx)
+            if face_track and face_track.smooth_bbox:
+                lm = lm_module.extract_landmarks(frame, face_track.mesh_478)
+                face_track.landmarks = lm
+
+        # Process through forward path
+        output = self._process_frame_v2(frame, frame_idx, face_track, face_track.landmarks if face_track else None)
+
+        # Get last render path from telemetry
+        render_path = "enhancement"
+        if self._frame_telemetry_log:
+            render_path = self._frame_telemetry_log[-1].get("render_path", "enhancement")
+
+        return {
+            'frame': output if output is not None else frame,
+            'landmarks': face_track.landmarks if face_track and hasattr(face_track, 'landmarks') else None,
+            'transform': self._last_SIM2,
+            'render_path': render_path,
+        }
 
     def _process_forward(
         self,
@@ -1015,8 +1055,8 @@ class FaceOSPipeline:
             if canonical_face_mask is not None and identity_confidence is not None:
                 identity_confidence = identity_confidence * canonical_face_mask
 
-            # D-05: Query lighting-invariant albedo for forward path
-            albedo_face, albedo_conf = self.identity_state.query_albedo(quality_map)
+            # D-05: Query lighting-invariant albedo for forward path (via subsystem wrapper)
+            albedo_face, albedo_conf = self._identity_estimator.query_albedo(quality_map)
             if albedo_face is not None and albedo_conf is not None:
                 albedo_weight = float(np.mean(albedo_conf)) * 0.4
                 identity_face = (1 - albedo_weight) * identity_face + albedo_weight * albedo_face
@@ -1128,11 +1168,11 @@ class FaceOSPipeline:
                     # Compute quality map for current frame
                     quality_map = self._compute_quality_map(solved_face, face_track.detection.confidence if face_track and face_track.detection else 0.5)
                     
-                    # V3: Query intrinsic components
-                    intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
+                    # V3: Query intrinsic components (via subsystem wrapper)
+                    intrinsic_components, intrinsic_conf = self._identity_estimator.query_intrinsic(quality_map)
                     
-                    # D-05: Query lighting-invariant albedo (decouple identity from lighting)
-                    albedo_face, albedo_conf = self.identity_state.query_albedo(quality_map)
+                    # D-05: Query lighting-invariant albedo (via subsystem wrapper)
+                    albedo_face, albedo_conf = self._identity_estimator.query_albedo(quality_map)
                     
                     # Render via shared _render_core
                     # NOTE: Mode update happens in orchestration layer, not here
@@ -1228,7 +1268,12 @@ class FaceOSPipeline:
 
         blend_3d = aligned_mask[:, :, np.newaxis]
         # D-01: Linear-light compositing (physically correct gamma handling)
-        output = _blend_linear(cropped, identity_in_crop, aligned_mask)
+        # D-01c: Multi-band blending when configured
+        blend_mode = cfg.compositor.get("blend_mode", "alpha") if hasattr(cfg, 'compositor') else "alpha"
+        if blend_mode == "laplacian":
+            output = multiband_blend(cropped, identity_in_crop, aligned_mask, levels=4)
+        else:
+            output = _blend_linear(cropped, identity_in_crop, aligned_mask)
 
         if frame_idx % 30 == 0:
             face_pixels = aligned_mask > 0.5
@@ -1319,14 +1364,17 @@ class FaceOSPipeline:
                 obs_vector, H, R,
             )
 
-            # D-06: SIM(2) velocity prediction for occlusion recovery
+            # D-06: SIM(2) velocity prediction for occlusion recovery (via subsystem wrapper)
             if self._last_SIM2 is not None and hasattr(self, '_prev_SIM2') and self._prev_SIM2 is not None:
                 try:
-                    predicted_sim2 = self.state_evolution.predict_with_velocity(
-                        self._prev_SIM2, self._last_SIM2
+                    temporal_state = self._temporal_estimator.predict(
+                        current_sim2=self._last_SIM2,
+                        observation=None,
+                        H=None,
+                        R=None,
                     )
-                    # Store prediction for use during face-loss recovery
-                    self._predicted_SIM2 = predicted_sim2
+                    if temporal_state.motion_field is not None:
+                        self._predicted_SIM2 = temporal_state.motion_field
                 except Exception:
                     pass
             self._prev_SIM2 = self._last_SIM2
@@ -1444,11 +1492,16 @@ class FaceOSPipeline:
         _render_start = _time.perf_counter()
 
         # 1. PhysicalRenderer
-        physical_possible = (intrinsic_components is not None
-                            and self.physical_renderer is not None
-                            and self.renderer_mode_state is not None
-                            and self.renderer_mode_state.current_mode in [RendererMode.PHYSICAL, RendererMode.HYBRID]
-                            and landmarks is not None)
+        # D-02: Check render_mode_override for A/B validation
+        if self.render_mode_override == 'alpha':
+            physical_possible = False
+            fallback_reason = "render_mode_override_alpha"
+        else:
+            physical_possible = (intrinsic_components is not None
+                                and self.physical_renderer is not None
+                                and self.renderer_mode_state is not None
+                                and self.renderer_mode_state.current_mode in [RendererMode.PHYSICAL, RendererMode.HYBRID]
+                                and landmarks is not None)
 
         if physical_possible:
             result = self._render_with_physical_renderer(
@@ -1624,18 +1677,17 @@ class FaceOSPipeline:
                 print(f"  Frame {frame_idx}: dense geometry failed: {e}")
 
             if dense_geometry is not None:
-                rendered_output = self.physical_renderer.render_with_mesh(
+                rendered_output = self._face_renderer.render_with_mesh(
                     albedo=source_intrinsic.albedo,
                     mesh_vertices=dense_geometry.vertices,
                     mesh_faces=dense_geometry.faces,
-                    shading=source_intrinsic.shading,
                     lighting=lighting,
-                    image_size=source_intrinsic.albedo.shape[:2],
+                    image_shape=source_intrinsic.albedo.shape[:2],
                 )
                 self._telemetry["mesh_normal_frames"] += 1
             else:
                 # Fallback: face-prior normals when geometry fails
-                rendered_output = self.physical_renderer.render(
+                rendered_output = self._face_renderer.render(
                     albedo=source_intrinsic.albedo,
                     normal_map=source_intrinsic.normal_map,
                     shading=source_intrinsic.shading,
@@ -1644,7 +1696,11 @@ class FaceOSPipeline:
                 self._telemetry["shading_normal_frames"] += 1
             
             # Convert from [0,1] to [0,255] uint8
-            rendered_face = (rendered_output.rendered * 255).astype(np.uint8)
+            # Wrapper returns rendered image directly (not result object)
+            if hasattr(rendered_output, 'rendered'):
+                rendered_face = (rendered_output.rendered * 255).astype(np.uint8)
+            else:
+                rendered_face = (rendered_output * 255).astype(np.uint8)
             
             # D-01b: Reuse M_inv for mask warp (same canonical transform)
             canonical_mask = self._make_canonical_geometry_mask(
@@ -1665,7 +1721,12 @@ class FaceOSPipeline:
             )
             
             # D-01: Single composite in output space (linear-light)
-            blended = _blend_linear(cropped, rendered_face, feathered_mask)
+            # D-01c: Multi-band blending when configured
+            blend_mode = cfg.compositor.get("blend_mode", "alpha") if hasattr(cfg, 'compositor') else "alpha"
+            if blend_mode == "laplacian":
+                blended = multiband_blend(cropped, rendered_face, feathered_mask, levels=4)
+            else:
+                blended = _blend_linear(cropped, rendered_face, feathered_mask)
 
             # D-01: Detail residual injection — preserve source HF detail
             # The decomposition produces blurry albedo. Inject HF from source.
@@ -1947,6 +2008,9 @@ class FaceOSPipeline:
         self._frame_telemetry_log = []
         # D-06: Reset SIM2 prediction state
         self._prev_SIM2 = None
+        # D-10: Reset temporal estimator wrapper
+        if self._temporal_estimator:
+            self._temporal_estimator.reset()
         self._predicted_SIM2 = None
         # D-01: Reset photometric lock temporal state
         reset_photometric_lock()
