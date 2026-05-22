@@ -288,18 +288,11 @@ class IntrinsicDecomposer:
         shading_3ch = np.repeat(shading, 3, axis=2)
         albedo = image / (shading_3ch + 1e-8)
 
-        # Edge-preserving smoothing: use median filter then Gaussian
-        # Median preserves edges better than Gaussian alone
-        sigma = self.config.albedo_smoothness * 3  # Reduced from 5
-        ksize = int(sigma * 6) | 1  # Ensure odd kernel size
-        # Convert to uint8 for medianBlur (much faster than scipy.ndimage.median_filter)
-        albedo_u8 = np.clip(albedo * 255, 0, 255).astype(np.uint8)
+        # Edge-preserving smoothing: Gaussian blur
+        # Light smoothing to remove noise while preserving edges
+        sigma = self.config.albedo_smoothness * 3
+        ksize = max(3, int(sigma * 6) | 1)
         for c in range(3):
-            # Apply median filter first (edge-preserving) — 3-5x faster than scipy
-            albedo_u8[:, :, c] = cv2.medianBlur(albedo_u8[:, :, c], 5)
-        albedo = albedo_u8.astype(np.float32) / 255.0
-        for c in range(3):
-            # Then light Gaussian smoothing
             albedo[:, :, c] = cv2.GaussianBlur(albedo[:, :, c], (ksize, ksize), sigma)
 
         # Clip to valid range
