@@ -117,6 +117,21 @@ def _extractor_args(client: str, dl_cfg: dict) -> list[str]:
     return ["--extractor-args", f"youtube:{';'.join(args)}"]
 
 
+def _yt_dlp_path() -> str:
+    """Find yt-dlp binary, preferring the one in the active venv."""
+    import shutil
+    # Try venv-relative path first
+    venv_bin = Path(sys.executable).parent
+    candidate = venv_bin / "yt-dlp"
+    if candidate.exists():
+        return str(candidate)
+    # Fallback to system PATH
+    found = shutil.which("yt-dlp")
+    if found:
+        return found
+    return "yt-dlp"
+
+
 def _base_yt_dlp_cmd(dl_cfg: dict, template: str) -> list[str]:
     # Kaggle/datacenter IPs get blocked by aggressive download settings
     kaggle = _is_kaggle()
@@ -125,7 +140,7 @@ def _base_yt_dlp_cmd(dl_cfg: dict, template: str) -> list[str]:
     use_aria2c = False if kaggle else dl_cfg.get("use_aria2c", False)
 
     cmd = [
-        "yt-dlp",
+        _yt_dlp_path(),
         "--format", dl_cfg.get("format", "bv*+ba/b"),
         "--merge-output-format", "mp4",
         "--format-sort", dl_cfg.get("format_sort", "res:2160,vbr,abr"),
@@ -333,7 +348,7 @@ def download(url: str, output_path: Optional[str] = None, sample_minutes: Option
     # ─── Capture Video Metadata ──────────────────────────────────────────────
     try:
         title_cmd = [
-            "yt-dlp",
+            _yt_dlp_path(),
             "--dump-json",
             "--no-playlist",
             "--no-warnings",
