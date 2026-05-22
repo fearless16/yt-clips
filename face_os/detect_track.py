@@ -6,6 +6,7 @@ No Haar cascade. No fallback.
 """
 
 import os
+import sys
 import time
 from typing import Dict, List, Optional, Tuple
 
@@ -34,6 +35,7 @@ MEDIPIPE_GPU_ACTIVE = False
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_MODULE_DIR)
+_IS_MACOS = sys.platform == "darwin"
 
 
 def _resolve_model(filename: str) -> str:
@@ -53,17 +55,22 @@ def get_detector():
     global _face_detector, MEDIPIPE_GPU_ACTIVE
     if _face_detector is None:
         model_path = _resolve_model("face_detector.tflite")
-        try:
-            base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=mp_python.BaseOptions.Delegate.GPU)
-            options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.5)
-            _face_detector = vision.FaceDetector.create_from_options(options)
-            print(f"[detect_track] FaceDetector: GPU delegate ACTIVE (model={model_path})")
-            MEDIPIPE_GPU_ACTIVE = True
-        except Exception as e:
-            print(f"[detect_track] FaceDetector: GPU failed ({e}), using CPU")
+        # macOS Metal GPU delegate crashes — skip to CPU directly
+        if not _IS_MACOS:
+            try:
+                base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=mp_python.BaseOptions.Delegate.GPU)
+                options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.5)
+                _face_detector = vision.FaceDetector.create_from_options(options)
+                print(f"[detect_track] FaceDetector: GPU delegate ACTIVE (model={model_path})")
+                MEDIPIPE_GPU_ACTIVE = True
+            except Exception as e:
+                print(f"[detect_track] FaceDetector: GPU failed ({e}), using CPU")
+                _face_detector = None
+        if _face_detector is None:
             base_options = mp_python.BaseOptions(model_asset_path=model_path)
             options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.5)
             _face_detector = vision.FaceDetector.create_from_options(options)
+            print(f"[detect_track] FaceDetector: CPU (model={model_path})")
     return _face_detector
 
 
@@ -71,17 +78,22 @@ def get_landmarker():
     global _face_landmarker, MEDIPIPE_GPU_ACTIVE
     if _face_landmarker is None:
         model_path = _resolve_model("face_landmarker.task")
-        try:
-            base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=mp_python.BaseOptions.Delegate.GPU)
-            options = vision.FaceLandmarkerOptions(base_options=base_options, num_faces=1)
-            _face_landmarker = vision.FaceLandmarker.create_from_options(options)
-            print(f"[detect_track] FaceLandmarker: GPU delegate ACTIVE (model={model_path})")
-            MEDIPIPE_GPU_ACTIVE = True
-        except Exception as e:
-            print(f"[detect_track] FaceLandmarker: GPU failed ({e}), using CPU")
+        # macOS Metal GPU delegate crashes — skip to CPU directly
+        if not _IS_MACOS:
+            try:
+                base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=mp_python.BaseOptions.Delegate.GPU)
+                options = vision.FaceLandmarkerOptions(base_options=base_options, num_faces=1)
+                _face_landmarker = vision.FaceLandmarker.create_from_options(options)
+                print(f"[detect_track] FaceLandmarker: GPU delegate ACTIVE (model={model_path})")
+                MEDIPIPE_GPU_ACTIVE = True
+            except Exception as e:
+                print(f"[detect_track] FaceLandmarker: GPU failed ({e}), using CPU")
+                _face_landmarker = None
+        if _face_landmarker is None:
             base_options = mp_python.BaseOptions(model_asset_path=model_path)
             options = vision.FaceLandmarkerOptions(base_options=base_options, num_faces=1)
             _face_landmarker = vision.FaceLandmarker.create_from_options(options)
+            print(f"[detect_track] FaceLandmarker: CPU (model={model_path})")
     return _face_landmarker
 
 
