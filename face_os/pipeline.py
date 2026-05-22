@@ -74,6 +74,9 @@ from face_os.renderer_mode import RendererMode, RendererModeState
 from face_os.state_evolution import StateEvolution
 from face_os.energy_scaling import EnergyScaler
 
+# D-10: Subsystem wrappers (thin delegation, boundary enforcement)
+from face_os.subsystems import GeometryEstimator, IdentityEstimator, TemporalEstimator, FaceRenderer
+
 
 # ─── D-01: Linear-light conversion helpers ──────────────────────────────────
 
@@ -235,6 +238,12 @@ class FaceOSPipeline:
 
         # D-08: Per-frame telemetry log (every frame exposed as JSON)
         self._frame_telemetry_log: list = []
+
+        # D-10: Subsystem wrappers (thin delegation, not replacement)
+        self._geometry_estimator = GeometryEstimator(config=cfg)
+        self._identity_estimator = IdentityEstimator(self.identity_state) if self.identity_state else None
+        self._temporal_estimator = TemporalEstimator(self.state_evolution) if self.state_evolution else None
+        self._face_renderer = FaceRenderer(self.physical_renderer, config=cfg)
 
     @staticmethod
     def _affine_to_sim2(M_inv_2x3: np.ndarray) -> SIM2Transform:
@@ -466,6 +475,8 @@ class FaceOSPipeline:
 
         # V3: Initialize physical renderer
         self.physical_renderer = PhysicalRenderer()
+        # D-10: Wire renderer subsystem wrapper
+        self._face_renderer = FaceRenderer(self.physical_renderer, config=cfg)
 
         # V3: Initialize renderer mode state
         self.renderer_mode_state = RendererModeState()
@@ -474,6 +485,8 @@ class FaceOSPipeline:
         self.state_evolution = StateEvolution()
         self._latent_state = np.zeros(11)  # Initial latent state
         self._latent_covariance = np.eye(11)  # Initial covariance
+        # D-10: Wire temporal subsystem wrapper
+        self._temporal_estimator = TemporalEstimator(self.state_evolution)
 
         # Extract reference mesh for quality gates
         ref_mesh = detect_track.extract_face_mesh(primary)
@@ -488,9 +501,12 @@ class FaceOSPipeline:
             atlas_size = tuple(cfg.canonical.atlas_size) if hasattr(cfg.canonical, 'atlas_size') else (512, 512)
             self.identity_state = IdentityState(atlas_size=atlas_size)
             self.patch_memory = PatchMemory()
+            # D-10: Wire identity subsystem wrapper
+            self._identity_estimator = IdentityEstimator(self.identity_state)
         else:
             self.identity_state = None
             self.patch_memory = None
+            self._identity_estimator = None
             print("  Identity: DISABLED (simple enhancement mode)")
 
         # Set reference embedding on verification gate
@@ -1025,6 +1041,12 @@ class FaceOSPipeline:
             # Mask confidence to face region only — prevent background reconstruction
             if canonical_face_mask is not None and identity_confidence is not None:
                 identity_confidence = identity_confidence * canonical_face_mask
+
+            # D-05: Query lighting-invariant albedo for forward path
+            albedo_face, albedo_conf = self.identity_state.query_albedo(quality_map)
+            if albedo_face is not None and albedo_conf is not None:
+                albedo_weight = float(np.mean(albedo_conf)) * 0.4
+                identity_face = (1 - albedo_weight) * identity_face + albedo_weight * albedo_face
 
             # V3: Query intrinsic components
             intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)

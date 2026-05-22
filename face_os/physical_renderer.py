@@ -326,6 +326,232 @@ class PhysicalRenderer:
             return 0.0
         return float(output_energy / input_energy)
 
+    def render_with_mesh(
+        self,
+        albedo: np.ndarray,
+        mesh_vertices: np.ndarray,
+        mesh_faces: np.ndarray,
+        shading: np.ndarray,
+        lighting: Optional[LightingModel] = None,
+        image_size: Optional[tuple] = None,
+        view_direction: Optional[np.ndarray] = None,
+        observed: Optional[np.ndarray] = None,
+        frame_idx: Optional[int] = None,
+    ) -> PhysicalRenderOutput:
+        """Render using mesh-derived normals instead of face-prior.
+
+        D-04: True geometry-derived normals break the circularity:
+        landmarks → dense mesh → per-face normals → raster normals → renderer
+
+        When mesh_vertices is None, falls back to face-prior ellipsoidal normals.
+
+        Args:
+            albedo: (H, W, 3) float32 [0,1]
+            mesh_vertices: (N, 3) vertex positions, or None for face-prior fallback
+            mesh_faces: (F, 3) face indices, or None for face-prior fallback
+            shading: (H, W) or (H, W, 1) float32
+            lighting: LightingModel (defaults if None)
+            image_size: (H, W) output size; inferred from albedo if None
+            view_direction: (3,) view direction
+            observed: optional observed frame for error computation
+            frame_idx: optional frame index for reporting
+
+        Returns:
+            PhysicalRenderOutput with rendered image
+        """
+        albedo = _as_float_image(albedo)
+        h, w = albedo.shape[:2]
+        if image_size is None:
+            image_size = (h, w)
+
+        if mesh_vertices is not None and mesh_faces is not None:
+            normal_map = self._rasterize_mesh_normals(
+                mesh_vertices, mesh_faces, image_size
+            )
+        else:
+            # Face-prior ellipsoidal fallback (D-04: deterministic, brightness-invariant)
+            normal_map = self._face_prior_normals(image_size)
+
+        return self.render(
+            albedo=albedo,
+            normal_map=normal_map,
+            shading=shading,
+            lighting=lighting,
+            view_direction=view_direction,
+            observed=observed,
+            frame_idx=frame_idx,
+        )
+
+    def _compute_per_face_normals(
+        self,
+        vertices: np.ndarray,
+        faces: np.ndarray,
+    ) -> np.ndarray:
+        """Compute per-face normals from mesh.
+
+        Args:
+            vertices: (N, 3) vertex positions
+            faces: (F, 3) face indices
+
+        Returns:
+            (F, 3) unit face normals
+        """
+        v0 = vertices[faces[:, 0]]
+        v1 = vertices[faces[:, 1]]
+        v2 = vertices[faces[:, 2]]
+        normals = np.cross(v1 - v0, v2 - v0)
+        norms = np.linalg.norm(normals, axis=1, keepdims=True)
+        normals = normals / (norms + 1e-8)
+        return normals.astype(np.float32)
+
+    def _rasterize_mesh_normals(
+        self,
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        image_size: tuple,
+    ) -> np.ndarray:
+        """Rasterize per-face normals to image plane via barycentric interpolation.
+
+        D-04: Converts 3D mesh normals to a 2D normal map for the renderer.
+
+        Args:
+            vertices: (N, 3) vertex positions
+            faces: (F, 3) face indices
+            image_size: (H, W) output size
+
+        Returns:
+            (H, W, 3) normal map, unit vectors
+        """
+        h, w = image_size
+        face_normals = self._compute_per_face_normals(vertices, faces)
+
+        # Project vertices to image plane (use x, y; ignore z for rasterization)
+        v_xy = vertices[:, :2].astype(np.float32)
+
+        # Normalize to image coordinates
+        v_min = v_xy.min(axis=0)
+        v_max = v_xy.max(axis=0)
+        v_range = v_max - v_min
+        v_range = np.where(v_range > 1e-8, v_range, 1.0)
+
+        # Map to pixel coordinates
+        px = (v_xy[:, 0] - v_min[0]) / v_range[0] * (w - 1)
+        py = (v_xy[:, 1] - v_min[1]) / v_range[1] * (h - 1)
+
+        normal_map = np.zeros((h, w, 3), dtype=np.float32)
+        normal_map[:, :, 2] = 1.0  # Default: pointing toward viewer
+        weight_map = np.zeros((h, w), dtype=np.float32)
+
+        # Rasterize using simple scanline-free approach:
+        # For each face, fill its bounding box with barycentric interpolation
+        for fi in range(len(faces)):
+            face = faces[fi]
+            fn = face_normals[fi]
+
+            # Get screen-space triangle vertices
+            sx = px[face]
+            sy = py[face]
+
+            # Bounding box
+            x_min = max(0, int(np.floor(np.min(sx))))
+            x_max = min(w - 1, int(np.ceil(np.max(sx))))
+            y_min = max(0, int(np.floor(np.min(sy))))
+            y_max = min(h - 1, int(np.ceil(np.max(sy))))
+
+            if x_max < x_min or y_max < y_min:
+                continue
+
+            # For each pixel in bounding box, test barycentric coordinates
+            for yi in range(y_min, y_max + 1):
+                for xi in range(x_min, x_max + 1):
+                    # Barycentric coordinates
+                    bc = self._barycentric_coords(
+                        float(xi), float(yi), sx[0], sy[0], sx[1], sy[1], sx[2], sy[2]
+                    )
+                    if bc is not None:
+                        u, v, w_bary = bc
+                        if u >= 0 and v >= 0 and w_bary >= 0:
+                            # Inside triangle — accumulate normal weighted by proximity
+                            # Use area-based weight (smaller triangles = higher weight)
+                            area = abs(
+                                (sx[1] - sx[0]) * (sy[2] - sy[0])
+                                - (sx[2] - sx[0]) * (sy[1] - sy[0])
+                            )
+                            weight = 1.0 / (area + 1e-6)
+                            weight = min(weight, 10.0)
+                            normal_map[yi, xi] += fn * weight
+                            weight_map[yi, xi] += weight
+
+        # Normalize accumulated normals
+        for yi in range(h):
+            for xi in range(w):
+                if weight_map[yi, xi] > 0:
+                    n = normal_map[yi, xi]
+                    norm = np.linalg.norm(n)
+                    if norm > 1e-8:
+                        normal_map[yi, xi] = n / norm
+
+        return normal_map
+
+    @staticmethod
+    def _barycentric_coords(
+        px: float, py: float,
+        x0: float, y0: float,
+        x1: float, y1: float,
+        x2: float, y2: float,
+    ) -> Optional[tuple]:
+        """Compute barycentric coordinates of point (px, py) in triangle.
+
+        Returns:
+            (u, v, w) or None if degenerate triangle
+        """
+        denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+        if abs(denom) < 1e-10:
+            return None
+        u = ((y1 - y2) * (px - x2) + (x2 - x1) * (py - y2)) / denom
+        v = ((y2 - y0) * (px - x2) + (x0 - x2) * (py - y2)) / denom
+        w = 1.0 - u - v
+        return (u, v, w)
+
+    def _face_prior_normals(self, image_size: tuple) -> np.ndarray:
+        """Generate face-prior ellipsoidal normals.
+
+        D-04: Deterministic, brightness-invariant fallback when mesh is unavailable.
+        Models the face as an ellipsoid with normals pointing outward.
+
+        Args:
+            image_size: (H, W)
+
+        Returns:
+            (H, W, 3) normal map, unit vectors
+        """
+        h, w = image_size
+        # Create normalized coordinate grid centered at (0.5, 0.5)
+        y = np.linspace(-1, 1, h, dtype=np.float32)
+        x = np.linspace(-1, 1, w, dtype=np.float32)
+        xx, yy = np.meshgrid(x, y)
+
+        # Ellipsoidal surface: z = sqrt(1 - x^2/a^2 - y^2/b^2)
+        # Face proportions: wider than tall
+        a, b = 1.2, 1.5
+        r2 = (xx / a) ** 2 + (yy / b) ** 2
+        r2 = np.clip(r2, 0, 1)
+        z = np.sqrt(1 - r2)
+
+        # Normal of ellipsoid: gradient of implicit surface
+        # For ellipsoid x^2/a^2 + y^2/b^2 + z^2/c^2 = 1
+        # Normal proportional to (x/a^2, y/b^2, z/c^2)
+        nx = xx / (a * a)
+        ny = yy / (b * b)
+        nz = z  # c=1
+
+        # Stack and normalize
+        normal_map = np.stack([nx, ny, nz], axis=2)
+        norms = np.linalg.norm(normal_map, axis=2, keepdims=True)
+        normal_map = normal_map / (norms + 1e-8)
+
+        return normal_map.astype(np.float32)
+
     def get_last_report(self) -> Optional[RenderReport]:
         """Return the last per-frame report if available."""
         return self._last_report
