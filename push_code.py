@@ -159,6 +159,7 @@ def push(include_data: bool = False) -> bool:
             + list(root.glob(".env"))
             + list(root.glob("utils/*.py"))
             + list(root.glob("utils/*.yaml"))
+            + list(root.glob("automation/*.py"))
             + list(root.glob("face_os/**/*.py"))
             + list(root.glob("face_os/subsystems/*.py"))
             + list(root.glob("transcripts/*.json"))
