@@ -153,7 +153,7 @@ def process():
 
         # Process
         t0 = time.time()
-        result = _pipeline.process(video_path.name, output_path, max_frames=max_frames)
+        result = _pipeline.process(str(video_path), output_path, max_frames=max_frames)
         elapsed = time.time() - t0
 
         # Collect telemetry
