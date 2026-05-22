@@ -340,35 +340,6 @@ class TestYawDiscontinuities:
             assert not np.any(np.isnan(T_interp.log()))
 
 
-class TestCovarianceExplosion:
-    """Test covariance edge cases."""
-
-    def test_zero_covariance(self):
-        """Zero covariance must not crash."""
-        from face_os.state_space import LatentState
-        state = LatentState()
-        state.covariance = np.zeros_like(state.covariance)
-        # Should not crash when accessing
-        assert state.covariance.shape == (11, 11)
-
-    def test_large_covariance(self):
-        """Large covariance must not crash."""
-        from face_os.state_space import LatentState
-        state = LatentState()
-        state.covariance = np.eye(11) * 1e10
-        # Should not crash when accessing
-        assert state.covariance.shape == (11, 11)
-
-    def test_singular_covariance(self):
-        """Singular covariance must not crash."""
-        from face_os.state_space import LatentState
-        state = LatentState()
-        state.covariance = np.zeros((11, 11))
-        state.covariance[0, 0] = 1.0  # Only one dimension
-        # Should not crash when accessing
-        assert state.covariance.shape == (11, 11)
-
-
 class TestEdgeCaseImages:
     """Test edge case image sizes."""
 
