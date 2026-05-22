@@ -12,6 +12,17 @@ Purpose:
     This module adds calibration to ensure metrics are meaningful.
 """
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# STRANDED MODULE — Status: SCHEDULED (D-10 / I-10)
+#
+# This module is fully implemented and tested but has ZERO runtime integration.
+# It is NOT called by pipeline.py or any runtime path.
+#
+# Decision: SCHEDULED for integration in Phase D (Hard Reality Validation)
+# Action: Keep code + tests. Do not modify until integration phase.
+# Tests: test_visibility_calibration.py (16 tests)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 from dataclasses import dataclass
 from typing import Dict, Optional
 

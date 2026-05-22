@@ -459,6 +459,59 @@ class TestV31Integration:
         frame = np.random.randint(0, 255, (1920, 1080, 3), dtype=np.uint8)
         assert FaceOSPipeline.validate_frame_contract(frame, 1920, 1080)
 
+    def test_render_core_delegates_to_blend_linear_methods(self):
+        """_render_core must delegate to methods that use _blend_linear."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        # _render_core delegates to _composite_identity_to_crop and _render_with_physical_renderer
+        composite_source = inspect.getsource(FaceOSPipeline._composite_identity_to_crop)
+        physical_source = inspect.getsource(FaceOSPipeline._render_with_physical_renderer)
+        assert '_blend_linear(' in composite_source, (
+            "_composite_identity_to_crop must use _blend_linear"
+        )
+        assert '_blend_linear(' in physical_source, (
+            "_render_with_physical_renderer must use _blend_linear"
+        )
+
+    def test_composite_identity_uses_blend_linear(self):
+        """_composite_identity_to_crop must use _blend_linear."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        source = inspect.getsource(FaceOSPipeline._composite_identity_to_crop)
+        assert '_blend_linear(' in source, (
+            "_composite_identity_to_crop must use _blend_linear for linear-light compositing"
+        )
+
+    def test_sharpening_consistent_across_paths(self):
+        """All sharpening calls must use amount=0.8, radius=0.8."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        source = inspect.getsource(FaceOSPipeline)
+        # All _sharpen calls must use consistent parameters
+        import re
+        sharpen_calls = re.findall(r'_sharpen\([^)]*amount=([0-9.]+)[^)]*radius=([0-9.]+)', source)
+        for amount, radius in sharpen_calls:
+            assert amount == '0.8', f"Sharpening amount={amount} — must be 0.8"
+            assert radius == '0.8', f"Sharpening radius={radius} — must be 0.8"
+
+    def test_query_albedo_in_identity_render_path(self):
+        """_render_frame_v2 must call query_albedo in the identity path."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        source = inspect.getsource(FaceOSPipeline._render_frame_v2)
+        assert 'query_albedo' in source, (
+            "_render_frame_v2 must call query_albedo for lighting-invariant identity"
+        )
+
+    def test_predict_with_velocity_in_update_v3_modules(self):
+        """predict_with_velocity must be wired into _update_v3_modules."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        source = inspect.getsource(FaceOSPipeline._update_v3_modules)
+        assert 'predict_with_velocity' in source, (
+            "_update_v3_modules must call predict_with_velocity for SIM(2) velocity prediction"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # P0: Benchmark Suite Generators
@@ -711,3 +764,75 @@ class TestFailureDistributionTelemetry:
         p = FaceOSPipeline()
         report = p.get_telemetry_report()
         assert "fallback_reason_distribution" in report
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# D-08: Per-frame telemetry JSON
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestPerFrameTelemetry:
+    """D-08: Per-frame telemetry JSON must be emitted by _render_core."""
+
+    def test_frame_telemetry_log_initialized(self):
+        """Pipeline must initialize _frame_telemetry_log on reset."""
+        from face_os.pipeline import FaceOSPipeline
+        p = FaceOSPipeline()
+        assert hasattr(p, '_frame_telemetry_log')
+        assert isinstance(p._frame_telemetry_log, list)
+
+    def test_frame_telemetry_log_cleared_on_reset(self):
+        """_frame_telemetry_log must be cleared on _reset_state."""
+        from face_os.pipeline import FaceOSPipeline
+        p = FaceOSPipeline()
+        p._frame_telemetry_log.append({"test": True})
+        p._reset_state()
+        assert len(p._frame_telemetry_log) == 0
+
+    def test_render_core_emits_per_frame_telemetry(self):
+        """_render_core must call _emit_frame_telemetry for all render paths."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        source = inspect.getsource(FaceOSPipeline._render_core)
+        assert '_emit_frame_telemetry' in source, (
+            "_render_core must call _emit_frame_telemetry for per-frame logging"
+        )
+
+    def test_frame_telemetry_has_required_keys(self):
+        """Per-frame telemetry dict must have all required keys."""
+        required_keys = [
+            "frame_idx", "render_path", "renderer_mode", "fallback_reason",
+            "intrinsic_used", "geometry_source", "resample_count",
+            "energy_terms", "transform_det",
+        ]
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        # D-08: Telemetry keys are in _emit_frame_telemetry (extracted from _render_core)
+        source = inspect.getsource(FaceOSPipeline._emit_frame_telemetry)
+        for key in required_keys:
+            assert f'"{key}"' in source, (
+                f"Per-frame telemetry missing key: {key}"
+            )
+
+    def test_frame_telemetry_render_path_values(self):
+        """render_path must be one of: physical, alpha, enhancement."""
+        import inspect
+        from face_os.pipeline import FaceOSPipeline
+        source = inspect.getsource(FaceOSPipeline._emit_frame_telemetry)
+        assert '"physical"' in source
+        assert '"alpha"' in source
+        assert '"enhancement"' in source
+
+    def test_get_frame_telemetry_method_exists(self):
+        """get_frame_telemetry() must return the per-frame log."""
+        from face_os.pipeline import FaceOSPipeline
+        p = FaceOSPipeline()
+        assert hasattr(p, 'get_frame_telemetry')
+        assert callable(p.get_frame_telemetry)
+        result = p.get_frame_telemetry()
+        assert isinstance(result, list)
+
+    def test_get_frame_telemetry_returns_frame_telemetry_log(self):
+        """get_frame_telemetry must return the same list as _frame_telemetry_log."""
+        from face_os.pipeline import FaceOSPipeline
+        p = FaceOSPipeline()
+        assert p.get_frame_telemetry() is p._frame_telemetry_log

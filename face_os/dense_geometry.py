@@ -21,6 +21,17 @@ References:
     - Parametric face models (FLAME, BFM)
 """
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# STRANDED MODULE — Status: SCHEDULED (D-10 / I-10)
+#
+# This module is fully implemented and tested but has ZERO runtime integration.
+# It is NOT called by pipeline.py or any runtime path.
+#
+# Decision: SCHEDULED for integration in Phase B (Geometry Realism)
+# Action: Keep code + tests. Do not modify until integration phase.
+# Tests: test_dense_geometry.py (23 tests)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Dict

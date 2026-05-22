@@ -27,6 +27,17 @@ Interpolation:
     γ(t) = exp_x(t · log_x(y))
 """
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# STRANDED MODULE — Status: SCHEDULED (D-10 / I-10)
+#
+# This module is fully implemented and tested but has ZERO runtime integration.
+# It is NOT called by pipeline.py or any runtime path.
+#
+# Decision: SCHEDULED for integration in Phase C (Probabilistic Runtime)
+# Action: Keep code + tests. Do not modify until integration phase.
+# Tests: test_identity_manifold.py (26 tests), test_v31_consolidation.py
+# ═══════════════════════════════════════════════════════════════════════════════
+
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
