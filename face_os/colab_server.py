@@ -50,9 +50,9 @@ def gpu_info():
                 "memory_total": torch.cuda.get_device_properties(0).total_mem / 1e9,
                 "memory_free": (torch.cuda.get_device_properties(0).total_mem - torch.cuda.memory_allocated(0)) / 1e9,
             })
-    except ImportError:
-        pass
-    return jsonify({"available": False, "name": "CPU only"})
+        return jsonify({"available": False, "name": "CUDA not available"})
+    except Exception as e:
+        return jsonify({"available": False, "name": "CPU only", "detail": str(e)})
 
 
 @app.route("/enroll", methods=["POST"])
