@@ -15,7 +15,8 @@ import cv2
 from face_os.identity_state import IdentityState
 from face_os.intrinsic_decomposition import IntrinsicComponents
 from face_os.temporal_solve import BidirectionalSolver, FrameQuality
-from face_os.compositor import Compositor, photometric_lock, reset_photometric_lock
+from face_os.compositor import Compositor
+from face_os.photometric import photometric_lock, reset_photometric_lock
 from face_os.renderer_mode import RendererModeState, RendererMode
 
 
@@ -254,12 +255,10 @@ class TestCompositor:
     """Compositor must reset state and produce valid output."""
 
     def test_reset_clears_luma_ema(self):
-        """reset() must clear temporal luminance state."""
+        """reset() must clear compositor-local state. Photometric locking is upstream."""
         comp = Compositor()
-        comp._luma_ema = 100.0
         comp._feather_kernel = np.ones((3, 3))
         comp.reset()
-        assert comp._luma_ema is None
         assert comp._feather_kernel is None
 
     def test_composite_preserves_shape(self):

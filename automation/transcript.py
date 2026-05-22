@@ -1,4 +1,4 @@
-"""transcript.py — Cached YouTube transcript fetcher.
+"""transcript.py — Cached YouTube transcript fetcher + LLM formatter.
 
 Priority order:
     1. youtube-transcript-api (Python library, JSON)
@@ -9,11 +9,14 @@ Results cached 1h in TRANSCRIPT_CACHE.
 
 Usage::
 
-    from .transcript import fetch, _extract_video_id
+    from .transcript import fetch, format_for_llm
 
     data = fetch("https://youtu.be/dQw4w9WgXcQ")
     data["segments"]  # -> [{"start": 0.0, "end": 5.0, "text": "..."}]
     data["source"]    # -> "api" | "vtt" | "unavailable"
+
+    # LLM-ready text:
+    text = format_for_llm(data["segments"], max_seconds=120, max_segments=50)
 """
 
 import re
@@ -130,6 +133,37 @@ def _fetch_via_ytdlp(video_id: str) -> dict | None:
         return None
     except Exception:
         return None
+
+
+def format_for_llm(segments: list[dict], max_seconds: float | None = None, max_segments: int = 100) -> str:
+    """Format transcript segments for LLM consumption.
+
+    Produces a timestamped plain-text transcript suitable for prompt injection.
+    Optionally trims to *max_seconds* of video time or *max_segments* entries.
+
+    Args:
+        segments: List of dicts with keys ``start``, ``end``, ``text``.
+        max_seconds: If set, only include segments up to this video time.
+        max_segments: Maximum number of segments to include.
+
+    Returns:
+        Formatted string::
+
+            [00:00] Hello and welcome to the stream
+            [00:05] Today we're talking about cricket
+    """
+    out = []
+    for seg in segments:
+        if max_seconds is not None and seg["start"] > max_seconds:
+            break
+        if len(out) >= max_segments:
+            break
+        ts = int(seg["start"])
+        m, s = divmod(ts, 60)
+        h, m = divmod(m, 60)
+        tag = f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+        out.append(f"[{tag}] {seg.get('text', '').strip()}")
+    return "\n".join(out)
 
 
 def fetch(url: str, output_path: str | None = None) -> dict:

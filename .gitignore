@@ -33,6 +33,8 @@ remote_job_result.json
 # IDE / System
 .DS_Store
 .idea/
+.opencode/
+.openclaude/
 .vscode/
 .gemini/
 graphify-out/

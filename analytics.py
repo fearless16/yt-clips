@@ -19,6 +19,10 @@ from google.oauth2.credentials import Credentials
 from utils.config import load_config
 from utils.logger import get_logger
 from seo_learner import SEOLearner
+from automation._cache import TTLCache
+
+YT_API_CACHE = TTLCache(maxsize=4, ttl=300)
+ANALYTICS_CACHE = TTLCache(maxsize=2, ttl=60)
 
 def _parse_iso8601_duration(dur: str) -> int:
     """Parse ISO 8601 duration string to seconds (robust to H/M/S combos)."""
@@ -66,7 +70,12 @@ def _auth() -> Optional[any]:
 
 
 def _fetch_all_recent(days: int = 30) -> Dict[str, List[Dict]]:
-    """Fetch all recent content, split by type: videos, shorts, lives."""
+    """Fetch all recent content, split by type: videos, shorts, lives (cached 5min)."""
+    cache_key = f"yt_content_{days}d"
+    cached = YT_API_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
     yt = _auth()
     if not yt:
         return {"videos": [], "shorts": [], "lives": []}
@@ -119,7 +128,9 @@ def _fetch_all_recent(days: int = 30) -> Dict[str, List[Dict]]:
     shorts.sort(key=lambda x: x["views"], reverse=True)
     lives.sort(key=lambda x: x["views"], reverse=True)
 
-    return {"videos": videos, "shorts": shorts, "lives": lives}
+    result = {"videos": videos, "shorts": shorts, "lives": lives}
+    YT_API_CACHE.set(cache_key, result)
+    return result
 
 
 def fetch_shorts(days: int = 30) -> List[Dict]:
@@ -157,7 +168,11 @@ def print_performance_dashboard(shorts: List[Dict], videos: List[Dict] = None, l
 
 def feed_seo_learner(shorts: List[Dict], videos: List[Dict] = None, lives: List[Dict] = None):
     """Feed all content types into the SEO learner for pattern recognition."""
-    learner = SEOLearner()
+    learner_cache_key = "seo_learner_instance"
+    learner = ANALYTICS_CACHE.get(learner_cache_key)
+    if learner is None:
+        learner = SEOLearner()
+        ANALYTICS_CACHE.set(learner_cache_key, learner)
     all_items = []
     for label, items in [("short", shorts), ("video", videos or []), ("live", lives or [])]:
         for item in items:
