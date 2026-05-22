@@ -51,14 +51,25 @@ def _resolve_model(filename: str) -> str:
     raise FileNotFoundError(f"Model not found: {filename} (checked: {candidates})")
 
 
+def _try_gpu(delegate):
+    """Return GPU delegate if platform supports it, else None.
+
+    macOS Metal crashes with 'unsupported ImageFrame format: 1' — skip GPU.
+    Linux/CUDA (Colab) works — try GPU.
+    """
+    if _IS_MACOS:
+        return None
+    return delegate
+
+
 def get_detector():
     global _face_detector, MEDIPIPE_GPU_ACTIVE
     if _face_detector is None:
         model_path = _resolve_model("face_detector.tflite")
-        # macOS Metal GPU delegate crashes — skip to CPU directly
-        if not _IS_MACOS:
+        gpu_delegate = _try_gpu(mp_python.BaseOptions.Delegate.GPU)
+        if gpu_delegate is not None:
             try:
-                base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=mp_python.BaseOptions.Delegate.GPU)
+                base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=gpu_delegate)
                 options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.5)
                 _face_detector = vision.FaceDetector.create_from_options(options)
                 print(f"[detect_track] FaceDetector: GPU delegate ACTIVE (model={model_path})")
@@ -78,10 +89,10 @@ def get_landmarker():
     global _face_landmarker, MEDIPIPE_GPU_ACTIVE
     if _face_landmarker is None:
         model_path = _resolve_model("face_landmarker.task")
-        # macOS Metal GPU delegate crashes — skip to CPU directly
-        if not _IS_MACOS:
+        gpu_delegate = _try_gpu(mp_python.BaseOptions.Delegate.GPU)
+        if gpu_delegate is not None:
             try:
-                base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=mp_python.BaseOptions.Delegate.GPU)
+                base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=gpu_delegate)
                 options = vision.FaceLandmarkerOptions(base_options=base_options, num_faces=1)
                 _face_landmarker = vision.FaceLandmarker.create_from_options(options)
                 print(f"[detect_track] FaceLandmarker: GPU delegate ACTIVE (model={model_path})")
