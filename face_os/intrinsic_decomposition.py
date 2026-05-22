@@ -35,6 +35,22 @@ import numpy as np
 import cv2
 
 
+def _as_float_image(img: np.ndarray) -> np.ndarray:
+    """Convert image to float32 in [0, 1].
+
+    Accepts uint8 [0,255] or float images already in [0,1].
+    """
+    arr = np.asarray(img, dtype=np.float32)
+    if arr.ndim != 3 or arr.shape[2] != 3:
+        raise ValueError(f"Expected (H, W, 3) image, got {arr.shape}")
+
+    max_val = float(np.max(arr)) if arr.size else 0.0
+    if max_val > 1.5:
+        arr = arr / 255.0
+    return np.clip(arr, 0.0, 1.0)
+
+
+
 @dataclass
 class DecompositionConfig:
     """Configuration for intrinsic decomposition."""
@@ -171,6 +187,7 @@ class IntrinsicDecomposer:
         if image.ndim != 3 or image.shape[2] != 3:
             raise ValueError(f"Expected (H, W, 3) image, got {image.shape}")
 
+        image = _as_float_image(image)
         start_time = time.time()
 
         # All paths need shading for albedo/specular estimation
@@ -179,12 +196,18 @@ class IntrinsicDecomposer:
         specular = self._compute_specular(image, albedo, shading)
 
         # Step 4: Estimate normals — from mesh geometry or shading gradient
-        if (self.use_mesh_normals
+        if (
+            self.use_mesh_normals
             and mesh_478 is not None
             and len(mesh_478) >= 468
-            and warp_M is not None):
-            normal_map = self._estimate_normals_from_mesh(mesh_478, warp_M, image.shape[:2])
-            self._normal_source = "mesh"
+            and warp_M is not None
+        ):
+            try:
+                normal_map = self._estimate_normals_from_mesh(mesh_478, warp_M, image.shape[:2])
+                self._normal_source = "mesh"
+            except Exception:
+                normal_map = self._estimate_normals(shading)
+                self._normal_source = "face_prior"
         else:
             normal_map = self._estimate_normals(shading)
             self._normal_source = "face_prior"
@@ -239,6 +262,14 @@ class IntrinsicDecomposer:
         Returns:
             (H, W, 3) normal map, unit vectors
         """
+        mesh_478 = np.asarray(mesh_478, dtype=np.float32)
+        warp_M = np.asarray(warp_M, dtype=np.float32)
+
+        if mesh_478.ndim != 2 or mesh_478.shape[1] < 3:
+            raise ValueError(f"Expected mesh_478 with shape (N, 3+), got {mesh_478.shape}")
+        if warp_M.shape != (2, 3):
+            raise ValueError(f"Expected warp_M with shape (2, 3), got {warp_M.shape}")
+
         from face_os.landmarks import mesh_normal_map
         return mesh_normal_map(mesh_478, warp_M, target_shape[::-1])
 
@@ -255,12 +286,22 @@ class IntrinsicDecomposer:
             Shading estimate (H, W, 1)
         """
         # Convert to grayscale for shading estimation
-        gray = np.mean(image, axis=2)
+        gray = np.mean(image, axis=2).astype(np.float32)
 
-        # Estimate shading via Gaussian blur (smooth illumination)
-        sigma = self.config.bilateral_sigma_spatial / 5.0
-        ksize = int(sigma * 6) | 1  # Ensure odd kernel size
-        shading_2d = cv2.GaussianBlur(gray.astype(np.float32), (ksize, ksize), sigma)
+        # Estimate shading with edge-preserving smoothing.
+        # Prefer bilateral filtering for better quality; fall back to Gaussian
+        # if OpenCV rejects the parameter set on very small images.
+        try:
+            shading_2d = cv2.bilateralFilter(
+                gray,
+                d=0,
+                sigmaColor=max(self.config.bilateral_sigma_intensity * 255.0, 1e-6),
+                sigmaSpace=max(self.config.bilateral_sigma_spatial, 1e-6),
+            )
+        except Exception:
+            sigma = max(self.config.bilateral_sigma_spatial / 5.0, 1e-6)
+            ksize = max(3, int(sigma * 6) | 1)  # Ensure odd kernel size
+            shading_2d = cv2.GaussianBlur(gray, (ksize, ksize), sigma)
 
         # Clip to valid range
         shading_2d = np.clip(shading_2d, self.config.min_albedo, 1.0)
@@ -557,6 +598,11 @@ class IntrinsicDecomposer:
         )
 
         return float(np.clip(quality, 0, 1))
+
+
+    def get_normal_source(self) -> str:
+        """Return the last normal source used by the decomposer."""
+        return self._normal_source
 
     def decompose_batch(
         self, images: list[np.ndarray]
