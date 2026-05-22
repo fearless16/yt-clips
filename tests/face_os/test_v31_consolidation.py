@@ -504,12 +504,13 @@ class TestV31Integration:
         )
 
     def test_predict_with_velocity_in_update_v3_modules(self):
-        """predict_with_velocity must be wired into _update_v3_modules."""
+        """predict_with_velocity must be wired into _update_v3_modules via TemporalEstimator."""
         import inspect
         from face_os.pipeline import FaceOSPipeline
         source = inspect.getsource(FaceOSPipeline._update_v3_modules)
-        assert 'predict_with_velocity' in source, (
-            "_update_v3_modules must call predict_with_velocity for SIM(2) velocity prediction"
+        # D-10: Call now goes through TemporalEstimator subsystem wrapper
+        assert 'temporal_estimator' in source or 'predict_with_velocity' in source, (
+            "_update_v3_modules must call predict_with_velocity via TemporalEstimator for SIM(2) velocity prediction"
         )
 
 

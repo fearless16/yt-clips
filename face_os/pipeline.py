@@ -971,7 +971,12 @@ class FaceOSPipeline:
         if self._face_state == "LOST_FACE":
             # FIX: Apply last good crop instead of returning full frame (prevents dimension jump)
             crop_plan = self.crop.plan_crop(frame.shape[:2], None, None)
-            return crop_planner.apply_crop(frame, crop_plan)
+            output = crop_planner.apply_crop(frame, crop_plan)
+            # D-08: Emit telemetry even for lost-face frames
+            self._emit_frame_telemetry(
+                frame_idx, "face_lost", None, {}, 0, 0,
+            )
+            return output
 
         # 3. Canonical alignment
         pose = None  # FIX: Initialize pose to prevent UnboundLocalError
@@ -1390,26 +1395,44 @@ class FaceOSPipeline:
     ) -> None:
         """D-08: Emit per-frame telemetry JSON.
 
-        Called from ALL render paths (physical, identity, enhancement)
-        to ensure every frame is logged.
+        Called from ALL render paths (physical, identity, enhancement, lost-face)
+        to ensure every frame is logged. Wrapped in try/except to guarantee emission.
         """
-        sim2_det = 1.0
-        if self._last_SIM2 is not None:
+        try:
+            sim2_det = 1.0
+            if self._last_SIM2 is not None:
+                try:
+                    sim2_det = self._last_SIM2.scale ** 2
+                except Exception:
+                    pass
+            renderer_mode = "unknown"
             try:
-                sim2_det = self._last_SIM2.scale ** 2
+                renderer_mode = self.renderer_mode_state.current_mode.value if self.renderer_mode_state else "unknown"
             except Exception:
                 pass
-        self._frame_telemetry_log.append({
-            "frame_idx": frame_idx,
-            "render_path": "physical" if self._telemetry["physical_render_frames"] > prev_physical else "alpha" if self._telemetry["alpha_fallback_frames"] > prev_alpha else "enhancement",
-            "renderer_mode": self.renderer_mode_state.current_mode.value if self.renderer_mode_state else "unknown",
-            "fallback_reason": fallback_reason,
-            "intrinsic_used": intrinsic_components is not None,
-            "geometry_source": self.identity_state.get_normal_source() if self.identity_state else "unknown",
-            "resample_count": 1,  # D-01b: collapsed to single resample
-            "energy_terms": energy_terms,
-            "transform_det": sim2_det,
-        })
+            geometry_source = "unknown"
+            try:
+                geometry_source = self.identity_state.get_normal_source() if self.identity_state else "unknown"
+            except Exception:
+                pass
+            self._frame_telemetry_log.append({
+                "frame_idx": frame_idx,
+                "render_path": "physical" if self._telemetry["physical_render_frames"] > prev_physical else "alpha" if self._telemetry["alpha_fallback_frames"] > prev_alpha else "enhancement",
+                "renderer_mode": renderer_mode,
+                "fallback_reason": fallback_reason,
+                "intrinsic_used": intrinsic_components is not None,
+                "geometry_source": geometry_source,
+                "resample_count": 1,
+                "energy_terms": energy_terms if energy_terms else {},
+                "transform_det": sim2_det,
+            })
+        except Exception:
+            # Last resort: emit minimal telemetry so the frame is never lost
+            self._frame_telemetry_log.append({
+                "frame_idx": frame_idx,
+                "render_path": "error",
+                "fallback_reason": fallback_reason or "telemetry_error",
+            })
 
     def _compute_energy_terms(
         self,
