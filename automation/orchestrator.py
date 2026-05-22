@@ -161,7 +161,9 @@ def run(url: str, skip_download=False, skip_transcribe=False,
         try:
             from export import export_all
             result.exported = export_all(
-                highlights_path, video_path, transcript_path=transcript_path
+                highlights_path, video_path,
+                transcript_path=transcript_path,
+                generate_seo=False,
             )
             log.info("[phase 4] done %s exported=%d", _t(t0), len(result.exported))
         except Exception as e:
@@ -304,6 +306,17 @@ def run(url: str, skip_download=False, skip_transcribe=False,
             log.info("[phase 7] done %s uploaded=%d", _t(t0), result.uploaded_count)
         except Exception as e:
             result.failures.append("phase7: %s" % e)
+
+    # ── Phase 8: Analytics & SEO Learning ──────────────────────────────────────
+    if auto_upload:
+        t0 = time.monotonic()
+        log.info("[phase 8] Analytics")
+        try:
+            from analytics import generate_daily_insights
+            generate_daily_insights()
+            log.info("[phase 8] done %s", _t(t0))
+        except Exception as e:
+            result.failures.append("phase8: %s" % e)
 
     result.total_seconds = time.monotonic() - start
     log.info("pipeline done %.1fs failures=%d", result.total_seconds, len(result.failures))

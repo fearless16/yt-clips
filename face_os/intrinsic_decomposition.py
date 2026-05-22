@@ -1,125 +1,126 @@
-"""Intrinsic Decomposition Module.
+"""
+Intrinsic Decomposition Module.
 
-Decomposes face images into intrinsic components:
-- Albedo (A): identity-intrinsic, lighting-invariant
-- Shading (S): lighting-dependent, identity-invariant
-- Specular: view-dependent specular response
-- Normal map: surface orientation
+This module decomposes a face crop into intrinsic components:
 
-Mathematical Model:
+- Albedo (A): identity-intrinsic, lighting-invariant reflectance
+- Shading (S): smooth illumination field
+- Specular: sparse view-dependent highlight residual
+- Normal map: surface orientation estimate
+
+Mathematical model:
     Y = A * S + specular
 
-where:
-    Y = observed image
-    A = albedo (reflectance)
-    S = shading (illumination)
-    specular = view-dependent highlights
-
-Approach:
-    Retinex-inspired decomposition with face priors:
-    1. Estimate illumination via bilateral filtering (smooth shading)
-    2. Extract albedo via Retinex: A = Y / S
-    3. Compute specular as residual: specular = max(0, Y - A * S)
-    4. Estimate normals from shading gradient
-
-References:
-    - Retinex theory (Land & McCann, 1971)
-    - Intrinsic images (Barrow & Tenenbaum, 1978)
+Architecture rules:
+- Input should be treated as linear-light as early as possible.
+- Normals should come from mesh geometry when available.
+- Shading-gradient normals are only a fallback prior.
+- Confidence and uncertainty are explicit outputs.
 """
 
+from __future__ import annotations
+
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
-import numpy as np
 import cv2
+import numpy as np
 
 
-def _as_float_image(img: np.ndarray) -> np.ndarray:
-    """Convert image to float32 in [0, 1].
+# ---------------------------------------------------------------------------
+# Image conversion helpers
+# ---------------------------------------------------------------------------
 
-    Accepts uint8 [0,255] or float images already in [0,1].
+def _srgb_to_linear(img: np.ndarray) -> np.ndarray:
+    """
+    Convert sRGB/BGR image data to linear-light float32 in [0, 1].
+
+    This uses the standard sRGB transfer curve, not a crude power-law shortcut.
+    """
+    arr = np.asarray(img, dtype=np.float32)
+    if arr.max(initial=0.0) > 1.5:
+        arr = arr / 255.0
+
+    arr = np.clip(arr, 0.0, 1.0)
+    mask = arr <= 0.04045
+    lin = np.where(mask, arr / 12.92, ((arr + 0.055) / 1.055) ** 2.4)
+    return lin.astype(np.float32)
+
+
+def _linear_to_srgb(img: np.ndarray) -> np.ndarray:
+    """Convert linear-light float32 in [0, 1] back to uint8 sRGB/BGR."""
+    lin = np.clip(np.asarray(img, dtype=np.float32), 0.0, 1.0)
+    mask = lin <= 0.0031308
+    srgb = np.where(mask, lin * 12.92, 1.055 * (lin ** (1.0 / 2.4)) - 0.055)
+    return (np.clip(srgb, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+
+def _ensure_linear_image(img: np.ndarray) -> np.ndarray:
+    """
+    Ensure a 3-channel image is in linear-light float32 [0, 1].
+
+    Accepts uint8 [0,255] or float images in either [0,1] or [0,255].
     """
     arr = np.asarray(img, dtype=np.float32)
     if arr.ndim != 3 or arr.shape[2] != 3:
         raise ValueError(f"Expected (H, W, 3) image, got {arr.shape}")
-
-    max_val = float(np.max(arr)) if arr.size else 0.0
-    if max_val > 1.5:
-        arr = arr / 255.0
-    return np.clip(arr, 0.0, 1.0)
+    if arr.max(initial=0.0) > 1.5:
+        return _srgb_to_linear(arr)
+    return np.clip(arr, 0.0, 1.0).astype(np.float32)
 
 
+# ---------------------------------------------------------------------------
+# Configuration and output dataclasses
+# ---------------------------------------------------------------------------
 
 @dataclass
 class DecompositionConfig:
     """Configuration for intrinsic decomposition."""
 
-    # Albedo smoothness (higher = smoother albedo)
+    # Higher values give smoother albedo estimates.
     albedo_smoothness: float = 0.5
 
-    # Shading smoothness (higher = smoother shading)
+    # Higher values give smoother shading estimates.
     shading_smoothness: float = 0.3
 
-    # Specular threshold (pixels above this are considered specular)
-    specular_threshold: float = 0.8
+    # Threshold above which residual pixels may be considered specular.
+    specular_threshold: float = 0.08
 
-    # Confidence threshold
-    confidence_threshold: float = 0.5
+    # Minimum shading value to prevent divide-by-zero during albedo extraction.
+    min_albedo: float = 0.01
 
-    # Bilateral filter sigma for Retinex
+    # Bilateral filter parameters for shading estimation.
     bilateral_sigma_spatial: float = 15.0
     bilateral_sigma_intensity: float = 0.1
 
-    # Normal estimation scale
-    normal_scale: float = 1.0
+    # Upper bound for how much specular energy we keep.
+    max_specular_ratio: float = 0.30
 
-    # Minimum albedo (prevent division by zero)
-    min_albedo: float = 0.01
-
-    # Maximum specular ratio
-    max_specular_ratio: float = 0.3
+    # Confidence floor for valid decomposition.
+    confidence_threshold: float = 0.50
 
 
 @dataclass
 class IntrinsicComponents:
     """Intrinsic components of a face image."""
 
-    # Albedo: (H, W, 3) — identity-intrinsic, lighting-invariant
     albedo: np.ndarray
-
-    # Shading: (H, W, 1) — lighting-dependent, identity-invariant
     shading: np.ndarray
-
-    # Specular: (H, W, 3) — view-dependent highlights
     specular: np.ndarray
-
-    # Normal map: (H, W, 3) — surface normals (unit vectors)
     normal_map: np.ndarray
-
-    # Confidence: (H, W, 1) — decomposition confidence [0, 1]
     confidence: np.ndarray
-
-    # Reconstruction error: ||Y - (A * S + specular)||
     reconstruction_error: float
 
-    # V3: Uncertainty propagation
-    # Albedo uncertainty: (H, W, 1) — uncertainty in albedo estimate
     albedo_uncertainty: Optional[np.ndarray] = None
-
-    # Shading uncertainty: (H, W, 1) — uncertainty in shading estimate
     shading_uncertainty: Optional[np.ndarray] = None
-
-    # Specular uncertainty: (H, W, 1) — uncertainty in specular estimate
     specular_uncertainty: Optional[np.ndarray] = None
-
-    # Overall decomposition quality [0, 1]
     decomposition_quality: float = 0.0
 
 
 @dataclass
 class DecompositionReport:
-    """Per-frame decomposition metrics."""
+    """Per-frame intrinsic decomposition metrics."""
 
     frame_idx: int
     components: IntrinsicComponents
@@ -129,7 +130,6 @@ class DecompositionReport:
     decomposition_time_ms: float
 
     def to_dict(self) -> dict:
-        """Convert to dictionary."""
         return {
             "frame_idx": self.frame_idx,
             "albedo_stability": self.albedo_stability,
@@ -137,32 +137,33 @@ class DecompositionReport:
             "specular_sparsity": self.specular_sparsity,
             "decomposition_time_ms": self.decomposition_time_ms,
             "reconstruction_error": self.components.reconstruction_error,
+            "decomposition_quality": self.components.decomposition_quality,
         }
 
 
+# ---------------------------------------------------------------------------
+# Main decomposer
+# ---------------------------------------------------------------------------
+
 class IntrinsicDecomposer:
-    """Retinex-inspired intrinsic decomposition.
+    """
+    Retinex-inspired intrinsic decomposition.
 
-    Decomposes image Y into:
-        Y = A * S + specular
-
-    where:
-        A = albedo (reflectance, identity-intrinsic)
-        S = shading (illumination, smooth)
-        specular = max(0, Y - A * S)
+    The module is intentionally conservative:
+    - use smooth shading as illumination prior,
+    - extract albedo by division in linear-light space,
+    - keep specular sparse,
+    - use geometry-derived normals when available.
     """
 
-    def __init__(self, config: Optional[DecompositionConfig] = None, use_mesh_normals: bool = True):
-        """Initialize decomposer.
-
-        Args:
-            config: Decomposition configuration
-            use_mesh_normals: When True and mesh_478 is provided, derive normals
-                              from mesh geometry instead of shading gradients
-        """
+    def __init__(
+        self,
+        config: Optional[DecompositionConfig] = None,
+        use_mesh_normals: bool = True,
+    ):
         self.config = config or DecompositionConfig()
         self.use_mesh_normals = use_mesh_normals
-        self._normal_source = "mesh"  # "mesh" or "shading_gradient"
+        self._normal_source = "face_prior"
 
     def decompose(
         self,
@@ -170,64 +171,63 @@ class IntrinsicDecomposer:
         mesh_478: Optional[np.ndarray] = None,
         warp_M: Optional[np.ndarray] = None,
     ) -> IntrinsicComponents:
-        """Decompose image into intrinsic components.
-
-        When mesh_478 is provided and use_mesh_normals is True, surface normals
-        are derived from mesh geometry instead of shading gradients, breaking
-        the circular shading→normals→shading dependency.
+        """
+        Decompose a face image into intrinsic components.
 
         Args:
-            image: Input image (H, W, 3), float32, [0, 1]
-            mesh_478: Optional (478, 3) MediaPipe mesh for geometry normals
-            warp_M: Optional (2, 3) forward similarity warp (source→canonical)
+            image: Input image, uint8 or float, shape (H, W, 3)
+            mesh_478: Optional MediaPipe 478-point mesh in 3D-ish coordinates
+            warp_M: Optional forward similarity transform (source -> canonical),
+                    shape (2, 3)
 
         Returns:
-            IntrinsicComponents with albedo, shading, specular, normals, confidence
+            IntrinsicComponents
         """
         if image.ndim != 3 or image.shape[2] != 3:
             raise ValueError(f"Expected (H, W, 3) image, got {image.shape}")
 
-        image = _as_float_image(image)
+        image_lin = _ensure_linear_image(image)
         start_time = time.time()
 
-        # All paths need shading for albedo/specular estimation
-        shading = self._estimate_shading(image)
-        albedo = self._extract_albedo(image, shading)
-        specular = self._compute_specular(image, albedo, shading)
+        # 1) Smooth shading estimate in linear-light space.
+        shading = self._estimate_shading(image_lin)
 
-        # Step 4: Estimate normals — from mesh geometry or shading gradient
+        # 2) Retinex-style albedo.
+        albedo = self._extract_albedo(image_lin, shading)
+
+        # 3) Sparse specular residual.
+        specular = self._compute_specular(image_lin, albedo, shading)
+
+        # 4) Normals from mesh geometry if available, otherwise face-prior fallback.
         if (
             self.use_mesh_normals
             and mesh_478 is not None
-            and len(mesh_478) >= 468
             and warp_M is not None
+            and np.asarray(mesh_478).ndim == 2
+            and np.asarray(mesh_478).shape[0] >= 468
         ):
             try:
-                normal_map = self._estimate_normals_from_mesh(mesh_478, warp_M, image.shape[:2])
+                normal_map = self._estimate_normals_from_mesh(mesh_478, warp_M, image_lin.shape[:2])
                 self._normal_source = "mesh"
             except Exception:
-                normal_map = self._estimate_normals(shading)
+                normal_map = self._estimate_normals_from_face_prior(shading)
                 self._normal_source = "face_prior"
         else:
-            normal_map = self._estimate_normals(shading)
+            normal_map = self._estimate_normals_from_face_prior(shading)
             self._normal_source = "face_prior"
 
-        # Step 5: Compute confidence
-        confidence = self._compute_confidence(image, albedo, shading, specular)
+        # 5) Confidence + uncertainty.
+        confidence = self._compute_confidence(image_lin, albedo, shading, specular)
+        reconstruction_error = self._compute_reconstruction_error(image_lin, albedo, shading, specular)
 
-        # Step 6: Compute reconstruction error
-        reconstruction_error = self._compute_reconstruction_error(
-            image, albedo, shading, specular
-        )
-
-        # Step 7: Compute uncertainty propagation
         albedo_uncertainty = self._compute_albedo_uncertainty(albedo, shading)
         shading_uncertainty = self._compute_shading_uncertainty(shading)
         specular_uncertainty = self._compute_specular_uncertainty(specular)
 
-        # Step 8: Compute overall decomposition quality
         decomposition_quality = self._compute_decomposition_quality(
-            reconstruction_error, confidence, albedo_uncertainty
+            reconstruction_error=reconstruction_error,
+            confidence=confidence,
+            albedo_uncertainty=albedo_uncertainty,
         )
 
         return IntrinsicComponents(
@@ -243,24 +243,20 @@ class IntrinsicDecomposer:
             decomposition_quality=float(decomposition_quality),
         )
 
+    # -----------------------------------------------------------------------
+    # Geometry / normals
+    # -----------------------------------------------------------------------
+
     def _estimate_normals_from_mesh(
         self,
         mesh_478: np.ndarray,
         warp_M: np.ndarray,
         target_shape: Tuple[int, int],
     ) -> np.ndarray:
-        """Estimate surface normals from MediaPipe 478-point mesh geometry.
+        """
+        Estimate normals from mesh geometry instead of shading gradients.
 
-        Breaks the circular shading→normals→shading dependency by computing
-        normals from the 3D mesh topology (852 triangles) instead of shading gradients.
-
-        Args:
-            mesh_478: (478, 3) MediaPipe mesh in pixel+depth coordinates
-            warp_M: (2, 3) forward similarity transform (source→canonical)
-            target_shape: (H, W) of the canonical image
-
-        Returns:
-            (H, W, 3) normal map, unit vectors
+        This keeps normals tied to geometry, not photometry.
         """
         mesh_478 = np.asarray(mesh_478, dtype=np.float32)
         warp_M = np.asarray(warp_M, dtype=np.float32)
@@ -270,298 +266,192 @@ class IntrinsicDecomposer:
         if warp_M.shape != (2, 3):
             raise ValueError(f"Expected warp_M with shape (2, 3), got {warp_M.shape}")
 
-        from face_os.landmarks import mesh_normal_map
+        # Keep this as a narrow integration point so the decomposer
+        # does not depend on any shading-derived fallback.
+        from face_os.landmarks import mesh_normal_map  # local import to avoid cycles
+
         return mesh_normal_map(mesh_478, warp_M, target_shape[::-1])
 
-    def _estimate_shading(self, image: np.ndarray) -> np.ndarray:
-        """Estimate illumination via bilateral filtering.
-
-        Shading is assumed to be smooth (low-frequency).
-        We use Gaussian filtering as a proxy for bilateral filtering.
-
-        Args:
-            image: Input image (H, W, 3)
-
-        Returns:
-            Shading estimate (H, W, 1)
+    def _estimate_normals_from_face_prior(self, shading: np.ndarray) -> np.ndarray:
         """
-        # Convert to grayscale for shading estimation
-        gray = np.mean(image, axis=2).astype(np.float32)
+        Deterministic face-prior normal map.
 
-        # Estimate shading with edge-preserving smoothing.
-        # Prefer bilateral filtering for better quality; fall back to Gaussian
-        # if OpenCV rejects the parameter set on very small images.
+        This is a geometry prior, not a photometric derivative.
+        It exists only as a fallback when mesh normals are not available.
+        """
+        h, w = shading.shape[:2]
+        cy, cx = h / 2.0, w / 2.0
+        ry, rx = h * 0.45, w * 0.40
+
+        yy, xx = np.ogrid[:h, :w]
+        nx = (xx - cx) / max(rx, 1.0)
+        ny = (yy - cy) / max(ry, 1.0)
+
+        r2 = nx * nx + ny * ny
+        nz = np.sqrt(np.maximum(0.0, 1.0 - r2))
+
+        # Ellipsoid-ish normal field.
+        normal_x = nx / max(rx, 1.0)
+        normal_y = ny / max(ry, 1.0)
+        normal_z = nz / max(min(rx, ry), 1.0)
+
+        norm = np.sqrt(normal_x**2 + normal_y**2 + normal_z**2) + 1e-8
+        normal_map = np.stack([normal_x / norm, normal_y / norm, normal_z / norm], axis=2)
+        return normal_map.astype(np.float32)
+
+    # -----------------------------------------------------------------------
+    # Shading / albedo / specular
+    # -----------------------------------------------------------------------
+
+    def _estimate_shading(self, image_lin: np.ndarray) -> np.ndarray:
+        """
+        Estimate smooth illumination from linear-light image.
+
+        Uses a bilateral filter over luminance to preserve structure while
+        removing local texture detail.
+        """
+        # Linear-light luminance from BGR input.
+        b = image_lin[:, :, 0]
+        g = image_lin[:, :, 1]
+        r = image_lin[:, :, 2]
+        gray = (0.0722 * b + 0.7152 * g + 0.2126 * r).astype(np.float32)
+
         try:
             shading_2d = cv2.bilateralFilter(
                 gray,
                 d=0,
-                sigmaColor=max(self.config.bilateral_sigma_intensity * 255.0, 1e-6),
+                sigmaColor=max(self.config.bilateral_sigma_intensity, 1e-6),
                 sigmaSpace=max(self.config.bilateral_sigma_spatial, 1e-6),
             )
         except Exception:
             sigma = max(self.config.bilateral_sigma_spatial / 5.0, 1e-6)
-            ksize = max(3, int(sigma * 6) | 1)  # Ensure odd kernel size
+            ksize = max(3, int(sigma * 6) | 1)
             shading_2d = cv2.GaussianBlur(gray, (ksize, ksize), sigma)
 
-        # Clip to valid range
         shading_2d = np.clip(shading_2d, self.config.min_albedo, 1.0)
+        return shading_2d[:, :, np.newaxis].astype(np.float32)
 
-        # Expand to (H, W, 1)
-        shading = shading_2d[:, :, np.newaxis]
-
-        return shading
-
-    def _extract_albedo(
-        self, image: np.ndarray, shading: np.ndarray
-    ) -> np.ndarray:
-        """Extract albedo via Retinex: A = Y / S.
-
-        Uses edge-preserving smoothing to preserve texture edges.
-
-        Args:
-            image: Input image (H, W, 3)
-            shading: Shading estimate (H, W, 1)
-
-        Returns:
-            Albedo estimate (H, W, 3)
+    def _extract_albedo(self, image_lin: np.ndarray, shading: np.ndarray) -> np.ndarray:
         """
-        # Retinex: A = Y / S
-        shading_3ch = np.repeat(shading, 3, axis=2)
-        albedo = image / (shading_3ch + 1e-8)
+        Extract albedo by division in linear-light space.
 
-        # Edge-preserving smoothing: Gaussian blur
-        # Light smoothing to remove noise while preserving edges
-        sigma = self.config.albedo_smoothness * 3
+        A = Y / S
+        """
+        shading_3ch = np.repeat(np.clip(shading, self.config.min_albedo, 1.0), 3, axis=2)
+        albedo = image_lin / (shading_3ch + 1e-8)
+
+        # Light smoothing only; do not erase identity texture.
+        sigma = max(self.config.albedo_smoothness * 2.0, 1e-6)
         ksize = max(3, int(sigma * 6) | 1)
         for c in range(3):
             albedo[:, :, c] = cv2.GaussianBlur(albedo[:, :, c], (ksize, ksize), sigma)
 
-        # Clip to valid range
-        albedo = np.clip(albedo, 0, 1)
-
-        return albedo
+        return np.clip(albedo, 0.0, 1.0).astype(np.float32)
 
     def _compute_specular(
         self,
-        image: np.ndarray,
+        image_lin: np.ndarray,
         albedo: np.ndarray,
         shading: np.ndarray,
     ) -> np.ndarray:
-        """Compute specular as residual: specular = max(0, Y - A * S).
-
-        Specular highlights are sparse and bright.
-        We threshold more aggressively to ensure sparsity.
-
-        Args:
-            image: Input image (H, W, 3)
-            albedo: Albedo estimate (H, W, 3)
-            shading: Shading estimate (H, W, 1)
-
-        Returns:
-            Specular estimate (H, W, 3)
         """
-        # Reconstruct diffuse component
+        Compute sparse specular residual.
+
+        Specular should be the positive residual left after diffuse reconstruction,
+        not a broad hand-tuned correction field.
+        """
         shading_3ch = np.repeat(shading, 3, axis=2)
         diffuse = albedo * shading_3ch
+        residual = np.maximum(0.0, image_lin - diffuse)
 
-        # Specular = max(0, Y - diffuse)
-        specular = np.maximum(0, image - diffuse)
+        # Keep only the strong residuals.
+        residual_mag = np.mean(residual, axis=2, keepdims=True)
+        keep = residual_mag >= self.config.specular_threshold
 
-        # Very aggressive thresholding for sparsity
-        # Only keep pixels that are significantly above diffuse
-        threshold = self.config.specular_threshold * 0.5  # Increased further
-        specular[specular < threshold] = 0
+        # Suppress noise in very dark or overexposed zones.
+        mean_luma = np.mean(image_lin, axis=2, keepdims=True)
+        keep = keep & (mean_luma >= 0.08) & (mean_luma <= 0.95)
 
-        # Additional: suppress specular in dark regions (likely noise)
-        dark_mask = np.mean(image, axis=2, keepdims=True) < 0.4
-        specular[dark_mask.repeat(3, axis=2)] = 0
+        specular = np.where(keep, residual, 0.0)
 
-        # Additional: suppress specular in very bright regions (likely overexposure)
-        bright_mask = np.mean(image, axis=2, keepdims=True) > 0.9
-        specular[bright_mask.repeat(3, axis=2)] = 0
+        # Respect a maximum specular energy budget.
+        max_spec = np.clip(image_lin * self.config.max_specular_ratio, 0.0, 1.0)
+        specular = np.minimum(specular, max_spec)
+        return specular.astype(np.float32)
 
-        return specular
-
-    def _estimate_normals(self, shading: np.ndarray) -> np.ndarray:
-        """Estimate surface normals using a deterministic face-prior model.
-
-        BREAKS CIRCULARITY: Does NOT use shading gradients.
-        Uses a fixed ellipsoidal face-prior normal map based on canonical face geometry.
-        This is deterministic and brightness-invariant.
-
-        Args:
-            shading: Shading estimate (H, W, 1) — used only for shape
-
-        Returns:
-            Normal map (H, W, 3), unit vectors
-        """
-        h, w = shading.shape[:2]
-        cy, cx = h / 2, w / 2
-        ry, rx = h * 0.45, w * 0.40
-
-        Y, X = np.ogrid[:h, :w]
-        # Normalized coordinates [-1, 1]
-        nx = (X - cx) / max(rx, 1)
-        ny = (Y - cy) / max(ry, 1)
-
-        # Ellipsoidal face prior: z = sqrt(1 - x^2 - y^2)
-        r2 = nx**2 + ny**2
-        nz = np.sqrt(np.maximum(0, 1.0 - r2))
-
-        # Normal = [dx, dy, dz] for ellipsoid
-        # For ellipsoid x^2/a^2 + y^2/b^2 + z^2/c^2 = 1, normal is proportional to (x/a^2, y/b^2, z/c^2)
-        normal_x = nx / max(rx, 1)
-        normal_y = ny / max(ry, 1)
-        normal_z = nz / max(min(rx, ry), 1)
-
-        # Normalize to unit vectors
-        norms = np.sqrt(normal_x**2 + normal_y**2 + normal_z**2)
-        normal_x = normal_x / (norms + 1e-8)
-        normal_y = normal_y / (norms + 1e-8)
-        normal_z = normal_z / (norms + 1e-8)
-
-        # Stack to (H, W, 3)
-        normal_map = np.stack([normal_x, normal_y, normal_z], axis=2)
-
-        return normal_map.astype(np.float32)
+    # -----------------------------------------------------------------------
+    # Confidence / uncertainty / quality
+    # -----------------------------------------------------------------------
 
     def _compute_confidence(
         self,
-        image: np.ndarray,
+        image_lin: np.ndarray,
         albedo: np.ndarray,
         shading: np.ndarray,
         specular: np.ndarray,
     ) -> np.ndarray:
-        """Compute decomposition confidence.
-
-        Confidence = 1 - reconstruction_error / input_energy
-
-        Args:
-            image: Input image (H, W, 3)
-            albedo: Albedo estimate (H, W, 3)
-            shading: Shading estimate (H, W, 1)
-            specular: Specular estimate (H, W, 3)
-
-        Returns:
-            Confidence map (H, W, 1), [0, 1]
         """
-        # Reconstruct
-        shading_3ch = np.repeat(shading, 3, axis=2)
-        reconstructed = albedo * shading_3ch + specular
+        Compute per-pixel confidence from reconstruction consistency.
 
-        # Per-pixel error
-        error = np.mean(np.abs(image - reconstructed), axis=2)
+        High confidence = low residual, smooth shading, stable albedo.
+        """
+        reconstructed = albedo * np.repeat(shading, 3, axis=2) + specular
+        error = np.mean(np.abs(image_lin - reconstructed), axis=2, keepdims=True)
 
-        # Normalize by input energy
-        input_energy = np.mean(np.abs(image), axis=2) + 1e-8
+        # Map error into confidence in [0, 1].
+        confidence = np.exp(-10.0 * error)
 
-        # Confidence = 1 - relative_error
-        confidence = 1.0 - error / input_energy
-        confidence = np.clip(confidence, 0, 1)
+        # Slightly reduce confidence in regions with unstable shading.
+        shading_grad_x = cv2.Sobel(shading[:, :, 0], cv2.CV_32F, 1, 0, ksize=3)
+        shading_grad_y = cv2.Sobel(shading[:, :, 0], cv2.CV_32F, 0, 1, ksize=3)
+        shading_grad = np.sqrt(shading_grad_x**2 + shading_grad_y**2)[:, :, np.newaxis]
+        confidence *= np.exp(-3.0 * np.clip(shading_grad, 0.0, 1.0))
 
-        # Expand to (H, W, 1)
-        confidence = confidence[:, :, np.newaxis]
-
-        return confidence
+        return np.clip(confidence, 0.0, 1.0).astype(np.float32)
 
     def _compute_reconstruction_error(
         self,
-        image: np.ndarray,
+        image_lin: np.ndarray,
         albedo: np.ndarray,
         shading: np.ndarray,
         specular: np.ndarray,
     ) -> float:
-        """Compute reconstruction error: ||Y - (A * S + specular)||.
+        reconstructed = albedo * np.repeat(shading, 3, axis=2) + specular
+        return float(np.mean(np.abs(image_lin - reconstructed)))
 
-        Args:
-            image: Input image (H, W, 3)
-            albedo: Albedo estimate (H, W, 3)
-            shading: Shading estimate (H, W, 1)
-            specular: Specular estimate (H, W, 3)
-
-        Returns:
-            Mean absolute error
+    def _compute_albedo_uncertainty(self, albedo: np.ndarray, shading: np.ndarray) -> np.ndarray:
         """
-        shading_3ch = np.repeat(shading, 3, axis=2)
-        reconstructed = albedo * shading_3ch + specular
-        error = np.mean(np.abs(image - reconstructed))
-        return float(error)
-
-    def _compute_albedo_uncertainty(
-        self,
-        albedo: np.ndarray,
-        shading: np.ndarray,
-    ) -> np.ndarray:
-        """Compute uncertainty in albedo estimate.
-
-        Uncertainty is higher where:
-        - Shading is dark (division by small number)
-        - Albedo has high variance (ambiguous regions)
-        - Edges (gradient discontinuities)
-
-        Args:
-            albedo: Albedo estimate (H, W, 3)
-            shading: Shading estimate (H, W, 1)
-
-        Returns:
-            Albedo uncertainty (H, W, 1)
+        Albedo uncertainty rises where illumination is weak or texture is unstable.
         """
-        # Shading-based uncertainty: darker shading = higher uncertainty
-        shading_uncertainty = 1.0 - shading
+        shading_uncertainty = 1.0 - np.clip(shading, 0.0, 1.0)
 
-        # Gradient-based uncertainty: edges = higher uncertainty
         albedo_gray = np.mean(albedo, axis=2).astype(np.float32)
-        gradient_x = cv2.Sobel(albedo_gray, cv2.CV_32F, 1, 0, ksize=3)
-        gradient_y = cv2.Sobel(albedo_gray, cv2.CV_32F, 0, 1, ksize=3)
-        gradient_mag = np.sqrt(gradient_x**2 + gradient_y**2)
-        edge_uncertainty = np.clip(gradient_mag * 10, 0, 1)
+        gx = cv2.Sobel(albedo_gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(albedo_gray, cv2.CV_32F, 0, 1, ksize=3)
+        gradient_mag = np.sqrt(gx**2 + gy**2)
+        edge_uncertainty = np.clip(gradient_mag * 5.0, 0.0, 1.0)
 
-        # Combined uncertainty
         uncertainty = np.maximum(shading_uncertainty[:, :, 0], edge_uncertainty)
-        return uncertainty[:, :, np.newaxis]
+        return uncertainty[:, :, np.newaxis].astype(np.float32)
 
-    def _compute_shading_uncertainty(
-        self,
-        shading: np.ndarray,
-    ) -> np.ndarray:
-        """Compute uncertainty in shading estimate.
-
-        Uncertainty is higher where:
-        - Shading changes rapidly (gradient)
-        - Shading is near boundaries
-
-        Args:
-            shading: Shading estimate (H, W, 1)
-
-        Returns:
-            Shading uncertainty (H, W, 1)
+    def _compute_shading_uncertainty(self, shading: np.ndarray) -> np.ndarray:
         """
-        shading_2d = shading[:, :, 0].astype(np.float32)
-        gradient_x = cv2.Sobel(shading_2d, cv2.CV_32F, 1, 0, ksize=3)
-        gradient_y = cv2.Sobel(shading_2d, cv2.CV_32F, 0, 1, ksize=3)
-        gradient_mag = np.sqrt(gradient_x**2 + gradient_y**2)
-        uncertainty = np.clip(gradient_mag * 5, 0, 1)
-        return uncertainty[:, :, np.newaxis]
-
-    def _compute_specular_uncertainty(
-        self,
-        specular: np.ndarray,
-    ) -> np.ndarray:
-        """Compute uncertainty in specular estimate.
-
-        Uncertainty is higher where:
-        - Specular is bright (could be texture)
-        - Specular is near edges
-
-        Args:
-            specular: Specular estimate (H, W, 3)
-
-        Returns:
-            Specular uncertainty (H, W, 1)
+        Shading uncertainty rises where the shading field is not smooth.
         """
-        specular_mag = np.linalg.norm(specular, axis=2)
-        uncertainty = np.clip(specular_mag * 2, 0, 1)
-        return uncertainty[:, :, np.newaxis]
+        s = shading[:, :, 0].astype(np.float32)
+        gx = cv2.Sobel(s, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(s, cv2.CV_32F, 0, 1, ksize=3)
+        gradient_mag = np.sqrt(gx**2 + gy**2)
+        uncertainty = np.clip(gradient_mag * 4.0, 0.0, 1.0)
+        return uncertainty[:, :, np.newaxis].astype(np.float32)
+
+    def _compute_specular_uncertainty(self, specular: np.ndarray) -> np.ndarray:
+        """
+        Specular uncertainty rises where specular energy is large and potentially ambiguous.
+        """
+        mag = np.linalg.norm(specular, axis=2)
+        uncertainty = np.clip(mag * 2.0, 0.0, 1.0)
+        return uncertainty[:, :, np.newaxis].astype(np.float32)
 
     def _compute_decomposition_quality(
         self,
@@ -569,80 +459,39 @@ class IntrinsicDecomposer:
         confidence: np.ndarray,
         albedo_uncertainty: np.ndarray,
     ) -> float:
-        """Compute overall decomposition quality.
-
-        Quality = f(reconstruction_error, confidence, uncertainty)
-
-        Args:
-            reconstruction_error: Reconstruction error
-            confidence: Confidence map (H, W, 1)
-            albedo_uncertainty: Albedo uncertainty (H, W, 1)
-
-        Returns:
-            Decomposition quality [0, 1]
         """
-        # Error quality: lower error = higher quality
-        error_quality = 1.0 - min(reconstruction_error * 5, 1.0)
-
-        # Confidence quality: higher confidence = higher quality
+        Overall decomposition quality in [0, 1].
+        """
+        error_quality = 1.0 - min(reconstruction_error * 5.0, 1.0)
         confidence_quality = float(np.mean(confidence))
-
-        # Uncertainty quality: lower uncertainty = higher quality
         uncertainty_quality = 1.0 - float(np.mean(albedo_uncertainty))
 
-        # Weighted combination
-        quality = (
-            0.4 * error_quality
-            + 0.3 * confidence_quality
-            + 0.3 * uncertainty_quality
-        )
+        quality = 0.4 * error_quality + 0.3 * confidence_quality + 0.3 * uncertainty_quality
+        return float(np.clip(quality, 0.0, 1.0))
 
-        return float(np.clip(quality, 0, 1))
-
+    # -----------------------------------------------------------------------
+    # Utilities
+    # -----------------------------------------------------------------------
 
     def get_normal_source(self) -> str:
         """Return the last normal source used by the decomposer."""
         return self._normal_source
 
-    def decompose_batch(
-        self, images: list[np.ndarray]
-    ) -> list[IntrinsicComponents]:
-        """Decompose batch of images.
-
-        Args:
-            images: List of input images (H, W, 3)
-
-        Returns:
-            List of IntrinsicComponents
-        """
+    def decompose_batch(self, images: list[np.ndarray]) -> list[IntrinsicComponents]:
+        """Decompose a batch of images."""
         return [self.decompose(img) for img in images]
 
-    def compute_albedo_stability(
-        self, albedos: list[np.ndarray]
-    ) -> float:
-        """Compute albedo stability across frames.
-
-        Stability = 1 - std(albedo) / mean(albedo)
-
-        Args:
-            albedos: List of albedo maps (H, W, 3)
-
-        Returns:
-            Stability score [0, 1], higher = more stable
+    def compute_albedo_stability(self, albedos: list[np.ndarray]) -> float:
+        """
+        Compute a simple temporal stability score for a sequence of albedo maps.
         """
         if len(albedos) < 2:
             return 1.0
 
-        # Stack albedos
         stacked = np.stack(albedos, axis=0)
-
-        # Compute mean and std across frames
         mean_albedo = np.mean(stacked, axis=0)
         std_albedo = np.std(stacked, axis=0)
 
-        # Stability = 1 - coefficient of variation
         cv = np.mean(std_albedo) / (np.mean(mean_albedo) + 1e-8)
         stability = 1.0 - cv
-        stability = np.clip(stability, 0, 1)
-
-        return float(stability)
+        return float(np.clip(stability, 0.0, 1.0))

@@ -224,12 +224,29 @@ def download_from_drive(
     from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
 
     service = get_drive_service()
-    if not service or service == FILESYSTEM_MODE:
+    if not service:
         log.error("Cannot download — Drive API not available (need API auth, not filesystem)")
         return []
 
     dest = Path(dest_dir)
     dest.mkdir(parents=True, exist_ok=True)
+
+    if service == FILESYSTEM_MODE:
+        colab_base = Path(os.environ.get("COLAB_SYNC_PATH", "/content/drive/MyDrive/yt-clips"))
+        if not colab_base.exists():
+            log.error("Drive mount not found at %s", colab_base)
+            return []
+        source_filenames = filenames if filenames else [f.name for f in colab_base.iterdir() if f.is_file()]
+        downloaded = []
+        for fname in source_filenames:
+            src = colab_base / fname
+            if src.exists():
+                shutil.copy2(src, dest / fname)
+                downloaded.append(str(dest / fname))
+                log.info("Copied %s from Drive mount", fname)
+            else:
+                log.warning("File not found on Drive mount: %s", fname)
+        return downloaded
 
     # Find yt-clips folder on Drive
     folder_id = find_or_create_folder(service, "yt-clips")
