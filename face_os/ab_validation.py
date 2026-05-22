@@ -617,7 +617,7 @@ class ABComparator:
 
         Runs pipeline twice:
         1. With PhysicalRenderer enabled (default)
-        2. With PhysicalRenderer forced to alpha mode
+        2. With PhysicalRenderer forced to alpha mode via render_mode_override
 
         Compares:
         - Photometric: LAB drift, lighting consistency, temporal luminance stability
@@ -687,6 +687,9 @@ class ABComparator:
     ) -> tuple:
         """Run pipeline and collect output frames, landmarks, transforms.
 
+        Uses the real pipeline.process_frame() API with render_mode_override
+        to switch between PhysicalRenderer and alpha compositing.
+
         Args:
             pipeline: FaceOSPipeline instance
             video_path: Path to input video
@@ -698,13 +701,16 @@ class ABComparator:
         """
         import cv2
 
-        # Save original state and configure
-        original_mode = getattr(pipeline, '_force_alpha_mode', False)
-        pipeline._force_alpha_mode = not use_physical
+        # Save and set render mode override
+        original_override = getattr(pipeline, 'render_mode_override', None)
+        if not use_physical:
+            pipeline.render_mode_override = 'alpha'
+        else:
+            pipeline.render_mode_override = None
 
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
-            pipeline._force_alpha_mode = original_mode
+            pipeline.render_mode_override = original_override
             return [], [], []
 
         frames = []
@@ -719,9 +725,8 @@ class ABComparator:
 
             try:
                 result = pipeline.process_frame(frame, frame_idx=frame_idx)
-                if result is not None:
-                    output_frame = result.get('frame', frame)
-                    frames.append(output_frame)
+                if result is not None and result.get('frame') is not None:
+                    frames.append(result['frame'])
                     lm = result.get('landmarks')
                     if lm is not None:
                         landmarks_list.append(lm)
@@ -734,7 +739,7 @@ class ABComparator:
             frame_idx += 1
 
         cap.release()
-        pipeline._force_alpha_mode = original_mode
+        pipeline.render_mode_override = original_override
         return frames, landmarks_list, transforms_list
 
     def benchmark_report(

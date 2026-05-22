@@ -89,6 +89,70 @@ def _blend_linear(bg: np.ndarray, fg: np.ndarray, mask: np.ndarray) -> np.ndarra
     return _linear_to_srgb(blended)
 
 
+def multiband_blend(bg: np.ndarray, fg: np.ndarray, mask: np.ndarray,
+                    levels: int = 4) -> np.ndarray:
+    """Laplacian pyramid multi-band blending.
+
+    Blends fg into bg using mask across multiple frequency bands.
+    Preserves both low-frequency shading and high-frequency detail.
+
+    Args:
+        bg: Background image (H, W, 3) uint8 BGR
+        fg: Foreground image (H, W, 3) uint8 BGR
+        mask: Blend mask (H, W) float [0, 1]
+        levels: Number of pyramid levels (default 4)
+
+    Returns:
+        Blended image (H, W, 3) uint8 BGR
+    """
+    if bg.shape != fg.shape:
+        raise ValueError(f"Shape mismatch: {bg.shape} vs {fg.shape}")
+
+    # Convert to linear light
+    bg_lin = _srgb_to_linear(bg).astype(np.float32)
+    fg_lin = _srgb_to_linear(fg).astype(np.float32)
+    mask_f = np.clip(mask.astype(np.float32), 0.0, 1.0)
+    mask_3ch = np.stack([mask_f] * 3, axis=2)
+
+    # Build Gaussian pyramids for mask
+    gp_mask = [mask_3ch]
+    for _ in range(levels):
+        mask_3ch = cv2.pyrDown(mask_3ch)
+        gp_mask.append(mask_3ch)
+
+    # Build Laplacian pyramids for bg and fg
+    def _build_laplacian(img, levels):
+        gp = [img]
+        for _ in range(levels):
+            img = cv2.pyrDown(img)
+            gp.append(img)
+        lp = [gp[levels]]
+        for i in range(levels, 0, -1):
+            expanded = cv2.pyrUp(gp[i], dstsize=(gp[i-1].shape[1], gp[i-1].shape[0]))
+            lp.append(gp[i-1] - expanded)
+        lp.reverse()
+        return lp
+
+    lp_bg = _build_laplacian(bg_lin, levels)
+    lp_fg = _build_laplacian(fg_lin, levels)
+
+    # Blend each Laplacian level
+    blended_lp = []
+    for lb, lf, gm in zip(lp_bg, lp_fg, gp_mask):
+        # Resize mask to match this level's size
+        if gm.shape[:2] != lb.shape[:2]:
+            gm = cv2.resize(gm, (lb.shape[1], lb.shape[0]), interpolation=cv2.INTER_LINEAR)
+        blended_lp.append(lb * (1.0 - gm) + lf * gm)
+
+    # Reconstruct from blended Laplacian pyramid
+    result = blended_lp[levels]
+    for i in range(levels, 0, -1):
+        expanded = cv2.pyrUp(result, dstsize=(blended_lp[i-1].shape[1], blended_lp[i-1].shape[0]))
+        result = expanded + blended_lp[i-1]
+
+    return _linear_to_srgb(result)
+
+
 # ---------------------------------------------------------------------------
 # Compositor
 # ---------------------------------------------------------------------------

@@ -61,3 +61,29 @@ class IdentityEstimator:
             ),
             initialized=True,
         )
+
+    def query_albedo(self, quality_map: np.ndarray):
+        """Query lighting-invariant albedo directly.
+
+        Args:
+            quality_map: Per-pixel quality (H, W) float32
+
+        Returns:
+            (albedo_face, albedo_conf) tuple
+        """
+        if not self._state.is_initialized():
+            return None, None
+        return self._state.query_albedo(quality_map)
+
+    def query_intrinsic(self, quality_map: np.ndarray):
+        """Query intrinsic decomposition components.
+
+        Args:
+            quality_map: Per-pixel quality (H, W) float32
+
+        Returns:
+            (intrinsic_components, intrinsic_conf) tuple
+        """
+        if not self._state.is_initialized():
+            return None, None
+        return self._state.query_intrinsic(quality_map)
