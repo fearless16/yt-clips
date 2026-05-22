@@ -1,8 +1,20 @@
 """worker.py — Safe parallel agent pool with memory backpressure.
-Thread.Semaphore throttling, batch processing, graceful shutdown."""
+
+Uses threading + Semaphore for throttling (no process pool, avoids
+serialisation overhead). Every batch calls ensure_free between batches.
+
+Usage::
+
+    from .worker import ParallelPool
+
+    pool = ParallelPool(max_workers=2, max_memory_gb=2.0)
+    pool.submit(fn, arg)           # returns _ControlledFuture
+    pool.map(fn, [1, 2, 3])       # blocking, all results
+    pool.batch_run(fn, items, 2)   # batched with memory backpressure
+    pool.shutdown()
+"""
 
 import time
-import queue
 import threading
 from concurrent.futures import Future
 
@@ -17,6 +29,11 @@ def _log(msg: str):
 
 
 class _ControlledFuture:
+    """Thin wrapper around concurrent.futures.Future.
+
+    Exposes result(), done(), cancel().
+    """
+
     def __init__(self, future: Future):
         self._future = future
 
@@ -31,6 +48,13 @@ class _ControlledFuture:
 
 
 class ParallelPool:
+    """Thread-based parallel worker pool with memory throttling.
+
+    Args:
+        max_workers: Maximum number of concurrent threads.
+        max_memory_gb: Minimum free GB required per batch.
+    """
+
     def __init__(self, max_workers: int = 2, max_memory_gb: float = 2.0):
         self._max_workers = max_workers
         self._max_memory_gb = max_memory_gb
@@ -40,7 +64,11 @@ class ParallelPool:
         self._shutdown = False
         self._stop_event = threading.Event()
 
-    def submit(self, fn, *args, **kwargs):
+    def submit(self, fn, *args, **kwargs) -> _ControlledFuture:
+        """Submit a function for execution. Returns _ControlledFuture.
+
+        Raises RuntimeError if pool is shut down.
+        """
         future: Future = Future()
         self._semaphore.acquire()
         with self._lock:
@@ -70,6 +98,7 @@ class ParallelPool:
         return _ControlledFuture(future)
 
     def map(self, fn, items):
+        """Apply *fn* to every *items* element. Blocks until all done."""
         results = []
         futures = [self.submit(fn, item) for item in items]
         for f in futures:
@@ -77,15 +106,20 @@ class ParallelPool:
         return results
 
     def batch_run(self, fn, items, batch_size: int = 4):
+        """Process *items* in batches with memory backpressure between batches.
+
+        Calls ensure_free after each batch before starting the next.
+        """
         results = []
         for i in range(0, len(items), batch_size):
-            batch = items[i : i + batch_size]
+            batch = items[i: i + batch_size]
             ensure_free(self._max_memory_gb, poll_interval=2.0, timeout=30.0)
             for item in batch:
                 results.append(self.submit(fn, item))
         return [r.result() for r in results]
 
     def shutdown(self, wait: bool = True):
+        """Signal shutdown. If *wait*, block until all workers finish."""
         self._stop_event.set()
         with self._lock:
             self._shutdown = True
@@ -94,8 +128,10 @@ class ParallelPool:
                 time.sleep(0.1)
 
     def pool_size(self) -> int:
+        """Return the configured max worker count."""
         return self._max_workers
 
     def active_count(self) -> int:
+        """Return number of currently executing workers."""
         with self._lock:
             return self._active

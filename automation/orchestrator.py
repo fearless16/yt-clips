@@ -1,4 +1,16 @@
-"""orchestrator.py — Pipeline orchestrator for yt-clips automation."""
+"""orchestrator.py — 8-phase pipeline runner for yt-clips automation.
+
+Orchestrates the full pipeline: transcript → download → transcribe →
+highlight → export → sync → SEO → upload. Each phase is independently
+skippable via flags.
+
+Usage::
+
+    from .orchestrator import run
+
+    result = run(url="https://youtu.be/...",
+                 auto_sync=True, auto_upload=True)
+"""
 
 import time
 import logging
@@ -10,6 +22,15 @@ from .worker import ParallelPool
 
 @dataclass
 class PipelineResult:
+    """Result container for the pipeline run.
+
+    Attributes:
+        exported: List of exported file paths.
+        uploaded_count: Number of videos uploaded.
+        failures: List of phase error messages.
+        total_seconds: Total wall-clock runtime.
+        transcript_source: "api", "vtt", "none", or "unavailable".
+    """
     exported: list = field(default_factory=list)
     uploaded_count: int = 0
     failures: list = field(default_factory=list)
@@ -26,6 +47,23 @@ def run(url: str, skip_download=False, skip_transcribe=False,
         skip_seo=False, auto_sync=False, auto_upload=False,
         auto_schedule=False, skip_tests=False, sample_minutes=None,
         sync_from_drive=False, mode=None) -> PipelineResult:
+    """Execute the yt-clips pipeline.
+
+    Each phase is a lazy import (zero cost if skipped).
+
+    Args:
+        url: YouTube video URL.
+        skip_*: Skip the corresponding phase.
+        auto_sync: Sync outputs to Google Drive after export.
+        auto_upload: Upload to YouTube after SEO generation.
+        auto_schedule: Schedule the upload.
+        sample_minutes: Limit download to first N minutes.
+        sync_from_drive: Sync input from Google Drive first.
+        mode: Highlight mode (e.g. "auto", "manual").
+
+    Returns:
+        PipelineResult with exported list, counts, and failures.
+    """
     start = time.monotonic()
     result = PipelineResult()
 
