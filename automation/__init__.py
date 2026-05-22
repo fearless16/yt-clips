@@ -12,7 +12,7 @@ Submodules:
     watcher      Watcher subprocess lifecycle
     tunnel       Always-up TunnelKeeper daemon
     worker       ParallelPool with Semaphore throttle
-    orchestator  8-phase pipeline runner
+    orchestrator 8-phase pipeline runner
     cli          CLI entry point with subcommands
 
 Usage:

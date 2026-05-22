@@ -8,6 +8,7 @@ Features:
   - Error recovery with max retry limits
   - Proper logging via utils/logger.py
 """
+import sys
 import time
 import subprocess
 import argparse
@@ -71,7 +72,7 @@ def monitor(channel_url: str, interval_minutes: int = 60):
 
                 # Trigger the pipeline with full automation
                 pipeline_cmd = [
-                    "python", "pipeline.py",
+                    sys.executable, "-m", "automation.cli",
                     video_url,
                     "--sync",
                     "--upload",
