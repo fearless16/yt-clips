@@ -49,11 +49,12 @@ def gpu_info():
     try:
         import torch
         if torch.cuda.is_available():
+            props = torch.cuda.get_device_properties(0)
             return jsonify({
                 "available": True,
                 "name": torch.cuda.get_device_name(0),
-                "memory_total": torch.cuda.get_device_properties(0).total_mem / 1e9,
-                "memory_free": (torch.cuda.get_device_properties(0).total_mem - torch.cuda.memory_allocated(0)) / 1e9,
+                "memory_total": props.total_memory / 1e9,
+                "memory_free": (props.total_memory - torch.cuda.memory_allocated(0)) / 1e9,
             })
         return jsonify({"available": False, "name": "CUDA not available"})
     except Exception as e:
