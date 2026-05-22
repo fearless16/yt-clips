@@ -36,18 +36,48 @@ class ColabClient:
     def gpu_info(self) -> dict:
         return self._get("/gpu")
 
-    def enroll(self, reference_path: str, photos_dir: Optional[str] = None) -> dict:
+    def enroll(self, reference_path: str = None, photos_dir: str = None, drive_ref: str = None, drive_photos: str = None) -> dict:
+        """Enroll identity.
+
+        Args:
+            reference_path: Local reference image path (uploaded via curl)
+            photos_dir: Local photos directory (uploaded via curl)
+            drive_ref: Drive path on Colab (e.g. /content/drive/MyDrive/yt-clips/expectation.png)
+            drive_photos: Drive path on Colab (e.g. /content/drive/MyDrive/yt-clips/photos)
+        """
+        if drive_ref:
+            return self._run([
+                "curl", "-sk", "--max-time", str(self.timeout), "-X", "POST",
+                "-F", f"drive_path={drive_ref}",
+                f"{self.base_url}/enroll"
+            ])
         args = ["curl", "-sk", "--max-time", str(self.timeout), "-X", "POST"]
-        args += ["-F", f"reference=@{reference_path}"]
+        if reference_path:
+            args += ["-F", f"reference=@{reference_path}"]
         if photos_dir and Path(photos_dir).is_dir():
             for photo in sorted(Path(photos_dir).glob("*.png")):
                 args += ["-F", f"photos=@{photo}"]
         args.append(f"{self.base_url}/enroll")
         return self._run(args)
 
-    def process(self, video_path: str, max_frames: int = 30) -> dict:
+    def process(self, video_path: str = None, max_frames: int = 30, drive_video: str = None) -> dict:
+        """Process video.
+
+        Args:
+            video_path: Local video path (uploaded via curl)
+            max_frames: Max frames to process
+            drive_video: Drive path on Colab (e.g. /content/drive/MyDrive/yt-clips/clips_test/test_clip.mp4)
+        """
+        if drive_video:
+            return self._run([
+                "curl", "-sk", "--max-time", str(self.timeout), "-X", "POST",
+                "-F", f"drive_path={drive_video}",
+                "-F", f"max_frames={max_frames}",
+                f"{self.base_url}/process"
+            ])
         args = ["curl", "-sk", "--max-time", str(self.timeout), "-X", "POST"]
-        args += ["-F", f"video=@{video_path}"]
+        if video_path:
+            args += ["-F", f"video=@{video_path}"]
         args += ["-F", f"max_frames={max_frames}"]
         args.append(f"{self.base_url}/process")
         return self._run(args)

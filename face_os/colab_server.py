@@ -62,11 +62,12 @@ def gpu_info():
 
 @app.route("/enroll", methods=["POST"])
 def enroll():
-    """Enroll identity from uploaded reference images.
+    """Enroll identity from reference images.
 
     Form data:
-        reference: reference image file (expectation.png)
+        reference: reference image file OR drive path to reference
         photos: directory of photo files (optional)
+        drive_path: path on Colab Drive to read photos from (optional)
 
     Returns:
         JSON with enrollment status
@@ -76,22 +77,36 @@ def enroll():
     try:
         from face_os.pipeline import FaceOSPipeline
 
-        # Save uploaded reference
+        # Get reference image
         ref_file = request.files.get("reference")
-        if not ref_file:
+        drive_path = request.form.get("drive_path")
+
+        if ref_file:
+            ref_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            ref_file.save(ref_path.name)
+        elif drive_path:
+            ref_path = drive_path
+        else:
             return jsonify({"error": "No reference image provided"}), 400
 
-        ref_path = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        ref_file.save(ref_path.name)
-
-        # Save uploaded photos
-        photos_dir = tempfile.mkdtemp()
-        for f in request.files.getlist("photos"):
-            f.save(os.path.join(photos_dir, f.filename))
+        # Get photos — from upload, drive path, or auto-detect
+        photos_dir = None
+        uploaded_photos = request.files.getlist("photos")
+        if uploaded_photos:
+            photos_dir = tempfile.mkdtemp()
+            for f in uploaded_photos:
+                f.save(os.path.join(photos_dir, f.filename))
+        elif drive_path:
+            # Look for photos/ subfolder relative to drive_path
+            candidate = os.path.join(os.path.dirname(drive_path), "photos")
+            if os.path.isdir(candidate):
+                photos_dir = candidate
+            else:
+                photos_dir = tempfile.mkdtemp()
 
         # Create pipeline and enroll
         _pipeline = FaceOSPipeline(use_bidirectional=False)
-        success = _pipeline.enroll(ref_path.name, photos_dir)
+        success = _pipeline.enroll(str(ref_path), photos_dir)
 
         return jsonify({
             "success": success,
@@ -107,9 +122,9 @@ def process():
     """Process a video clip.
 
     Form data:
-        video: video file
+        video: video file OR drive_path to video
         max_frames: max frames to process (default: 30)
-        bidirectional: use bidirectional solver (default: false)
+        drive_path: path on Colab Drive to read video from (optional)
 
     Returns:
         JSON with processing results and telemetry
@@ -121,14 +136,16 @@ def process():
 
     try:
         video_file = request.files.get("video")
-        if not video_file:
-            return jsonify({"error": "No video file provided"}), 400
-
+        drive_path = request.form.get("drive_path")
         max_frames = int(request.form.get("max_frames", 30))
 
-        # Save video
-        video_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-        video_file.save(video_path.name)
+        if video_file:
+            video_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+            video_file.save(video_path.name)
+        elif drive_path and os.path.exists(drive_path):
+            video_path = drive_path
+        else:
+            return jsonify({"error": "No video file provided"}), 400
 
         # Output path
         output_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
