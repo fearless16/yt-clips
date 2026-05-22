@@ -65,6 +65,7 @@ from face_os import export_qc
 # NEW modules
 from face_os.identity_state import IdentityState
 from face_os.patch_memory import PatchMemory
+from face_os.dense_geometry import DenseGeometryEstimator
 from face_os.temporal_solve import TemporalRepairEngine, FrameQuality
 
 # V3 modules
@@ -215,6 +216,7 @@ class FaceOSPipeline:
         self._identity_estimator = IdentityEstimator(self.identity_state) if self.identity_state else None
         self._temporal_estimator = TemporalEstimator(self.state_evolution) if self.state_evolution else None
         self._face_renderer = FaceRenderer(self.physical_renderer, config=cfg)
+        self._dense_geometry = DenseGeometryEstimator()
 
     @staticmethod
     def _affine_to_sim2(M_inv_2x3: np.ndarray) -> SIM2Transform:
@@ -1268,12 +1270,7 @@ class FaceOSPipeline:
                 self._telemetry["intrinsic_failure_reasons"].get(reason, 0) + 1
             )
 
-        # Track normal source
-        normal_source = self.identity_state.get_normal_source()
-        if normal_source == "mesh":
-            self._telemetry["mesh_normal_frames"] += 1
-        else:
-            self._telemetry["shading_normal_frames"] += 1
+        # Normal source tracking moved to _render_with_physical_renderer (real runtime telemetry)
 
         # Renderer mode is committed only by orchestration code via _commit_renderer_mode().
 
@@ -1467,6 +1464,10 @@ class FaceOSPipeline:
                     frame_idx, fallback_reason, intrinsic_components,
                     energy_terms, prev_physical, prev_alpha,
                 )
+                # PATCH 5: Render timing for physical path
+                render_time_ms = (_time.perf_counter() - _render_start) * 1000
+                self._telemetry["render_time_sum_ms"] += render_time_ms
+                self._telemetry["render_time_count"] += 1
                 return result
             else:
                 fallback_reason = "physical_renderer_failed"
@@ -1500,6 +1501,10 @@ class FaceOSPipeline:
                         frame_idx, fallback_reason, intrinsic_components,
                         energy_terms, prev_physical, prev_alpha,
                     )
+                    # PATCH 5: Render timing for identity composite path
+                    render_time_ms = (_time.perf_counter() - _render_start) * 1000
+                    self._telemetry["render_time_sum_ms"] += render_time_ms
+                    self._telemetry["render_time_count"] += 1
                     return output
             except Exception as e:
                 print(f"  Frame {frame_idx}: COMPOSITOR FAILED: {e}")
@@ -1605,13 +1610,38 @@ class FaceOSPipeline:
                 diffuse_intensity=float(np.mean(source_intrinsic.shading)) * 0.8,
             )
             
-            # Render in output space using PhysicalRenderer
-            rendered_output = self.physical_renderer.render(
-                albedo=source_intrinsic.albedo,
-                normal_map=source_intrinsic.normal_map,
-                shading=source_intrinsic.shading,
-                lighting=lighting,
-            )
+            # ─────────────────────────────────────────────────
+            # D-04: REAL dense geometry pipeline
+            # landmarks → dense mesh → mesh normals → render_with_mesh()
+            # ─────────────────────────────────────────────────
+            dense_geometry = None
+            try:
+                if landmarks is not None and hasattr(landmarks, "points"):
+                    dense_geometry = self._dense_geometry.estimate(
+                        landmarks.points[:, :2]
+                    )
+            except Exception as e:
+                print(f"  Frame {frame_idx}: dense geometry failed: {e}")
+
+            if dense_geometry is not None:
+                rendered_output = self.physical_renderer.render_with_mesh(
+                    albedo=source_intrinsic.albedo,
+                    mesh_vertices=dense_geometry.vertices,
+                    mesh_faces=dense_geometry.faces,
+                    shading=source_intrinsic.shading,
+                    lighting=lighting,
+                    image_size=source_intrinsic.albedo.shape[:2],
+                )
+                self._telemetry["mesh_normal_frames"] += 1
+            else:
+                # Fallback: face-prior normals when geometry fails
+                rendered_output = self.physical_renderer.render(
+                    albedo=source_intrinsic.albedo,
+                    normal_map=source_intrinsic.normal_map,
+                    shading=source_intrinsic.shading,
+                    lighting=lighting,
+                )
+                self._telemetry["shading_normal_frames"] += 1
             
             # Convert from [0,1] to [0,255] uint8
             rendered_face = (rendered_output.rendered * 255).astype(np.uint8)
