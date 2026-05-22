@@ -38,12 +38,14 @@ def get_detector():
         model_path = os.path.join(os.path.dirname(__file__), "..", "face_detector.tflite")
         if not os.path.exists(model_path):
             model_path = "face_detector.tflite"
-        base_options = mp_python.BaseOptions(model_asset_path=model_path)
-        options = vision.FaceDetectorOptions(
-            base_options=base_options,
-            min_detection_confidence=0.6,
-        )
-        _face_detector = vision.FaceDetector.create_from_options(options)
+        try:
+            base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=mp_python.BaseOptions.Delegate.GPU)
+            options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.6)
+            _face_detector = vision.FaceDetector.create_from_options(options)
+        except Exception:
+            base_options = mp_python.BaseOptions(model_asset_path=model_path)
+            options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.6)
+            _face_detector = vision.FaceDetector.create_from_options(options)
     return _face_detector
 
 
@@ -53,12 +55,14 @@ def get_landmarker():
         model_path = os.path.join(os.path.dirname(__file__), "..", "face_landmarker.task")
         if not os.path.exists(model_path):
             model_path = "face_landmarker.task"
-        base_options = mp_python.BaseOptions(model_asset_path=model_path)
-        options = vision.FaceLandmarkerOptions(
-            base_options=base_options,
-            num_faces=1,
-        )
-        _face_landmarker = vision.FaceLandmarker.create_from_options(options)
+        try:
+            base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=mp_python.BaseOptions.Delegate.GPU)
+            options = vision.FaceLandmarkerOptions(base_options=base_options, num_faces=1)
+            _face_landmarker = vision.FaceLandmarker.create_from_options(options)
+        except Exception:
+            base_options = mp_python.BaseOptions(model_asset_path=model_path)
+            options = vision.FaceLandmarkerOptions(base_options=base_options, num_faces=1)
+            _face_landmarker = vision.FaceLandmarker.create_from_options(options)
     return _face_landmarker
 
 
