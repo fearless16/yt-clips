@@ -13,7 +13,7 @@ This prevents artifacts where enhancement creates visible seams
 between the face region and the background.
 """
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -230,11 +230,20 @@ class Compositor:
         if face_mask is None:
             # No face mask — blend globally based on confidence
             if confidence and confidence.combined is not None:
-                return self._blend_by_confidence(original, enhanced, confidence.combined)
+                conf = confidence.combined
+                h, w = original.shape[:2]
+                if conf.shape[:2] != (h, w):
+                    conf = cv2.resize(conf, (w, h), interpolation=cv2.INTER_LINEAR)
+                return _blend_linear(original, enhanced, conf)
             return enhanced
 
-        # Feather the face mask edges
-        feathered = self._feather_mask(face_mask)
+        # Feather the face mask edges (inlined)
+        feather = cfg.compositor.feather_pixels
+        if feather > 0:
+            ksize = max(3, feather * 2 + 1)
+            feathered = cv2.GaussianBlur(face_mask, (ksize, ksize), feather / 2)
+        else:
+            feathered = face_mask
 
         # Compute blend weight
         blend_weight = feathered.copy()
@@ -272,84 +281,13 @@ class Compositor:
                     lab[:, :, 0] = np.clip(lab[:, :, 0] + delta, 0, 255)
                     enhanced = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
 
-        # D-01: Linear-light compositing (physically correct gamma handling)
-        result = _blend_linear(original, enhanced, blend_weight)
+        # D-01: Compositing — linear-light or multi-band
+        if getattr(cfg.compositor, 'blend_mode', 'linear') == 'multiband':
+            result = multiband_blend(original, enhanced, blend_weight)
+        else:
+            result = _blend_linear(original, enhanced, blend_weight)
 
         return result
-
-    def composite_with_memory(
-        self,
-        original: np.ndarray,
-        memory_face: np.ndarray,
-        confidence: ConfidenceMap,
-        face_mask: np.ndarray,
-    ) -> np.ndarray:
-        """Composite using the stable memory face.
-
-        The memory face is the accumulated appearance from the Identity Memory Atlas.
-        It's cleaner and more stable than any single frame.
-
-        Args:
-            original: Original cropped frame
-            memory_face: Accumulated stable face from memory atlas
-            confidence: Per-pixel confidence
-            face_mask: Face region mask
-
-        Returns:
-            Composited frame
-        """
-        if memory_face is None:
-            return original
-
-        # Resize memory face to match frame
-        h, w = original.shape[:2]
-        if memory_face.shape[:2] != (h, w):
-            memory_face = cv2.resize(memory_face, (w, h), interpolation=cv2.INTER_LANCZOS4)
-
-        # Get confidence map
-        conf = confidence.combined
-        if conf is None:
-            conf = np.ones((h, w), dtype=np.float32) * 0.5
-        elif conf.shape[:2] != (h, w):
-            conf = cv2.resize(conf, (w, h), interpolation=cv2.INTER_LINEAR)
-
-        # Feather face mask
-        feathered = self._feather_mask(face_mask)
-
-        # Blend weight: face_mask * confidence
-        blend_weight = feathered * conf
-
-        # Match lighting
-        if cfg.compositor.use_light_matching:
-            memory_face = self._match_lighting(original, memory_face, face_mask)
-
-        # D-01: Linear-light compositing (physically correct gamma handling)
-        result = _blend_linear(original, memory_face, blend_weight)
-
-        return result
-
-    def _feather_mask(self, mask: np.ndarray) -> np.ndarray:
-        """Apply Gaussian feathering to mask edges."""
-        feather = cfg.compositor.feather_pixels
-        if feather <= 0:
-            return mask
-
-        ksize = max(3, feather * 2 + 1)
-        return cv2.GaussianBlur(mask, (ksize, ksize), feather / 2)
-
-    def _blend_by_confidence(
-        self,
-        original: np.ndarray,
-        enhanced: np.ndarray,
-        confidence: np.ndarray,
-    ) -> np.ndarray:
-        """Blend using per-pixel confidence."""
-        h, w = original.shape[:2]
-        if confidence.shape[:2] != (h, w):
-            confidence = cv2.resize(confidence, (w, h), interpolation=cv2.INTER_LINEAR)
-
-        # D-01: Linear-light compositing (physically correct gamma handling)
-        return _blend_linear(original, enhanced, confidence)
 
     def _match_lighting(
         self,
