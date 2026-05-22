@@ -280,21 +280,11 @@ def pass_quality_gates(
 # ─── Face Matching (Identity) ───────────────────────────────────────────────
 
 def _compute_embedding(frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
-    """Compute face embedding for identity matching."""
+    """Compute face embedding for identity matching using LAB histogram."""
     x, y, w, h = bbox
     face_roi = frame[max(0, y):y+h, max(0, x):x+w]
     if face_roi.size == 0:
         return None
-
-    try:
-        import face_recognition
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        locations = [(y, x + w, y + h, x)]
-        encodings = face_recognition.face_encodings(rgb, locations)
-        if encodings:
-            return encodings[0]
-    except ImportError:
-        pass
 
     lab = cv2.cvtColor(face_roi, cv2.COLOR_BGR2LAB)
     hist_l = cv2.calcHist([lab], [0], None, [32], [0, 256]).flatten()
@@ -314,21 +304,15 @@ def match_identity(
     if embedding is None or not reference_embeddings:
         return False, 1.0
 
-    try:
-        import face_recognition
-        distances = face_recognition.face_distance(reference_embeddings, embedding)
-        min_dist = float(np.min(distances))
+    distances = []
+    for ref in reference_embeddings:
+        if ref.shape == embedding.shape:
+            dist = 1.0 - np.minimum(embedding, ref).sum()
+            distances.append(dist)
+    if distances:
+        min_dist = min(distances)
         return min_dist <= tolerance, min_dist
-    except ImportError:
-        distances = []
-        for ref in reference_embeddings:
-            if ref.shape == embedding.shape:
-                dist = 1.0 - np.minimum(embedding, ref).sum()
-                distances.append(dist)
-        if distances:
-            min_dist = min(distances)
-            return min_dist <= tolerance, min_dist
-        return False, 1.0
+    return False, 1.0
 
 
 # ─── Temporal Tracker ───────────────────────────────────────────────────────

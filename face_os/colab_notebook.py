@@ -4,7 +4,7 @@
 # ── Step 1: Clone repo + install deps ──────────────────────────────────────
 !git clone https://github.com/YOUR_USER/yt-clips.git 2>/dev/null || true
 %cd yt-clips
-!pip install -q flask pyngrok mediapipe face-recognition opencv-python-headless numpy
+!pip install -q flask pyngrok mediapipe opencv-python-headless numpy
 
 # ── Step 2: Start tunnel (pick one method) ─────────────────────────────────
 

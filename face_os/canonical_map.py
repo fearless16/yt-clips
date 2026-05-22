@@ -398,25 +398,6 @@ def build_identity_profile(
     """
     profile = IdentityProfile(reference_paths=reference_paths or [])
 
-    # Extract embeddings from face regions (not full images)
-    try:
-        import face_recognition
-        from face_os.detect_track import detect_faces
-        for img in reference_images:
-            # Detect face first, then compute embedding from face region
-            detections = detect_faces(img)
-            if detections:
-                track = detections[0]
-                x, y, w, h = track.smooth_bbox
-                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                # face_recognition expects (top, right, bottom, left) format
-                locations = [(y, x + w, y + h, x)]
-                encodings = face_recognition.face_encodings(rgb, locations)
-                if encodings:
-                    profile.embeddings.extend(encodings)
-    except ImportError:
-        pass
-
     # Build initial atlas from best reference
     if reference_images:
         builder = AppearanceFieldBuilder()

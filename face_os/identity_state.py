@@ -121,15 +121,10 @@ class VerificationGate:
         return True, "passed"
 
     def _embedding_distance(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
-        """Compute distance between two embeddings."""
-        try:
-            import face_recognition
-            return float(face_recognition.face_distance([emb2], emb1)[0])
-        except ImportError:
-            # Fallback: cosine distance
-            norm1 = emb1 / max(np.linalg.norm(emb1), 1e-6)
-            norm2 = emb2 / max(np.linalg.norm(emb2), 1e-6)
-            return float(1.0 - np.dot(norm1, norm2))
+        """Compute distance between two embeddings using cosine distance."""
+        norm1 = emb1 / max(np.linalg.norm(emb1), 1e-6)
+        norm2 = emb2 / max(np.linalg.norm(emb2), 1e-6)
+        return float(1.0 - np.dot(norm1, norm2))
 
     def _compute_jitter(self) -> float:
         """Compute landmark jitter across history."""
