@@ -25,6 +25,65 @@ from face_os.types import ConfidenceMap, EnhancementMask
 cfg = get_config()
 
 
+# Module-level state for photometric locking
+_prev_luminance: Optional[float] = None
+_luminance_ema_alpha: float = 0.5
+_luminance_clamp: float = 8.0  # LAB units
+
+
+def reset_photometric_lock() -> None:
+    """Reset photometric lock state between clips."""
+    global _prev_luminance
+    _prev_luminance = None
+
+
+def photometric_lock(frame: np.ndarray, mask: Optional[np.ndarray] = None) -> np.ndarray:
+    """Temporal photometric locking via luminance EMA.
+
+    D-01: Prevents temporal photometric instability by locking
+    frame luminance to a running average.
+
+    Args:
+        frame: Input frame (H, W, 3) uint8 BGR
+        mask: Optional face mask (H, W) float32 [0,1]. If provided,
+              luminance is computed only within the mask.
+
+    Returns:
+        Photometrically locked frame (H, W, 3) uint8 BGR
+    """
+    global _prev_luminance
+
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l_channel = lab[:, :, 0].astype(np.float32)
+
+    if mask is not None and mask.max() > 0.01:
+        face_pixels = mask > 0.5
+        if face_pixels.sum() < 100:
+            return frame
+        current_luma = float(l_channel[face_pixels].mean())
+    else:
+        current_luma = float(l_channel.mean())
+
+    if _prev_luminance is None:
+        _prev_luminance = current_luma
+        return frame
+
+    _prev_luminance = (
+        _luminance_ema_alpha * current_luma
+        + (1 - _luminance_ema_alpha) * _prev_luminance
+    )
+
+    delta = _prev_luminance - current_luma
+    if abs(delta) < 2.0:
+        return frame
+
+    delta = np.clip(delta, -_luminance_clamp, _luminance_clamp)
+
+    lab_out = lab.astype(np.float32)
+    lab_out[:, :, 0] = np.clip(l_channel + delta, 0, 255)
+    return cv2.cvtColor(lab_out.astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+
 class Compositor:
     """Composites enhanced face onto the frame using confidence blending."""
 

@@ -15,7 +15,7 @@ import cv2
 from face_os.identity_state import IdentityState
 from face_os.intrinsic_decomposition import IntrinsicComponents
 from face_os.temporal_solve import BidirectionalSolver, FrameQuality
-from face_os.compositor import Compositor
+from face_os.compositor import Compositor, photometric_lock, reset_photometric_lock
 from face_os.renderer_mode import RendererModeState, RendererMode
 
 
@@ -338,3 +338,128 @@ class TestRendererMode:
         state.mode_confidence = 0.45
         w = state.get_blend_weight()
         assert 0.0 <= w <= 1.0
+
+
+# ─── Photometric Lock ────────────────────────────────────────────────────────
+
+class TestPhotometricLock:
+    """photometric_lock must stabilize temporal luminance."""
+
+    def test_photometric_lock_returns_same_shape(self):
+        """Output must have same shape and dtype as input."""
+        reset_photometric_lock()
+        frame = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+        result = photometric_lock(frame)
+        assert result.shape == frame.shape
+        assert result.dtype == np.uint8
+
+    def test_photometric_lock_first_frame_unchanged(self):
+        """First frame must pass through unchanged (no reference yet)."""
+        reset_photometric_lock()
+        frame = np.ones((64, 64, 3), dtype=np.uint8) * 128
+        result = photometric_lock(frame)
+        np.testing.assert_array_equal(result, frame)
+
+    def test_photometric_lock_no_nan(self):
+        """Must not produce NaN or Inf."""
+        reset_photometric_lock()
+        for _ in range(5):
+            frame = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+            result = photometric_lock(frame)
+            assert not np.any(np.isnan(result.astype(float)))
+            assert not np.any(np.isinf(result.astype(float)))
+
+    def test_photometric_lock_with_mask(self):
+        """Must work with face mask."""
+        reset_photometric_lock()
+        frame = np.random.randint(50, 200, (64, 64, 3), dtype=np.uint8)
+        mask = np.zeros((64, 64), dtype=np.float32)
+        mask[16:48, 16:48] = 1.0
+        result = photometric_lock(frame, mask=mask)
+        assert result.shape == frame.shape
+        assert result.dtype == np.uint8
+
+    def test_photometric_lock_dampens_sudden_brightness_jump(self):
+        """EMA must dampen sudden luminance jumps."""
+        reset_photometric_lock()
+        bright = np.ones((64, 64, 3), dtype=np.uint8) * 200
+        dark = np.ones((64, 64, 3), dtype=np.uint8) * 50
+
+        photometric_lock(bright)  # establish baseline
+        result = photometric_lock(dark)  # sudden jump
+
+        # Result should be brighter than input (EMA pulls toward bright baseline)
+        assert float(np.mean(result)) > float(np.mean(dark))
+
+    def test_reset_photometric_lock_clears_state(self):
+        """reset_photometric_lock must clear temporal state."""
+        bright = np.ones((64, 64, 3), dtype=np.uint8) * 200
+        photometric_lock(bright)
+        reset_photometric_lock()
+        # After reset, next frame should pass through unchanged
+        dark = np.ones((64, 64, 3), dtype=np.uint8) * 50
+        result = photometric_lock(dark)
+        np.testing.assert_array_equal(result, dark)
+
+
+# ─── Linear-light blending ───────────────────────────────────────────────────
+
+class TestBlendLinear:
+    """_blend_linear must blend in linear-light space."""
+
+    def test_blend_linear_returns_correct_shape(self):
+        """Output must match input shape and dtype."""
+        from face_os.pipeline import _blend_linear
+        bg = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+        fg = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+        mask = np.ones((64, 64), dtype=np.float32) * 0.5
+        result = _blend_linear(bg, fg, mask)
+        assert result.shape == bg.shape
+        assert result.dtype == np.uint8
+
+    def test_blend_linear_full_mask_returns_fg(self):
+        """Full mask (1.0) must return foreground."""
+        from face_os.pipeline import _blend_linear
+        bg = np.zeros((64, 64, 3), dtype=np.uint8)
+        fg = np.ones((64, 64, 3), dtype=np.uint8) * 200
+        mask = np.ones((64, 64), dtype=np.float32)
+        result = _blend_linear(bg, fg, mask)
+        # Should be close to fg (linear roundtrip may cause minor quantization)
+        assert np.abs(result.astype(float) - fg.astype(float)).mean() < 2.0
+
+    def test_blend_linear_zero_mask_returns_bg(self):
+        """Zero mask (0.0) must return background."""
+        from face_os.pipeline import _blend_linear
+        bg = np.ones((64, 64, 3), dtype=np.uint8) * 200
+        fg = np.zeros((64, 64, 3), dtype=np.uint8)
+        mask = np.zeros((64, 64), dtype=np.float32)
+        result = _blend_linear(bg, fg, mask)
+        assert np.abs(result.astype(float) - bg.astype(float)).mean() < 2.0
+
+    def test_blend_linear_no_nan(self):
+        """Must not produce NaN or Inf."""
+        from face_os.pipeline import _blend_linear
+        bg = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+        fg = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+        mask = np.random.rand(64, 64).astype(np.float32)
+        result = _blend_linear(bg, fg, mask)
+        assert not np.any(np.isnan(result.astype(float)))
+        assert not np.any(np.isinf(result.astype(float)))
+
+    def test_blend_linear_differs_from_gamma_blend(self):
+        """Linear-light blend must differ from naive gamma-space blend."""
+        from face_os.pipeline import _blend_linear
+        bg = np.ones((64, 64, 3), dtype=np.uint8) * 128
+        fg = np.ones((64, 64, 3), dtype=np.uint8) * 200
+        mask = np.ones((64, 64), dtype=np.float32) * 0.5
+
+        linear_result = _blend_linear(bg, fg, mask)
+        # Gamma-space blend (naive)
+        gamma_result = (bg.astype(float) * 0.5 + fg.astype(float) * 0.5).astype(np.uint8)
+
+        # They should differ because gamma-space is nonlinear
+        diff = np.abs(linear_result.astype(float) - gamma_result.astype(float)).mean()
+        assert diff > 1.0, (
+            f"Linear and gamma blends differ by only {diff:.2f} — "
+            f"_blend_linear may not be doing actual linear-light conversion"
+        )

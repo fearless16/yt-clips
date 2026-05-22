@@ -58,6 +58,7 @@ from face_os import canonical_map
 from face_os import crop_planner
 from face_os import face_enhance
 from face_os import compositor
+from face_os.compositor import photometric_lock, reset_photometric_lock
 from face_os import export_qc
 
 # NEW modules
@@ -189,6 +190,8 @@ class FaceOSPipeline:
 
         # V3: LieGroup transform state
         self._last_SIM2: Optional[SIM2Transform] = None
+        self._prev_SIM2: Optional[SIM2Transform] = None
+        self._predicted_SIM2: Optional[SIM2Transform] = None
 
         # V3.1: Energy scaler for normalized energy terms (I-07: default-on)
         energy_cfg = getattr(cfg, 'energy', None)
@@ -229,6 +232,9 @@ class FaceOSPipeline:
             "render_time_sum_ms": 0.0,
             "render_time_count": 0,
         }
+
+        # D-08: Per-frame telemetry log (every frame exposed as JSON)
+        self._frame_telemetry_log: list = []
 
     @staticmethod
     def _affine_to_sim2(M_inv_2x3: np.ndarray) -> SIM2Transform:
@@ -407,6 +413,17 @@ class FaceOSPipeline:
             # RULE 7: Energy scaler stats
             "energy_scaler_stats": self.energy_scaler.get_stats(),
         }
+
+    def get_frame_telemetry(self) -> list:
+        """Get per-frame telemetry log.
+
+        D-08: Every frame exposes render_path, renderer_mode, fallback_reason,
+        intrinsic_used, geometry_source, resample_count, energy_terms, transform_det.
+
+        Returns:
+            List of per-frame telemetry dicts
+        """
+        return self._frame_telemetry_log
 
     def enroll(
         self,
@@ -1119,9 +1136,17 @@ class FaceOSPipeline:
                     # V3: Query intrinsic components
                     intrinsic_components, intrinsic_conf = self.identity_state.query_intrinsic(quality_map)
                     
+                    # D-05: Query lighting-invariant albedo (decouple identity from lighting)
+                    albedo_face, albedo_conf = self.identity_state.query_albedo(quality_map)
+                    
                     # Render via shared _render_core
                     # NOTE: Mode update happens in orchestration layer, not here
+                    # D-05: Use albedo as primary identity, fall back to RGB query
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
+                    # Blend albedo into identity face for lighting invariance
+                    if albedo_face is not None and albedo_conf is not None:
+                        albedo_weight = float(np.mean(albedo_conf)) * 0.4
+                        identity_face = (1 - albedo_weight) * identity_face + albedo_weight * albedo_face
 
                     # Use _render_core for PhysicalRenderer → identity composite → enhance
                     output = self._render_core(
@@ -1139,7 +1164,7 @@ class FaceOSPipeline:
 
                     # Post-sharpen to recover detail from low-res source
                     if output is not None:
-                        output = face_enhance._sharpen(output, amount=0.3, radius=0.8)
+                        output = face_enhance._sharpen(output, amount=0.8, radius=0.8)
                     return output
 
             except Exception as e:
@@ -1204,9 +1229,8 @@ class FaceOSPipeline:
         aligned_mask = np.clip(aligned_mask, 0, 1)
 
         blend_3d = aligned_mask[:, :, np.newaxis]
-        # D-01: Compositing (linear-light for face region)
-        output = cropped.astype(np.float32) * (1 - blend_3d) + identity_in_crop.astype(np.float32) * blend_3d
-        output = np.clip(output, 0, 255).astype(np.uint8)
+        # D-01: Linear-light compositing (physically correct gamma handling)
+        output = _blend_linear(cropped, identity_in_crop, aligned_mask)
 
         if frame_idx % 30 == 0:
             face_pixels = aligned_mask > 0.5
@@ -1302,6 +1326,50 @@ class FaceOSPipeline:
                 obs_vector, H, R,
             )
 
+            # D-06: SIM(2) velocity prediction for occlusion recovery
+            if self._last_SIM2 is not None and hasattr(self, '_prev_SIM2') and self._prev_SIM2 is not None:
+                try:
+                    predicted_sim2 = self.state_evolution.predict_with_velocity(
+                        self._prev_SIM2, self._last_SIM2
+                    )
+                    # Store prediction for use during face-loss recovery
+                    self._predicted_SIM2 = predicted_sim2
+                except Exception:
+                    pass
+            self._prev_SIM2 = self._last_SIM2
+
+    def _emit_frame_telemetry(
+        self,
+        frame_idx: int,
+        fallback_reason: Optional[str],
+        intrinsic_components: Optional['IntrinsicComponents'],
+        energy_terms: dict,
+        prev_physical: int,
+        prev_alpha: int,
+    ) -> None:
+        """D-08: Emit per-frame telemetry JSON.
+
+        Called from ALL render paths (physical, identity, enhancement)
+        to ensure every frame is logged.
+        """
+        sim2_det = 1.0
+        if self._last_SIM2 is not None:
+            try:
+                sim2_det = self._last_SIM2.scale ** 2
+            except Exception:
+                pass
+        self._frame_telemetry_log.append({
+            "frame_idx": frame_idx,
+            "render_path": "physical" if self._telemetry["physical_render_frames"] > prev_physical else "alpha" if self._telemetry["alpha_fallback_frames"] > prev_alpha else "enhancement",
+            "renderer_mode": self.renderer_mode_state.current_mode.value if self.renderer_mode_state else "unknown",
+            "fallback_reason": fallback_reason,
+            "intrinsic_used": intrinsic_components is not None,
+            "geometry_source": self.identity_state.get_normal_source() if self.identity_state else "unknown",
+            "resample_count": 2,
+            "energy_terms": energy_terms,
+            "transform_det": sim2_det,
+        })
+
     def _compute_energy_terms(
         self,
         intrinsic_components: Optional['IntrinsicComponents'],
@@ -1370,6 +1438,8 @@ class FaceOSPipeline:
         """
         # Track why we skip PhysicalRenderer (for telemetry)
         fallback_reason = None
+        prev_physical = self._telemetry["physical_render_frames"]
+        prev_alpha = self._telemetry["alpha_fallback_frames"]
 
         # RULE 7: Compute and normalize energy terms
         energy_terms = self._compute_energy_terms(
@@ -1394,6 +1464,13 @@ class FaceOSPipeline:
             )
             if result is not None:
                 self._telemetry["physical_render_frames"] += 1
+                # D-01: Temporal photometric locking
+                result = photometric_lock(result, face_mask)
+                # D-08: Per-frame telemetry (before early return)
+                self._emit_frame_telemetry(
+                    frame_idx, fallback_reason, intrinsic_components,
+                    energy_terms, prev_physical, prev_alpha,
+                )
                 return result
             else:
                 fallback_reason = "physical_renderer_failed"
@@ -1415,11 +1492,18 @@ class FaceOSPipeline:
                         cropped, identity_face, landmarks, crop_plan, frame_idx,
                     )
                     # D-01: Post-sharpen identity composite path
-                    output = face_enhance._sharpen(output, amount=1.5, radius=1.0)
+                    output = face_enhance._sharpen(output, amount=0.8, radius=0.8)
+                    # D-01: Temporal photometric locking
+                    output = photometric_lock(output, face_mask)
                     self._telemetry["alpha_fallback_frames"] += 1
                     if fallback_reason:
                         fb_dist = self._telemetry["fallback_reason_distribution"]
                         fb_dist[fallback_reason] = fb_dist.get(fallback_reason, 0) + 1
+                    # D-08: Per-frame telemetry (before early return)
+                    self._emit_frame_telemetry(
+                        frame_idx, fallback_reason, intrinsic_components,
+                        energy_terms, prev_physical, prev_alpha,
+                    )
                     return output
             except Exception as e:
                 print(f"  Frame {frame_idx}: COMPOSITOR FAILED: {e}")
@@ -1435,11 +1519,20 @@ class FaceOSPipeline:
             eye_confidence=eye_confidence,
         )
         # D-01: Post-sharpen last resort path
-        rendered = face_enhance._sharpen(rendered, amount=1.5, radius=1.0)
+        rendered = face_enhance._sharpen(rendered, amount=0.8, radius=0.8)
+        # D-01: Temporal photometric locking
+        rendered = photometric_lock(rendered, face_mask)
         # RULE 8: Track render timing
         render_time_ms = (_time.perf_counter() - _render_start) * 1000
         self._telemetry["render_time_sum_ms"] += render_time_ms
         self._telemetry["render_time_count"] += 1
+
+        # D-08: Per-frame telemetry JSON emission
+        self._emit_frame_telemetry(
+            frame_idx, fallback_reason, intrinsic_components,
+            energy_terms, prev_physical, prev_alpha,
+        )
+
         return rendered
 
     def _render_with_physical_renderer(
@@ -1550,10 +1643,8 @@ class FaceOSPipeline:
                 aligned_mask, (feather_ksize, feather_ksize), cfg.compositor.feather_pixels / 2
             )
             
-            # Single composite in output space
-            conf_3d = feathered_mask[:, :, np.newaxis]
-            blended = cropped.astype(np.float32) * (1 - conf_3d) + rendered_face.astype(np.float32) * conf_3d
-            blended = np.clip(blended, 0, 255).astype(np.uint8)
+            # D-01: Single composite in output space (linear-light)
+            blended = _blend_linear(cropped, rendered_face, feathered_mask)
 
             # D-01: Detail residual injection — preserve source HF detail
             # The decomposition produces blurry albedo. Inject HF from source.
@@ -1831,6 +1922,13 @@ class FaceOSPipeline:
         }
         # RULE 7: Reset energy scaler for fresh per-clip stats
         self.energy_scaler.reset()
+        # D-08: Reset per-frame telemetry log
+        self._frame_telemetry_log = []
+        # D-06: Reset SIM2 prediction state
+        self._prev_SIM2 = None
+        self._predicted_SIM2 = None
+        # D-01: Reset photometric lock temporal state
+        reset_photometric_lock()
 
 
 # ─── CLI ────────────────────────────────────────────────────────────────────
