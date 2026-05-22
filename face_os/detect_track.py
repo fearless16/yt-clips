@@ -32,23 +32,37 @@ _face_detector = None
 _face_landmarker = None
 MEDIPIPE_GPU_ACTIVE = False
 
+_MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(_MODULE_DIR)
+
+
+def _resolve_model(filename: str) -> str:
+    """Resolve model file path. Checks project root, then module dir, then CWD."""
+    candidates = [
+        os.path.join(_PROJECT_ROOT, filename),
+        os.path.join(_MODULE_DIR, filename),
+        filename,
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(f"Model not found: {filename} (checked: {candidates})")
+
 
 def get_detector():
     global _face_detector, MEDIPIPE_GPU_ACTIVE
     if _face_detector is None:
-        model_path = os.path.join(os.path.dirname(__file__), "..", "face_detector.tflite")
-        if not os.path.exists(model_path):
-            model_path = "face_detector.tflite"
+        model_path = _resolve_model("face_detector.tflite")
         try:
             base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=mp_python.BaseOptions.Delegate.GPU)
-            options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.6)
+            options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.5)
             _face_detector = vision.FaceDetector.create_from_options(options)
-            print("[detect_track] FaceDetector: GPU delegate ACTIVE")
+            print(f"[detect_track] FaceDetector: GPU delegate ACTIVE (model={model_path})")
             MEDIPIPE_GPU_ACTIVE = True
         except Exception as e:
             print(f"[detect_track] FaceDetector: GPU failed ({e}), using CPU")
             base_options = mp_python.BaseOptions(model_asset_path=model_path)
-            options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.6)
+            options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.5)
             _face_detector = vision.FaceDetector.create_from_options(options)
     return _face_detector
 
@@ -56,14 +70,12 @@ def get_detector():
 def get_landmarker():
     global _face_landmarker, MEDIPIPE_GPU_ACTIVE
     if _face_landmarker is None:
-        model_path = os.path.join(os.path.dirname(__file__), "..", "face_landmarker.task")
-        if not os.path.exists(model_path):
-            model_path = "face_landmarker.task"
+        model_path = _resolve_model("face_landmarker.task")
         try:
             base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=mp_python.BaseOptions.Delegate.GPU)
             options = vision.FaceLandmarkerOptions(base_options=base_options, num_faces=1)
             _face_landmarker = vision.FaceLandmarker.create_from_options(options)
-            print("[detect_track] FaceLandmarker: GPU delegate ACTIVE")
+            print(f"[detect_track] FaceLandmarker: GPU delegate ACTIVE (model={model_path})")
             MEDIPIPE_GPU_ACTIVE = True
         except Exception as e:
             print(f"[detect_track] FaceLandmarker: GPU failed ({e}), using CPU")
@@ -79,13 +91,25 @@ def detect_faces(frame: np.ndarray) -> List[FaceTrack]:
     """Detect faces using MediaPipe FaceDetector.
 
     Returns list of FaceTrack with bbox and confidence.
+    If GPU delegate fails at runtime, reinitializes with CPU.
     """
+    global _face_detector, MEDIPIPE_GPU_ACTIVE
+
     detector = get_detector()
     mp_image = MpImage(
         image_format=MpImageFormat.SRGB,
         data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
     )
-    result = detector.detect(mp_image)
+
+    try:
+        result = detector.detect(mp_image)
+    except Exception as e:
+        # GPU delegate failed at runtime — reinitialize with CPU
+        print(f"[detect_track] FaceDetector runtime error ({e}), reinitializing CPU")
+        _face_detector = None
+        MEDIPIPE_GPU_ACTIVE = False
+        detector = get_detector()
+        result = detector.detect(mp_image)
 
     tracks = []
     for detection in result.detections:
@@ -109,13 +133,24 @@ def extract_face_mesh(frame: np.ndarray) -> Optional[np.ndarray]:
     """Extract face landmarks using MediaPipe FaceLandmarker.
 
     Returns (N, 3) array of (x, y, z) pixel coordinates, or None.
+    If GPU delegate fails at runtime, reinitializes with CPU.
     """
+    global _face_landmarker, MEDIPIPE_GPU_ACTIVE
+
     landmarker = get_landmarker()
     mp_image = MpImage(
         image_format=MpImageFormat.SRGB,
         data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
     )
-    result = landmarker.detect(mp_image)
+
+    try:
+        result = landmarker.detect(mp_image)
+    except Exception as e:
+        print(f"[detect_track] FaceLandmarker runtime error ({e}), reinitializing CPU")
+        _face_landmarker = None
+        MEDIPIPE_GPU_ACTIVE = False
+        landmarker = get_landmarker()
+        result = landmarker.detect(mp_image)
 
     if not result.face_landmarks:
         return None
