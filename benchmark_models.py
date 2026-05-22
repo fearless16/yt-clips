@@ -9,11 +9,6 @@ import sys
 
 # API configs
 PROVIDERS = {
-    "DeepSeek V4 Pro": {
-        "url": "https://api.deepseek.com/v1/chat/completions",
-        "key": os.environ.get("DEEPSEEK_API_KEY", ""),
-        "model": "deepseek-v4-pro",
-    },
     "DeepSeek V4 Flash": {
         "url": "https://api.deepseek.com/v1/chat/completions",
         "key": os.environ.get("DEEPSEEK_API_KEY", ""),

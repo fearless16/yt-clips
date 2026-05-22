@@ -1,8 +1,8 @@
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, FIRST_COMPLETED, wait
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Callable
 
 import requests
 from dotenv import load_dotenv
@@ -17,12 +17,23 @@ _cfg = load_config()
 
 class AIClient:
     PROVIDER_MODELS = {
-        "groq": ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen/qwen3-32b"],
-        "openrouter": ["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro", "qwen/qwen3.5-122b-a10b", "google/gemini-2.0-flash-001"],
+        "groq": ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "qwen/qwen3-32b"],
+        "openrouter": ["deepseek/deepseek-v4-flash", "google/gemini-2.0-flash-001", "qwen/qwen3.5-122b-a10b"],
         "nvidia": ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.1-8b-instruct", "nvidia/nemotron-3-super-120b-a12b"],
-        "deepseek": ["deepseek-v4-flash", "deepseek-v4-pro"],
+        "deepseek": ["deepseek-v4-flash"],
         "xai": ["grok-2"],
     }
+
+    # Speed-ordered flat list of (provider, model) — fastest first.
+    # Used by generate_fastest_first() for parallel racing.
+    FASTEST_TIERS = [
+        [("groq", "meta-llama/llama-4-scout-17b-16e-instruct")],
+        [("groq", "llama-3.3-70b-versatile"), ("openrouter", "deepseek/deepseek-v4-flash"), ("openrouter", "google/gemini-2.0-flash-001")],
+        [("groq", "qwen/qwen3-32b"), ("openrouter", "qwen/qwen3.5-122b-a10b")],
+        [("nvidia", "meta/llama-3.3-70b-instruct"), ("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1")],
+        [("deepseek", "deepseek-v4-flash")],
+        [("xai", "grok-2")],
+    ]
 
     def __init__(self):
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
@@ -87,6 +98,87 @@ class AIClient:
         elif self.groq_api_key:
             return self.generate_groq(prompt, system_instruction)
         return self.generate_ollama(prompt, system_instruction)
+
+    def _available_plan(self) -> List[List[tuple]]:
+        """Return FASTEST_TIERS filtered to only available (have API key) providers."""
+        has_key = {
+            "groq": bool(self.groq_api_key),
+            "openrouter": bool(self.openrouter_api_key),
+            "nvidia": bool(self.nvidia_api_key),
+            "deepseek": bool(self.deepseek_api_key),
+            "xai": bool(self.xai_api_key),
+        }
+        plan = []
+        for tier in self.FASTEST_TIERS:
+            available = [(p, m) for p, m in tier if has_key.get(p)]
+            if available:
+                plan.append(available)
+        return plan
+
+    def generate_fastest_first(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+        """Race multiple models in parallel tiers, return first successful response.
+
+        Fires all models in tier 1 concurrently. If none succeed, moves to tier 2,
+        and so on. Never blocks waiting for a slow model — first valid response wins.
+        Cancels remaining in-flight calls once a result is received.
+        """
+        plan = self._available_plan()
+        if not plan:
+            return self.generate_ollama(prompt, system_instruction)
+
+        provider_map = {
+            "groq": self.generate_groq,
+            "openrouter": self.generate_openrouter,
+            "nvidia": self.generate_nvidia,
+            "deepseek": self.generate_deepseek,
+            "xai": self.generate_grok,
+        }
+
+        for tier in plan:
+            calls: List[tuple] = []
+            for provider, model in tier:
+                fn = provider_map.get(provider)
+                if fn is None:
+                    continue
+                old_p, old_m = self._provider, self._model
+                def make_call(f=fn, p=provider, m=model, _op=old_p, _om=old_m):
+                    self._provider = p
+                    self._model = m
+                    try:
+                        return f(prompt, system_instruction)
+                    finally:
+                        self._provider = _op
+                        self._model = _om
+                calls.append((provider, model, make_call))
+
+            if not calls:
+                continue
+
+            with ThreadPoolExecutor(max_workers=len(calls)) as exc:
+                fut_map = {exc.submit(c[2]): (c[0], c[1]) for c in calls}
+                try:
+                    done, not_done = wait(
+                        fut_map, return_when=FIRST_COMPLETED, timeout=45,
+                    )
+                    for fut in done:
+                        p, m = fut_map[fut]
+                        try:
+                            text = fut.result(timeout=5)
+                            if text and text.strip() and "API key missing" not in text:
+                                self._last_provider = p
+                                self._last_model = m
+                                for f in not_done:
+                                    f.cancel()
+                                return text.strip()
+                        except Exception:
+                            continue
+                    for f in not_done:
+                        f.cancel()
+                except Exception:
+                    for f in fut_map:
+                        f.cancel()
+
+        return ""
 
     # ---------------- OPENROUTER ----------------
 
