@@ -92,11 +92,11 @@ def run(url: str, skip_download=False, skip_transcribe=False,
         log.info("[phase 0] YouTube transcript")
         try:
             from .transcript import fetch as fetch_transcript
-            transcript = fetch_transcript(url)
+            transcript = fetch_transcript(url, output_path=transcript_path)
             if transcript.get("segments"):
                 skip_transcribe = True
                 result.transcript_source = transcript.get("source", "api")
-                log.info("[phase 0] done %s source=%s", _t(t0), result.transcript_source)
+                log.info("[phase 0] done %s source=%s segments=%d", _t(t0), result.transcript_source, len(transcript["segments"]))
         except Exception as e:
             result.failures.append("phase0: %s" % e)
 
