@@ -1238,17 +1238,20 @@ class FaceOSPipeline:
             M_inv = self._sim2_to_affine(interpolated)
         self._last_SIM2 = current_sim2
 
-        identity_in_crop = cv2.warpAffine(
-            identity_face, M_inv, (cropped.shape[1], cropped.shape[0]),
+        # D-01b: Single-resample — combine identity + mask into one warp
+        h, w = cropped.shape[:2]
+        canonical_mask = self._make_canonical_geometry_mask(identity_face.shape[:2])
+        identity_with_mask = np.concatenate([
+            identity_face,
+            canonical_mask[:, :, np.newaxis]
+        ], axis=2)  # (H, W, 4)
+
+        warped = cv2.warpAffine(
+            identity_with_mask, M_inv, (w, h),
             flags=cv2.INTER_LANCZOS4, borderMode=cv2.BORDER_REFLECT,
         )
-
-        canonical_mask = self._make_canonical_geometry_mask(identity_face.shape[:2])
-        aligned_mask = cv2.warpAffine(
-            canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
-            flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
-        )
-        aligned_mask = np.clip(aligned_mask, 0, 1)
+        identity_in_crop = warped[:, :, :3]
+        aligned_mask = np.clip(warped[:, :, 3], 0, 1)
 
         blend_3d = aligned_mask[:, :, np.newaxis]
         # D-01: Linear-light compositing (physically correct gamma handling)
@@ -1387,7 +1390,7 @@ class FaceOSPipeline:
             "fallback_reason": fallback_reason,
             "intrinsic_used": intrinsic_components is not None,
             "geometry_source": self.identity_state.get_normal_source() if self.identity_state else "unknown",
-            "resample_count": 2,
+            "resample_count": 1,  # D-01b: collapsed to single resample
             "energy_terms": energy_terms,
             "transform_det": sim2_det,
         })
@@ -1592,14 +1595,19 @@ class FaceOSPipeline:
             source_decomposer = self.identity_state._intrinsic_decomposer
             source_intrinsic = source_decomposer.decompose(source_rgb)
             
+            # Compute adjusted landmarks and M_inv once (reused for anchor + mask)
+            adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
+            if adjusted_lm is None:
+                return None
+
+            _, _, M = canonical_map.warp_to_canonical(
+                cropped, adjusted_lm,
+                canonical_size=tuple(cfg.canonical.atlas_size),
+            )
+            M_inv = np.linalg.inv(M)[:2]
+
             # Warp anchor albedo to source crop space for correction
             if anchor_albedo is not None:
-                _, _, M = canonical_map.warp_to_canonical(
-                    cropped, self._adjust_landmarks_to_crop(landmarks, crop_plan) or landmarks,
-                    canonical_size=tuple(cfg.canonical.atlas_size),
-                )
-                M_inv = np.linalg.inv(M)[:2]
-                
                 # Warp anchor to crop space
                 anchor_crop = cv2.warpAffine(
                     anchor_albedo, M_inv, (cropped.shape[1], cropped.shape[0]),
@@ -1637,22 +1645,12 @@ class FaceOSPipeline:
             # Convert from [0,1] to [0,255] uint8
             rendered_face = (rendered_output.rendered * 255).astype(np.uint8)
             
-            # Create face mask from landmarks
-            adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
-            if adjusted_lm is None:
-                return None
-            
-            _, _, M_mask = canonical_map.warp_to_canonical(
-                cropped, adjusted_lm,
-                canonical_size=tuple(cfg.canonical.atlas_size),
-            )
-            M_inv_mask = np.linalg.inv(M_mask)[:2]
-            
+            # D-01b: Reuse M_inv for mask warp (same canonical transform)
             canonical_mask = self._make_canonical_geometry_mask(
                 tuple(cfg.canonical.atlas_size)[::-1]
             )
             aligned_mask = cv2.warpAffine(
-                canonical_mask, M_inv_mask, (cropped.shape[1], cropped.shape[0]),
+                canonical_mask, M_inv, (cropped.shape[1], cropped.shape[0]),
                 flags=cv2.INTER_LINEAR,
                 borderMode=cv2.BORDER_CONSTANT,
                 borderValue=0,
