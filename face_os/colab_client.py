@@ -130,51 +130,31 @@ class ColabClient:
     # ── HTTP helpers ──────────────────────────────────────────────────────
 
     def _get(self, path: str) -> dict:
-        url = f"{self.base_url}{path}"
+        import requests
         try:
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()
-            try:
-                return json.loads(body)
-            except Exception:
-                return {"error": f"HTTP {e.code}: {body}"}
+            r = requests.get(f"{self.base_url}{path}", timeout=self.timeout, verify=False)
+            return r.json()
         except Exception as e:
             return {"error": str(e)}
 
     def _post(self, path: str) -> dict:
-        url = f"{self.base_url}{path}"
+        import requests
         try:
-            req = urllib.request.Request(url, method="POST", data=b"")
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            body = e.read().decode()
-            try:
-                return json.loads(body)
-            except Exception:
-                return {"error": f"HTTP {e.code}: {body}"}
+            r = requests.post(f"{self.base_url}{path}", timeout=self.timeout, verify=False)
+            return r.json()
         except Exception as e:
             return {"error": str(e)}
 
     def _post_multipart(self, path: str, body: bytes, boundary: str) -> dict:
-        url = f"{self.base_url}{path}"
+        import requests
         try:
-            req = urllib.request.Request(
-                url,
+            r = requests.post(
+                f"{self.base_url}{path}",
                 data=body,
                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-                method="POST",
+                timeout=self.timeout,
+                verify=False,
             )
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            body_bytes = e.read().decode()
-            try:
-                return json.loads(body_bytes)
-            except Exception:
-                return {"error": f"HTTP {e.code}: {body_bytes}"}
+            return r.json()
         except Exception as e:
             return {"error": str(e)}
