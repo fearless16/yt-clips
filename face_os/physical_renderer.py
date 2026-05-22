@@ -410,9 +410,10 @@ class PhysicalRenderer:
         faces: np.ndarray,
         image_size: tuple,
     ) -> np.ndarray:
-        """Rasterize per-face normals to image plane via barycentric interpolation.
+        """Rasterize per-face normals to image plane via vectorized barycentric interpolation.
 
         D-04: Converts 3D mesh normals to a 2D normal map for the renderer.
+        Optimized: numpy vectorized (no Python pixel loops).
 
         Args:
             vertices: (N, 3) vertex positions
@@ -425,34 +426,28 @@ class PhysicalRenderer:
         h, w = image_size
         face_normals = self._compute_per_face_normals(vertices, faces)
 
-        # Project vertices to image plane (use x, y; ignore z for rasterization)
+        # Project vertices to image plane
         v_xy = vertices[:, :2].astype(np.float32)
-
-        # Normalize to image coordinates
         v_min = v_xy.min(axis=0)
         v_max = v_xy.max(axis=0)
         v_range = v_max - v_min
         v_range = np.where(v_range > 1e-8, v_range, 1.0)
 
-        # Map to pixel coordinates
         px = (v_xy[:, 0] - v_min[0]) / v_range[0] * (w - 1)
         py = (v_xy[:, 1] - v_min[1]) / v_range[1] * (h - 1)
 
         normal_map = np.zeros((h, w, 3), dtype=np.float32)
-        normal_map[:, :, 2] = 1.0  # Default: pointing toward viewer
+        normal_map[:, :, 2] = 1.0
         weight_map = np.zeros((h, w), dtype=np.float32)
 
-        # Rasterize using simple scanline-free approach:
-        # For each face, fill its bounding box with barycentric interpolation
+        # Vectorized rasterization: process each face's bounding box
         for fi in range(len(faces)):
             face = faces[fi]
             fn = face_normals[fi]
 
-            # Get screen-space triangle vertices
             sx = px[face]
             sy = py[face]
 
-            # Bounding box
             x_min = max(0, int(np.floor(np.min(sx))))
             x_max = min(w - 1, int(np.ceil(np.max(sx))))
             y_min = max(0, int(np.floor(np.min(sy))))
@@ -461,35 +456,48 @@ class PhysicalRenderer:
             if x_max < x_min or y_max < y_min:
                 continue
 
-            # For each pixel in bounding box, test barycentric coordinates
-            for yi in range(y_min, y_max + 1):
-                for xi in range(x_min, x_max + 1):
-                    # Barycentric coordinates
-                    bc = self._barycentric_coords(
-                        float(xi), float(yi), sx[0], sy[0], sx[1], sy[1], sx[2], sy[2]
-                    )
-                    if bc is not None:
-                        u, v, w_bary = bc
-                        if u >= 0 and v >= 0 and w_bary >= 0:
-                            # Inside triangle — accumulate normal weighted by proximity
-                            # Use area-based weight (smaller triangles = higher weight)
-                            area = abs(
-                                (sx[1] - sx[0]) * (sy[2] - sy[0])
-                                - (sx[2] - sx[0]) * (sy[1] - sy[0])
-                            )
-                            weight = 1.0 / (area + 1e-6)
-                            weight = min(weight, 10.0)
-                            normal_map[yi, xi] += fn * weight
-                            weight_map[yi, xi] += weight
+            # Create pixel grid for bounding box
+            yi, xi = np.mgrid[y_min:y_max+1, x_min:x_max+1]
+            yi = yi.astype(np.float32)
+            xi = xi.astype(np.float32)
 
-        # Normalize accumulated normals
-        for yi in range(h):
-            for xi in range(w):
-                if weight_map[yi, xi] > 0:
-                    n = normal_map[yi, xi]
-                    norm = np.linalg.norm(n)
-                    if norm > 1e-8:
-                        normal_map[yi, xi] = n / norm
+            # Vectorized barycentric coordinates
+            v0x, v0y = sx[0], sy[0]
+            v1x, v1y = sx[1], sy[1]
+            v2x, v2y = sx[2], sy[2]
+
+            denom = (v1y - v2y) * (v0x - v2x) + (v2x - v1x) * (v0y - v2y)
+            if abs(denom) < 1e-10:
+                continue
+
+            u = ((v1y - v2y) * (xi - v2x) + (v2x - v1x) * (yi - v2y)) / denom
+            v = ((v2y - v0y) * (xi - v2x) + (v0x - v2x) * (yi - v2y)) / denom
+            bw = 1.0 - u - v
+
+            # Inside-triangle mask
+            inside = (u >= 0) & (v >= 0) & (bw >= 0)
+
+            if not np.any(inside):
+                continue
+
+            area = abs((v1x - v0x) * (v2y - v0y) - (v2x - v0x) * (v1y - v0y))
+            weight = min(1.0 / (area + 1e-6), 10.0)
+
+            # Accumulate normals
+            mask_slice = np.zeros((h, w), dtype=bool)
+            mask_slice[y_min:y_max+1, x_min:x_max+1] = inside
+            normal_map[mask_slice] += fn * weight
+            weight_map[mask_slice] += weight
+
+        # Normalize
+        valid = weight_map > 0
+        for c in range(3):
+            normal_map[:, :, c][valid] /= weight_map[valid]
+
+        # Normalize to unit vectors
+        norms = np.linalg.norm(normal_map, axis=2, keepdims=True)
+        norms = np.where(norms > 1e-8, norms, 1.0)
+        normal_map /= norms
 
         return normal_map
 
