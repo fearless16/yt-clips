@@ -141,7 +141,6 @@ def _base_yt_dlp_cmd(dl_cfg: dict, template: str) -> list[str]:
 
     cmd = [
         _yt_dlp_path(),
-        "--remote-components", "ejs:github",
         "--format", dl_cfg.get("format", "bv*+ba/b"),
         "--merge-output-format", "mp4",
         "--format-sort", dl_cfg.get("format_sort", "res:2160,vbr,abr"),
