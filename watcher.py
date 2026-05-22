@@ -150,6 +150,12 @@ class JobHandler(BaseHTTPRequestHandler):
 
 def process_queue():
     global currently_processing
+    # Ensure deno is in PATH for yt-dlp JS challenge solver
+    deno_bin = str(Path.home() / ".deno" / "bin")
+    env = os.environ.copy()
+    if deno_bin not in env.get("PATH", ""):
+        env["PATH"] = deno_bin + ":" + env.get("PATH", "")
+
     while job_queue:
         with processing_lock:
             currently_processing = True
@@ -166,7 +172,7 @@ def process_queue():
         cmd = [sys.executable, "pipeline.py", url] + flags
         result = None
         try:
-            result = subprocess.run(cmd)
+            result = subprocess.run(cmd, env=env)
         except KeyboardInterrupt:
             print("\n  Job interrupted by user")
             with open(RESULT_FILE, "w") as f:
