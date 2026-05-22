@@ -25,6 +25,106 @@ from face_os.types import ConfidenceMap, EnhancementMask
 cfg = get_config()
 
 
+# ─── D-01: Linear-light compositing helpers ─────────────────────────────────
+
+def _srgb_to_linear(img: np.ndarray) -> np.ndarray:
+    """Convert sRGB uint8 image to linear-light float32 [0,1].
+
+    D-01: Gamma-space compositing is physically incorrect.
+    Blending must happen in linear-light space.
+    """
+    f = img.astype(np.float32) / 255.0
+    return np.power(f, 2.2)
+
+
+def _linear_to_srgb(img: np.ndarray) -> np.ndarray:
+    """Convert linear-light float32 [0,1] back to sRGB uint8."""
+    g = np.power(np.clip(img, 0, 1), 1.0 / 2.2)
+    return (g * 255).astype(np.uint8)
+
+
+def _blend_linear(bg: np.ndarray, fg: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Blend two sRGB images in linear-light space.
+
+    D-01: Fixes gamma-space compositing.
+    bg, fg: (H,W,3) uint8 BGR
+    mask: (H,W) float32 [0,1]
+    Returns: (H,W,3) uint8 BGR
+    """
+    bg_lin = _srgb_to_linear(bg)
+    fg_lin = _srgb_to_linear(fg)
+    m3 = mask[:, :, np.newaxis] if mask.ndim == 2 else mask
+    blended = bg_lin * (1 - m3) + fg_lin * m3
+    return _linear_to_srgb(blended)
+
+
+# ─── D-01c: Multi-band compositing (Laplacian pyramid) ──────────────────────
+
+def multiband_blend(
+    bg: np.ndarray,
+    fg: np.ndarray,
+    mask: np.ndarray,
+    levels: int = 4,
+) -> np.ndarray:
+    """Multi-band compositing via Laplacian pyramid blending.
+
+    D-01c: Single-band alpha blending destroys frequency bands.
+    Laplacian pyramid blends each frequency band independently.
+
+    Args:
+        bg: Background (H, W, 3) uint8 BGR
+        fg: Foreground (H, W, 3) uint8 BGR
+        mask: Blend mask (H, W) float32 [0,1]
+        levels: Number of pyramid levels
+
+    Returns:
+        Blended result (H, W, 3) uint8 BGR
+    """
+    bg_f = bg.astype(np.float32)
+    fg_f = fg.astype(np.float32)
+
+    # Build Gaussian pyramids
+    gp_bg = [bg_f]
+    gp_fg = [fg_f]
+    gp_mask = [mask.astype(np.float32)]
+
+    for _i in range(levels):
+        gp_bg.append(cv2.pyrDown(gp_bg[-1]))
+        gp_fg.append(cv2.pyrDown(gp_fg[-1]))
+        gp_mask.append(cv2.pyrDown(gp_mask[-1]))
+
+    # Build Laplacian pyramids for bg and fg
+    lp_bg = [gp_bg[levels]]
+    lp_fg = [gp_fg[levels]]
+
+    for i in range(levels, 0, -1):
+        up_bg = cv2.pyrUp(gp_bg[i], dstsize=(gp_bg[i - 1].shape[1], gp_bg[i - 1].shape[0]))
+        up_fg = cv2.pyrUp(gp_fg[i], dstsize=(gp_fg[i - 1].shape[1], gp_fg[i - 1].shape[0]))
+        lp_bg.append(gp_bg[i - 1] - up_bg)
+        lp_fg.append(gp_fg[i - 1] - up_fg)
+
+    # Blend each Laplacian level using the corresponding mask level
+    blended_lp = []
+    for i in range(levels + 1):
+        m = gp_mask[levels - i] if i < levels else gp_mask[0]
+        # Ensure mask has 3 channels
+        m3 = m[:, :, np.newaxis] if m.ndim == 2 else m
+        # Ensure spatial dimensions match
+        if m3.shape[:2] != lp_bg[i].shape[:2]:
+            m3 = cv2.resize(m3, (lp_bg[i].shape[1], lp_bg[i].shape[0]), interpolation=cv2.INTER_LINEAR)
+            if m3.ndim == 2:
+                m3 = m3[:, :, np.newaxis]
+        blended_lp.append(lp_bg[i] * (1 - m3) + lp_fg[i] * m3)
+
+    # Reconstruct from blended pyramid
+    result = blended_lp[0]
+    for i in range(1, levels + 1):
+        result = cv2.pyrUp(result, dstsize=(blended_lp[i].shape[1], blended_lp[i].shape[0]))
+        result = result + blended_lp[i]
+
+    return np.clip(result, 0, 255).astype(np.uint8)
+
+
 # Module-level state for photometric locking
 _prev_luminance: Optional[float] = None
 _luminance_ema_alpha: float = 0.5
@@ -172,10 +272,8 @@ class Compositor:
                     lab[:, :, 0] = np.clip(lab[:, :, 0] + delta, 0, 255)
                     enhanced = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
 
-        # D-01: Compositing
-        blend_3ch = blend_weight[:, :, np.newaxis]
-        result = original.astype(np.float32) * (1 - blend_3ch) + enhanced.astype(np.float32) * blend_3ch
-        result = np.clip(result, 0, 255).astype(np.uint8)
+        # D-01: Linear-light compositing (physically correct gamma handling)
+        result = _blend_linear(original, enhanced, blend_weight)
 
         return result
 
@@ -225,10 +323,8 @@ class Compositor:
         if cfg.compositor.use_light_matching:
             memory_face = self._match_lighting(original, memory_face, face_mask)
 
-        # D-01: Compositing
-        blend_3ch = blend_weight[:, :, np.newaxis]
-        result = original.astype(np.float32) * (1 - blend_3ch) + memory_face.astype(np.float32) * blend_3ch
-        result = np.clip(result, 0, 255).astype(np.uint8)
+        # D-01: Linear-light compositing (physically correct gamma handling)
+        result = _blend_linear(original, memory_face, blend_weight)
 
         return result
 
@@ -252,11 +348,8 @@ class Compositor:
         if confidence.shape[:2] != (h, w):
             confidence = cv2.resize(confidence, (w, h), interpolation=cv2.INTER_LINEAR)
 
-        # D-01: Compositing
-        conf_3ch = confidence[:, :, np.newaxis]
-        result = original.astype(np.float32) * (1 - conf_3ch) + enhanced.astype(np.float32) * conf_3ch
-        result = np.clip(result, 0, 255).astype(np.uint8)
-        return result
+        # D-01: Linear-light compositing (physically correct gamma handling)
+        return _blend_linear(original, enhanced, confidence)
 
     def _match_lighting(
         self,
