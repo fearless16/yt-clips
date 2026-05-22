@@ -24,7 +24,7 @@ else:
 # CELL 2: Install deps
 # ════════════════════════════════════════════════════════════════════════════
 %cd /content/drive/MyDrive/yt-clips
-!pip install -q flask mediapipe face-recognition opencv-python-headless numpy scipy
+!pip install -q flask mediapipe opencv-python-headless numpy scipy
 
 # ════════════════════════════════════════════════════════════════════════════
 # CELL 3: Start tunnel + server
