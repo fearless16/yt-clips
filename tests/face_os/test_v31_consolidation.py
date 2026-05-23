@@ -910,3 +910,10 @@ class TestPerFrameTelemetry:
 
         assert get_config().compositor.blend_mode == "laplacian"
         assert FaceOSPipeline()._resolve_blend_mode() == "laplacian"
+
+    def test_mesh_normal_raster_shape_is_bounded(self):
+        """Dense mesh normal raster should not run at full 1080p/1920p."""
+        from face_os.pipeline import FaceOSPipeline
+
+        assert FaceOSPipeline._normal_raster_shape((1920, 1080)) == (384, 216)
+        assert FaceOSPipeline._normal_raster_shape((128, 128)) == (128, 128)

@@ -81,7 +81,13 @@ def _video_writer(path: Path, fps: float, frame_shape: tuple[int, int, int]) -> 
     return writer
 
 
-def run(input_path: Path, output_path: Path, report_path: Path, max_frames: Optional[int]) -> int:
+def run(
+    input_path: Path,
+    output_path: Path,
+    report_path: Path,
+    max_frames: Optional[int],
+    max_seconds: Optional[float],
+) -> int:
     cap = cv2.VideoCapture(str(input_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open input clip: {input_path}")
@@ -115,6 +121,8 @@ def run(input_path: Path, output_path: Path, report_path: Path, max_frames: Opti
 
     while True:
         if max_frames is not None and processed >= max_frames:
+            break
+        if max_seconds is not None and (time.perf_counter() - start) >= max_seconds:
             break
         ok, frame = cap.read()
         if not ok:
@@ -152,6 +160,8 @@ def run(input_path: Path, output_path: Path, report_path: Path, max_frames: Opti
             ))))
         prev_output = output
         processed += 1
+        if processed == 1 or processed % 10 == 0:
+            print(f"processed {processed} frames", flush=True)
 
     cap.release()
     if writer is not None:
@@ -201,6 +211,8 @@ def run(input_path: Path, output_path: Path, report_path: Path, max_frames: Opti
             f"**Input:** `{input_path}`",
             f"**Output:** `{output_path}`",
             f"**Frames processed:** {processed} / {source_frames}",
+            f"**Stopped by max frames:** {'YES' if max_frames is not None and processed >= max_frames else 'NO'}",
+            f"**Stopped by max seconds:** {'YES' if max_seconds is not None and elapsed >= max_seconds else 'NO'}",
             f"**Source:** {source_w}x{source_h} @ {source_fps:.2f} fps",
             f"**Processing time:** {elapsed:.2f}s ({processed / elapsed if elapsed > 0 else 0.0:.2f} fps)",
             f"**Pipeline failures:** {failures}",
@@ -263,8 +275,9 @@ def main() -> int:
     parser.add_argument("--output", default="output/face_os/test_clip_validated.mp4")
     parser.add_argument("--report", default="reports/face_os_real_clip_metrics.md")
     parser.add_argument("--max-frames", type=int, default=None)
+    parser.add_argument("--max-seconds", type=float, default=None)
     args = parser.parse_args()
-    return run(Path(args.input), Path(args.output), Path(args.report), args.max_frames)
+    return run(Path(args.input), Path(args.output), Path(args.report), args.max_frames, args.max_seconds)
 
 
 if __name__ == "__main__":

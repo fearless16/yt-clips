@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+import cv2
 import numpy as np
 
 
@@ -371,6 +372,15 @@ class PhysicalRenderer:
         else:
             # Face-prior ellipsoidal fallback (D-04: deterministic, brightness-invariant)
             normal_map = self._face_prior_normals(image_size)
+
+        if normal_map.shape[:2] != albedo.shape[:2]:
+            normal_map = cv2.resize(
+                normal_map,
+                (albedo.shape[1], albedo.shape[0]),
+                interpolation=cv2.INTER_LINEAR,
+            )
+            norm = np.linalg.norm(normal_map, axis=2, keepdims=True)
+            normal_map = normal_map / (norm + 1e-8)
 
         return self.render(
             albedo=albedo,

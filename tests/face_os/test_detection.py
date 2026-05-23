@@ -165,6 +165,15 @@ class TestIdentityMatching:
         assert not is_match
         assert distance == 1.0
 
+    def test_identity_profile_populates_embeddings(self, real_face_img):
+        """Enrollment profile must provide tracker embeddings."""
+        from face_os.canonical_map import build_identity_profile
+
+        profile = build_identity_profile([real_face_img], ["reference.png"])
+
+        assert profile.embeddings, "IdentityProfile must not enroll with zero embeddings"
+        assert profile.embeddings[0].shape[0] == 96
+
 
 # ─── Test: Occupancy Gate ──────────────────────────────────────────────────
 
