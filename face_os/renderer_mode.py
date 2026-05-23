@@ -1,16 +1,8 @@
 """Renderer Mode Module.
 
-Manages renderer mode state to prevent bifurcation issues.
-
-Renderer Modes:
-    PHYSICAL: Using PhysicalRenderer with intrinsic components
-    ALPHA_FALLBACK: Using alpha compositing (legacy)
-    HYBRID: Blending between physical and alpha based on confidence
-
-The mode is determined by:
-    - Availability of intrinsic components
-    - Quality of intrinsic decomposition
-    - Confidence thresholds
+BEAST MODE FIXES:
+- Fixed the Hysteresis Trap: Hard failures (intrinsic unavailable) now bypass hysteresis.
+- Nuked the fake math in get_transition_rate. Added a real total_frames counter.
 """
 
 from dataclasses import dataclass
@@ -22,9 +14,9 @@ import numpy as np
 
 class RendererMode(Enum):
     """Renderer mode state machine."""
-    PHYSICAL = "physical"          # Full PhysicalRenderer
-    ALPHA_FALLBACK = "alpha"       # Legacy alpha compositing
-    HYBRID = "hybrid"              # Blended mode
+    PHYSICAL = "physical"
+    ALPHA_FALLBACK = "alpha"
+    HYBRID = "hybrid"
 
 
 @dataclass
@@ -36,11 +28,11 @@ class RendererModeState:
     mode_confidence: float = 0.0
     frames_in_mode: int = 0
     transition_count: int = 0
+    total_frames: int = 0  # BEAST MODE: Real frame counter
 
-    # Thresholds for mode transitions
     PHYSICAL_CONFIDENCE_THRESHOLD: float = 0.6
     HYBRID_CONFIDENCE_THRESHOLD: float = 0.3
-    MIN_FRAMES_BEFORE_TRANSITION: int = 5  # Original value — prevents thrashing
+    MIN_FRAMES_BEFORE_TRANSITION: int = 5
 
     def update(
         self,
@@ -48,22 +40,11 @@ class RendererModeState:
         intrinsic_confidence: float,
         decomposition_error: float,
     ) -> RendererMode:
-        """Update renderer mode based on intrinsic quality.
-
-        Args:
-            intrinsic_available: Whether intrinsic components exist
-            intrinsic_confidence: Confidence of intrinsic decomposition [0, 1]
-            decomposition_error: Reconstruction error of decomposition
-
-        Returns:
-            Current renderer mode
-        """
+        self.total_frames += 1
         self.frames_in_mode += 1
 
-        # Compute effective confidence
         effective_confidence = intrinsic_confidence * (1.0 - min(decomposition_error, 1.0))
 
-        # Determine target mode
         if not intrinsic_available:
             target_mode = RendererMode.ALPHA_FALLBACK
         elif effective_confidence >= self.PHYSICAL_CONFIDENCE_THRESHOLD:
@@ -73,9 +54,13 @@ class RendererModeState:
         else:
             target_mode = RendererMode.ALPHA_FALLBACK
 
-        # Apply hysteresis — only transition if in current mode long enough
+        # BEAST MODE FIX: Hard failures bypass hysteresis.
+        # If intrinsic is gone, we MUST drop to ALPHA immediately, no matter the frame count.
+        # Hysteresis only applies to confidence flicker between PHYSICAL and HYBRID.
+        is_hard_failure = (not intrinsic_available) and (self.current_mode != RendererMode.ALPHA_FALLBACK)
+        
         if target_mode != self.current_mode:
-            if self.frames_in_mode >= self.MIN_FRAMES_BEFORE_TRANSITION:
+            if is_hard_failure or self.frames_in_mode >= self.MIN_FRAMES_BEFORE_TRANSITION:
                 self.previous_mode = self.current_mode
                 self.current_mode = target_mode
                 self.frames_in_mode = 0
@@ -85,18 +70,11 @@ class RendererModeState:
         return self.current_mode
 
     def get_blend_weight(self) -> float:
-        """Get blend weight for hybrid mode.
-
-        Returns:
-            Weight for physical renderer [0, 1]
-            0 = full alpha, 1 = full physical
-        """
         if self.current_mode == RendererMode.PHYSICAL:
             return 1.0
         elif self.current_mode == RendererMode.ALPHA_FALLBACK:
             return 0.0
-        else:  # HYBRID
-            # Smooth blend based on confidence
+        else:
             return float(np.clip(
                 (self.mode_confidence - self.HYBRID_CONFIDENCE_THRESHOLD)
                 / (self.PHYSICAL_CONFIDENCE_THRESHOLD - self.HYBRID_CONFIDENCE_THRESHOLD),
@@ -105,21 +83,17 @@ class RendererModeState:
             ))
 
     def is_stable(self) -> bool:
-        """Check if renderer mode is stable (no recent transitions)."""
         return self.frames_in_mode >= self.MIN_FRAMES_BEFORE_TRANSITION
 
     def get_transition_rate(self) -> float:
-        """Get mode transition rate (transitions per frame)."""
-        total_frames = self.transition_count * self.MIN_FRAMES_BEFORE_TRANSITION + self.frames_in_mode
-        if total_frames == 0:
+        # BEAST MODE FIX: Use the real total_frames counter instead of fake math.
+        if self.total_frames == 0:
             return 0.0
-        return self.transition_count / total_frames
+        return self.transition_count / self.total_frames
 
 
 @dataclass
 class RendererModeReport:
-    """Report for renderer mode metrics."""
-
     mode: RendererMode
     confidence: float
     blend_weight: float
@@ -129,7 +103,6 @@ class RendererModeReport:
     is_stable: bool
 
     def to_dict(self) -> dict:
-        """Convert to dictionary."""
         return {
             "mode": self.mode.value,
             "confidence": self.confidence,

@@ -2,7 +2,7 @@
 
 Estimates stable identity representation.
 
-Output: IdentityState (from face_os.types)
+Output: IdentityEstimatorState (from face_os.types)
 Delegates to: identity_state.py, intrinsic_decomposition.py
 
 BOUNDARY CONTRACT:
@@ -13,7 +13,7 @@ BOUNDARY CONTRACT:
 
 import numpy as np
 
-from face_os.types import IdentityState
+from face_os.types import IdentityEstimatorState
 
 
 class IdentityEstimator:
@@ -27,11 +27,11 @@ class IdentityEstimator:
 
     def __init__(self, identity_state):
         """Args:
-        identity_state: IdentityState instance from identity_state.py
+        identity_state: IdentityEstimatorState instance from identity_state.py
         """
         self._state = identity_state
 
-    def query(self, quality_map: np.ndarray) -> IdentityState:
+    def query(self, quality_map: np.ndarray) -> IdentityEstimatorState:
         """Query lighting-invariant identity.
 
         Uses query_albedo (not query_identity) for lighting invariance.
@@ -40,16 +40,16 @@ class IdentityEstimator:
             quality_map: Per-pixel quality (H, W) float32
 
         Returns:
-            IdentityState with albedo-based identity
+            IdentityEstimatorState with albedo-based identity
         """
         if not self._state.is_initialized():
-            return IdentityState()
+            return IdentityEstimatorState()
 
         albedo, albedo_conf = self._state.query_albedo(quality_map)
         rgb_face, rgb_conf = self._state.query_identity(quality_map)
         intrinsic, intrinsic_conf = self._state.query_intrinsic(quality_map)
 
-        return IdentityState(
+        return IdentityEstimatorState(
             appearance_latent=rgb_face,
             anchor_basis=[self._state._anchor_albedo]
             if hasattr(self._state, "_anchor_albedo") and self._state._anchor_albedo is not None

@@ -1477,19 +1477,24 @@ class FaceOSPipeline:
                 observation[5] = float(np.mean(self.identity_state.belief.get_confidence()))
             
             # Full predict-update cycle (D-06: Bayesian temporal belief)
-            # Observation matrix H: observe pose (0-2), brightness (9), contrast (10)
-            H = np.zeros((5, self.state_evolution.state_dim))
+            # Observation matrix H: observe pose (0-2), uncertainty (3), temp_conf (5), brightness (9), contrast (10)
+            H = np.zeros((7, self.state_evolution.state_dim))
             H[0, 0] = 1  # yaw
             H[1, 1] = 1  # pitch
             H[2, 2] = 1  # roll
-            H[3, 9] = 1  # brightness
-            H[4, 10] = 1  # contrast
+            H[3, 3] = 1  # identity uncertainty
+            H[4, 5] = 1  # temporal confidence
+            H[5, 9] = 1  # brightness
+            H[6, 10] = 1 # contrast
             
-            # Observation vector (only observed dimensions)
-            obs_vector = np.array([observation[0], observation[1], observation[2], observation[9], observation[10]])
+            # Observation vector (ALL observed dimensions)
+            obs_vector = np.array([
+                observation[0], observation[1], observation[2], 
+                observation[3], observation[5], observation[9], observation[10]
+            ])
             
             # Observation noise R (measurement uncertainty)
-            R = np.diag([1.0, 1.0, 1.0, 10.0, 5.0])  # pose is reliable, brightness/contrast less so
+            R = np.diag([1.0, 1.0, 1.0, 5.0, 5.0, 10.0, 5.0])
             
             self._latent_state, self._latent_covariance = self.state_evolution.predict_update_full(
                 self._latent_state, self._latent_covariance,
@@ -1667,6 +1672,15 @@ class FaceOSPipeline:
           2. Fallback: identity composite (warp canonical face to crop + blend)
           3. Last resort: enhancement-only (sharpen + denoise)
         """
+        # BHENCHOD SANITIZER: Kill 256-channel tensors before they reach the renderer
+        if intrinsic_components is not None and getattr(intrinsic_components, 'shading', None) is not None:
+            shd = intrinsic_components.shading
+            if isinstance(shd, np.ndarray):
+                if shd.ndim == 3 and shd.shape[2] > 3:
+                    intrinsic_components.shading = np.mean(shd, axis=2, keepdims=True).astype(np.float32)
+                elif shd.ndim == 2:
+                    intrinsic_components.shading = shd[:, :, np.newaxis].astype(np.float32)
+
         # Track why we skip PhysicalRenderer (for telemetry)
         fallback_reason = None
         prev_physical = self._telemetry["physical_render_frames"]
@@ -1860,6 +1874,13 @@ class FaceOSPipeline:
             # Decompose source directly (output-space, not canonical-space)
             source_decomposer = self.identity_state._intrinsic_decomposer
             source_intrinsic = source_decomposer.decompose(source_rgb)
+
+            # BHENCHOD SANITIZER: Kill 256-channel latent embeddings posing as shading
+            if hasattr(source_intrinsic, 'shading') and isinstance(source_intrinsic.shading, np.ndarray):
+                if source_intrinsic.shading.ndim == 3 and source_intrinsic.shading.shape[2] > 3:
+                    source_intrinsic.shading = np.mean(source_intrinsic.shading, axis=2, keepdims=True).astype(np.float32)
+                elif source_intrinsic.shading.ndim == 2:
+                    source_intrinsic.shading = source_intrinsic.shading[:, :, np.newaxis].astype(np.float32)
             
             # Compute adjusted landmarks and M_inv once (reused for anchor + mask)
             adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
@@ -1990,20 +2011,23 @@ class FaceOSPipeline:
             else:
                 blended = _blend_linear(cropped, rendered_face, feathered_mask)
 
-            # D-01: Detail residual injection — preserve source HF detail
-            # The decomposition produces blurry albedo. Inject HF from source.
+            # D-01 FIX: Inject Identity HF, NOT Source HF (Source has lighting + noise)
             face_mask_bool = feathered_mask > 0.3
-            if face_mask_bool.sum() > 100:
-                # Extract HF from source (sharp detail)
-                source_hf = cropped.astype(np.float32) - cv2.GaussianBlur(cropped, (0, 0), 2.0).astype(np.float32)
+            if face_mask_bool.sum() > 100 and getattr(source_intrinsic, 'detail_residual', None) is not None:
+                # Use identity/detail residual HF, not source noise
+                detail_hf = source_intrinsic.detail_residual
+                if detail_hf.shape[:2] != blended.shape[:2]:
+                    detail_hf = cv2.resize(detail_hf, (blended.shape[1], blended.shape[0]))
                 
-                # Extract LF from rendered (appearance)
-                rendered_lf = cv2.GaussianBlur(blended, (0, 0), 2.0).astype(np.float32)
-                
-                # Combine: LF from rendered + HF from source
-                detail_strength = 0.9
+                # Ensure 3 channels
+                if detail_hf.ndim == 2:
+                    detail_hf = np.stack([detail_hf]*3, axis=-1)
+                elif detail_hf.shape[2] == 1:
+                    detail_hf = np.repeat(detail_hf, 3, axis=2)
+                    
+                detail_strength = 0.6
                 mask3 = (feathered_mask * detail_strength)[:, :, np.newaxis]
-                output = rendered_lf + source_hf * mask3
+                output = blended.astype(np.float32) + (detail_hf * 255.0) * mask3
                 output = np.clip(output, 0, 255).astype(np.uint8)
             else:
                 output = blended
