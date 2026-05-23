@@ -100,6 +100,29 @@ class TestFastRotation:
             frame = generate_face_frame(yaw=yaw)
             assert not np.any(np.isnan(frame))
 
+    def test_pipeline_processing(self):
+        """Run fast rotation sequence through FaceOSPipeline and verify robust tracking/telemetry."""
+        from face_os.pipeline import FaceOSPipeline
+        frames = [generate_face_frame(yaw=i * 2.0) for i in range(30)]
+        pipeline = FaceOSPipeline(use_bidirectional=False)
+        assert pipeline.enroll(reference_image="expectation.png", reference_dir="photos/")
+
+        for idx, frame in enumerate(frames):
+            result = pipeline.process_frame(frame, frame_idx=idx)
+            assert result is not None
+            assert "frame" in result
+            assert result["frame"].shape == (1920, 1080, 3)
+            assert result["frame"].dtype == np.uint8
+            assert not np.any(np.isnan(result["frame"]))
+
+        telemetry = pipeline.get_frame_telemetry()
+        assert len(telemetry) == len(frames)
+        for t in telemetry:
+            assert "render_path" in t
+            assert "renderer_mode" in t
+            assert "fallback_reason" in t
+        assert any(t["fallback_reason"] == "face_lost" for t in telemetry)
+
 
 class TestOcclusion:
     """Partial face occlusion."""
@@ -119,6 +142,29 @@ class TestOcclusion:
             frame = generate_face_frame(occlusion_rect=(x, 60, 40, 60))
             frames.append(frame)
         assert len(frames) == 20
+
+    def test_pipeline_processing(self):
+        """Run occlusion sequence through FaceOSPipeline."""
+        from face_os.pipeline import FaceOSPipeline
+        frames = [generate_face_frame(occlusion_rect=(50 + i * 5, 60, 40, 60)) for i in range(20)]
+        pipeline = FaceOSPipeline(use_bidirectional=False)
+        assert pipeline.enroll(reference_image="expectation.png", reference_dir="photos/")
+
+        for idx, frame in enumerate(frames):
+            result = pipeline.process_frame(frame, frame_idx=idx)
+            assert result is not None
+            assert "frame" in result
+            assert result["frame"].shape == (1920, 1080, 3)
+            assert result["frame"].dtype == np.uint8
+            assert not np.any(np.isnan(result["frame"]))
+
+        telemetry = pipeline.get_frame_telemetry()
+        assert len(telemetry) == len(frames)
+        for t in telemetry:
+            assert "render_path" in t
+            assert "renderer_mode" in t
+            assert "fallback_reason" in t
+        assert any(t["fallback_reason"] == "face_lost" for t in telemetry)
 
 
 class TestLowLight:
@@ -140,6 +186,29 @@ class TestLowLight:
         # Last frame should be very dark
         assert np.mean(frames[-1]) < 30
 
+    def test_pipeline_processing(self):
+        """Run low-light sequence through FaceOSPipeline."""
+        from face_os.pipeline import FaceOSPipeline
+        frames = [generate_face_frame(brightness=b) for b in range(128, 10, -5)]
+        pipeline = FaceOSPipeline(use_bidirectional=False)
+        assert pipeline.enroll(reference_image="expectation.png", reference_dir="photos/")
+
+        for idx, frame in enumerate(frames):
+            result = pipeline.process_frame(frame, frame_idx=idx)
+            assert result is not None
+            assert "frame" in result
+            assert result["frame"].shape == (1920, 1080, 3)
+            assert result["frame"].dtype == np.uint8
+            assert not np.any(np.isnan(result["frame"]))
+
+        telemetry = pipeline.get_frame_telemetry()
+        assert len(telemetry) == len(frames)
+        for t in telemetry:
+            assert "render_path" in t
+            assert "renderer_mode" in t
+            assert "fallback_reason" in t
+        assert any(t["fallback_reason"] == "face_lost" for t in telemetry)
+
 
 class TestMotionBlur:
     """Motion blur from fast head movement."""
@@ -160,6 +229,29 @@ class TestMotionBlur:
 
         assert blur_var < sharp_var
 
+    def test_pipeline_processing(self):
+        """Run motion-blurred sequence through FaceOSPipeline."""
+        from face_os.pipeline import FaceOSPipeline
+        frames = [generate_face_frame(blur_ksize=k) for k in [0, 3, 5, 7, 9, 11, 13, 15]]
+        pipeline = FaceOSPipeline(use_bidirectional=False)
+        assert pipeline.enroll(reference_image="expectation.png", reference_dir="photos/")
+
+        for idx, frame in enumerate(frames):
+            result = pipeline.process_frame(frame, frame_idx=idx)
+            assert result is not None
+            assert "frame" in result
+            assert result["frame"].shape == (1920, 1080, 3)
+            assert result["frame"].dtype == np.uint8
+            assert not np.any(np.isnan(result["frame"]))
+
+        telemetry = pipeline.get_frame_telemetry()
+        assert len(telemetry) == len(frames)
+        for t in telemetry:
+            assert "render_path" in t
+            assert "renderer_mode" in t
+            assert "fallback_reason" in t
+        assert any(t["fallback_reason"] == "face_lost" for t in telemetry)
+
 
 class TestOverexposure:
     """Overexposed frames (L > 240)."""
@@ -174,6 +266,29 @@ class TestOverexposure:
         """No overflow in bright frames."""
         frame = generate_face_frame(brightness=250)
         assert frame.max() <= 255
+
+    def test_pipeline_processing(self):
+        """Run overexposed sequence through FaceOSPipeline."""
+        from face_os.pipeline import FaceOSPipeline
+        frames = [generate_face_frame(brightness=b) for b in range(128, 255, 10)]
+        pipeline = FaceOSPipeline(use_bidirectional=False)
+        assert pipeline.enroll(reference_image="expectation.png", reference_dir="photos/")
+
+        for idx, frame in enumerate(frames):
+            result = pipeline.process_frame(frame, frame_idx=idx)
+            assert result is not None
+            assert "frame" in result
+            assert result["frame"].shape == (1920, 1080, 3)
+            assert result["frame"].dtype == np.uint8
+            assert not np.any(np.isnan(result["frame"]))
+
+        telemetry = pipeline.get_frame_telemetry()
+        assert len(telemetry) == len(frames)
+        for t in telemetry:
+            assert "render_path" in t
+            assert "renderer_mode" in t
+            assert "fallback_reason" in t
+        assert any(t["fallback_reason"] == "face_lost" for t in telemetry)
 
 
 class TestHeavyNoise:
@@ -192,6 +307,29 @@ class TestHeavyNoise:
         # Correlation should be > 0.5 (structure preserved)
         corr = np.corrcoef(clean.flatten(), noisy.flatten())[0, 1]
         assert corr > 0.5
+
+    def test_pipeline_processing(self):
+        """Run noisy sequence through FaceOSPipeline."""
+        from face_os.pipeline import FaceOSPipeline
+        frames = [generate_face_frame(noise_std=s) for s in range(0, 50, 5)]
+        pipeline = FaceOSPipeline(use_bidirectional=False)
+        assert pipeline.enroll(reference_image="expectation.png", reference_dir="photos/")
+
+        for idx, frame in enumerate(frames):
+            result = pipeline.process_frame(frame, frame_idx=idx)
+            assert result is not None
+            assert "frame" in result
+            assert result["frame"].shape == (1920, 1080, 3)
+            assert result["frame"].dtype == np.uint8
+            assert not np.any(np.isnan(result["frame"]))
+
+        telemetry = pipeline.get_frame_telemetry()
+        assert len(telemetry) == len(frames)
+        for t in telemetry:
+            assert "render_path" in t
+            assert "renderer_mode" in t
+            assert "fallback_reason" in t
+        assert any(t["fallback_reason"] == "face_lost" for t in telemetry)
 
 
 class TestCombinedDegradation:
@@ -223,3 +361,36 @@ class TestCombinedDegradation:
             )
             frames.append(frame)
         assert len(frames) == 30
+
+    def test_pipeline_processing(self):
+        """Run worst-case sequence through FaceOSPipeline."""
+        from face_os.pipeline import FaceOSPipeline
+        frames = []
+        for i in range(30):
+            frame = generate_face_frame(
+                brightness=30 + i,
+                yaw=i * 2.0,
+                blur_ksize=5 + i,
+                noise_std=10 + i,
+                occlusion_rect=(80 + i*2, 60, 30, 50),
+            )
+            frames.append(frame)
+
+        pipeline = FaceOSPipeline(use_bidirectional=False)
+        assert pipeline.enroll(reference_image="expectation.png", reference_dir="photos/")
+
+        for idx, frame in enumerate(frames):
+            result = pipeline.process_frame(frame, frame_idx=idx)
+            assert result is not None
+            assert "frame" in result
+            assert result["frame"].shape == (1920, 1080, 3)
+            assert result["frame"].dtype == np.uint8
+            assert not np.any(np.isnan(result["frame"]))
+
+        telemetry = pipeline.get_frame_telemetry()
+        assert len(telemetry) == len(frames)
+        for t in telemetry:
+            assert "render_path" in t
+            assert "renderer_mode" in t
+            assert "fallback_reason" in t
+        assert any(t["fallback_reason"] == "face_lost" for t in telemetry)

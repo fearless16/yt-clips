@@ -210,6 +210,8 @@ class FaceOSPipeline:
 
         # D-08: Per-frame telemetry log (every frame exposed as JSON)
         self._frame_telemetry_log: list = []
+        self._last_geometry_source = "none"
+        self._last_transform_det = 1.0
 
         # D-02: A/B validation — render mode override (None = use default, 'alpha' = force alpha)
         self.render_mode_override: Optional[str] = None
@@ -582,17 +584,13 @@ class FaceOSPipeline:
         Returns:
             Dict with keys: 'frame' (output ndarray), 'landmarks', 'transform', 'render_path'
         """
-        # Detect face
-        face_track = None
-        detections = detect_track.detect_faces(frame)
-        if detections:
-            face_track = self.tracker.update(detections, frame_idx)
-            if face_track and face_track.smooth_bbox:
-                lm = lm_module.extract_landmarks(frame, face_track.mesh_478)
-                face_track.landmarks = lm
+        # Process through forward path v2
+        timestamp = float(frame_idx) / 30.0
+        output = self._process_frame_v2(frame, frame_idx, timestamp)
 
-        # Process through forward path
-        output = self._process_frame_v2(frame, frame_idx, face_track, face_track.landmarks if face_track else None)
+        # Get landmarks from tracker if target track exists
+        face_track = self.tracker._get_target_track()
+        landmarks = face_track.landmarks if face_track and hasattr(face_track, 'landmarks') else None
 
         # Get last render path from telemetry
         render_path = "enhancement"
@@ -601,7 +599,7 @@ class FaceOSPipeline:
 
         return {
             'frame': output if output is not None else frame,
-            'landmarks': face_track.landmarks if face_track and hasattr(face_track, 'landmarks') else None,
+            'landmarks': landmarks,
             'transform': self._last_SIM2,
             'render_path': render_path,
         }
@@ -975,6 +973,11 @@ class FaceOSPipeline:
             # D-08: Emit telemetry even for lost-face frames
             self._emit_frame_telemetry(
                 frame_idx, "face_lost", None, {}, 0, 0,
+                render_path="enhancement",
+                intrinsic_used=False,
+                geometry_source="none",
+                resample_count=0,
+                transform_det=1.0,
             )
             return output
 
@@ -1202,9 +1205,6 @@ class FaceOSPipeline:
                         frame_idx=frame_idx,
                     )
 
-                    # Post-sharpen to recover detail from low-res source
-                    if output is not None:
-                        output = face_enhance._sharpen(output, amount=0.8, radius=0.8)
                     return output
 
             except Exception as e:
@@ -1244,8 +1244,8 @@ class FaceOSPipeline:
         Uses geometry-based canonical mask (brightness-invariant).
         """
         adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
-        _, _, M = canonical_map.warp_to_canonical(
-            cropped, adjusted_lm,
+        M, _ = canonical_map.compute_alignment(
+            adjusted_lm,
             canonical_size=tuple(cfg.canonical.atlas_size),
         )
         M_inv = np.linalg.inv(M)[:2]
@@ -1255,6 +1255,7 @@ class FaceOSPipeline:
             interpolated = interpolate_sim2(self._last_SIM2, current_sim2, 0.6)
             M_inv = self._sim2_to_affine(interpolated)
         self._last_SIM2 = current_sim2
+        self._last_transform_det = current_sim2.scale ** 2
 
         # D-01b: Single-resample — combine identity + mask into one warp
         h, w = cropped.shape[:2]
@@ -1274,7 +1275,7 @@ class FaceOSPipeline:
         blend_3d = aligned_mask[:, :, np.newaxis]
         # D-01: Linear-light compositing (physically correct gamma handling)
         # D-01c: Multi-band blending when configured
-        blend_mode = cfg.compositor.get("blend_mode", "alpha") if hasattr(cfg, 'compositor') else "alpha"
+        blend_mode = self._resolve_blend_mode()
         if blend_mode == "laplacian":
             output = multiband_blend(cropped, identity_in_crop, aligned_mask, levels=4)
         else:
@@ -1392,6 +1393,11 @@ class FaceOSPipeline:
         energy_terms: dict,
         prev_physical: int,
         prev_alpha: int,
+        render_path: Optional[str] = None,
+        intrinsic_used: Optional[bool] = None,
+        geometry_source: Optional[str] = None,
+        resample_count: int = 0,
+        transform_det: Optional[float] = None,
     ) -> None:
         """D-08: Emit per-frame telemetry JSON.
 
@@ -1399,30 +1405,26 @@ class FaceOSPipeline:
         to ensure every frame is logged. Wrapped in try/except to guarantee emission.
         """
         try:
-            sim2_det = 1.0
-            if self._last_SIM2 is not None:
-                try:
-                    sim2_det = self._last_SIM2.scale ** 2
-                except Exception:
-                    pass
+            sim2_det = self._last_transform_det if transform_det is None else float(transform_det)
             renderer_mode = "unknown"
             try:
                 renderer_mode = self.renderer_mode_state.current_mode.value if self.renderer_mode_state else "unknown"
             except Exception:
                 pass
-            geometry_source = "unknown"
-            try:
-                geometry_source = self.identity_state.get_normal_source() if self.identity_state else "unknown"
-            except Exception:
-                pass
+            if geometry_source is None:
+                geometry_source = self._last_geometry_source
+            if intrinsic_used is None:
+                intrinsic_used = intrinsic_components is not None
+            if render_path is None:
+                render_path = "physical" if self._telemetry["physical_render_frames"] > prev_physical else "alpha" if self._telemetry["alpha_fallback_frames"] > prev_alpha else "enhancement"
             self._frame_telemetry_log.append({
                 "frame_idx": frame_idx,
-                "render_path": "physical" if self._telemetry["physical_render_frames"] > prev_physical else "alpha" if self._telemetry["alpha_fallback_frames"] > prev_alpha else "enhancement",
+                "render_path": render_path,
                 "renderer_mode": renderer_mode,
                 "fallback_reason": fallback_reason,
-                "intrinsic_used": intrinsic_components is not None,
+                "intrinsic_used": bool(intrinsic_used),
                 "geometry_source": geometry_source,
-                "resample_count": 1,
+                "resample_count": int(resample_count),
                 "energy_terms": energy_terms if energy_terms else {},
                 "transform_det": sim2_det,
             })
@@ -1431,8 +1433,31 @@ class FaceOSPipeline:
             self._frame_telemetry_log.append({
                 "frame_idx": frame_idx,
                 "render_path": "error",
+                "renderer_mode": "unknown",
                 "fallback_reason": fallback_reason or "telemetry_error",
+                "intrinsic_used": False,
+                "geometry_source": "unknown",
+                "resample_count": 0,
+                "energy_terms": {},
+                "transform_det": 1.0,
             })
+
+    def _resolve_blend_mode(self) -> str:
+        """Return an implemented compositor mode."""
+        try:
+            mode = cfg.compositor.get("blend_mode", "laplacian")
+        except Exception:
+            mode = "laplacian"
+        return "alpha" if mode == "alpha" else "laplacian"
+
+    def _postprocess_rendered_crop(
+        self,
+        output: np.ndarray,
+        face_mask: Optional[np.ndarray],
+    ) -> np.ndarray:
+        """Apply the common post-composite detail and photometric lock pass."""
+        output = face_enhance._sharpen(output, amount=0.8, radius=0.8)
+        return photometric_lock(output, face_mask)
 
     def _compute_energy_terms(
         self,
@@ -1533,12 +1558,15 @@ class FaceOSPipeline:
             )
             if result is not None:
                 self._telemetry["physical_render_frames"] += 1
-                # D-01: Temporal photometric locking
-                result = photometric_lock(result, face_mask)
+                result = self._postprocess_rendered_crop(result, face_mask)
                 # D-08: Per-frame telemetry (before early return)
                 self._emit_frame_telemetry(
                     frame_idx, fallback_reason, intrinsic_components,
                     energy_terms, prev_physical, prev_alpha,
+                    render_path="physical",
+                    intrinsic_used=True,
+                    geometry_source=self._last_geometry_source,
+                    resample_count=1,
                 )
                 # PATCH 5: Render timing for physical path
                 render_time_ms = (_time.perf_counter() - _render_start) * 1000
@@ -1564,10 +1592,7 @@ class FaceOSPipeline:
                     output = self._composite_identity_to_crop(
                         cropped, identity_face, landmarks, crop_plan, frame_idx,
                     )
-                    # D-01: Post-sharpen identity composite path
-                    output = face_enhance._sharpen(output, amount=0.8, radius=0.8)
-                    # D-01: Temporal photometric locking
-                    output = photometric_lock(output, face_mask)
+                    output = self._postprocess_rendered_crop(output, face_mask)
                     self._telemetry["alpha_fallback_frames"] += 1
                     if fallback_reason:
                         fb_dist = self._telemetry["fallback_reason_distribution"]
@@ -1576,6 +1601,10 @@ class FaceOSPipeline:
                     self._emit_frame_telemetry(
                         frame_idx, fallback_reason, intrinsic_components,
                         energy_terms, prev_physical, prev_alpha,
+                        render_path="alpha",
+                        intrinsic_used=False,
+                        geometry_source="canonical_identity",
+                        resample_count=1,
                     )
                     # PATCH 5: Render timing for identity composite path
                     render_time_ms = (_time.perf_counter() - _render_start) * 1000
@@ -1595,10 +1624,7 @@ class FaceOSPipeline:
             identity_eyes=identity_eyes,
             eye_confidence=eye_confidence,
         )
-        # D-01: Post-sharpen last resort path
-        rendered = face_enhance._sharpen(rendered, amount=0.8, radius=0.8)
-        # D-01: Temporal photometric locking
-        rendered = photometric_lock(rendered, face_mask)
+        rendered = self._postprocess_rendered_crop(rendered, face_mask)
         # RULE 8: Track render timing
         render_time_ms = (_time.perf_counter() - _render_start) * 1000
         self._telemetry["render_time_sum_ms"] += render_time_ms
@@ -1608,6 +1634,10 @@ class FaceOSPipeline:
         self._emit_frame_telemetry(
             frame_idx, fallback_reason, intrinsic_components,
             energy_terms, prev_physical, prev_alpha,
+            render_path="enhancement",
+            intrinsic_used=False,
+            geometry_source="none",
+            resample_count=0,
         )
 
         return rendered
@@ -1652,11 +1682,17 @@ class FaceOSPipeline:
             if adjusted_lm is None:
                 return None
 
-            _, _, M = canonical_map.warp_to_canonical(
-                cropped, adjusted_lm,
+            M, _ = canonical_map.compute_alignment(
+                adjusted_lm,
                 canonical_size=tuple(cfg.canonical.atlas_size),
             )
             M_inv = np.linalg.inv(M)[:2]
+            current_sim2 = self._affine_to_sim2(M_inv)
+            if self._last_SIM2 is not None:
+                interpolated = interpolate_sim2(self._last_SIM2, current_sim2, 0.6)
+                M_inv = self._sim2_to_affine(interpolated)
+            self._last_SIM2 = current_sim2
+            self._last_transform_det = current_sim2.scale ** 2
 
             # Warp anchor albedo to source crop space for correction
             if anchor_albedo is not None:
@@ -1704,10 +1740,14 @@ class FaceOSPipeline:
                     albedo=source_intrinsic.albedo,
                     mesh_vertices=dense_geometry.vertices,
                     mesh_faces=dense_geometry.faces,
+                    shading=source_intrinsic.shading,
                     lighting=lighting,
                     image_shape=source_intrinsic.albedo.shape[:2],
                 )
+                if rendered_output is None:
+                    return None
                 self._telemetry["mesh_normal_frames"] += 1
+                self._last_geometry_source = "mesh"
             else:
                 # Fallback: face-prior normals when geometry fails
                 rendered_output = self._face_renderer.render(
@@ -1716,7 +1756,10 @@ class FaceOSPipeline:
                     shading=source_intrinsic.shading,
                     lighting=lighting,
                 )
+                if rendered_output is None:
+                    return None
                 self._telemetry["shading_normal_frames"] += 1
+                self._last_geometry_source = "face_prior"
             
             # Convert from [0,1] to [0,255] uint8
             # Wrapper returns rendered image directly (not result object)
@@ -1745,7 +1788,7 @@ class FaceOSPipeline:
             
             # D-01: Single composite in output space (linear-light)
             # D-01c: Multi-band blending when configured
-            blend_mode = cfg.compositor.get("blend_mode", "alpha") if hasattr(cfg, 'compositor') else "alpha"
+            blend_mode = self._resolve_blend_mode()
             if blend_mode == "laplacian":
                 blended = multiband_blend(cropped, rendered_face, feathered_mask, levels=4)
             else:
@@ -1999,6 +2042,8 @@ class FaceOSPipeline:
         self._frame_count = 0
         self._last_M_inv = None
         self._last_good_crop_plan = None
+        self._last_geometry_source = "none"
+        self._last_transform_det = 1.0
         self._frame_beliefs = {}
         self._forward_intrinsic_components = None
         self._forward_intrinsic_conf = None

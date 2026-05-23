@@ -363,7 +363,7 @@ class TestVerificationGate:
         bbox = (0, 0, 100, 100)
 
         # Very different embedding
-        different_embedding = ref_embedding + 10.0
+        different_embedding = -ref_embedding
 
         passed, reason = gate.verify(face, bbox, None, embedding=different_embedding)
         assert not passed

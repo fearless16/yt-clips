@@ -62,7 +62,7 @@ class FaceRenderer:
         except Exception:
             return None
 
-    def render_with_mesh(self, albedo, mesh_vertices, mesh_faces, lighting,
+    def render_with_mesh(self, albedo, mesh_vertices, mesh_faces, shading, lighting,
                          image_shape: tuple) -> Optional[np.ndarray]:
         """Render using mesh-derived normals (true geometry).
 
@@ -70,6 +70,7 @@ class FaceRenderer:
             albedo: (H, W, 3) float32 [0,1]
             mesh_vertices: (N, 3) mesh vertex positions
             mesh_faces: (F, 3) face indices
+            shading: (H, W) or (H, W, 1) float32
             lighting: LightingModel
             image_shape: (H, W) output size
 
@@ -84,8 +85,9 @@ class FaceRenderer:
                 albedo=albedo,
                 mesh_vertices=mesh_vertices,
                 mesh_faces=mesh_faces,
+                shading=shading,
                 lighting=lighting,
-                image_shape=image_shape,
+                image_size=image_shape,
             )
             return result.rendered if hasattr(result, 'rendered') else result
         except Exception:

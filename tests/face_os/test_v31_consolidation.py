@@ -837,3 +837,76 @@ class TestPerFrameTelemetry:
         from face_os.pipeline import FaceOSPipeline
         p = FaceOSPipeline()
         assert p.get_frame_telemetry() is p._frame_telemetry_log
+
+    def test_enhancement_telemetry_reports_actual_branch(self):
+        """Enhancement-only render telemetry must not inherit stale counters."""
+        from face_os.pipeline import FaceOSPipeline
+        from face_os.types import CropPlan
+
+        p = FaceOSPipeline()
+        p._telemetry["physical_render_frames"] = 3
+        p._telemetry["alpha_fallback_frames"] = 2
+        frame = np.full((64, 64, 3), 128, dtype=np.uint8)
+
+        result = p._render_core(
+            cropped=frame,
+            source_frame=frame,
+            intrinsic_components=None,
+            intrinsic_conf=None,
+            identity_face=None,
+            landmarks=None,
+            crop_plan=CropPlan(dst_w=64, dst_h=64),
+            region_masks=None,
+            face_mask=None,
+            frame_idx=7,
+        )
+
+        telemetry = p.get_frame_telemetry()[-1]
+        assert result.shape == frame.shape
+        assert telemetry["render_path"] == "enhancement"
+        assert telemetry["intrinsic_used"] is False
+        assert telemetry["geometry_source"] == "none"
+        assert telemetry["resample_count"] == 0
+        for key in [
+            "frame_idx", "render_path", "renderer_mode", "fallback_reason",
+            "intrinsic_used", "geometry_source", "resample_count",
+            "energy_terms", "transform_det",
+        ]:
+            assert key in telemetry
+
+    def test_lost_face_telemetry_does_not_infer_from_counters(self):
+        """Lost-face telemetry must remain explicit after prior physical/alpha frames."""
+        from face_os.pipeline import FaceOSPipeline
+
+        p = FaceOSPipeline()
+        p._telemetry["physical_render_frames"] = 4
+        p._telemetry["alpha_fallback_frames"] = 4
+
+        p._emit_frame_telemetry(
+            frame_idx=8,
+            fallback_reason="face_lost",
+            intrinsic_components=None,
+            energy_terms={},
+            prev_physical=0,
+            prev_alpha=0,
+            render_path="enhancement",
+            intrinsic_used=False,
+            geometry_source="none",
+            resample_count=0,
+            transform_det=1.0,
+        )
+
+        telemetry = p.get_frame_telemetry()[-1]
+        assert telemetry["render_path"] == "enhancement"
+        assert telemetry["fallback_reason"] == "face_lost"
+        assert telemetry["intrinsic_used"] is False
+        assert telemetry["geometry_source"] == "none"
+        assert telemetry["resample_count"] == 0
+
+    def test_default_blend_mode_is_implemented_multiband(self):
+        """Default compositor mode must route to implemented Laplacian blending."""
+        from face_os.config import get_config
+        from face_os.pipeline import FaceOSPipeline
+
+        assert get_config().compositor.blend_mode == "laplacian"
+        assert FaceOSPipeline()._resolve_blend_mode() == "laplacian"
