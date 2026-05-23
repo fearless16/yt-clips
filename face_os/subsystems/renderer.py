@@ -59,7 +59,9 @@ class FaceRenderer:
                 lighting=lighting,
             )
             return result.rendered
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Render failed: %s", e)
             return None
 
     def render_with_mesh(self, albedo, mesh_vertices, mesh_faces, shading, lighting,
@@ -90,5 +92,7 @@ class FaceRenderer:
                 image_size=image_shape,
             )
             return result.rendered if hasattr(result, 'rendered') else result
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Mesh render failed: %s", e)
             return None

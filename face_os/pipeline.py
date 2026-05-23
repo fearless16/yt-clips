@@ -60,7 +60,7 @@ from face_os import canonical_map
 from face_os import crop_planner
 from face_os import face_enhance
 from face_os import compositor
-from face_os.compositor import _blend_linear, multiband_blend
+from face_os.compositor import _blend_linear, multiband_blend, _srgb_to_linear, _linear_to_srgb
 from face_os.photometric import photometric_lock, reset_photometric_lock
 from face_os import export_qc
 
@@ -79,7 +79,7 @@ from face_os.state_evolution import StateEvolution
 from face_os.energy_scaling import EnergyScaler
 
 # D-10: Subsystem wrappers (thin delegation, boundary enforcement)
-from face_os.subsystems import GeometryEstimator, IdentityEstimator, TemporalEstimator, FaceRenderer
+from face_os.subsystems import IdentityEstimator, TemporalEstimator, FaceRenderer
 
 
 cfg = get_config()
@@ -219,7 +219,6 @@ class FaceOSPipeline:
         self.render_mode_override: Optional[str] = None
 
         # D-10: Subsystem wrappers (thin delegation, not replacement)
-        self._geometry_estimator = GeometryEstimator(config=cfg)
         self._identity_estimator = IdentityEstimator(self.identity_state) if self.identity_state else None
         self._temporal_estimator = TemporalEstimator(self.state_evolution) if self.state_evolution else None
         self._face_renderer = FaceRenderer(self.physical_renderer, config=cfg)
@@ -716,7 +715,7 @@ class FaceOSPipeline:
 
         # Get landmarks from tracker if target track exists
         face_track = self.tracker._get_target_track()
-        landmarks = face_track.landmarks if face_track and hasattr(face_track, 'landmarks') else None
+        landmarks = face_track.mesh_478 if face_track and hasattr(face_track, 'mesh_478') else None
 
         # Get last render path from telemetry
         render_path = "enhancement"
@@ -1093,10 +1092,30 @@ class FaceOSPipeline:
         # GATE: Skip identity update if face is lost
         # ═══════════════════════════════════════════════════════════════════
         if self._face_state == "LOST_FACE":
-            # FIX: Apply last good crop instead of returning full frame (prevents dimension jump)
+            # H-02: Use predicted SIM(2) for short occlusion recovery (1-2 frames)
+            if (self._predicted_SIM2 is not None
+                    and self._last_SIM2 is not None
+                    and self._lost_frame_count <= 2
+                    and self.identity_state is not None
+                    and self.identity_state.is_initialized()):
+                try:
+                    M_predicted = self._sim2_to_affine(self._predicted_SIM2)
+                    crop_plan = self.crop.plan_crop(frame.shape[:2], None, None)
+                    output = crop_planner.apply_crop(frame, crop_plan)
+                    self._emit_frame_telemetry(
+                        frame_idx, "face_lost_predicted", None, {}, 0, 0,
+                        render_path="enhancement",
+                        intrinsic_used=False,
+                        geometry_source="predicted_sim2",
+                        resample_count=0,
+                        transform_det=float(self._predicted_SIM2.scale ** 2),
+                    )
+                    return output
+                except Exception:
+                    pass
+
             crop_plan = self.crop.plan_crop(frame.shape[:2], None, None)
             output = crop_planner.apply_crop(frame, crop_plan)
-            # D-08: Emit telemetry even for lost-face frames
             self._emit_frame_telemetry(
                 frame_idx, "face_lost", None, {}, 0, 0,
                 render_path="enhancement",
@@ -1707,6 +1726,17 @@ class FaceOSPipeline:
                                 and self.renderer_mode_state.current_mode in [RendererMode.PHYSICAL, RendererMode.HYBRID]
                                 and landmarks is not None)
 
+            # H-03: Energy-based quality gating
+            if physical_possible and energy_terms:
+                E_geom = energy_terms.get('E_geom', 0.0)
+                E_photometric = energy_terms.get('E_photometric', 0.0)
+                if E_geom > 0.8:
+                    physical_possible = False
+                    fallback_reason = 'energy_geom_extreme'
+                elif E_photometric < 0.1:
+                    physical_possible = False
+                    fallback_reason = 'energy_photometric_low'
+
         if physical_possible:
             result = self._render_with_physical_renderer(
                 source_frame, cropped, intrinsic_components, intrinsic_conf,
@@ -1761,13 +1791,13 @@ class FaceOSPipeline:
                     output = self._composite_identity_to_crop(
                         cropped, identity_face, landmarks, crop_plan, frame_idx,
                     )
-                    output = self._postprocess_rendered_crop(output, face_mask)
                     output = self._inject_detail_residual(
                         output,
                         intrinsic_components,
                         face_mask=face_mask,
                         strength=0.15,
                     )
+                    output = self._postprocess_rendered_crop(output, face_mask)
                     self._telemetry["alpha_fallback_frames"] += 1
                     if fallback_reason:
                         fb_dist = self._telemetry["fallback_reason_distribution"]
@@ -1796,6 +1826,7 @@ class FaceOSPipeline:
                     return output
             except Exception as e:
                 print(f"  Frame {frame_idx}: COMPOSITOR FAILED: {e}")
+                fallback_reason = "compositor_exception"
 
         # 3. Last resort: enhancement only
         enhancement_mask = None
@@ -1807,13 +1838,13 @@ class FaceOSPipeline:
             identity_eyes=identity_eyes,
             eye_confidence=eye_confidence,
         )
-        rendered = self._postprocess_rendered_crop(rendered, face_mask)
         rendered = self._inject_detail_residual(
             rendered,
             intrinsic_components,
             face_mask=face_mask,
             strength=0.15,
         )
+        rendered = self._postprocess_rendered_crop(rendered, face_mask)
         # RULE 8: Track render timing
         render_time_ms = (_time.perf_counter() - _render_start) * 1000
         self._telemetry["render_time_sum_ms"] += render_time_ms
@@ -2027,8 +2058,9 @@ class FaceOSPipeline:
                     
                 detail_strength = 0.6
                 mask3 = (feathered_mask * detail_strength)[:, :, np.newaxis]
-                output = blended.astype(np.float32) + (detail_hf * 255.0) * mask3
-                output = np.clip(output, 0, 255).astype(np.uint8)
+                blended_linear = _srgb_to_linear(blended.astype(np.float32) / 255.0)
+                output_linear = blended_linear + detail_hf * mask3
+                output = (_linear_to_srgb(np.clip(output_linear, 0.0, 1.0)) * 255.0).astype(np.uint8)
             else:
                 output = blended
             
