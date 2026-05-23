@@ -31,7 +31,9 @@ CORE EQUATION:
 
 import argparse
 import json
+import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -223,6 +225,13 @@ class FaceOSPipeline:
         self._face_renderer = FaceRenderer(self.physical_renderer, config=cfg)
         self._dense_geometry = DenseGeometryEstimator()
 
+        self._start_visibility_run()
+        self._log_event(
+            "pipeline_init",
+            use_identity=USE_IDENTITY,
+            use_bidirectional=self.use_bidirectional,
+        )
+
     @staticmethod
     def _affine_to_sim2(M_inv_2x3: np.ndarray) -> SIM2Transform:
         """Convert 2x3 affine matrix to SIM2Transform.
@@ -275,6 +284,107 @@ class FaceOSPipeline:
         if arr.size == 0:
             return 0.0
         return float(np.mean(arr))
+
+    # ─── Visibility / Logging Helpers ──────────────────────────────────────
+
+    def _start_visibility_run(self) -> None:
+        """Start a fresh per-clip visibility/logging run."""
+        self._run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self._visibility_dir = Path("output/face_os/visibility")
+        self._visibility_dir.mkdir(parents=True, exist_ok=True)
+        self._run_log_path = self._visibility_dir / f"pipeline_{self._run_id}.jsonl"
+        self._summary_log_path = self._visibility_dir / f"pipeline_{self._run_id}_summary.json"
+
+        self._logger = logging.getLogger("face_os.pipeline")
+        if not self._logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+            )
+            self._logger.addHandler(handler)
+        self._logger.setLevel(logging.INFO)
+        self._logger.propagate = False
+
+    def _json_default(self, obj):
+        """Safe JSON serialization for numpy / custom objects."""
+        if isinstance(obj, np.ndarray):
+            return {
+                "shape": list(obj.shape),
+                "dtype": str(obj.dtype),
+                "min": float(np.min(obj)) if obj.size else 0.0,
+                "max": float(np.max(obj)) if obj.size else 0.0,
+            }
+        if isinstance(obj, (np.floating, np.integer)):
+            return obj.item()
+        if hasattr(obj, "to_dict"):
+            return obj.to_dict()
+        if hasattr(obj, "__dict__"):
+            return obj.__dict__
+        raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+    def _append_visibility_record(self, record: dict) -> None:
+        """Append one JSONL record to the run log."""
+        line = json.dumps(record, default=self._json_default, ensure_ascii=False)
+        with self._run_log_path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    def _log_event(self, event: str, **payload) -> None:
+        """Human log + JSONL log."""
+        record = {
+            "ts": time.time(),
+            "run_id": getattr(self, "_run_id", "unknown"),
+            "event": event,
+            **payload,
+        }
+        self._append_visibility_record(record)
+        self._logger.info("%s | %s", event, json.dumps(payload, default=self._json_default, ensure_ascii=False))
+
+    def _write_run_summary(self, status: str, output_path: Optional[str] = None) -> None:
+        """Write a final per-run summary JSON."""
+        summary = {
+            "ts": time.time(),
+            "run_id": getattr(self, "_run_id", "unknown"),
+            "status": status,
+            "output_path": output_path,
+            "telemetry": self.get_telemetry_report(),
+            "frames_logged": len(self._frame_telemetry_log),
+        }
+        self._summary_log_path.write_text(
+            json.dumps(summary, indent=2, default=self._json_default, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        self._logger.info("run_summary_written | %s", str(self._summary_log_path))
+
+    def _inject_detail_residual(
+        self,
+        rendered_bgr: np.ndarray,
+        intrinsic_components: Optional["IntrinsicComponents"],
+        face_mask: Optional[np.ndarray] = None,
+        strength: float = 0.30,
+    ) -> np.ndarray:
+        """
+        Re-inject high-frequency detail from intrinsic decomposition.
+        This preserves sharpness without breaking the smooth base render.
+        """
+        if intrinsic_components is None or getattr(intrinsic_components, "detail_residual", None) is None:
+            return rendered_bgr
+
+        base = np.asarray(rendered_bgr, dtype=np.float32)
+        if base.max(initial=0.0) > 1.5:
+            base = base / 255.0
+        base = np.clip(base, 0.0, 1.0)
+
+        detail = np.asarray(intrinsic_components.detail_residual, dtype=np.float32)
+        if detail.shape[:2] != base.shape[:2]:
+            detail = cv2.resize(detail, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_LINEAR)
+
+        if face_mask is not None and face_mask.shape[:2] == base.shape[:2]:
+            mask = np.asarray(face_mask, dtype=np.float32)
+            mask = np.clip(mask, 0.0, 1.0)[..., np.newaxis]
+            detail = detail * mask
+
+        out = np.clip(base + strength * detail, 0.0, 1.0)
+        return (out * 255.0).astype(np.uint8)
 
     def _commit_renderer_mode(
         self,
@@ -550,6 +660,14 @@ class FaceOSPipeline:
             print("ERROR: Must enroll before processing.")
             return None
 
+        self._log_event(
+            "process_start",
+            video_path=video_path,
+            output_path=output_path,
+            max_frames=max_frames,
+            bidirectional=self.use_bidirectional,
+        )
+
         print(f"\n=== FACE OS PROCESSING ===")
         print(f"  Input: {video_path}")
         print(f"  Output: {output_path}")
@@ -561,15 +679,22 @@ class FaceOSPipeline:
         # Reset per-clip state
         self._reset_state()
 
-        # Simple enhancement mode: skip bidirectional solve (needs identity_state)
-        if not USE_IDENTITY:
-            print("  Mode: SIMPLE ENHANCEMENT (no identity, no bidirectional)")
-            return self._process_forward(video_path, output_path, max_frames, meta)
+        try:
+            if not USE_IDENTITY:
+                print("  Mode: SIMPLE ENHANCEMENT (no identity, no bidirectional)")
+                result = self._process_forward(video_path, output_path, max_frames, meta)
+            elif self.use_bidirectional:
+                result = self._process_bidirectional(video_path, output_path, max_frames, meta)
+            else:
+                result = self._process_forward(video_path, output_path, max_frames, meta)
 
-        if self.use_bidirectional:
-            return self._process_bidirectional(video_path, output_path, max_frames, meta)
-        else:
-            return self._process_forward(video_path, output_path, max_frames, meta)
+            self._log_event("process_end", result=result)
+            self._write_run_summary("completed", output_path=result)
+            return result
+        except Exception as e:
+            self._log_event("process_error", error=str(e))
+            self._write_run_summary("failed", output_path=output_path)
+            raise
 
     def process_frame(self, frame: np.ndarray, frame_idx: int = 0) -> dict:
         """Process a single frame and return result dict.
@@ -1418,7 +1543,7 @@ class FaceOSPipeline:
                 intrinsic_used = intrinsic_components is not None
             if render_path is None:
                 render_path = "physical" if self._telemetry["physical_render_frames"] > prev_physical else "alpha" if self._telemetry["alpha_fallback_frames"] > prev_alpha else "enhancement"
-            self._frame_telemetry_log.append({
+            record = {
                 "frame_idx": frame_idx,
                 "render_path": render_path,
                 "renderer_mode": renderer_mode,
@@ -1428,6 +1553,22 @@ class FaceOSPipeline:
                 "resample_count": int(resample_count),
                 "energy_terms": energy_terms if energy_terms else {},
                 "transform_det": sim2_det,
+            }
+            self._frame_telemetry_log.append(record)
+            # JSONL visibility log
+            self._append_visibility_record({
+                "ts": time.time(),
+                "run_id": self._run_id,
+                "event": "frame_telemetry",
+                **record,
+                "totals": {
+                    "physical_render_frames": self._telemetry["physical_render_frames"],
+                    "alpha_fallback_frames": self._telemetry["alpha_fallback_frames"],
+                    "intrinsic_success_frames": self._telemetry["intrinsic_success_frames"],
+                    "intrinsic_failure_frames": self._telemetry["intrinsic_failure_frames"],
+                    "renderer_mode_transitions": self._telemetry["renderer_mode_transitions"],
+                    "render_time_count": self._telemetry["render_time_count"],
+                },
             })
         except Exception:
             # Last resort: emit minimal telemetry so the frame is never lost
@@ -1558,6 +1699,12 @@ class FaceOSPipeline:
                 landmarks, crop_plan, frame_idx, region_masks,
             )
             if result is not None:
+                result = self._inject_detail_residual(
+                    result,
+                    intrinsic_components,
+                    face_mask=face_mask,
+                    strength=0.30,
+                )
                 self._telemetry["physical_render_frames"] += 1
                 result = self._postprocess_rendered_crop(result, face_mask)
                 # D-08: Per-frame telemetry (before early return)
@@ -1568,6 +1715,13 @@ class FaceOSPipeline:
                     intrinsic_used=True,
                     geometry_source=self._last_geometry_source,
                     resample_count=1,
+                )
+                self._logger.info(
+                    "frame=%d | render=physical | fallback=%s | det=%.4f | energy=%s",
+                    frame_idx,
+                    fallback_reason,
+                    float(self._last_transform_det),
+                    json.dumps(energy_terms, default=self._json_default),
                 )
                 # PATCH 5: Render timing for physical path
                 render_time_ms = (_time.perf_counter() - _render_start) * 1000
@@ -1594,6 +1748,12 @@ class FaceOSPipeline:
                         cropped, identity_face, landmarks, crop_plan, frame_idx,
                     )
                     output = self._postprocess_rendered_crop(output, face_mask)
+                    output = self._inject_detail_residual(
+                        output,
+                        intrinsic_components,
+                        face_mask=face_mask,
+                        strength=0.15,
+                    )
                     self._telemetry["alpha_fallback_frames"] += 1
                     if fallback_reason:
                         fb_dist = self._telemetry["fallback_reason_distribution"]
@@ -1606,6 +1766,14 @@ class FaceOSPipeline:
                         intrinsic_used=False,
                         geometry_source="canonical_identity",
                         resample_count=1,
+                    )
+                    self._logger.info(
+                        "frame=%d | render=alpha | fallback=%s | intrinsic=%s | geom=%s | det=%.4f",
+                        frame_idx,
+                        fallback_reason,
+                        intrinsic_components is not None,
+                        self._last_geometry_source,
+                        float(self._last_transform_det),
                     )
                     # PATCH 5: Render timing for identity composite path
                     render_time_ms = (_time.perf_counter() - _render_start) * 1000
@@ -1626,10 +1794,25 @@ class FaceOSPipeline:
             eye_confidence=eye_confidence,
         )
         rendered = self._postprocess_rendered_crop(rendered, face_mask)
+        rendered = self._inject_detail_residual(
+            rendered,
+            intrinsic_components,
+            face_mask=face_mask,
+            strength=0.15,
+        )
         # RULE 8: Track render timing
         render_time_ms = (_time.perf_counter() - _render_start) * 1000
         self._telemetry["render_time_sum_ms"] += render_time_ms
         self._telemetry["render_time_count"] += 1
+
+        self._logger.info(
+            "frame=%d | render=enhancement | fallback=%s | intrinsic=%s | geom=%s | det=%.4f",
+            frame_idx,
+            fallback_reason,
+            intrinsic_components is not None,
+            self._last_geometry_source,
+            float(self._last_transform_det),
+        )
 
         # D-08: Per-frame telemetry JSON emission
         self._emit_frame_telemetry(
@@ -1762,12 +1945,24 @@ class FaceOSPipeline:
                 self._telemetry["shading_normal_frames"] += 1
                 self._last_geometry_source = "face_prior"
             
-            # Convert from [0,1] to [0,255] uint8
+            # Convert from [0,1] to [0,255] uint8 with detail injection
             # Wrapper returns rendered image directly (not result object)
-            if hasattr(rendered_output, 'rendered'):
-                rendered_face = (rendered_output.rendered * 255).astype(np.uint8)
+            if hasattr(rendered_output, "rendered"):
+                rendered_face = np.clip(rendered_output.rendered, 0.0, 1.0).astype(np.float32)
+                rendered_face = self._inject_detail_residual(
+                    (rendered_face * 255.0).astype(np.uint8),
+                    source_intrinsic,
+                    face_mask=None,
+                    strength=0.25,
+                )
             else:
-                rendered_face = (rendered_output * 255).astype(np.uint8)
+                rendered_face = np.clip(rendered_output, 0.0, 1.0).astype(np.float32)
+                rendered_face = self._inject_detail_residual(
+                    (rendered_face * 255.0).astype(np.uint8),
+                    source_intrinsic,
+                    face_mask=None,
+                    strength=0.25,
+                )
             
             # D-01b: Reuse M_inv for mask warp (same canonical transform)
             canonical_mask = self._make_canonical_geometry_mask(
@@ -2042,6 +2237,8 @@ class FaceOSPipeline:
         NOTE: Identity state is NOT reset — it preserves the anchor
         and accumulated observations from enrollment.
         """
+        self._start_visibility_run()
+        self._log_event("reset_state", reason="new_clip", use_identity=USE_IDENTITY)
         if self.crop:
             self.crop.reset()
         # DON'T reset identity state — it preserves the anchor
