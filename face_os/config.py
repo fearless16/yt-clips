@@ -92,7 +92,7 @@ _DEFAULTS: Dict[str, Any] = {
     # ─── Compositor ────────────────────────────────────────────────────────
     "compositor": {
         "confidence_threshold": 0.3,          # Below this, use source pixels
-        "blend_mode": "poisson",              # poisson | laplacian | alpha
+        "blend_mode": "laplacian",            # laplacian | alpha
         "feather_pixels": 10,                 # Edge feathering width
         "use_light_matching": True,           # Match lighting between face and background
     },

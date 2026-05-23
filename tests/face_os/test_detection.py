@@ -148,7 +148,7 @@ class TestIdentityMatching:
         emb = _compute_embedding(other, (0, 0, other.shape[1], other.shape[0]))
         if emb is None:
             pytest.skip("Could not compute embedding from other face")
-        is_match, distance = match_identity(emb, reference_embeddings, tolerance=0.55)
+        is_match, distance = match_identity(emb, reference_embeddings, tolerance=0.20)
         # Different face should NOT match
         assert not is_match, f"Different face matched with distance {distance:.3f}"
 

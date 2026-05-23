@@ -20,6 +20,45 @@ from face_os.physical_renderer import (
     PhysicalRenderOutput,
     RenderReport,
 )
+from face_os.subsystems.renderer import FaceRenderer
+
+
+class TestFaceRendererWrapper:
+    """Tests for the subsystem wrapper around PhysicalRenderer."""
+
+    def test_render_with_mesh_passes_shading_and_image_size(self):
+        """Wrapper must match PhysicalRenderer.render_with_mesh signature."""
+        class StrictRenderer:
+            def render_with_mesh(
+                self,
+                albedo,
+                mesh_vertices,
+                mesh_faces,
+                shading,
+                lighting=None,
+                image_size=None,
+                **kwargs,
+            ):
+                assert shading is not None
+                assert image_size == albedo.shape[:2]
+                return albedo
+
+        wrapper = FaceRenderer(StrictRenderer())
+        albedo = np.ones((32, 32, 3), dtype=np.float32) * 0.5
+        shading = np.ones((32, 32, 1), dtype=np.float32)
+        vertices = np.array([[0, 0, 1], [31, 0, 1], [0, 31, 1]], dtype=np.float32)
+        faces = np.array([[0, 1, 2]], dtype=np.int32)
+
+        result = wrapper.render_with_mesh(
+            albedo=albedo,
+            mesh_vertices=vertices,
+            mesh_faces=faces,
+            shading=shading,
+            lighting=LightingModel(),
+            image_shape=albedo.shape[:2],
+        )
+
+        np.testing.assert_allclose(result, albedo)
 
 
 class TestLightingModel:

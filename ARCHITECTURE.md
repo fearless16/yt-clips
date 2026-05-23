@@ -1,5 +1,9 @@
 # Architecture
 
+> Face OS status note: use `face_os/STATE.md` as the current source of truth.
+> Runtime percentages and test counts below are historical snapshots unless
+> repeated in `face_os/STATE.md`.
+
 Two parallel systems co-exist in this codebase:
 
 1. **Face OS** (primary) — Identity-reconstruction pipeline for portrait-mode studio video

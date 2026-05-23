@@ -1,5 +1,8 @@
 # yt-clips — Face OS + YouTube Shorts Automation
 
+> Face OS status note: use `face_os/STATE.md` as the current source of truth.
+> Older metric snapshots in this README are historical until refreshed.
+
 Two pipelines in one repo:
 
 1. **Face OS** — Identity-reconstruction pipeline for portrait-mode studio video

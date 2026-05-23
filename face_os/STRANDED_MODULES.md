@@ -1,12 +1,12 @@
 # Stranded Modules — D-10 / I-10
 
-Last updated: 2026-05-22
+Last updated: 2026-05-23
 
 | Module | File | Tests | Decision | Reason |
 |---|---|---|---|---|
-| DenseGeometryEstimator | dense_geometry.py | 23 | **ACTIVE** | Wired into pipeline at line 1620 — D-04 ALIGNED |
+| DenseGeometryEstimator | dense_geometry.py | 23 | **ACTIVE** | Wired into physical path via `DenseGeometryEstimator.estimate()` → `FaceRenderer.render_with_mesh()` |
 | IdentityManifold | identity_manifold.py | 26 | STRANDED | Riemannian identity space — not needed for current anchor-based system |
-| OptimizationEngine | optimizer_architecture.py | 32 | DELETED | Factor-graph solver — Phase C NOT NEEDED. Current Kalman + SIM(2) is sufficient |
+| OptimizationEngine | optimizer_architecture.py | 32 | STRANDED / PHASE C | Factor-graph solver remains future work; runtime is still procedural orchestration plus Kalman/SIM(2) |
 | VisibilityCalibrator | visibility_calibration.py | 16 | STRANDED | Metric calibration — not needed until hard-scene validation phase |
 | SE2Transform | lie_group.py | (shared) | STRANDED | SE(2) unused at runtime; only SIM(2) is active |
 | ObservabilityAnalyzer | (in optimizer_architecture.py) | 28 | DELETED | Degeneracy analysis for factor-graph — Phase C NOT NEEDED |

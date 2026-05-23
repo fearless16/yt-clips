@@ -1,5 +1,7 @@
 # Face OS — Architecture Audit Report (V3.0.0)
 
+> Historical audit snapshot. Current Face OS status lives in `face_os/STATE.md`.
+
 **Document Status:** Honest assessment of current implementation vs intended architecture  
 **Version:** 3.0.0  
 **Branch:** `fix/v3-audit-stabilization`  

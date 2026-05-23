@@ -1,5 +1,8 @@
 # Face OS V3.1 — Missing Items & Next Actions
 
+> Historical V3.1 planning snapshot. Current Face OS status lives in
+> `face_os/STATE.md`.
+
 **Last Updated:** 2026-05-21  
 **Status:** Runtime-active, telemetry-backed, P0+P1 complete, 893 tests passing
 
