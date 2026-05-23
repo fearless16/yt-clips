@@ -398,13 +398,29 @@ def build_identity_profile(
     """
     profile = IdentityProfile(reference_paths=reference_paths or [])
 
+    # Build reference embeddings for tracker identity matching.
+    from face_os.detect_track import _compute_embedding, detect_faces, extract_face_mesh
+    for ref in reference_images:
+        detections = detect_faces(ref)
+        if detections:
+            for det in detections:
+                if det.smooth_bbox is None:
+                    continue
+                emb = _compute_embedding(ref, det.smooth_bbox)
+                if emb is not None:
+                    profile.embeddings.append(emb)
+                    break
+        else:
+            emb = _compute_embedding(ref, (0, 0, ref.shape[1], ref.shape[0]))
+            if emb is not None:
+                profile.embeddings.append(emb)
+
     # Build initial atlas from best reference
     if reference_images:
         builder = AppearanceFieldBuilder()
         best_img = reference_images[0]  # Primary reference
         
         # Use MediaPipe instead of Haar cascade
-        from face_os.detect_track import detect_faces, extract_face_mesh
         detections = detect_faces(best_img)
         
         if detections:

@@ -587,6 +587,7 @@ class FaceOSPipeline:
         # Process through forward path v2
         timestamp = float(frame_idx) / 30.0
         output = self._process_frame_v2(frame, frame_idx, timestamp)
+        self._telemetry["total_frames"] += 1
 
         # Get landmarks from tracker if target track exists
         face_track = self.tracker._get_target_track()
@@ -1742,7 +1743,7 @@ class FaceOSPipeline:
                     mesh_faces=dense_geometry.faces,
                     shading=source_intrinsic.shading,
                     lighting=lighting,
-                    image_shape=source_intrinsic.albedo.shape[:2],
+                    image_shape=self._normal_raster_shape(source_intrinsic.albedo.shape[:2]),
                 )
                 if rendered_output is None:
                     return None
@@ -1820,6 +1821,16 @@ class FaceOSPipeline:
         except Exception as e:
             print(f"  Frame {frame_idx}: OUTPUT-SPACE RENDER FAILED: {e}")
             return None
+
+    @staticmethod
+    def _normal_raster_shape(image_shape: tuple, max_side: int = 384) -> tuple:
+        """Bound mesh-normal raster resolution for real-time physical rendering."""
+        h, w = image_shape
+        largest = max(h, w)
+        if largest <= max_side:
+            return (h, w)
+        scale = max_side / float(largest)
+        return (max(1, int(round(h * scale))), max(1, int(round(w * scale))))
 
     @staticmethod
     def _make_canonical_geometry_mask(

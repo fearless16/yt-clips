@@ -135,6 +135,25 @@ class TestPhysicalRenderer:
         result = renderer.render(albedo, normal_map, shading)
         assert result.rendered.shape == (256, 256, 3)
 
+    def test_render_with_mesh_resizes_bounded_normal_raster(self):
+        """Mesh normals may be rasterized below output resolution then resized."""
+        renderer = PhysicalRenderer()
+        albedo = np.ones((64, 96, 3), dtype=np.float32) * 0.5
+        shading = np.ones((64, 96, 1), dtype=np.float32)
+        vertices = np.array([[0, 0, 1], [31, 0, 1], [0, 31, 1]], dtype=np.float32)
+        faces = np.array([[0, 1, 2]], dtype=np.int32)
+
+        result = renderer.render_with_mesh(
+            albedo=albedo,
+            mesh_vertices=vertices,
+            mesh_faces=faces,
+            shading=shading,
+            image_size=(32, 32),
+        )
+
+        assert result.rendered.shape == albedo.shape
+        assert np.isfinite(result.rendered).all()
+
     def test_render_valid_range(self):
         """Rendering output must be in [0, 1]."""
         renderer = PhysicalRenderer()
