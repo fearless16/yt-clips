@@ -276,6 +276,8 @@ def _load_transcript_segments(transcript_path: Optional[str]) -> Optional[List[D
     except Exception as e:
         log.warning("Could not load transcript %s: %s", path, e)
         return None
+    if isinstance(data, dict):
+        data = data.get("segments", [])
     if not isinstance(data, list):
         return None
     segments = []

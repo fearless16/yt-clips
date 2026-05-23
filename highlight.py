@@ -396,8 +396,8 @@ def detect_highlights(
         sys.exit(1)
 
     with open(t_path, encoding="utf-8") as f:
-        segments: list[dict] = json.load(f)
-
+        data = json.load(f)
+    segments = data if isinstance(data, list) else data.get("segments", [])
     log.info("Loaded %d transcript segments from %s", len(segments), t_path)
 
     # Extract audio energy (reliable WAV-based method)

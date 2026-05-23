@@ -31,7 +31,9 @@ def main():
     p.add_argument("--tunnel-status", action="store_true")
     p.add_argument("--sync-only", action="store_true")
     p.add_argument("--auto-pilot", metavar="CHANNEL_URL")
-    p.add_argument("--remote", metavar="URL", help="Beam job to Colab tunnel")
+    p.add_argument("--remote", metavar="URL", help="Beam job to Colab")
+    p.add_argument("--via", choices=["tunnel", "drive"], default=None,
+                   help="Delivery method for remote job (tunnel or drive)")
     p.add_argument("--sync", action="store_true")
     p.add_argument("--upload", action="store_true")
     p.add_argument("--schedule", action="store_true")
@@ -113,7 +115,7 @@ def main():
             flags.extend(["--sample-minutes", str(args.sample_minutes)])
         if args.mode:
             flags.extend(["--mode", args.mode])
-        push_job(args.remote, flags)
+        push_job(args.remote, flags, via=args.via)
         return
 
     # ── Local pipeline ──
@@ -138,6 +140,11 @@ def main():
     print(f"Done: exported={len(result.exported)} uploaded={result.uploaded_count}"
           f" failures={len(result.failures)} in {result.total_seconds:.1f}s"
           f" transcript={result.transcript_source}")
+
+    if result.failures:
+        for f in result.failures:
+            log.error("  failure: %s", f)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
