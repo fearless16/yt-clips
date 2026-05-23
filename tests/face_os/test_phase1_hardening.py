@@ -20,7 +20,7 @@ import pytest
 from typing import Tuple
 
 from face_os.types import (
-    GeometryState, IdentityState, TemporalState, CropPlan,
+    GeometryState, IdentityEstimatorState, TemporalState, CropPlan,
     Landmarks, FaceDetection, FaceTrack, FaceState,
 )
 from face_os.identity_state import (
