@@ -4,7 +4,7 @@ BEAST MODE FIXES:
 - Nuked O(N^3) np.linalg.inv and @ matrix multiplications.
 - Implemented O(1) Analytical Closed-Form Inverse and Composition.
 - Fixed the 360-Degree Spin Trap via Angle Unwrapping in interpolation.
-- Kept the fake exp/log API wrappers for pipeline stability.
+- True SE(2)/SIM(2) exp/log maps via Lie algebra V-matrix.
 """
 
 from dataclasses import dataclass
@@ -41,11 +41,32 @@ class SE2Transform:
         )
 
     def log(self) -> np.ndarray:
-        return np.array([self.theta, self.tx, self.ty])
+        """True SE(2) logarithmic map."""
+        theta = self.theta
+        if abs(theta) < 1e-8:
+            A = 1.0 - theta**2 / 6.0
+            B = theta / 2.0 - theta**3 / 24.0
+        else:
+            A = np.sin(theta) / theta
+            B = (1.0 - np.cos(theta)) / theta
+        det = A**2 + B**2
+        V_inv = np.array([[A, B], [-B, A]]) / det
+        u = V_inv @ np.array([self.tx, self.ty])
+        return np.array([theta, u[0], u[1]])
 
     @staticmethod
     def exp(v: np.ndarray) -> 'SE2Transform':
-        return SE2Transform(theta=v[0], tx=v[1], ty=v[2])
+        """True SE(2) exponential map."""
+        theta, u0, u1 = v[0], v[1], v[2]
+        if abs(theta) < 1e-8:
+            A = 1.0 - theta**2 / 6.0
+            B = theta / 2.0 - theta**3 / 24.0
+        else:
+            A = np.sin(theta) / theta
+            B = (1.0 - np.cos(theta)) / theta
+        V = np.array([[A, -B], [B, A]])
+        t = V @ np.array([u0, u1])
+        return SE2Transform(theta=theta, tx=t[0], ty=t[1])
 
     def compose(self, other: 'SE2Transform') -> 'SE2Transform':
         """BEAST MODE: Analytical Composition. 100x faster than matrix @."""
@@ -98,11 +119,48 @@ class SIM2Transform:
         return SIM2Transform(theta=theta, tx=M[0, 2], ty=M[1, 2], scale=scale)
 
     def log(self) -> np.ndarray:
-        return np.array([self.theta, self.tx, self.ty, np.log(self.scale)])
+        """True SIM(2) logarithmic map."""
+        theta = self.theta
+        sigma = np.log(max(self.scale, 1e-12))
+        if abs(theta) < 1e-8 and abs(sigma) < 1e-8:
+            A, B = 1.0, 0.0
+        elif abs(sigma) < 1e-8:
+            A = np.sin(theta) / theta
+            B = (1.0 - np.cos(theta)) / theta
+        elif abs(theta) < 1e-8:
+            A = (self.scale - 1.0) / sigma
+            B = 0.0
+        else:
+            alpha = sigma + 1j * theta
+            W = (self.scale * np.exp(1j * theta) - 1.0) / alpha
+            A, B = W.real, W.imag
+        det = A**2 + B**2
+        if det < 1e-12:
+            return np.array([theta, self.tx, self.ty, sigma])
+        V_inv = np.array([[A, B], [-B, A]]) / det
+        u = V_inv @ np.array([self.tx, self.ty])
+        return np.array([theta, u[0], u[1], sigma])
 
     @staticmethod
     def exp(v: np.ndarray) -> 'SIM2Transform':
-        return SIM2Transform(theta=v[0], tx=v[1], ty=v[2], scale=np.exp(v[3]))
+        """True SIM(2) exponential map."""
+        theta, u0, u1, sigma = v[0], v[1], v[2], v[3]
+        scale = np.exp(sigma)
+        if abs(theta) < 1e-8 and abs(sigma) < 1e-8:
+            A, B = 1.0, 0.0
+        elif abs(sigma) < 1e-8:
+            A = np.sin(theta) / theta
+            B = (1.0 - np.cos(theta)) / theta
+        elif abs(theta) < 1e-8:
+            A = (scale - 1.0) / sigma
+            B = 0.0
+        else:
+            alpha = sigma + 1j * theta
+            W = (scale * np.exp(1j * theta) - 1.0) / alpha
+            A, B = W.real, W.imag
+        V = np.array([[A, -B], [B, A]])
+        t = V @ np.array([u0, u1])
+        return SIM2Transform(theta=theta, tx=t[0], ty=t[1], scale=scale)
 
     def compose(self, other: 'SIM2Transform') -> 'SIM2Transform':
         """BEAST MODE: Analytical Composition."""

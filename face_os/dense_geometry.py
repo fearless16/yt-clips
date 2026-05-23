@@ -116,7 +116,50 @@ class DenseGeometryEstimator:
         self._template_vertices[:, 1] *= 1.5  
         self._template_vertices[:, 2] *= 0.8  
 
-        self._landmark_indices = np.linspace(0, n_vertices - 1, 478, dtype=int)
+        # Anatomical landmark mapping: key MediaPipe indices → icosphere regions
+        key_anchors = {
+            1: (0.0, -0.1),      # nose tip
+            10: (0.0, 0.55),     # forehead
+            33: (-0.22, 0.12),   # left eye inner
+            133: (-0.35, 0.12),  # left eye outer
+            263: (0.22, 0.12),   # right eye inner
+            362: (0.35, 0.12),   # right eye outer
+            61: (-0.12, -0.35),  # left mouth corner
+            291: (0.12, -0.35),  # right mouth corner
+            152: (0.0, -0.65),   # chin
+            234: (-0.55, 0.0),   # left ear
+            454: (0.55, 0.0),    # right ear
+            168: (0.0, 0.2),     # nose bridge
+            4: (0.0, -0.2),      # nose bottom
+            70: (-0.15, -0.15),  # left nostril
+            300: (0.15, -0.15),  # right nostril
+        }
+
+        template_xy = self._template_vertices[:, :2]
+        anchor_tree = cKDTree(template_xy)
+
+        self._landmark_indices = np.zeros(478, dtype=int)
+        assigned = set()
+
+        for mp_idx, (ax, ay) in key_anchors.items():
+            if mp_idx < 478:
+                target = np.array([ax * 1.2, ay * 1.5])
+                _, nearest_idx = anchor_tree.query(target)
+                self._landmark_indices[mp_idx] = nearest_idx
+                assigned.add(mp_idx)
+
+        remaining = [i for i in range(478) if i not in assigned]
+        used = set(self._landmark_indices[list(assigned)])
+        available = np.array(sorted(set(range(n_vertices)) - used))
+
+        if len(available) >= len(remaining):
+            spacing = np.linspace(0, len(available) - 1, len(remaining), dtype=int)
+            for i, mp_idx in enumerate(remaining):
+                self._landmark_indices[mp_idx] = available[spacing[i]]
+        else:
+            spacing = np.linspace(0, n_vertices - 1, len(remaining), dtype=int)
+            for i, mp_idx in enumerate(remaining):
+                self._landmark_indices[mp_idx] = spacing[i]
         
         # Cache KDTree for RBF
         self._template_tree = cKDTree(self._template_vertices[self._landmark_indices])

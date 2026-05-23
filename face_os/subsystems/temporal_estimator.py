@@ -52,8 +52,9 @@ class TemporalEstimator:
                     self._prev_sim2, current_sim2
                 )
                 state.motion_field = predicted
-            except Exception:
-                pass
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning("SIM(2) prediction failed: %s", e)
 
         self._prev_sim2 = current_sim2
 

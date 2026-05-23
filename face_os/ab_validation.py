@@ -9,9 +9,12 @@ BEAST MODE FIXES:
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
+import logging
 
 import cv2
 import numpy as np
+
+_logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -103,7 +106,14 @@ def compute_temporal_brightness_stability(frames: List[np.ndarray]) -> float:
 
 def compute_procrustes_consistency(landmarks_list: list) -> float:
     if len(landmarks_list) < 2: return 1.0
-    shapes = [lm[:, :2] if hasattr(lm, 'ndim') and lm.ndim > 1 else np.array(lm)[:, :2] for lm in landmarks_list if lm is not None]
+    shapes = []
+    for lm in landmarks_list:
+        if lm is None:
+            continue
+        arr = np.asarray(lm)
+        if arr.ndim < 2 or arr.shape[0] < 2:
+            continue
+        shapes.append(arr[:, :2])
     if len(shapes) < 2: return 1.0
 
     normalized = []
@@ -121,15 +131,19 @@ def compute_landmark_coherence(landmarks_list: list) -> float:
     distances = []
     for i in range(1, len(landmarks_list)):
         prev, curr = landmarks_list[i - 1], landmarks_list[i]
-        if prev is not None and curr is not None:
-            p = prev[:, :2] if hasattr(prev, 'ndim') and prev.ndim > 1 else np.array(prev)[:, :2]
-            c = curr[:, :2] if hasattr(curr, 'ndim') and curr.ndim > 1 else np.array(curr)[:, :2]
-            if p.shape == c.shape:
-                dist = np.mean(np.sqrt(np.sum((c - p) ** 2, axis=1)))
-                # BEAST MODE FIX: Dynamic normalization using inter-ocular distance or bounding spread
-                face_scale = np.max(p, axis=0) - np.min(p, axis=0)
-                scale_factor = max(face_scale[0], face_scale[1], 50.0) # Fallback to 50px
-                distances.append(dist / scale_factor)
+        if prev is None or curr is None:
+            continue
+        p = np.asarray(prev)
+        c = np.asarray(curr)
+        if p.ndim < 2 or c.ndim < 2 or p.shape != c.shape:
+            continue
+        p2 = p[:, :2]
+        c2 = c[:, :2]
+        dist = np.mean(np.sqrt(np.sum((c2 - p2) ** 2, axis=1)))
+        # BEAST MODE FIX: Dynamic normalization using inter-ocular distance or bounding spread
+        face_scale = np.max(p2, axis=0) - np.min(p2, axis=0)
+        scale_factor = max(face_scale[0], face_scale[1], 50.0) # Fallback to 50px
+        distances.append(dist / scale_factor)
 
     if not distances: return 1.0
     return float(max(0.0, 1.0 - min(np.mean(distances), 1.0)))
@@ -290,9 +304,9 @@ class ABComparator:
         # BEAST MODE FIX: Reset state to prevent Identity Memory pollution between A and B runs!
         if hasattr(pipeline, '_reset_state'):
             pipeline._reset_state()
-        if hasattr(pipeline, 'enroll'):
-            # Re-enroll if possible, or just reset telemetry
-            pass 
+        # H-09: Re-enroll after reset so tracker is available
+        if hasattr(pipeline, 'enroll') and pipeline.tracker is None:
+            pipeline.enroll()
 
         original_override = getattr(pipeline, 'render_mode_override', None)
         pipeline.render_mode_override = None if use_physical else 'alpha'
@@ -311,9 +325,14 @@ class ABComparator:
                 result = pipeline.process_frame(frame, frame_idx=frame_idx)
                 if result and result.get('frame') is not None:
                     frames.append(result['frame'])
-                    if result.get('landmarks'): landmarks_list.append(result['landmarks'])
+                    lm = result.get('landmarks')
+                    if lm is not None:
+                        arr = np.asarray(lm)
+                        if arr.ndim >= 2:
+                            landmarks_list.append(arr)
                     if result.get('transform'): transforms_list.append(result['transform'])
-            except Exception: pass
+            except Exception as e:
+                _logger.warning('AB pipeline frame %d error: %s', frame_idx, e)
             frame_idx += 1
 
         cap.release()

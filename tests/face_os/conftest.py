@@ -1,109 +1,66 @@
-"""
-tests/face_os/conftest.py — Shared fixtures for Face OS tests.
-
-Provides:
-- Reference image loading
-- Mock face generation
-- Common test utilities
-"""
-
-import sys
-from pathlib import Path
-
-# Add root directory to path
-root_dir = Path(__file__).parent.parent.parent
-if str(root_dir) not in sys.path:
-    sys.path.insert(0, str(root_dir))
-
+"""Shared fixtures for face_os integration tests."""
+import os
+import pytest
 import cv2
 import numpy as np
-import pytest
 
 
-@pytest.fixture
-def reference_image():
-    """Load reference image."""
-    img = cv2.imread("expectation.png")
-    if img is None:
-        pytest.skip("expectation.png not found")
-    return img
+@pytest.fixture(scope='session')
+def real_video_path():
+    """Path to the real test video clip."""
+    path = os.path.join(os.path.dirname(__file__), '..', '..', 'input', 'video.mp4')
+    path = os.path.abspath(path)
+    if not os.path.exists(path):
+        pytest.skip('Real video not available at input/video.mp4')
+    return path
 
 
-@pytest.fixture
-def canonical_face(reference_image):
-    """Resize reference to canonical size."""
-    return cv2.resize(reference_image, (256, 256))
+@pytest.fixture(scope='session')
+def video_frames(real_video_path):
+    """Load first 30 frames from the real video."""
+    cap = cv2.VideoCapture(real_video_path)
+    frames = []
+    for _ in range(30):
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frames.append(frame)
+    cap.release()
+    assert len(frames) > 0, "Failed to read any frames from video"
+    return frames
 
 
-@pytest.fixture
-def cascade():
-    """Get Haar Cascade classifier."""
-    return cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-
-
-@pytest.fixture
-def face_detection(cascade, reference_image):
-    """Detect face in reference image."""
-    gray = cv2.cvtColor(reference_image, cv2.COLOR_BGR2GRAY)
-    faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
-    if len(faces) == 0:
-        pytest.skip("No face detected in reference")
-    return max(faces, key=lambda f: f[2] * f[3])
-
-
-@pytest.fixture
-def landmarks(reference_image, face_detection):
-    """Extract landmarks from reference image."""
-    from face_os import landmarks as lm_module
-    from face_os.detect_track import extract_face_mesh
-    mesh = extract_face_mesh(reference_image)
-    if mesh is None:
-        return None
-    return lm_module.extract_landmarks(reference_image, mesh)
+@pytest.fixture(scope='session')
+def video_metadata(real_video_path):
+    """Video metadata: width, height, fps, total_frames."""
+    cap = cv2.VideoCapture(real_video_path)
+    meta = {
+        'width': int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+        'height': int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        'fps': cap.get(cv2.CAP_PROP_FPS),
+        'total_frames': int(cap.get(cv2.CAP_PROP_FRAME_COUNT)),
+    }
+    cap.release()
+    return meta
 
 
 @pytest.fixture
 def mock_face():
-    """Generate a mock face image."""
-    face = np.ones((256, 256, 3), dtype=np.uint8) * 128
-    face[80:180, 80:180] = 200  # Face region
-    face[100:120, 110:130] = 180  # Left eye
-    face[100:120, 140:160] = 180  # Right eye
-    face[140:160, 120:150] = 160  # Mouth
-    return face
+    """Simple synthetic face for unit-level tests."""
+    img = np.full((256, 256, 3), 128, dtype=np.uint8)
+    cv2.ellipse(img, (128, 128), (80, 100), 0, 0, 360, (180, 160, 140), -1)
+    cv2.circle(img, (100, 100), 12, (60, 50, 40), -1)
+    cv2.circle(img, (156, 100), 12, (60, 50, 40), -1)
+    cv2.ellipse(img, (128, 160), (30, 10), 0, 0, 360, (100, 80, 80), -1)
+    return img
 
 
 @pytest.fixture
-def quality_map():
-    """Generate a quality map."""
-    return np.ones((256, 256), dtype=np.float32) * 0.8
-
-
-@pytest.fixture
-def dark_face(canonical_face):
-    """Generate a dark version of canonical face."""
-    return (canonical_face * 0.6).astype(np.uint8)
-
-
-@pytest.fixture
-def bright_face(canonical_face):
-    """Generate a bright version of canonical face."""
-    return np.clip(canonical_face.astype(np.float32) * 1.4, 0, 255).astype(np.uint8)
-
-
-@pytest.fixture
-def cold_face(canonical_face):
-    """Generate a cold (low b-channel) version of canonical face."""
-    lab = cv2.cvtColor(canonical_face, cv2.COLOR_BGR2LAB).astype(np.float32)
-    lab[:, :, 2] -= 20
-    return cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
-
-
-@pytest.fixture
-def warm_face(canonical_face):
-    """Generate a warm (high b-channel) version of canonical face."""
-    lab = cv2.cvtColor(canonical_face, cv2.COLOR_BGR2LAB).astype(np.float32)
-    lab[:, :, 2] += 20
-    return cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2BGR)
+def canonical_face():
+    """256x256 canonical-space face with skin-like gradient."""
+    h, w = 256, 256
+    Y, X = np.mgrid[0:h, 0:w]
+    b = np.clip(140 + (X - 128) * 0.2 + (Y - 128) * 0.1, 0, 255).astype(np.uint8)
+    g = np.clip(160 + (X - 128) * 0.15, 0, 255).astype(np.uint8)
+    r = np.clip(180 - (Y - 128) * 0.1, 0, 255).astype(np.uint8)
+    return np.stack([b, g, r], axis=-1)

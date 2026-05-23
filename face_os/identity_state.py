@@ -149,7 +149,16 @@ def _pose_similarity(
 def _expression_similarity(e1: Optional[str], e2: Optional[str]) -> float:
     if e1 is None or e2 is None:
         return 0.7
-    return 1.0 if e1 == e2 else 0.85
+    if e1 == e2:
+        return 1.0
+    # Related expressions get partial credit
+    _related = {
+        frozenset({"smile", "laugh"}): 0.8,
+        frozenset({"neutral", "calm"}): 0.85,
+        frozenset({"surprise", "fear"}): 0.7,
+    }
+    pair = frozenset({e1, e2})
+    return _related.get(pair, 0.55)
 
 
 def _lighting_similarity(l1: Optional[str], l2: Optional[str]) -> float:
