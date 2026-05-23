@@ -1,17 +1,14 @@
-
 """Physically-inspired renderer module for Face OS.
 
-This version keeps the public API but fixes the most damaging drift:
+Beast-mode fix goals:
+- keep the public API stable
+- remove shading scalar-collapse as the only lighting prior
+- preserve a high-frequency residual path
+- keep energy conservation on the *base* render, not the whole image
+- keep output in linear-light float space until final conversion
+- stay stable, testable, and pipeline-friendly
 
-- removes per-pixel shading re-multiplication of all terms
-- uses shading only as a global irradiance prior, not a second lighting pass
-- computes rendering error against an optional observed target (or zero if absent)
-- keeps output in linear-light float space until final consumer converts if needed
-- preserves a clean separation between albedo, normals, lighting, and diagnostics
-
-NOTE:
 This is still physically-inspired, not full physically-based rendering.
-It is intended to be stable, testable, and pipeline-friendly.
 """
 
 from __future__ import annotations
@@ -26,9 +23,27 @@ import numpy as np
 
 def _as_float_image(img: np.ndarray) -> np.ndarray:
     arr = np.asarray(img, dtype=np.float32)
-    if arr.ndim != 3 or arr.shape[2] != 3:
+    
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=2)
+        
+    if arr.ndim != 3:
+        raise ValueError(f"Expected 2D or 3D image, got {arr.ndim}D with shape {arr.shape}")
+        
+    # Safeguard against accidental concatenation with high-dim feature maps (e.g., 768-d embeddings)
+    if arr.shape[2] > 3:
+        arr = arr[:, :, :3]
+        
+    if arr.shape[2] != 3:
         raise ValueError(f"Expected (H, W, 3) image, got {arr.shape}")
-    return np.clip(arr, 0.0, 1.0) if arr.max(initial=0.0) <= 1.5 else np.clip(arr / 255.0, 0.0, 1.0)
+        
+    if arr.size == 0:
+        raise ValueError("Empty image")
+        
+    mx = float(np.max(arr))
+    if mx <= 1.5:
+        return np.clip(arr, 0.0, 1.0)
+    return np.clip(arr / 255.0, 0.0, 1.0)
 
 
 def _normalize_vec(v: np.ndarray, default: Optional[np.ndarray] = None) -> np.ndarray:
@@ -54,7 +69,14 @@ def _ensure_shading(shading: np.ndarray, shape_hw: tuple[int, int]) -> np.ndarra
     arr = np.asarray(shading, dtype=np.float32)
     if arr.ndim == 2:
         arr = arr[:, :, np.newaxis]
-    if arr.ndim != 3 or arr.shape[2] not in (1, 3):
+    if arr.ndim != 3:
+        raise ValueError(f"Expected shading map (H, W, 1/3), got {arr.ndim}D")
+        
+    # Safeguard against high-dimensional shading/feature maps
+    if arr.shape[2] > 3:
+        arr = arr[:, :, :1]
+        
+    if arr.shape[2] not in (1, 3):
         raise ValueError(f"Expected shading map (H, W, 1/3), got {arr.shape}")
     if arr.shape[:2] != shape_hw:
         raise ValueError(f"Shading shape {arr.shape[:2]} does not match expected {shape_hw}")
@@ -63,15 +85,50 @@ def _ensure_shading(shading: np.ndarray, shape_hw: tuple[int, int]) -> np.ndarra
     return np.clip(arr, 0.0, 1.0)
 
 
+def _gaussian_blur_float(img: np.ndarray, sigma: float) -> np.ndarray:
+    arr = np.ascontiguousarray(img, dtype=np.float32)
+    if sigma <= 0:
+        return arr
+    k = int(max(3, 2 * round(3 * sigma) + 1))
+    if k % 2 == 0:
+        k += 1
+    return cv2.GaussianBlur(arr, (k, k), sigmaX=float(sigma), sigmaY=float(sigma), borderType=cv2.BORDER_REFLECT101)
+
+
+def _luminance(img: np.ndarray) -> np.ndarray:
+    arr = _as_float_image(img)
+    return np.mean(arr, axis=2).astype(np.float32)
+
+
+def _high_frequency_component(img: np.ndarray, sigma: float) -> np.ndarray:
+    arr = _as_float_image(img)
+    low = _gaussian_blur_float(arr, sigma)
+    return arr - low
+
+
+def _edge_strength_mask(img: np.ndarray) -> np.ndarray:
+    lum = _luminance(img)
+    gx = cv2.Sobel(lum, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(lum, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(gx * gx + gy * gy)
+    mx = float(np.max(mag)) if mag.size else 0.0
+    if mx <= 1e-8:
+        return np.full_like(mag, 0.25, dtype=np.float32)
+    mag = mag / mx
+    return np.clip(0.25 + 0.75 * mag, 0.25, 1.0).astype(np.float32)
+
+
 @dataclass
 class LightingModel:
     """Lighting model configuration."""
 
-    ambient: float = 0.1
-    diffuse_direction: np.ndarray = field(default_factory=lambda: np.array([0.3, 0.3, 0.9], dtype=np.float64))
-    diffuse_intensity: float = 0.8
+    ambient: float = 0.10
+    diffuse_direction: np.ndarray = field(
+        default_factory=lambda: np.array([0.3, 0.3, 0.9], dtype=np.float64)
+    )
+    diffuse_intensity: float = 0.80
     specular_power: float = 32.0
-    specular_intensity: float = 0.3
+    specular_intensity: float = 0.30
     spherical_harmonics: np.ndarray = field(default_factory=lambda: np.zeros(9, dtype=np.float32))
 
     def __post_init__(self):
@@ -86,13 +143,24 @@ class LightingModel:
 class PhysicalRenderConfig:
     """Configuration for the physically-inspired renderer."""
 
-    diffuse_weight: float = 0.7
-    specular_weight: float = 0.2
-    ambient_weight: float = 0.1
+    diffuse_weight: float = 0.70
+    specular_weight: float = 0.20
+    ambient_weight: float = 0.10
+
+    # Energy control
     energy_conservation_limit: float = 0.95
+    clamp_output: bool = True
+
+    # Beast-mode detail preservation
+    detail_strength: float = 0.65
+    detail_sigma: float = 2.0
+    observed_detail_mix: float = 0.20
+    use_detail_residual: bool = True
+    preserve_edges: bool = True
+
+    # Lighting control
     shininess: float = 32.0
     use_spherical_harmonics: bool = False
-    clamp_output: bool = True
 
 
 @dataclass
@@ -103,7 +171,9 @@ class PhysicalRenderOutput:
     diffuse_component: np.ndarray
     specular_component: np.ndarray
     ambient_component: np.ndarray
+    detail_component: np.ndarray
     rendering_error: float
+    high_frequency_retention: float = 0.0
     render_time_ms: float = 0.0
 
 
@@ -120,23 +190,16 @@ class RenderReport:
             "frame_idx": self.frame_idx,
             "render_time_ms": self.render_time_ms,
             "rendering_error": self.output.rendering_error,
+            "high_frequency_retention": self.output.high_frequency_retention,
             "mean_diffuse": float(np.mean(self.output.diffuse_component)),
             "mean_specular": float(np.mean(self.output.specular_component)),
             "mean_ambient": float(np.mean(self.output.ambient_component)),
+            "mean_detail": float(np.mean(self.output.detail_component)),
         }
 
 
 class PhysicalRenderer:
-    """Physically-inspired renderer.
-
-    Rendering equation (approximate):
-        Y = ambient + diffuse + specular
-
-    Important correction:
-    - shading is NOT multiplied into every term pixel-by-pixel.
-    - shading is used as a global irradiance prior so the renderer
-      does not double-apply illumination from the decomposition stage.
-    """
+    """Physically-inspired renderer with HF detail preservation."""
 
     def __init__(self, config: Optional[PhysicalRenderConfig] = None):
         self.config = config or PhysicalRenderConfig()
@@ -172,7 +235,6 @@ class PhysicalRenderer:
             view_direction = np.array([0.0, 0.0, 1.0], dtype=np.float64)
         view_direction = _normalize_vec(view_direction)
 
-        # Global irradiance prior from shading, not per-pixel re-lighting.
         irradiance = float(np.mean(shading))
         irradiance = float(np.clip(irradiance, 0.25, 1.50))
 
@@ -180,16 +242,29 @@ class PhysicalRenderer:
         diffuse = self._compute_diffuse(albedo, normal_map, lighting, irradiance)
         specular = self._compute_specular(normal_map, lighting, view_direction, irradiance)
 
-        rendered = (
+        base_render = (
             self.config.ambient_weight * ambient
             + self.config.diffuse_weight * diffuse
             + self.config.specular_weight * specular
         )
 
+        base_render = self._apply_energy_conservation(albedo, base_render)
+
+        detail = self._compute_detail_component(
+            albedo=albedo,
+            shading=shading,
+            observed=observed,
+            normal_map=normal_map,
+        )
+
+        if self.config.use_detail_residual:
+            detail_mask = self._compute_detail_mask(albedo, normal_map) if self.config.preserve_edges else 1.0
+            rendered = base_render + self.config.detail_strength * detail_mask[..., np.newaxis] * detail
+        else:
+            rendered = base_render
+
         if self.config.clamp_output:
             rendered = np.clip(rendered, 0.0, 1.0)
-
-        rendered = self._apply_energy_conservation(albedo, rendered)
 
         if observed is not None:
             observed_f = _as_float_image(observed)
@@ -198,8 +273,12 @@ class PhysicalRenderer:
                     f"Observed image shape {observed_f.shape} does not match rendered shape {rendered.shape}"
                 )
             rendering_error = self.compute_rendering_error(observed_f, rendered)
+            reference_for_hf = observed_f
         else:
             rendering_error = 0.0
+            reference_for_hf = albedo
+
+        hf_retention = self._compute_high_frequency_retention(reference_for_hf, rendered)
 
         render_time_ms = (time.perf_counter() - start_time) * 1000.0
 
@@ -208,7 +287,9 @@ class PhysicalRenderer:
             diffuse_component=diffuse.astype(np.float32),
             specular_component=specular.astype(np.float32),
             ambient_component=ambient.astype(np.float32),
+            detail_component=detail.astype(np.float32),
             rendering_error=float(rendering_error),
+            high_frequency_retention=float(hf_retention),
             render_time_ms=float(render_time_ms),
         )
 
@@ -227,14 +308,9 @@ class PhysicalRenderer:
         lighting: LightingModel,
         irradiance: float,
     ) -> np.ndarray:
-        """Compute ambient component.
-
-        Ambient is a global term; it should not re-apply the full shading map.
-        """
         ambient = albedo * lighting.ambient * irradiance
 
         if lighting.spherical_harmonics is not None and self.config.use_spherical_harmonics:
-            # Soft low-order bias only, not a second lighting field.
             sh = np.asarray(lighting.spherical_harmonics, dtype=np.float32).reshape(-1)
             sh_scale = float(np.clip(np.mean(np.abs(sh)), 0.0, 1.0))
             ambient = ambient * (0.9 + 0.1 * sh_scale)
@@ -248,7 +324,6 @@ class PhysicalRenderer:
         lighting: LightingModel,
         irradiance: float,
     ) -> np.ndarray:
-        """Compute Lambertian diffuse component."""
         N_dot_L = np.sum(normal_map * lighting.diffuse_direction[np.newaxis, np.newaxis, :], axis=2)
         N_dot_L = np.maximum(N_dot_L, 0.0)
         diffuse = albedo * lighting.diffuse_intensity * N_dot_L[:, :, np.newaxis] * irradiance
@@ -261,7 +336,6 @@ class PhysicalRenderer:
         view_direction: np.ndarray,
         irradiance: float,
     ) -> np.ndarray:
-        """Compute Blinn-Phong specular component."""
         half_vec = _normalize_vec(lighting.diffuse_direction + view_direction)
         N_dot_H = np.sum(normal_map * half_vec[np.newaxis, np.newaxis, :], axis=2)
         N_dot_H = np.maximum(N_dot_H, 0.0)
@@ -271,8 +345,48 @@ class PhysicalRenderer:
         specular = np.repeat(spec_scalar[:, :, np.newaxis], 3, axis=2)
         return specular
 
+    def _compute_detail_component(
+        self,
+        albedo: np.ndarray,
+        shading: np.ndarray,
+        observed: Optional[np.ndarray],
+        normal_map: np.ndarray,
+    ) -> np.ndarray:
+        detail_sigma = max(0.5, float(self.config.detail_sigma))
+        albedo_hp = _high_frequency_component(albedo, detail_sigma)
+
+        shading_lp = _gaussian_blur_float(shading, max(1.5, detail_sigma * 2.5))
+        shading_residual = np.repeat(shading - shading_lp, 3, axis=2)
+
+        detail = albedo_hp + 0.15 * shading_residual
+
+        if observed is not None:
+            observed_f = _as_float_image(observed)
+            observed_hp = _high_frequency_component(observed_f, detail_sigma)
+            detail = (1.0 - self.config.observed_detail_mix) * detail + self.config.observed_detail_mix * observed_hp
+
+        edge_mask = self._compute_detail_mask(albedo, normal_map)[..., np.newaxis]
+        detail = detail * edge_mask
+
+        detail = detail - np.mean(detail, axis=(0, 1), keepdims=True)
+        return detail.astype(np.float32)
+
+    def _compute_detail_mask(self, albedo: np.ndarray, normal_map: np.ndarray) -> np.ndarray:
+        edge = _edge_strength_mask(albedo)
+
+        n_blur = _gaussian_blur_float(normal_map, 1.5)
+        n_var = np.linalg.norm(normal_map - n_blur, axis=2)
+        n_max = float(np.max(n_var)) if n_var.size else 0.0
+        if n_max > 1e-8:
+            n_var = n_var / n_max
+        else:
+            n_var = np.zeros_like(edge, dtype=np.float32)
+
+        mask = 0.55 * edge + 0.45 * n_var
+        mask = np.clip(mask, 0.20, 1.0).astype(np.float32)
+        return mask
+
     def _apply_energy_conservation(self, albedo: np.ndarray, rendered: np.ndarray) -> np.ndarray:
-        """Clamp/suppress output when output energy exceeds the configured limit."""
         input_energy = float(np.mean(albedo))
         output_energy = float(np.mean(rendered))
 
@@ -308,7 +422,6 @@ class PhysicalRenderer:
         )
 
     def compute_rendering_error(self, observed: np.ndarray, rendered: np.ndarray) -> float:
-        """Compute mean absolute error against an observed frame."""
         observed_f = _as_float_image(observed)
         rendered_f = _as_float_image(rendered)
         if observed_f.shape != rendered_f.shape:
@@ -318,7 +431,6 @@ class PhysicalRenderer:
         return float(np.mean(np.abs(observed_f - rendered_f)))
 
     def compute_energy_conservation(self, albedo: np.ndarray, rendered: np.ndarray) -> float:
-        """Compute output/input energy ratio."""
         albedo_f = _as_float_image(albedo)
         rendered_f = _as_float_image(rendered)
         input_energy = float(np.mean(albedo_f))
@@ -326,6 +438,21 @@ class PhysicalRenderer:
         if input_energy <= 1e-8:
             return 0.0
         return float(output_energy / input_energy)
+
+    def _compute_high_frequency_retention(self, reference: np.ndarray, rendered: np.ndarray) -> float:
+        ref = _as_float_image(reference)
+        out = _as_float_image(rendered)
+
+        def lap_var(img: np.ndarray) -> float:
+            gray = np.mean(img, axis=2).astype(np.float32)
+            lap = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
+            return float(np.var(lap))
+
+        ref_hf = lap_var(ref)
+        out_hf = lap_var(out)
+        if ref_hf <= 1e-8:
+            return 0.0
+        return float(out_hf / ref_hf)
 
     def render_with_mesh(
         self,
@@ -339,38 +466,15 @@ class PhysicalRenderer:
         observed: Optional[np.ndarray] = None,
         frame_idx: Optional[int] = None,
     ) -> PhysicalRenderOutput:
-        """Render using mesh-derived normals instead of face-prior.
-
-        D-04: True geometry-derived normals break the circularity:
-        landmarks → dense mesh → per-face normals → raster normals → renderer
-
-        When mesh_vertices is None, falls back to face-prior ellipsoidal normals.
-
-        Args:
-            albedo: (H, W, 3) float32 [0,1]
-            mesh_vertices: (N, 3) vertex positions, or None for face-prior fallback
-            mesh_faces: (F, 3) face indices, or None for face-prior fallback
-            shading: (H, W) or (H, W, 1) float32
-            lighting: LightingModel (defaults if None)
-            image_size: (H, W) output size; inferred from albedo if None
-            view_direction: (3,) view direction
-            observed: optional observed frame for error computation
-            frame_idx: optional frame index for reporting
-
-        Returns:
-            PhysicalRenderOutput with rendered image
-        """
+        """Render using mesh-derived normals instead of face-prior."""
         albedo = _as_float_image(albedo)
         h, w = albedo.shape[:2]
         if image_size is None:
             image_size = (h, w)
 
         if mesh_vertices is not None and mesh_faces is not None:
-            normal_map = self._rasterize_mesh_normals(
-                mesh_vertices, mesh_faces, image_size
-            )
+            normal_map = self._rasterize_mesh_normals(mesh_vertices, mesh_faces, image_size)
         else:
-            # Face-prior ellipsoidal fallback (D-04: deterministic, brightness-invariant)
             normal_map = self._face_prior_normals(image_size)
 
         if normal_map.shape[:2] != albedo.shape[:2]:
@@ -397,15 +501,6 @@ class PhysicalRenderer:
         vertices: np.ndarray,
         faces: np.ndarray,
     ) -> np.ndarray:
-        """Compute per-face normals from mesh.
-
-        Args:
-            vertices: (N, 3) vertex positions
-            faces: (F, 3) face indices
-
-        Returns:
-            (F, 3) unit face normals
-        """
         v0 = vertices[faces[:, 0]]
         v1 = vertices[faces[:, 1]]
         v2 = vertices[faces[:, 2]]
@@ -420,23 +515,9 @@ class PhysicalRenderer:
         faces: np.ndarray,
         image_size: tuple,
     ) -> np.ndarray:
-        """Rasterize per-face normals to image plane via vectorized barycentric interpolation.
-
-        D-04: Converts 3D mesh normals to a 2D normal map for the renderer.
-        Optimized: numpy vectorized (no Python pixel loops).
-
-        Args:
-            vertices: (N, 3) vertex positions
-            faces: (F, 3) face indices
-            image_size: (H, W) output size
-
-        Returns:
-            (H, W, 3) normal map, unit vectors
-        """
         h, w = image_size
         face_normals = self._compute_per_face_normals(vertices, faces)
 
-        # Project vertices to image plane
         v_xy = vertices[:, :2].astype(np.float32)
         v_min = v_xy.min(axis=0)
         v_max = v_xy.max(axis=0)
@@ -450,7 +531,6 @@ class PhysicalRenderer:
         normal_map[:, :, 2] = 1.0
         weight_map = np.zeros((h, w), dtype=np.float32)
 
-        # Vectorized rasterization: process each face's bounding box
         for fi in range(len(faces)):
             face = faces[fi]
             fn = face_normals[fi]
@@ -466,12 +546,10 @@ class PhysicalRenderer:
             if x_max < x_min or y_max < y_min:
                 continue
 
-            # Create pixel grid for bounding box
-            yi, xi = np.mgrid[y_min:y_max+1, x_min:x_max+1]
+            yi, xi = np.mgrid[y_min:y_max + 1, x_min:x_max + 1]
             yi = yi.astype(np.float32)
             xi = xi.astype(np.float32)
 
-            # Vectorized barycentric coordinates
             v0x, v0y = sx[0], sy[0]
             v1x, v1y = sx[1], sy[1]
             v2x, v2y = sx[2], sy[2]
@@ -484,27 +562,22 @@ class PhysicalRenderer:
             v = ((v2y - v0y) * (xi - v2x) + (v0x - v2x) * (yi - v2y)) / denom
             bw = 1.0 - u - v
 
-            # Inside-triangle mask
             inside = (u >= 0) & (v >= 0) & (bw >= 0)
-
             if not np.any(inside):
                 continue
 
             area = abs((v1x - v0x) * (v2y - v0y) - (v2x - v0x) * (v1y - v0y))
             weight = min(1.0 / (area + 1e-6), 10.0)
 
-            # Accumulate normals
             mask_slice = np.zeros((h, w), dtype=bool)
-            mask_slice[y_min:y_max+1, x_min:x_max+1] = inside
+            mask_slice[y_min:y_max + 1, x_min:x_max + 1] = inside
             normal_map[mask_slice] += fn * weight
             weight_map[mask_slice] += weight
 
-        # Normalize
         valid = weight_map > 0
         for c in range(3):
             normal_map[:, :, c][valid] /= weight_map[valid]
 
-        # Normalize to unit vectors
         norms = np.linalg.norm(normal_map, axis=2, keepdims=True)
         norms = np.where(norms > 1e-8, norms, 1.0)
         normal_map /= norms
@@ -513,16 +586,15 @@ class PhysicalRenderer:
 
     @staticmethod
     def _barycentric_coords(
-        px: float, py: float,
-        x0: float, y0: float,
-        x1: float, y1: float,
-        x2: float, y2: float,
+        px: float,
+        py: float,
+        x0: float,
+        y0: float,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
     ) -> Optional[tuple]:
-        """Compute barycentric coordinates of point (px, py) in triangle.
-
-        Returns:
-            (u, v, w) or None if degenerate triangle
-        """
         denom = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
         if abs(denom) < 1e-10:
             return None
@@ -532,38 +604,21 @@ class PhysicalRenderer:
         return (u, v, w)
 
     def _face_prior_normals(self, image_size: tuple) -> np.ndarray:
-        """Generate face-prior ellipsoidal normals.
-
-        D-04: Deterministic, brightness-invariant fallback when mesh is unavailable.
-        Models the face as an ellipsoid with normals pointing outward.
-
-        Args:
-            image_size: (H, W)
-
-        Returns:
-            (H, W, 3) normal map, unit vectors
-        """
         h, w = image_size
-        # Create normalized coordinate grid centered at (0.5, 0.5)
+
         y = np.linspace(-1, 1, h, dtype=np.float32)
         x = np.linspace(-1, 1, w, dtype=np.float32)
         xx, yy = np.meshgrid(x, y)
 
-        # Ellipsoidal surface: z = sqrt(1 - x^2/a^2 - y^2/b^2)
-        # Face proportions: wider than tall
         a, b = 1.2, 1.5
         r2 = (xx / a) ** 2 + (yy / b) ** 2
         r2 = np.clip(r2, 0, 1)
         z = np.sqrt(1 - r2)
 
-        # Normal of ellipsoid: gradient of implicit surface
-        # For ellipsoid x^2/a^2 + y^2/b^2 + z^2/c^2 = 1
-        # Normal proportional to (x/a^2, y/b^2, z/c^2)
         nx = xx / (a * a)
         ny = yy / (b * b)
-        nz = z  # c=1
+        nz = z
 
-        # Stack and normalize
         normal_map = np.stack([nx, ny, nz], axis=2)
         norms = np.linalg.norm(normal_map, axis=2, keepdims=True)
         normal_map = normal_map / (norms + 1e-8)
@@ -571,5 +626,4 @@ class PhysicalRenderer:
         return normal_map.astype(np.float32)
 
     def get_last_report(self) -> Optional[RenderReport]:
-        """Return the last per-frame report if available."""
         return self._last_report
