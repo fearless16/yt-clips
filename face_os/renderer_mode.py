@@ -30,9 +30,9 @@ class RendererModeState:
     transition_count: int = 0
     total_frames: int = 0  # BEAST MODE: Real frame counter
 
-    PHYSICAL_CONFIDENCE_THRESHOLD: float = 0.6
-    HYBRID_CONFIDENCE_THRESHOLD: float = 0.3
-    MIN_FRAMES_BEFORE_TRANSITION: int = 5
+    PHYSICAL_CONFIDENCE_THRESHOLD: float = 0.45
+    HYBRID_CONFIDENCE_THRESHOLD: float = 0.20
+    MIN_FRAMES_BEFORE_TRANSITION: int = 3
 
     def update(
         self,
