@@ -8,12 +8,14 @@ __pycache__/
 env/
 venv/
 .env
+.ai.env
 
 # Project Folders (Data/Output)
 input/
 temp/
 shorts/
 logs/
+reports/
 opencode.json
 transcripts/
 highlights/
@@ -40,6 +42,7 @@ remote_job_result.json
 graphify-out/
 scratch/
 *pipeline.log
+.ai.env
 
 # User Data (DO NOT PUSH)
 data/

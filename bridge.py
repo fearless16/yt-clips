@@ -2,11 +2,12 @@
 bridge.py — The local-to-cloud bridge.
 Writes a job file that the Colab watcher will pick up.
 
-Delivery cascade:
-  1. Direct Drive API (via shared utils/drive_auth.py)
-  2. Tunnel (if colab_url.txt exists)
-  3. Local file fallback
-  4. Manual injection block
+Delivery:
+   --via tunnel: POST to colab_url.txt/kaggle_url.txt tunnel endpoint
+   --via drive:  upload remote_job.json to Google Drive yt-clips/ folder
+   default:      tunnel first, then Drive, then file fallback
+
+Always falls back to local file + manual injection if chosen method fails.
 """
 import argparse
 import json
@@ -21,8 +22,14 @@ cfg = load_config()
 log = get_logger("bridge", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 
-def push_job(url: str, flags: list):
-    """Push a pipeline job to the Colab worker via the best available channel."""
+def push_job(url: str, flags: list, via: str | None = None):
+    """Push a pipeline job to the Colab worker.
+
+    Args:
+        url: YouTube URL to process.
+        flags: Additional CLI flags for the pipeline.
+        via: Delivery method — "tunnel", "drive", or None for default (tunnel→drive→file).
+    """
     job = {
         "url": url,
         "flags": flags,
@@ -30,28 +37,28 @@ def push_job(url: str, flags: list):
         "status": "pending",
     }
 
-    # ─── Attach secrets (client_secrets.json, yt_token.json) ────────────────
-    for secret_file in ["client_secrets.json", "yt_token.json"]:
-        secret_path = Path(secret_file)
-        if secret_path.exists() and secret_path.stat().st_size > 0:
-            job[secret_file] = secret_path.read_text(encoding="utf-8")
-            log.info(f"🔑 Attached {secret_file} ({secret_path.stat().st_size} bytes)")
+    # ─── Delivery ───────────────────────────────────────────────────────────
+    delivered = False
+    if via == "tunnel":
+        log.info("📡 Delivery: tunnel only")
+        delivered = _push_via_tunnel(job)
+    elif via == "drive":
+        log.info("📡 Delivery: Drive only")
+        delivered = _push_via_drive_api(job)
+    else:
+        # Default: tunnel first, then Drive
+        delivered = _push_via_tunnel(job) or _push_via_drive_api(job)
 
-    # ─── Mode 1: Tunnel Bridge (PREFERRED for Kaggle) ──────────────────────────
-    if _push_via_tunnel(job):
+    if delivered:
         return
 
-    # ─── Mode 2: Direct Google Drive API ──────────────────────────────────────
-    if _push_via_drive_api(job):
-        return
-
-    # ─── Mode 3: Local File Fallback ─────────────────────────────────────────
+    # ─── Local File Fallback ────────────────────────────────────────────────
     job_path = Path("remote_job.json").absolute()
     with open(job_path, "w") as f:
         json.dump(job, f, indent=2)
     log.info(f"📂 Job saved to local folder for sync: {job_path}")
 
-    # ─── Mode 4: Manual Injection Block ──────────────────────────────────────
+    # ─── Manual Injection Block ─────────────────────────────────────────────
     log.info("═" * 50)
     log.info("💎 MANUAL INJECTION (If all else fails)")
     log.info("═" * 50)
@@ -64,7 +71,15 @@ def push_job(url: str, flags: list):
 
 
 def _push_via_drive_api(job: dict) -> bool:
-    """Attempt to push job via Google Drive API. Returns True on success."""
+    """Attempt to push job via Google Drive API. Returns True on success.
+
+    Strips secrets from the payload before uploading to Drive.
+    """
+    # Strip secrets before Drive delivery
+    drive_job = {k: v for k, v in job.items()
+                 if k not in {"client_secrets.json", "yt_token.json",
+                              "cookies.txt", ".env"}}
+
     try:
         from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
         from googleapiclient.http import MediaIoBaseUpload
@@ -87,7 +102,7 @@ def _push_via_drive_api(job: dict) -> bool:
         existing = results.get("files", [])
 
         media = MediaIoBaseUpload(
-            io.BytesIO(json.dumps(job, indent=2).encode("utf-8")),
+            io.BytesIO(json.dumps(drive_job, indent=2).encode("utf-8")),
             mimetype="application/json",
         )
 
