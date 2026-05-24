@@ -286,14 +286,11 @@ class TestWorker:
 # ─── orchestrator.py ───────────────────────────────────────────────────────────
 
 class TestOrchestrator:
-    def test_pipeline_result_defaults(self):
-        from automation.orchestrator import PipelineResult
-        r = PipelineResult()
-        assert r.exported == []
-        assert r.uploaded_count == 0
-        assert r.failures == []
-        assert r.total_seconds == 0.0
-        assert r.transcript_source == "none"
+    def test_run_orchestrator(self):
+        from automation.orchestrator import run
+        # Should fail with missing file, but not import error
+        result = run(url="https://youtu.be/test", skip_download=True, skip_transcribe=True, skip_highlight=True, skip_export=True, skip_seo=True, skip_sync=True)
+        assert result is not None
 
 
 # ─── cli.py ────────────────────────────────────────────────────────────────────

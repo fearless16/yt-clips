@@ -184,6 +184,13 @@ def process_queue():
     if deno_bin not in env.get("PATH", ""):
         env["PATH"] = deno_bin + ":" + env.get("PATH", "")
 
+    # Ensure project root is on PYTHONPATH so automation.cli can resolve
+    # root-level modules (download, transcribe, export, highlight, utils.*)
+    project_root = str(Path(__file__).resolve().parent)
+    existing_pp = env.get("PYTHONPATH", "")
+    if project_root not in existing_pp:
+        env["PYTHONPATH"] = project_root + (os.pathsep + existing_pp if existing_pp else "")
+
     while True:
         with processing_lock:
             if not job_queue:
@@ -205,7 +212,7 @@ def process_queue():
         t_start = time.time()
         result = None
         try:
-            result = subprocess.run(cmd, env=env, timeout=JOB_TIMEOUT)
+            result = subprocess.run(cmd, env=env, cwd=project_root, timeout=JOB_TIMEOUT)
             elapsed = time.time() - t_start
         except subprocess.TimeoutExpired:
             elapsed = time.time() - t_start

@@ -14,8 +14,10 @@ Usage::
 
 import time
 import logging
-from dataclasses import dataclass, field
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from dataclasses import dataclass, field
 from typing import Optional
 
 from . import config
