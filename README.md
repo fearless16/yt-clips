@@ -98,6 +98,57 @@ python kaggle_monitor.py --monitor            # watch progress
 
 ---
 
+## Reports & Analytics
+
+All generated reports live in `reports/` (gitignored). Each run overwrites.
+
+### Face Detection Report
+
+One-shot pipeline: sample → detect → crop → compare → HTML report.
+
+```bash
+# Full pipeline
+python tools/run_report.py
+
+# Reuse existing sampled frames
+python tools/run_report.py --skip-sampling
+
+# Open in browser when done
+python tools/run_report.py --open
+
+# Validate existing outputs
+python tools/run_report.py --validate-only
+```
+
+Input: `expectation.png` (reference face photo) + `input/video.mp4`  
+Output: `reports/face_detection/face_detection_report.html`
+
+The report includes:
+- Face ROI comparison (expectation vs best video frame)
+- Per-frame detection stats (confidence, area, position, sharpness)
+- After-cropping quality analysis (sharpness, contrast, saturation, brightness drops)
+- Face position consistency across 30 sampled frames
+
+### SEO Analytics Dashboard
+
+Standalone report from collected performance data + YouTube analytics.
+
+```bash
+# Generate analytics dashboard
+python automation/seo/analytics_report.py
+
+# Custom output path
+python automation/seo/analytics_report.py -o my_report.html
+
+# Open in browser
+python automation/seo/analytics_report.py --open
+```
+
+Input: `data/seo_performance.json` + `logs/analytics_*.json`  
+Output: `reports/analytics/analytics_report.html`
+
+---
+
 ## Docs
 
 | File | What |

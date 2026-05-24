@@ -151,15 +151,20 @@ def push(include_data: bool = False) -> bool:
 
         # 2. Build file list to sync
         root = Path(".")
+        SECRET_PATTERNS = {".env", "yt_token.json", "client_secrets.json",
+                          "cookies.txt", "colab_url.txt", "kaggle_url.txt",
+                          "remote_job.json", "remote_job_result.json",
+                          "yt_analytics_token.json", "token.json", ".ai.env"}
+
         files_to_sync = (
             list(root.glob("*.py"))
             + list(root.glob("*.yaml"))
             + list(root.glob("*.sh"))
-            + list(root.glob("*.txt"))
-            + list(root.glob(".env"))
+            + [f for f in root.glob("*.txt") if f.name not in SECRET_PATTERNS]
             + list(root.glob("utils/*.py"))
             + list(root.glob("utils/*.yaml"))
             + list(root.glob("automation/*.py"))
+            + list(root.glob("automation/seo/*.py"))
             + list(root.glob("face_os/**/*.py"))
             + list(root.glob("face_os/subsystems/*.py"))
             + list(root.glob("transcripts/*.json"))
@@ -167,7 +172,6 @@ def push(include_data: bool = False) -> bool:
             + list(root.glob("photos/*.png"))
             + list(root.glob("photos/*.jpg"))
             + list(root.glob("photos/*.jpeg"))
-
         )
 
         if include_data:
@@ -175,11 +179,9 @@ def push(include_data: bool = False) -> bool:
             files_to_sync += list(root.glob("input/*.mp4"))
             files_to_sync += list(root.glob("input/*.json"))
 
-        for special_file in [
-            "channel_logo.png", "client_secrets.json", "yt_token.json",
-            "remote_job.json", "colab_url.txt",
-        ]:
-            p = Path(special_file)
+        # Add non-secret special files
+        for fname in ["channel_logo.png", "cta.mp3", "expectation.png"]:
+            p = Path(fname)
             if p.exists():
                 files_to_sync.append(p)
 
