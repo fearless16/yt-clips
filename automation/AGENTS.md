@@ -11,19 +11,32 @@ automation/
 ├── AGENTS.md         ← YOU ARE HERE (single source of truth)
 ├── README.md         User-facing docs
 ├── __init__.py       Package exports, version
-├── _cache.py         TTLCache (LRU + TTL, thread-safe)
+├── _cache.py         TTLCache class + 4 core infra singletons (LRU + TTL, thread-safe)
 ├── config.py         YAML config (cached, dot-notation)
 ├── env.py            Colab/Kaggle detection, nvidia-smi GPU queries
 ├── memory.py         /proc/meminfo tracker, ring buffer, sparkline, backpressure
 ├── transcript.py     YouTube transcript fetcher + LLM formatter
-├── scoring.py        LLM output quality scoring + evaluation (tabulated)
+├── scoring.py        LLM output quality scoring + evaluation (SCORE_CACHE local)
 ├── watcher.py        Watcher subprocess lifecycle
 ├── tunnel.py         TunnelKeeper daemon, auto-reconnect, 3 fallback methods
 ├── worker.py         ParallelPool (Semaphore-throttled, batch_run, shutdown)
 ├── orchestrator.py   8-phase pipeline runner
 ├── cli.py            Entry point: local, remote, sync, tunnel, memory, gpu
 ├── colab.py          (backward-compat re-exports → env + watcher + tunnel)
-└── kaggle.py         Kaggle setup, reuses watcher
+├── kaggle.py         Kaggle setup, reuses watcher
+└── seo/              SEO subpackage
+    ├── __init__.py   Re-exports: process_all_seo, SEOLearner, generate_daily_insights, trends
+    ├── seo.py        SEO generation + SUGGEST_CACHE + TREND_CACHE
+    ├── seo_learner.py Auto-benchmark, LLM perf tracking + PERF_CACHE
+    ├── analytics.py  YouTube API analytics + YT_API_CACHE + ANALYTICS_CACHE
+    ├── analytics_report.py  Standalone HTML report generator (run via python -m)
+    └── trends.py     Cricket/YouTube trend fetching
+
+Root backward-compat stubs (re-export automation.seo.*):
+    seo.py            → automation/seo/seo.py
+    seo_learner.py    → automation/seo/seo_learner.py
+    analytics.py      → automation/seo/analytics.py
+    trends.py         → automation/seo/trends.py
 
 tests/
 └── test_automation.py  45 tests (all passing)
@@ -35,20 +48,25 @@ tests/
 
 ### `_cache.py` — TTL + LRU Cache
 
-Thread-safe, 4 global singletons with tuned TTLs:
+Provides the `TTLCache` class. Four global singletons for core infrastructure:
 
-| Cache | maxsize | TTL | Used By |
-|-------|---------|-----|---------|
-| CONFIG_CACHE | 4 | 600s | config.py |
-| TRANSCRIPT_CACHE | 16 | 3600s | transcript.py |
-| GPU_CACHE | 2 | 30s | env.py |
-| MEMORY_CACHE | 4 | 5s | memory.py |
-| SCORE_CACHE | 32 | 300s | scoring.py |
-| SUGGEST_CACHE | 16 | 600s | seo.py (root) |
-| TREND_CACHE | 4 | 300s | seo.py (root) |
-| PERF_CACHE | 2 | 60s | seo_learner.py (root) |
-| YT_API_CACHE | 4 | 300s | analytics.py (root) |
-| ANALYTICS_CACHE | 2 | 60s | analytics.py (root) |
+| Cache | maxsize | TTL | Defined In |
+|-------|---------|-----|------------|
+| CONFIG_CACHE | 4 | 600s | `automation/_cache.py` |
+| TRANSCRIPT_CACHE | 16 | 3600s | `automation/_cache.py` |
+| GPU_CACHE | 2 | 30s | `automation/_cache.py` |
+| MEMORY_CACHE | 4 | 5s | `automation/_cache.py` |
+
+SEO/analytics modules define their own local caches using `TTLCache`:
+
+| Cache | maxsize | TTL | Defined In |
+|-------|---------|-----|------------|
+| SCORE_CACHE | 32 | 300s | `automation/scoring.py` |
+| SUGGEST_CACHE | 16 | 600s | `automation/seo/seo.py` |
+| TREND_CACHE | 4 | 300s | `automation/seo/seo.py` |
+| PERF_CACHE | 2 | 60s | `automation/seo/seo_learner.py` |
+| YT_API_CACHE | 4 | 300s | `automation/seo/analytics.py` |
+| ANALYTICS_CACHE | 2 | 60s | `automation/seo/analytics.py` |
 
 ### `transcript.py` — YouTube Transcript + LLM Formatter
 
@@ -104,26 +122,29 @@ Key APIs:
 
 ## Root Module Quality Audit
 
-### `seo.py` (root) — SEO Generation
+> **Note:** Root-level `seo.py`, `seo_learner.py`, `analytics.py`, `trends.py` are now **backward-compat stubs**.
+> All logic lives in `automation/seo/`. The stubs just re-export everything from `automation.seo.*`.
+
+### `automation/seo/seo.py` — SEO Generation (canonical)
 
 **Pattern compliance:**
 - ✅ Lazy auto-benchmark (was module-level, now first-call)
-- ✅ Cached YouTube suggestions (SUGGEST_CACHE, 10min TTL)
-- ✅ Cached trend context (TREND_CACHE, 5min TTL)
+- ✅ Cached YouTube suggestions (SUGGEST_CACHE, 10min TTL, local to module)
+- ✅ Cached trend context (TREND_CACHE, 5min TTL, local to module)
 - ✅ Retry + backoff on 429/593
 - ✅ Template fallback when AI fails
 - ✅ Module-level side effects removed (auto-benchmark lazy)
 - ✅ Lazy imports for seo_learner functions
 
-### `seo_learner.py` (root) — Self-Learning
+### `automation/seo/seo_learner.py` — Self-Learning (canonical)
 
 - ✅ Lazy singleton (was module-level instantiation)
-- ✅ Cached performance data reads (PERF_CACHE, 60s)
+- ✅ Cached performance data reads (PERF_CACHE, 60s, local to module)
 - ✅ Track provider/model performance
 - ✅ Auto-benchmark discovers best LLM
 - ✅ Logs use %-formatting (was f-strings)
 
-### `analytics.py` (root) — Performance Analytics
+### `automation/seo/analytics.py` — Performance Analytics (canonical)
 
 - ✅ Cached YouTube API responses (YT_API_CACHE, 5min)
 - ✅ Cached SEOLearner instance (ANALYTICS_CACHE, 60s)
