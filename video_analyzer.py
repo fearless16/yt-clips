@@ -38,18 +38,6 @@ try:
 except ImportError:
     pass
 
-HAAR_CASCADE = None
-
-
-def _get_haar_cascade():
-    global HAAR_CASCADE
-    if HAAR_CASCADE is None:
-        HAAR_CASCADE = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-    return HAAR_CASCADE
-
-
 def _detect_faces(frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
     """Detect faces, return list of (top, right, bottom, left)."""
     if HAS_FACE_REC:
@@ -59,11 +47,9 @@ def _detect_faces(frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
                 return locations
         except Exception:
             pass
-    # Fallback: OpenCV Haar
-    cascade = _get_haar_cascade()
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    rects = cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
-    return [(y, x + w, y + h, x) for (x, y, w, h) in rects]
+    from utils.face_detect import detect_faces
+    bboxes = detect_faces(frame, score_threshold=0.5)
+    return [(y, x + w, y + h, x) for (x, y, w, h) in bboxes]
 
 
 # ─── Lighting analysis ────────────────────────────────────────────────────

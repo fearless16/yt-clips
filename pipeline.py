@@ -18,7 +18,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
+from datetime import datetime
 
 from utils.config import load_config
 from utils.logger import get_logger, phase_tracker
@@ -215,9 +216,11 @@ def run(
                     graded_path = str(Path(cfg["paths"]["temp"]) / f"{clip_path.stem}_graded.mp4")
                     result = grade_video(str(clip_path), ref_path, graded_path)
                     if result == graded_path and Path(graded_path).exists():
+                        bak_path = str(clip_path) + ".bak"
+                        shutil.copy2(str(clip_path), bak_path)
                         shutil.move(graded_path, str(clip_path))
                         enhanced_exported.append(clip_path)
-                        log.info("[%s] Color grade applied", clip_path.stem)
+                        log.info("[%s] Color grade applied (backup: %s)", clip_path.stem, bak_path)
                     else:
                         log.warning("[%s] Color grade failed — keeping original", clip_path.stem)
                         enhanced_exported.append(clip_path)
@@ -229,9 +232,11 @@ def run(
                     result = enhance_video(str(clip_path), ref_path, enhanced_path,
                                            use_region_grading=True)
                     if result == enhanced_path and Path(enhanced_path).exists():
+                        bak_path = str(clip_path) + ".bak"
+                        shutil.copy2(str(clip_path), bak_path)
                         shutil.move(enhanced_path, str(clip_path))
                         enhanced_exported.append(clip_path)
-                        log.info("[%s] Face-mapper enhancement applied", clip_path.stem)
+                        log.info("[%s] Face-mapper enhancement applied (backup: %s)", clip_path.stem, bak_path)
                     else:
                         log.warning("[%s] Face-mapper enhancement failed — keeping original", clip_path.stem)
                         enhanced_exported.append(clip_path)
@@ -292,6 +297,7 @@ def run(
                    cfg["youtube"].get("schedule_interval_hours", 1))
 
         # Pre-generate schedule with jitter + prime-time assignment
+        slot_map: Dict[str, datetime] = {}
         if auto_schedule:
             from scheduler import assign_clips_to_slots, format_for_youtube
             # Optional: rank clips by SEO quality score

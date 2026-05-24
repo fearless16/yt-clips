@@ -13,8 +13,6 @@ from utils.face_matcher import find_host_in_frame
 cfg = load_config()
 log = get_logger("analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
-FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-
 # Per-clip crop smoothing state — thread-local to prevent bleed across parallel exports
 _crop_local = threading.local()
 
@@ -121,11 +119,9 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
             "is_dynamic_match": True
         }
 
-    # ── 2. Fallback to Haar Cascade (Anonymous Detection) ───────────────────
-    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-    faces = FACE_CASCADE.detectMultiScale(
-        gray, scaleFactor=1.03, minNeighbors=3, minSize=(30, 30),
-    )
+    # ── 2. Fallback to DNN face detection ───────────────────
+    from utils.face_detect import detect_faces
+    faces = detect_faces(frame_bgr, score_threshold=0.5)
     if len(faces) == 0:
         return None
 
@@ -313,10 +309,14 @@ def _detect_chat_overlay(frame_array: np.ndarray, width: int, height: int, cfg: 
     return None
 
 def _detect_faces_per_half(frame_array: np.ndarray, width: int) -> dict:
-    left_half = frame_array[:, :width // 2]
-    right_half = frame_array[:, width // 2:]
-    left_faces = FACE_CASCADE.detectMultiScale(left_half, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
-    right_faces = FACE_CASCADE.detectMultiScale(right_half, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30))
+    # frame_array is 320x180 grayscale from ffmpeg pipe
+    # Convert to BGR 3-channel for DNN, resize to 300x300 for better detection
+    gray_3ch = cv2.cvtColor(frame_array, cv2.COLOR_GRAY2BGR)
+    left_half = gray_3ch[:, :width // 2]
+    right_half = gray_3ch[:, width // 2:]
+    from utils.face_detect import detect_faces
+    left_faces = detect_faces(left_half, score_threshold=0.3)
+    right_faces = detect_faces(right_half, score_threshold=0.3)
     return {"left": len(left_faces), "right": len(right_faces)}
 
 def _is_screen_share_frame(frame_array: np.ndarray) -> bool:

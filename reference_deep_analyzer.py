@@ -22,14 +22,12 @@ def analyze_reference(image_path: str = "expectation.png") -> Dict:
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
     # ── 1. Face Detection ───────────────────────────────────────────────
-    cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
-    faces = cascade.detectMultiScale(gray.astype(np.uint8), 1.1, 4, minSize=(60, 60))
-    if len(faces) == 0:
+    from utils.face_detect import detect_face
+    face_bbox = detect_face(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape)==2 else img, score_threshold=0.5)
+    if face_bbox is None:
         raise ValueError("No face detected in reference")
 
-    fx, fy, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+    fx, fy, fw, fh = face_bbox
     face = img[fy:fy+fh, fx:fx+fw]
     face_lab = cv2.cvtColor(face, cv2.COLOR_BGR2LAB).astype(np.float32)
     face_hsv = cv2.cvtColor(face, cv2.COLOR_BGR2HSV).astype(np.float32)

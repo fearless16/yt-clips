@@ -221,7 +221,7 @@ def download_from_drive(
     Returns:
         List of downloaded file paths.
     """
-    from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
+    from utils.drive_auth import get_drive_service, find_folder, FILESYSTEM_MODE
 
     service = get_drive_service()
     if not service:
@@ -248,8 +248,11 @@ def download_from_drive(
                 log.warning("File not found on Drive mount: %s", fname)
         return downloaded
 
-    # Find yt-clips folder on Drive
-    folder_id = find_or_create_folder(service, "yt-clips")
+    # Find yt-clips folder on Drive (read-only lookup, never creates)
+    folder_id = find_folder(service, "yt-clips")
+    if not folder_id:
+        log.warning("yt-clips folder not found on Drive — nothing to download")
+        return []
 
     # List files in yt-clips root
     query = f"'{folder_id}' in parents and trashed = false"
