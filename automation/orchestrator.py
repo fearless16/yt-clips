@@ -102,17 +102,13 @@ def run(url: str, skip_download=False, skip_transcribe=False,
 
     # ── Phase 1: Download ─────────────────────────────────────────────────────
     if sync_from_drive:
-        log.info("[phase 1] Pulling video + transcript from Google Drive")
+        log.info("[phase 1] Pulling video + transcript + shorts from Google Drive")
         try:
             from sync import download_from_drive
-            download_from_drive(
-                filenames=["video.mp4"],
-                dest_dir=input_dir,
-            )
-            download_from_drive(
-                filenames=["%s.json" % stem],
-                dest_dir=transcripts_dir,
-            )
+            download_from_drive(filenames=["video.mp4"], dest_dir=input_dir)
+            download_from_drive(filenames=["%s.json" % stem], dest_dir=transcripts_dir)
+            # Also pull any exported shorts so post-export phases can run
+            download_from_drive(filenames=None, dest_dir=shorts_dir)
             skip_download = True
             skip_transcribe = True
             log.info("[phase 1] Drive sync complete")
@@ -168,6 +164,21 @@ def run(url: str, skip_download=False, skip_transcribe=False,
             log.info("[phase 4] done %s exported=%d", _t(t0), len(result.exported))
         except Exception as e:
             result.failures.append("phase4: %s" % e)
+    else:
+        # Populate from existing files on disk so post-export phases can run
+        # Clips live in dated subdirs (e.g. shorts/2026-05-23_155847/clip1.mp4)
+        existing = sorted(Path(shorts_dir).rglob("*.mp4")) if Path(shorts_dir).exists() else []
+        # Exclude test files and prefer the most recent dated subdir
+        existing = [p for p in existing if "test_output" not in p.name]
+        if existing:
+            # Use only the latest batch (most recent dated subdir)
+            latest_dir = max(set(p.parent for p in existing), key=lambda d: d.name)
+            existing = sorted(latest_dir.glob("*.mp4"))
+        if existing:
+            result.exported = existing
+            log.info("[phase 4] skipped — using %d existing clips from %s", len(existing), shorts_dir)
+        else:
+            log.warning("[phase 4] skipped — no .mp4 files found in %s", shorts_dir)
 
     # ── Phase 4.5: Enhancement (optional, mode-driven) ───────────────────────
     if result.exported and mode:
@@ -215,7 +226,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
         t0 = time.monotonic()
         log.info("[phase 5] SEO")
         try:
-            from seo import process_all_seo
+            from .seo.seo import process_all_seo
             export_dir = str(result.exported[0].parent)
             process_all_seo(highlights_path, export_dir)
             log.info("[phase 5] done %s", _t(t0))
@@ -312,7 +323,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
         t0 = time.monotonic()
         log.info("[phase 8] Analytics")
         try:
-            from analytics import generate_daily_insights
+            from .seo.analytics import generate_daily_insights
             generate_daily_insights()
             log.info("[phase 8] done %s", _t(t0))
         except Exception as e:

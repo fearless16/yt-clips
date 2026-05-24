@@ -27,7 +27,9 @@ def start_watcher(port: int | None = None) -> bool:
     if _watcher_proc and _watcher_proc.poll() is None:
         return True
     port = port or WATCHER_PORT
-    watcher_path = Path("watcher.py")
+    # Watcher script lives at project root (../watcher.py from automation/)
+    base_dir = Path(__file__).resolve().parent.parent
+    watcher_path = base_dir / "watcher.py"
     if not watcher_path.exists():
         return False
     try:

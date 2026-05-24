@@ -168,6 +168,13 @@ testing:
   timeout_seconds: 120              # Max time per test
   fail_fast: true                   # Stop on first failure (-x mode)
 
+# ── SEO Learner ─────────────────────────────────────────────────────────────────
+# Self-improving SEO system — learns from past performance to boost future clips.
+learner:
+  decay_half_life_days: 30           # How fast old clips lose influence (30 days = 50% weight)
+  min_clips_for_pattern: 2           # Min clips before a pattern is considered stable
+  llm_insights: true                 # Feed data to LLM for deep analytical insights
+
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
   provider: "groq"            # groq | deepseek | openrouter | nvidia | xai | ollama
