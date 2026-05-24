@@ -37,6 +37,13 @@ def push_job(url: str, flags: list, via: str | None = None):
         "status": "pending",
     }
 
+    # ─── Attach secrets (client_secrets.json, yt_token.json) ────────────────
+    for secret_file in ["client_secrets.json", "yt_token.json"]:
+        secret_path = Path(secret_file)
+        if secret_path.exists() and secret_path.stat().st_size > 0:
+            job[secret_file] = secret_path.read_text(encoding="utf-8")
+            log.info(f"🔑 Attached {secret_file} ({secret_path.stat().st_size} bytes)")
+
     # ─── Delivery ───────────────────────────────────────────────────────────
     delivered = False
     if via == "tunnel":
@@ -71,15 +78,7 @@ def push_job(url: str, flags: list, via: str | None = None):
 
 
 def _push_via_drive_api(job: dict) -> bool:
-    """Attempt to push job via Google Drive API. Returns True on success.
-
-    Strips secrets from the payload before uploading to Drive.
-    """
-    # Strip secrets before Drive delivery
-    drive_job = {k: v for k, v in job.items()
-                 if k not in {"client_secrets.json", "yt_token.json",
-                              "cookies.txt", ".env"}}
-
+    """Attempt to push job via Google Drive API. Returns True on success."""
     try:
         from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
         from googleapiclient.http import MediaIoBaseUpload
@@ -102,7 +101,7 @@ def _push_via_drive_api(job: dict) -> bool:
         existing = results.get("files", [])
 
         media = MediaIoBaseUpload(
-            io.BytesIO(json.dumps(drive_job, indent=2).encode("utf-8")),
+            io.BytesIO(json.dumps(job, indent=2).encode("utf-8")),
             mimetype="application/json",
         )
 
