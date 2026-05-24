@@ -107,6 +107,23 @@ class TunnelKeeper:
 
     def _connect(self):
         self._kill_proc()
+        import os
+        ngrok_token = os.environ.get("NGROK_AUTH_TOKEN")
+        
+        # If token exists, ONLY try ngrok to avoid unstable fallbacks
+        if ngrok_token:
+            url = _tunnel_ngrok(self._port)
+            if url:
+                with self._lock:
+                    self._proc = _tunnel_proc
+                    self._url = url
+                    self._start_time = time.monotonic()
+                    self._fail_count = 0
+                self._url_file.parent.mkdir(parents=True, exist_ok=True)
+                self._url_file.write_text(url)
+                return
+
+        # Fallback if no token or ngrok failed
         for method in [_tunnel_serveo, _tunnel_localhost_run, _tunnel_localtunnel]:
             url = method(self._port)
             if url:
@@ -161,11 +178,37 @@ def start_tunnel(port: int = WATCHER_PORT) -> str | None:
 
 
 def tunnel_status() -> dict:
-    """Return status of the module-level tunnel, or default offline dict."""
+    """Return tunnel status.
+
+    Priority:
+    1. In-process TunnelKeeper singleton (if running).
+    2. URL file written by automation.sh subprocess — probe /health via public URL.
+    """
     global _keeper
-    if _keeper is None:
-        return {"url": None, "alive": False, "uptime": 0.0, "fail_count": 0, "port": WATCHER_PORT}
-    return _keeper.status()
+    if _keeper is not None:
+        return _keeper.status()
+
+    # No in-process keeper — probe from the URL file written by automation.sh
+    url = None
+    alive = False
+    for path in [TUNNEL_URL_FILE, Path("colab_url.txt")]:
+        try:
+            if path.exists():
+                raw = path.read_text().strip()
+                if raw:
+                    url = raw
+                    break
+        except Exception:
+            continue
+
+    if url:
+        try:
+            r = urllib.request.urlopen(f"{url}/health", timeout=5)
+            alive = r.status == 200
+        except Exception:
+            pass
+
+    return {"url": url, "alive": alive, "uptime": 0.0, "fail_count": 0, "port": WATCHER_PORT}
 
 
 def kill_tunnel():
@@ -180,6 +223,46 @@ def kill_tunnel():
 
 _tunnel_proc: subprocess.Popen | None = None
 
+
+def _tunnel_ngrok(port: int) -> str | None:
+    """Create tunnel via ngrok using AUTH_TOKEN."""
+    global _tunnel_proc
+    import os
+    token = os.environ.get("NGROK_AUTH_TOKEN")
+    if not token:
+        return None
+    try:
+        # Ensure we are in /content/ to avoid Drive path issues with binary execution
+        # Use fixed ngrok download path
+        bin_path = "/content/ngrok"
+        if not os.path.exists(bin_path):
+            subprocess.run(["curl", "-s", "https://bin.equinox.io/c/b34edqS6yS8/ngrok", "-o", bin_path], check=True)
+            subprocess.run(["chmod", "+x", bin_path], check=True)
+        
+        # Auth
+        subprocess.run([bin_path, "config", "add-authtoken", token], check=True)
+        
+        # Start tunnel
+        _tunnel_proc = subprocess.Popen(
+            [bin_path, "http", str(port)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        
+        # Poll API for the URL
+        for _ in range(30):
+            try:
+                import json
+                with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=2) as r:
+                    data = json.loads(r.read().decode())
+                    tunnels = data.get("tunnels", [])
+                    if tunnels:
+                        return tunnels[0]["public_url"]
+            except Exception:
+                pass
+            time.sleep(1)
+    except Exception as e:
+        print(f"Ngrok Error: {e}")
+    return None
 
 def _tunnel_serveo(port: int) -> str | None:
     """Create tunnel via serveo.net SSH reverse proxy."""

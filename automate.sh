@@ -27,7 +27,7 @@ fi
 echo ""
 echo "=== yt-clips ==="
 echo "1) Local    (download→transcribe→export→sync→upload)"
-echo "2) Remote   (beam to Colab via tunnel)"
+echo "2) Remote   (send job to Colab)"
 echo "3) Sync     (upload shorts/ to Google Drive)"
 echo "4) AutoPilot(watch channel for new VODs)"
 echo "5) Tunnel   (check Colab tunnel status)"
@@ -35,7 +35,17 @@ read -p "Choice [1-5]: " mode
 
 case "$mode" in
     1) .venv/bin/python -m automation.cli "$@" --sync --upload --schedule ;;
-    2) .venv/bin/python -m automation.cli --remote "$@" ;;
+    2) echo ""
+       echo "Send via:"
+       echo "  1) Tunnel"
+       echo "  2) Drive"
+       read -p "Choice [1-2]: " via
+       case "$via" in
+           1) .venv/bin/python -m automation.cli --remote "$@" --via tunnel ;;
+           2) .venv/bin/python -m automation.cli --remote "$@" --via drive ;;
+           *) echo "Invalid" && exit 1 ;;
+       esac
+       ;;
     3) .venv/bin/python -m automation.cli --sync-only ;;
     4) .venv/bin/python -m automation.cli --auto-pilot "https://www.youtube.com/@CricketWithPrajjwal2.0" ;;
     5) .venv/bin/python -m automation.cli --tunnel-status ;;
