@@ -246,12 +246,9 @@ class PhysicalRenderer:
             view_direction = np.array([0.0, 0.0, 1.0], dtype=np.float64)
         view_direction = _normalize_vec(view_direction)
 
-        irradiance = float(np.mean(shading))
-        irradiance = float(np.clip(irradiance, 0.25, 1.50))
-
-        ambient = self._compute_ambient(albedo, lighting, irradiance)
-        diffuse = self._compute_diffuse(albedo, normal_map, lighting, irradiance)
-        specular = self._compute_specular(normal_map, lighting, view_direction, irradiance)
+        ambient = self._compute_ambient(albedo, lighting)
+        diffuse = self._compute_diffuse(albedo, normal_map, lighting)
+        specular = self._compute_specular(normal_map, lighting, view_direction)
 
         base_render = (
             self.config.ambient_weight * ambient
@@ -259,7 +256,26 @@ class PhysicalRenderer:
             + self.config.specular_weight * specular
         )
 
-        base_render = self._apply_energy_conservation(albedo, base_render)
+        # Apply shading as spatial illumination modulation on the base lit render.
+        # base_render captures surface geometry (N·L), shading captures scene illumination.
+        # Their product gives the correctly lit output.
+        shading_3ch = shading if shading.ndim == 3 else shading[:, :, np.newaxis]
+        if shading_3ch.shape[2] == 1:
+            shading_3ch = np.repeat(shading_3ch, 3, axis=2)
+
+        # Normalize base_render so shading controls absolute brightness.
+        # base_render has arbitrary energy from lighting params; normalize to unit mean
+        # so that shading alone determines the output energy level.
+        base_mean = float(np.mean(base_render))
+        if base_mean > 1e-8:
+            base_render = base_render / base_mean
+
+        # Modulate: output ≈ albedo-lit-surface × scene-illumination
+        base_render = base_render * shading_3ch
+
+        # Safety-net energy conservation against albedo*shading target
+        target_energy = float(np.mean(albedo * shading_3ch))
+        base_render = self._apply_energy_conservation(albedo, base_render, target_energy=target_energy)
 
         detail = self._compute_detail_component(
             albedo=albedo,
@@ -313,26 +329,26 @@ class PhysicalRenderer:
 
         return output
 
-    def _compute_ambient(self, albedo: np.ndarray, lighting: LightingModel, irradiance: float) -> np.ndarray:
-        ambient = albedo * lighting.ambient * irradiance
+    def _compute_ambient(self, albedo: np.ndarray, lighting: LightingModel) -> np.ndarray:
+        ambient = albedo * lighting.ambient
         if lighting.spherical_harmonics is not None and self.config.use_spherical_harmonics:
             sh = np.asarray(lighting.spherical_harmonics, dtype=np.float32).reshape(-1)
             sh_scale = float(np.clip(np.mean(np.abs(sh)), 0.0, 1.0))
             ambient = ambient * (0.9 + 0.1 * sh_scale)
         return ambient
 
-    def _compute_diffuse(self, albedo: np.ndarray, normal_map: np.ndarray, lighting: LightingModel, irradiance: float) -> np.ndarray:
+    def _compute_diffuse(self, albedo: np.ndarray, normal_map: np.ndarray, lighting: LightingModel) -> np.ndarray:
         N_dot_L = np.sum(normal_map * lighting.diffuse_direction[np.newaxis, np.newaxis, :], axis=2)
         N_dot_L = np.maximum(N_dot_L, 0.0)
-        diffuse = albedo * lighting.diffuse_intensity * N_dot_L[:, :, np.newaxis] * irradiance
+        diffuse = albedo * lighting.diffuse_intensity * N_dot_L[:, :, np.newaxis]
         return diffuse
 
-    def _compute_specular(self, normal_map: np.ndarray, lighting: LightingModel, view_direction: np.ndarray, irradiance: float) -> np.ndarray:
+    def _compute_specular(self, normal_map: np.ndarray, lighting: LightingModel, view_direction: np.ndarray) -> np.ndarray:
         half_vec = _normalize_vec(lighting.diffuse_direction + view_direction)
         N_dot_H = np.sum(normal_map * half_vec[np.newaxis, np.newaxis, :], axis=2)
         N_dot_H = np.maximum(N_dot_H, 0.0)
         shininess = float(self.config.shininess if self.config.shininess > 0 else lighting.specular_power)
-        spec_scalar = lighting.specular_intensity * np.power(N_dot_H, shininess) * irradiance
+        spec_scalar = lighting.specular_intensity * np.power(N_dot_H, shininess)
         specular = np.repeat(spec_scalar[:, :, np.newaxis], 3, axis=2)
         return specular
 
@@ -385,14 +401,21 @@ class PhysicalRenderer:
         mask = np.clip(mask, 0.20, 1.0).astype(np.float32)
         return mask
 
-    def _apply_energy_conservation(self, albedo: np.ndarray, rendered: np.ndarray) -> np.ndarray:
-        input_energy = float(np.mean(albedo))
+    def _apply_energy_conservation(self, albedo: np.ndarray, rendered: np.ndarray, target_energy: Optional[float] = None) -> np.ndarray:
+        if target_energy is not None and target_energy > 1e-8:
+            input_energy = target_energy
+        else:
+            input_energy = float(np.mean(albedo))
         output_energy = float(np.mean(rendered))
         if input_energy <= 1e-8 or output_energy <= 1e-8:
             return rendered
         ratio = output_energy / input_energy
         if ratio > self.config.energy_conservation_limit:
             scale = self.config.energy_conservation_limit / ratio
+            rendered = rendered * scale
+        # Scale UP if output is too dark (below 50% of target energy)
+        elif ratio < 0.5:
+            scale = min(0.5 / ratio, 4.0)  # cap upscaling at 4x for very dark shading
             rendered = rendered * scale
         if self.config.clamp_output:
             rendered = np.clip(rendered, 0.0, 1.0)

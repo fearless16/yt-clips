@@ -385,6 +385,54 @@ class FaceOSPipeline:
         out = np.clip(base + strength * detail, 0.0, 1.0)
         return (out * 255.0).astype(np.uint8)
 
+    def _reinject_source_hf(
+        self,
+        rendered_bgr: np.ndarray,
+        source_bgr: np.ndarray,
+        face_mask: Optional[np.ndarray],
+        strength: float = 0.35,
+    ) -> np.ndarray:
+        """Re-inject source high-frequency texture into rendered output.
+
+        Mathematical model:
+            source_hf = source - GaussianBlur(source, σ=1.5)
+            output = rendered + strength * source_hf * face_mask
+
+        The source frame has HF at native resolution (no warp loss).
+        The rendered output has correct low-freq identity + smooth shading.
+        Their sum gives identity-accurate LF + source-authentic HF.
+
+        This directly addresses D-01: 'frequency destruction' from single-
+        resample canonical warp (256→1920 = ×7.5 magnification).
+        """
+        if face_mask is not None and face_mask.max() < 0.01:
+            # Mask present but empty — no face region to reinject into
+            return rendered_bgr
+
+        # Resize source to match rendered if needed
+        rh, rw = rendered_bgr.shape[:2]
+        src = source_bgr
+        if src.shape[:2] != (rh, rw):
+            src = cv2.resize(src, (rw, rh), interpolation=cv2.INTER_LINEAR)
+
+        # Extract source HF: σ=1.5 separates texture-scale HF from illumination LF
+        src_f32 = src.astype(np.float32)
+        src_blur = cv2.GaussianBlur(src_f32, (0, 0), sigmaX=1.5, sigmaY=1.5,
+                                    borderType=cv2.BORDER_REFLECT)
+        src_hf = src_f32 - src_blur  # zero-mean HF band
+
+        if face_mask is None:
+            # No mask: apply HF reinject uniformly across the full crop.
+            # This is the correct mode for enhancement path where face_mask is None.
+            mask3 = np.ones((rendered_bgr.shape[0], rendered_bgr.shape[1], 1), dtype=np.float32)
+        else:
+            mask3 = np.clip(face_mask, 0.0, 1.0)[:, :, np.newaxis].astype(np.float32)
+
+        rendered_f32 = rendered_bgr.astype(np.float32)
+        result = rendered_f32 + strength * src_hf * mask3
+        return np.clip(result, 0, 255).astype(np.uint8)
+
+
     def _commit_renderer_mode(
         self,
         intrinsic_components: Optional['IntrinsicComponents'],
@@ -1621,8 +1669,17 @@ class FaceOSPipeline:
         output: np.ndarray,
         face_mask: Optional[np.ndarray],
     ) -> np.ndarray:
-        """Apply the common post-composite detail and photometric lock pass."""
-        output = face_enhance._sharpen(output, amount=0.8, radius=0.8)
+        """Apply the common post-composite detail and photometric lock pass.
+
+        Multi-radius USM recovers HF lost through canonical warp + multiband
+        blending. Two radii target different frequency bands:
+          - Fine (0.6px): skin pores, eyelashes, hair strands
+          - Coarse (1.2px): edges, contours, feature boundaries
+        """
+        # Fine-scale HF recovery (skin texture)
+        output = face_enhance._sharpen(output, amount=1.4, radius=0.6)
+        # Coarse-scale edge recovery
+        output = face_enhance._sharpen(output, amount=0.8, radius=1.2)
         return photometric_lock(output, face_mask)
 
     def _compute_energy_terms(
@@ -1747,8 +1804,10 @@ class FaceOSPipeline:
                     result,
                     intrinsic_components,
                     face_mask=face_mask,
-                    strength=0.30,
+                    strength=0.55,
                 )
+                # Source-HF re-injection: recover HF lost in canonical warp
+                result = self._reinject_source_hf(result, cropped, face_mask, strength=0.80)
                 self._telemetry["physical_render_frames"] += 1
                 result = self._postprocess_rendered_crop(result, face_mask)
                 # D-08: Per-frame telemetry (before early return)
@@ -1795,8 +1854,10 @@ class FaceOSPipeline:
                         output,
                         intrinsic_components,
                         face_mask=face_mask,
-                        strength=0.15,
+                        strength=0.35,
                     )
+                    # Source-HF re-injection on alpha path too
+                    output = self._reinject_source_hf(output, cropped, face_mask, strength=0.75)
                     output = self._postprocess_rendered_crop(output, face_mask)
                     self._telemetry["alpha_fallback_frames"] += 1
                     if fallback_reason:
@@ -1842,8 +1903,10 @@ class FaceOSPipeline:
             rendered,
             intrinsic_components,
             face_mask=face_mask,
-            strength=0.15,
+            strength=0.30,
         )
+        # Source-HF re-injection on enhancement path (was missing before)
+        rendered = self._reinject_source_hf(rendered, cropped, face_mask, strength=0.65)
         rendered = self._postprocess_rendered_crop(rendered, face_mask)
         # RULE 8: Track render timing
         render_time_ms = (_time.perf_counter() - _render_start) * 1000
@@ -1953,9 +2016,13 @@ class FaceOSPipeline:
                     source_intrinsic.albedo = np.clip(source_intrinsic.albedo, 0, 1).astype(np.float32)
             
             # Estimate lighting from source shading
+            # NOTE: Do NOT scale lighting values by shading_mean — the shading map
+            # already encodes spatial illumination; scaling the light intensity by its
+            # mean causes double-attenuation (e.g. 0.03*0.3 = 0.009 ambient → black).
+            # Energy conservation handles calibrating output to albedo×shading target.
             lighting = LightingModel(
-                ambient=float(np.mean(source_intrinsic.shading)) * 0.3,
-                diffuse_intensity=float(np.mean(source_intrinsic.shading)) * 0.8,
+                ambient=0.15,
+                diffuse_intensity=0.85,
             )
             
             # ─────────────────────────────────────────────────
@@ -2058,9 +2125,9 @@ class FaceOSPipeline:
                     
                 detail_strength = 0.6
                 mask3 = (feathered_mask * detail_strength)[:, :, np.newaxis]
-                blended_linear = _srgb_to_linear(blended.astype(np.float32) / 255.0)
+                blended_linear = _srgb_to_linear(blended)
                 output_linear = blended_linear + detail_hf * mask3
-                output = (_linear_to_srgb(np.clip(output_linear, 0.0, 1.0)) * 255.0).astype(np.uint8)
+                output = _linear_to_srgb(np.clip(output_linear, 0.0, 1.0))
             else:
                 output = blended
             
