@@ -122,19 +122,25 @@ def _iou(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def _linear_assignment(cost_matrix: np.ndarray) -> List[Tuple[int, int]]:
-    if not HAS_SCIPY:
-        # Fallback: greedy matching (no SciPy available)
-        matched = []
-        used_rows, used_cols = set(), set()
-        for i in range(cost_matrix.shape[0]):
-            for j in range(cost_matrix.shape[1]):
-                if i not in used_rows and j not in used_cols:
-                    matched.append((i, j))
-                    used_rows.add(i)
-                    used_cols.add(j)
-        return matched
-    row, col = linear_sum_assignment(cost_matrix)
-    return list(zip(row, col))
+    rows, cols = cost_matrix.shape
+    if rows == 0 or cols == 0:
+        return []
+    if HAS_SCIPY:
+        row, col = linear_sum_assignment(cost_matrix)
+        return list(zip(row, col))
+    # Fallback: greedy minimum-cost matching (no SciPy available)
+    matched = []
+    used_cols: set = set()
+    for i in range(rows):
+        if len(used_cols) >= cols:
+            break
+        best_j = min(
+            (j for j in range(cols) if j not in used_cols),
+            key=lambda j: cost_matrix[i, j],
+        )
+        matched.append((i, best_j))
+        used_cols.add(best_j)
+    return matched
 
 
 class ByteTrack:
@@ -225,7 +231,7 @@ class ByteTrack:
 
 class FaceDetector:
     def __init__(self):
-        self.backend = "haar"
+        self.backend = "dnn"
         self.yolo_model = None
         if HAS_YOLO:
             try:
@@ -233,18 +239,13 @@ class FaceDetector:
                 self.backend = "yolo"
                 log.info("Premium: YOLOv8-face loaded")
             except Exception as e:
-                log.warning("YOLOv8-face load failed: %s — falling back to Haar", e)
-        if self.backend == "haar":
-            self.haar = cv2.CascadeClassifier(
-                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            )
+                log.warning("YOLOv8-face load failed: %s — falling back to DNN", e)
 
     def detect(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         if self.backend == "yolo" and self.yolo_model:
             xyxy, conf = self._detect_yolo(frame_bgr)
         else:
-            xyxy, conf = self._detect_haar(frame_bgr)
-        # Filter out non-facecam faces (poster players in background)
+            xyxy, conf = self._detect_dnn(frame_bgr)
         return self._filter_by_facecam_region(xyxy, conf, frame_bgr.shape[1], frame_bgr.shape[0])
 
     def _detect_yolo(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -256,15 +257,13 @@ class FaceDetector:
         conf = boxes.conf.cpu().numpy()
         return xyxy, conf
 
-    def _detect_haar(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        faces = self.haar.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=4, minSize=(30, 30),
-        )
+    def _detect_dnn(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        from utils.face_detect import detect_faces
+        faces = detect_faces(frame_bgr, score_threshold=0.3)
         if len(faces) == 0:
             return np.empty((0, 4)), np.empty((0,))
         xyxy = np.array([[x, y, x + w, y + h] for (x, y, w, h) in faces], dtype=np.float32)
-        conf = np.ones(len(faces), dtype=np.float32) * 0.5
+        conf = np.ones(len(faces), dtype=np.float32) * 0.7
         return xyxy, conf
 
     @staticmethod

@@ -112,17 +112,12 @@ class ReferenceProfile:
             return profile
 
         h, w = img.shape[:2]
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
-
-        if len(faces) == 0:
+        from utils.face_detect import detect_face as _dnn_detect_face
+        face = _dnn_detect_face(img)
+        if face is None:
             log.warning("No face in reference: %s — using defaults", image_path)
             return profile
-
-        x, y, fw, fh = max(faces, key=lambda f: f[2]*f[3])
+        x, y, fw, fh = face
         face_roi = img[y:y+fh, x:x+fw]
         face_lab = cv2.cvtColor(face_roi, cv2.COLOR_BGR2LAB)
 
@@ -528,10 +523,8 @@ def enhance_video(
     frames_dir = temp_dir / "frames"
     frames_dir.mkdir()
 
-    # ── Pre-scan: detect face bounding boxes ──────────────────────────────
-    cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
+    # ── Pre-scan: detect face bounding boxes using OpenCV DNN ──────────────
+    from utils.face_detect import detect_faces as _dnn_detect_faces
     face_bboxes: Dict[int, Tuple[int, int, int, int]] = {}
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -540,10 +533,9 @@ def enhance_video(
         ret, frame = cap.read()
         if not ret:
             break
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
-        if len(faces) > 0:
-            face_bboxes[idx] = tuple(int(v) for v in max(faces, key=lambda f: f[2]*f[3]))
+        faces = _dnn_detect_faces(frame)
+        if faces:
+            face_bboxes[idx] = max(faces, key=lambda f: f[2] * f[3])
         idx += 1
 
     # Bidirectional fill

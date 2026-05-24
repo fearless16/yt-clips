@@ -27,6 +27,7 @@ from typing import Dict, Optional, Tuple
 import time
 
 from utils.config import load_config
+from utils.face_detect import detect_face
 from utils.logger import get_logger
 
 cfg = load_config()
@@ -36,19 +37,10 @@ log = get_logger("ref_grade", cfg["logging"]["log_file"], cfg["logging"]["level"
 # ─── Phase 1: ENROLLMENT — Extract fixed params from reference ──────────
 
 def _detect_face_once(img: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    data_mod = getattr(cv2, "data", None)
-    if data_mod is not None:
-        cascade_path = getattr(data_mod, "haarcascades", None)
-    else:
-        cascade_path = None
-    if cascade_path is None:
-        cascade_path = os.path.join(os.path.dirname(cv2.__file__), "data")
-    cascade = cv2.CascadeClassifier(os.path.join(str(cascade_path), "haarcascade_frontalface_default.xml"))
-    faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
-    if not len(faces):
+    face = detect_face(img, score_threshold=0.5)
+    if face is None:
         return None
-    return tuple(int(v) for v in max(faces, key=lambda f: f[2]*f[3]))
+    return tuple(int(v) for v in face)
 
 
 def enroll(reference_path: str = "expectation.png") -> Dict:

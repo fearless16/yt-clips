@@ -86,6 +86,10 @@ def print_learnings():
 def check_new_videos():
     """Check if there are new videos to process."""
     pending_dir = Path("pending")
+    pipeline_script = str(Path(__file__).resolve().parent / "pipeline.py")
+    if not Path(pipeline_script).exists():
+        log.error("pipeline.py not found at %s", pipeline_script)
+        return
     if pending_dir.exists():
         for f in pending_dir.glob("*.url"):
             url = f.read_text().strip()
@@ -93,7 +97,7 @@ def check_new_videos():
             try:
                 import subprocess
                 result = subprocess.run(
-                    [sys.executable, "pipeline.py", url, "--sync", "--skip-tests"],
+                    [sys.executable, pipeline_script, url, "--sync", "--skip-tests"],
                     capture_output=True, text=True, timeout=3600,
                 )
                 if result.returncode == 0:

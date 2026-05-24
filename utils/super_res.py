@@ -244,14 +244,9 @@ class SuperResEnhancer:
         except Exception:
             pass
             
-        # Fallback to OpenCV
-        import cv2
-        cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = cascade.detectMultiScale(gray, 1.1, 4)
-        return [(y, x+w, y+h, x) for (x, y, w, h) in faces]
+        from utils.face_detect import detect_faces
+        bboxes = detect_faces(frame, score_threshold=0.5)
+        return [(y, x + w, y + h, x) for (x, y, w, h) in bboxes]
         
     def _aggressive_enhance(self, img: "np.ndarray") -> "np.ndarray":
         """Aggressive enhancement to match expectation.png quality.

@@ -56,17 +56,12 @@ class ReferenceTarget:
             return
         
         h, w = img.shape[:2]
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        cascade = cv2.CascadeClassifier(
-            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        )
-        faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(60, 60))
-        
-        if len(faces) == 0:
+        from utils.face_detect import detect_face
+        face = detect_face(img, score_threshold=0.5)
+        if face is None:
             log.warning("No face in reference: %s", reference_path)
             return
-        
-        x, y, fw, fh = max(faces, key=lambda f: f[2]*f[3])
+        x, y, fw, fh = face
         face_roi = img[y:y+fh, x:x+fw]
         face_lab = cv2.cvtColor(face_roi, cv2.COLOR_BGR2LAB)
         
@@ -93,15 +88,16 @@ class ReferenceTarget:
 
 # ─── Per-Frame Analysis ───────────────────────────────────────────────────
 
-def analyze_frame(frame: np.ndarray, cascade) -> Optional[Dict]:
+def analyze_frame(frame: np.ndarray) -> Optional[Dict]:
     """Extract quality metrics from a single frame."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(40, 40))
+    from utils.face_detect import detect_face
+    face = detect_face(frame, score_threshold=0.5)
     
     brightness = float(np.mean(gray))
     contrast = float(np.std(gray))
     
-    if len(faces) == 0:
+    if face is None:
         return {
             "face_detected": False,
             "brightness": brightness,
@@ -112,7 +108,7 @@ def analyze_frame(frame: np.ndarray, cascade) -> Optional[Dict]:
             "is_black": brightness < 5,
         }
     
-    x, y, fw, fh = max(faces, key=lambda f: f[2]*f[3])
+    x, y, fw, fh = face
     face_roi = frame[y:y+fh, x:x+fw]
     face_gray = gray[y:y+fh, x:x+fw]
     face_lab = cv2.cvtColor(face_roi, cv2.COLOR_BGR2LAB)
@@ -152,9 +148,6 @@ def analyze_video_frames(video_path: str, sample_rate: int = 1) -> List[Dict]:
     
     fps = cap.get(cv2.CAP_PROP_FPS)
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    cascade = cv2.CascadeClassifier(
-        cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-    )
     
     frames_data = []
     frame_idx = 0
@@ -165,7 +158,7 @@ def analyze_video_frames(video_path: str, sample_rate: int = 1) -> List[Dict]:
             break
         
         if frame_idx % sample_rate == 0:
-            data = analyze_frame(frame, cascade)
+            data = analyze_frame(frame)
             if data:
                 data["frame_idx"] = frame_idx
                 data["timestamp"] = frame_idx / fps if fps > 0 else 0

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Benchmark models via direct API calls. Faster than opencode CLI."""
+"""Benchmark models via direct API calls. Fast model comparison tool."""
 import json
 import time
 import urllib.request
@@ -60,7 +60,6 @@ def call_model(name, cfg, prompt, timeout=30):
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {cfg['key']}",
-            "HTTP-Referer": "https://github.com/anomalyco/opencode",
         },
         method="POST",
     )

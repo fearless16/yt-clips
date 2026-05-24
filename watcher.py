@@ -14,10 +14,37 @@ from urllib.parse import urlparse
 PORT = int(os.environ.get("PORT", "5000"))
 JOB_FILE = "remote_job.json"
 RESULT_FILE = "remote_job_result.json"
+STATUS_FILE = "status.json"
+JOB_TIMEOUT = int(os.environ.get("JOB_TIMEOUT", "7200"))  # 2 hours default
 
 job_queue = []
 processing_lock = threading.Lock()
 currently_processing = False
+
+
+def _ts() -> str:
+    """Return current timestamp string."""
+    import datetime
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log_info(msg: str):
+    """Print timestamped log message."""
+    print(f"[{_ts()}] {msg}")
+
+
+def write_status(status: str, url: str = "", message: str = ""):
+    """Write a status file so the notebook/Mac client can track progress."""
+    try:
+        with open(STATUS_FILE, "w") as f:
+            json.dump({
+                "status": status,
+                "url": url,
+                "message": message,
+                "timestamp": time.time(),
+            }, f, indent=2)
+    except Exception:
+        pass
 
 
 class JobHandler(BaseHTTPRequestHandler):
@@ -80,14 +107,15 @@ class JobHandler(BaseHTTPRequestHandler):
                 for secret_file in ["client_secrets.json", "yt_token.json"]:
                     if secret_file in job and job[secret_file]:
                         Path(secret_file).write_text(job[secret_file], encoding="utf-8")
-                        print(f"[WATCHER] 🔑 Saved {secret_file} ({len(job[secret_file])} bytes)")
+                        log_info(f"🔑 Saved {secret_file} ({len(job[secret_file])} bytes)")
                         del job[secret_file]  # don't pass to pipeline
 
                 job_queue.append(job)
-                print(f"[WATCHER] Job received via tunnel: {url}")
+                log_info(f"Job received via tunnel: {url}")
 
-                if not currently_processing:
-                    threading.Thread(target=process_queue, daemon=True).start()
+                with processing_lock:
+                    if not currently_processing:
+                        threading.Thread(target=process_queue, daemon=True).start()
 
                 self.send_response(202)
                 self.end_headers()
@@ -156,25 +184,44 @@ def process_queue():
     if deno_bin not in env.get("PATH", ""):
         env["PATH"] = deno_bin + ":" + env.get("PATH", "")
 
-    while job_queue:
+    while True:
         with processing_lock:
-            currently_processing = True
             if not job_queue:
-                break
+                currently_processing = False
+                return
             job = job_queue.pop(0)
+            currently_processing = True
         url = job.get("url", "")
         flags = job.get("flags", [])
 
-        print(f"\n{'='*55}")
-        print(f"  PROCESSING: {url}")
-        print(f"{'='*55}\n")
-
         cmd = [sys.executable, "-m", "automation.cli", url] + flags
+
+        log_info(f"{'='*55}")
+        log_info(f"  PROCESSING: {url}")
+        log_info(f"{'='*55}")
+        log_info(f"  Command: {' '.join(cmd[-3:])} ...")
+        log_info(f"  Timeout: {JOB_TIMEOUT}s")
+        write_status("running", url, "Pipeline executing...")
+        t_start = time.time()
         result = None
         try:
-            result = subprocess.run(cmd, env=env)
+            result = subprocess.run(cmd, env=env, timeout=JOB_TIMEOUT)
+            elapsed = time.time() - t_start
+        except subprocess.TimeoutExpired:
+            elapsed = time.time() - t_start
+            log_info(f"Job timed out after {JOB_TIMEOUT}s ({elapsed:.0f}s elapsed): {url}")
+            write_status("failed", url, f"Timed out after {JOB_TIMEOUT}s")
+            with open(RESULT_FILE, "w") as f:
+                json.dump({
+                    "status": "failed",
+                    "returncode": -1,
+                    "url": url,
+                    "error": f"TimeoutExpired ({JOB_TIMEOUT}s)",
+                }, f, indent=2)
+            continue
         except KeyboardInterrupt:
-            print("\n  Job interrupted by user")
+            log_info("Job interrupted by user")
+            write_status("interrupted", url, "KeyboardInterrupt")
             with open(RESULT_FILE, "w") as f:
                 json.dump({
                     "status": "failed",
@@ -191,46 +238,57 @@ def process_queue():
                 "url": url,
             }, f, indent=2)
 
-        status = "OK" if result.returncode == 0 else "FAILED"
-        print(f"  Job {status} (exit={result.returncode})\n")
-
-    with processing_lock:
-        currently_processing = False
+        status_label = "OK" if result.returncode == 0 else "FAILED"
+        write_status("done" if result.returncode == 0 else "failed", url,
+                     f"Exit code {result.returncode} ({elapsed:.0f}s)")
+        log_info(f"Job {status_label} (exit={result.returncode}, {elapsed:.0f}s)\n")
 
 
 def poll_job_file():
-    global currently_processing
     job_path = Path(JOB_FILE)
     while True:
-        if job_path.exists() and not currently_processing:
+        if job_path.exists():
+            with processing_lock:
+                if currently_processing:
+                    time.sleep(5)
+                    continue
             try:
                 with open(job_path) as f:
                     job = json.load(f)
                 url = job.get("url", "")
                 if url:
-                    print(f"[WATCHER] Job detected via file: {url}")
-                    job_queue.append(job)
+                    log_info(f"Job detected via file: {url}")
+                    write_status("queued", url, "Job detected on Drive, queued for processing")
+                    with processing_lock:
+                        job_queue.append(job)
                     threading.Thread(target=process_queue, daemon=True).start()
                 job_path.unlink(missing_ok=True)
             except Exception as e:
-                print(f"[WATCHER] File poll error: {e}")
+                log_info(f"File poll error: {e}")
                 job_path.unlink(missing_ok=True)
         time.sleep(10)
 
 
 if __name__ == "__main__":
-    print(f"[WATCHER] Starting on port {PORT}...")
+    log_info(f"Starting watcher on port {PORT}...")
+    log_info(f"Job timeout: {JOB_TIMEOUT}s (set JOB_TIMEOUT env to change)")
+    log_info(f"Polling: {JOB_FILE} every 10s")
+    log_info(f"Status file: {STATUS_FILE}")
+    write_status("idle", "", "Watcher started")
 
     poller = threading.Thread(target=poll_job_file, daemon=True)
     poller.start()
 
     server = HTTPServer(("0.0.0.0", PORT), JobHandler)
-    print(f"[WATCHER] HTTP server: http://0.0.0.0:{PORT}")
-    print(f"[WATCHER] POST /job to submit a pipeline job")
-    print(f"[WATCHER] GET /health to check status")
+    log_info(f"HTTP server: http://0.0.0.0:{PORT}")
+    log_info(f"POST /job to submit a pipeline job")
+    log_info(f"GET /health to check status")
+    log_info(f"GET /files to list working files")
+    log_info(f"Watcher ready")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("\n[WATCHER] Shutting down...")
+        log_info("Shutting down...")
+        write_status("stopped", "", "Watcher shutting down")
         server.shutdown()

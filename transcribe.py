@@ -95,10 +95,10 @@ def transcribe(video_path: str, output_path: str):
             "words": words_data
         })
 
-    # Save results
+    # Save results (dict format for consistency with automation/transcript.py)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
+        json.dump({"segments": results, "source": "whisper", "language": info.language or "unknown"}, f, indent=2, ensure_ascii=False)
 
     log.info(f"✨ Transcription complete! Saved → {output_path}")
 

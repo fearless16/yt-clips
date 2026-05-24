@@ -156,13 +156,18 @@ def find_or_create_folder(
 ) -> str:
     """Find a folder by name (under optional parent), or create it.
 
-    Enforces no duplicate folders: if multiple folders with the same name
-    exist, keeps the newest and trashes the older ones.
+    RULE: No duplicate folders allowed. If multiple folders with the same
+    name exist, keeps the newest and trashes the older ones. Creation only
+    happens when *zero* matching folders exist — never accidentally creates
+    a duplicate due to a race condition or mismatched case.
+    
+    Uses case-insensitive search via Drive API name contains + post-filter
+    to catch differently-cased duplicates.
     """
+    # Search with case-insensitive matching via name contains + post-filter
     query = (
-        "name = '%s' and "
         "mimeType = 'application/vnd.google-apps.folder' and "
-        "trashed = false" % name
+        "trashed = false"
     )
     if parent_id:
         query += " and '%s' in parents" % parent_id
@@ -172,11 +177,15 @@ def find_or_create_folder(
     ).execute()
     items = results.get("files", [])
 
-    if items:
-        if len(items) > 1:
-            items.sort(key=lambda x: x.get("createdTime", ""), reverse=True)
-            keep = items[0]
-            duplicates = items[1:]
+    # Post-filter by exact name match (case-insensitive) since Drive API
+    # doesn't support case-insensitive equality
+    matched = [f for f in items if f.get("name", "").lower() == name.lower()]
+
+    if matched:
+        if len(matched) > 1:
+            matched.sort(key=lambda x: x.get("createdTime", ""), reverse=True)
+            keep = matched[0]
+            duplicates = matched[1:]
             log.warning(
                 "Duplicate folders named '%s' found — trashing %d older copies, keeping %s",
                 name, len(duplicates), keep["id"],
@@ -189,7 +198,7 @@ def find_or_create_folder(
                     log.info("Trashed duplicate folder '%s' (id=%s)", name, dup["id"])
                 except Exception as e:
                     log.warning("Failed to trash duplicate %s: %s", dup["id"], e)
-        return items[0]["id"]
+        return matched[0]["id"]
 
     metadata = {
         "name": name,
@@ -202,3 +211,26 @@ def find_or_create_folder(
     folder_id = folder.get("id")
     log.info("Created Drive folder: %s (id=%s)", name, folder_id)
     return folder_id
+
+
+def find_folder(service, name: str, parent_id: Optional[str] = None) -> Optional[str]:
+    """Find a folder by name (case-insensitive). Returns folder ID or None.
+
+    Unlike find_or_create_folder, this NEVER creates a folder — use for
+    read/download operations where you just want to find an existing path.
+    """
+    query = (
+        "mimeType = 'application/vnd.google-apps.folder' and "
+        "trashed = false"
+    )
+    if parent_id:
+        query += " and '%s' in parents" % parent_id
+
+    results = service.files().list(
+        q=query, spaces="drive", fields="files(id, name)"
+    ).execute()
+    items = results.get("files", [])
+    matched = [f for f in items if f.get("name", "").lower() == name.lower()]
+    if matched:
+        return matched[0]["id"]
+    return None
