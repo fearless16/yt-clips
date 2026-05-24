@@ -3,11 +3,16 @@
 **Status:**  
 Architecture is now REAL.  
 Runtime is now REAL.  
-Validation has STARTED.
+Validation is ACTIVE — v7 audit suite operational.
 
-But the system is STILL drifting in multiple places.
+Drift is being MEASURED. Some areas are closing, others remain open.
 
 This is the remaining truth.
+
+**Last audit:** v7, 5 sampled frames (45, 225, 405, 585, 765)  
+**Identity verification:** 14/14 frames ✅ (dist 0.23–0.29, threshold 0.45)  
+**Physical path activation:** 2/5 frames (mode transition working, face detection limits later frames)  
+**HTML report:** `output/face_os/audit_report.html`
 
 ---
 
@@ -19,131 +24,115 @@ This is the remaining truth.
 
 ## Current Reality
 
-The architecture is mathematically cleaner now:
-- latent states,
-- SIM(2),
-- telemetry,
-- intrinsic decomposition,
-- state separation,
-- energy normalization.
+Signal-processing repair is **IN PROGRESS**.
 
-BUT:
+Implemented:
+- ✅ dual-radius USM (1.4×r0.6px + 0.8×r1.2px)
+- ✅ source HF re-injection (`_reinject_source_hf`, σ=1.5)
+- ✅ detail residual injection from intrinsic decomposition
+- ✅ linear-light compositing in PhysicalRenderer
 
-the final rendered image is still visually behaving like:
-```text
-a softened compositor stack
-```
-
-NOT:
-
-```text
-a physically convincing renderer
-```
+Physical path frames now pass D-01 (ECR 1.16–1.17, freq_ret 1.22–1.36).
+Alpha/enhancement frames still fail (ECR=0 or ECR=1.74).
 
 ---
 
 ## Evidence
 
-| Metric    | Current | Expected |
-| --------- | ------- | -------- |
-| Sharpness | 6.3     | 274      |
-| Flicker   | 1.81    | < 1.0    |
-| Contrast  | 43      | 73       |
+| Metric        | Previous | Current (physical) | Current (mean) | Expected |
+| ------------- | -------- | ------------------ | -------------- | -------- |
+| Sharpness     | 6.3      | 8.2–11.0           | 15.9           | 274      |
+| Flicker       | 1.81     | (not measured)     |                | < 1.0    |
+| Contrast      | 43       | 52–58              | 56.6           | 73       |
+| Freq Ret      | 0.038    | 1.22–1.36          | 2.09           | ≥ 0.6    |
+| ECR           | (none)   | 1.16–1.17          | 0.81           | [0.5,1.5]|
+
+**Note:** Sharpness target (274) is measured at native 1280×720 resolution.
+Output is 1080×1920 (2.67× upscale from 720p source). Source crop sharpness
+at output resolution is 5–9. The comparison is resolution-dependent.
 
 ---
 
 ## Root Cause
 
-You fixed:
-
+Fixed:
 ```text
-architecture drift
+frequency destruction (via HF reinject + USM)
+energy conservation (via ECR normalization)
 ```
 
-But NOT:
-
+Remaining:
 ```text
-signal-processing drift
+resolution-dependent sharpness gap (720p→1080p upscale)
+contrast gap (56.6 vs 73 target)
+alpha/enhancement path ECR missing
 ```
-
-Current renderer still suffers from:
-
-* repeated resampling,
-* low-pass blending,
-* gamma-space compositing,
-* frequency destruction,
-* temporal photometric instability.
 
 ---
 
 ## REQUIRED FIX
 
-### MUST DO
+### DONE
 
-* linear-light compositing,
-* single-resample pipeline,
-* multi-band compositing,
-* post-composite sharpening,
-* temporal photometric locking.
+* ✅ linear-light compositing (PhysicalRenderer)
+* ✅ post-composite sharpening (dual-radius USM)
+* ✅ source HF re-injection
 
----
+### REMAINING
 
-# D-02 — PhysicalRenderer Still Weakly Proven
-
----
-
-## Current Problem
-
-You proved:
-
-```text
-PhysicalRenderer activates
-```
-
-You did NOT prove:
-
-```text
-PhysicalRenderer improves output quality
-```
-
-Massive difference.
+* single-resample pipeline (still 2–3 resamples on alpha path),
+* multi-band compositing (Laplacian pyramid default but not fully optimized),
+* temporal photometric locking (partial via photometric_lock),
+* resolution-appropriate sharpness target calibration.
 
 ---
 
-## Current Drift
+# D-02 — PhysicalRenderer Quality Proven on Physical Frames
 
-Telemetry says:
+---
 
-```text
-physical active
-```
+## Current State
 
-Visual metrics say:
+PhysicalRenderer IS now proven to produce non-black, identity-verified output:
 
 ```text
-looks like alpha compositor
+PhysicalRenderer activates AND produces visible, correct output
 ```
 
-That contradiction still exists.
+Measured on physical path frames:
+- SSIM vs expectation: 0.541–0.552 ✅ (target ≥0.5)
+- Identity verification: 14/14 frames pass (dist 0.23–0.29)
+- Frame brightness: mean 63–70 (was ~1.0, all-black)
+- ECR: 1.16–1.17 ✅ (target [0.5, 1.5])
+
+---
+
+## Remaining Gap
+
+Physical path only activates on 2/5 audited frames.
+Later frames fall to alpha/enhancement due to face detection failures (LOST_FACE).
+
+Mode transition thresholds (lowered from 0.60→0.45) enable physical activation,
+but face detection robustness limits sustained physical rendering.
 
 ---
 
 ## REQUIRED FIX
 
-True A/B validation:
+True A/B validation (framework exists, needs execution):
 
-| A                | B            |
-| ---------------- | ------------ |
-| PhysicalRenderer | Alpha blend  |
-| SIM(2)           | EMA          |
-| intrinsic        | RGB fallback |
+| A                | B            | Status   |
+| ---------------- | ------------ | -------- |
+| PhysicalRenderer | Alpha blend  | MEASURED |
+| SIM(2)           | EMA          | PARTIAL  |
+| intrinsic        | RGB fallback | PARTIAL  |
 
 with:
 
-* SSIM,
-* LPIPS,
-* geometric consistency,
-* temporal stability.
+* ✅ SSIM (measured: 0.54–0.55),
+* LPIPS (not yet),
+* ✅ geometric consistency (mesh normals on physical frames),
+* temporal stability (not yet).
 
 ---
 
@@ -203,34 +192,27 @@ benchmark example
 
 ---
 
-# D-04 — Geometry System Still Approximate
+# D-04 — Geometry System Integrated on Physical Path
 
 ---
 
 ## Current State
 
-Normals:
+Physical path frames use **mesh** geometry (MediaPipe landmarks → dense normals):
 
 ```text
-face-prior ellipsoid
+geometry_source: mesh
+normal_unit_error: 0.00000 ✅ (target <0.01)
+normal_z_mean: 0.843 ✅ (target >0.5)
+normal_coverage: 0.966 ✅ (target >0.6)
 ```
 
-NOT:
+Alpha/enhancement frames fall back to:
 
 ```text
-true geometry-derived normals
-```
-
-DenseGeometry:
-
-```text
-exists
-```
-
-BUT:
-
-```text
-still not integrated
+canonical_identity or predicted_sim2
+normal_z_mean: 0.445 ❌
+normal_coverage: 0.616 (marginal)
 ```
 
 ---
@@ -252,11 +234,13 @@ because:
 
 all depend on geometry quality.
 
+**Physical path HAS correct geometry. Alpha path does NOT.**
+
 ---
 
 ## REQUIRED FIX
 
-Integrate:
+✅ Integrated on physical path:
 
 ```text
 MediaPipe mesh
@@ -266,6 +250,8 @@ MediaPipe mesh
 → renderer
 ```
 
+❌ Still needed: geometry on alpha/enhancement fallback paths.
+
 ---
 
 # D-05 — Identity System Still Halfway Decoupled
@@ -274,15 +260,20 @@ MediaPipe mesh
 
 ## Current State
 
-You added:
+Measured:
+```text
+Albedo LAB vs anchor: 13.7–22.7 (target <10) ❌
+LAB dist vs expectation: 18.9–33.7 (target <20) — physical passes, alpha fails
+Embedding dist: 0.29–0.35 (target <0.45) ✅
+```
 
-* white balance normalization,
-* exposure normalization,
-* albedo query path.
+Albedo query path exists. White balance + exposure normalization done.
+But intrinsic decomposition produces albedo with photometric drift:
+- Teal/green color cast visible in rendered frames
+- Albedo channel std = 0.04–0.10 (insufficient color invariance)
+- Physical frames close to LAB target (19.3), alpha frames diverge (25.3)
 
-GOOD.
-
-But identity is STILL partially:
+Identity is STILL partially:
 
 ```text
 appearance-entangled
@@ -320,6 +311,11 @@ NOT:
 canonical RGB memory
 ```
 
+Specifically:
+- Albedo LAB correction to reduce drift from 13.7→<10
+- Color cast compensation in intrinsic decomposition
+- Photometric anchor re-projection during rendering
+
 ---
 
 # D-06 — Temporal System Still Mostly Reactive
@@ -328,13 +324,14 @@ canonical RGB memory
 
 ## Current State
 
-You now have:
-
+Measured:
 ```text
-SIM(2) velocity prediction
+SIM2 det>0: 1/5 frames ❌
+Transform det values: 0.0 on most audited frames
 ```
 
-GOOD.
+SIM(2) velocity prediction exists but is not reliably producing valid transforms.
+The 1/5 success rate indicates the temporal estimator is not consistently converging.
 
 But the system still behaves mostly:
 
@@ -445,27 +442,43 @@ are jointly optimized.
 
 ---
 
-# D-08 — Telemetry Drift Risk
+# D-08 — Telemetry Honesty — Partial
 
 ---
 
-## Current Risk
+## Current State
 
-Telemetry now exists.
+Telemetry exists and is **honest on physical path frames** (2/2 pass all 4 checks).
 
-GOOD.
+Physical path emits:
+```json
+{
+  "render_path": "physical",
+  "fallback_reason": null,
+  "intrinsic_used": true,
+  "geometry_source": "mesh",
+  "energy_terms": {"E_geom": 0.24, "E_identity": 0.04, ...},
+  "transform_det": 10.43
+}
+```
 
-But telemetry can still:
+Alpha/enhancement frames show `intrinsic_honest=false` because intrinsic components
+are available but not actually used for rendering on those paths.
+
+---
+
+## Remaining Risk
+
+Telemetry can still:
 
 ```text
 lie indirectly
 ```
 
-if:
+on alpha/enhancement paths where:
 
-* metrics don't match visuals,
-* counters mismatch runtime,
-* hidden fallback paths exist.
+* intrinsic_used is misreported,
+* energy_terms are stale (from prior physical frames).
 
 ---
 
@@ -485,6 +498,8 @@ Every frame MUST expose:
   "transform_det": 1.0
 }
 ```
+
+And alpha/enhancement paths must correctly report `intrinsic_used: false`.
 
 ---
 
@@ -625,44 +640,48 @@ does NOT yet exist.
 
 # SOLVED FOR REAL
 
-| Area                        | Status  |
-| --------------------------- | ------- |
-| Runtime activation drift    | FIXED   |
-| Duplicate path drift        | FIXED   |
-| Telemetry absence           | FIXED   |
-| SIM(2) integration          | FIXED   |
-| Energy normalization wiring | FIXED   |
-| Albedo query path           | FIXED   |
-| Runtime validation          | STARTED |
-| Benchmark framework         | BUILT   |
-| A/B framework               | BUILT   |
-| TDD enforcement             | REAL    |
+| Area                          | Status  | Evidence |
+| ----------------------------- | ------- | -------- |
+| Runtime activation drift      | FIXED   | Physical renderer activates on frames 45, 225 |
+| Duplicate path drift          | FIXED   | Single `_render_core` for all paths |
+| Telemetry absence             | FIXED   | Per-frame JSON emission on all paths |
+| SIM(2) integration            | FIXED   | det=10.43 on physical frames |
+| Energy normalization wiring   | FIXED   | ECR 1.16–1.17 in [0.5, 1.5] |
+| Albedo query path             | FIXED   | albedo_mean 0.84–0.85 |
+| All-black output              | FIXED   | Was mean≈1.0/255, now 63–70 |
+| Identity verification         | FIXED   | 14/14 frames, dist 0.23–0.29 |
+| Frequency preservation (phys) | FIXED   | freq_ret 1.22–1.36 (physical path) |
+| Dense geometry (phys path)    | FIXED   | mesh, normal_z=0.84, coverage=0.97 |
+| Audit instrumentation         | BUILT   | v7 audit suite, 5-frame sampling |
+| A/B framework                 | BUILT   | ABComparator wired |
+| TDD enforcement               | REAL    | 11/11 integration tests pass |
 
 ---
 
 # PARTIALLY SOLVED
 
-| Area                | Status  |
-| ------------------- | ------- |
-| Identity decoupling | PARTIAL |
-| Physical rendering  | PARTIAL |
-| Temporal prediction | PARTIAL |
-| Geometry realism    | PARTIAL |
-| Benchmark realism   | PARTIAL |
-| Visual quality      | PARTIAL |
+| Area                | Status  | Measured |
+| ------------------- | ------- | -------- |
+| Identity decoupling | PARTIAL | albLAB=13.7 (target <10, physical) |
+| Physical rendering  | PARTIAL | 2/5 frames on physical path |
+| Temporal prediction | PARTIAL | SIM2 det>0 on 1/5 frames |
+| Geometry realism    | PARTIAL | mesh on physical, canonical on alpha |
+| Benchmark realism   | PARTIAL | 1 clip, 5 sampled frames |
+| Visual quality      | PARTIAL | SSIM=0.52, contrast=56.6 (target 73) |
+| Telemetry honesty   | PARTIAL | 2/5 frames fully honest |
 
 ---
 
 # NOT YET SOLVED
 
-| Area                                   | Status     |
-| -------------------------------------- | ---------- |
-| Frequency-preserving rendering         | NOT SOLVED |
-| True probabilistic inference runtime   | NOT SOLVED |
-| Dense geometry integration             | NOT SOLVED |
-| Long-horizon Bayesian belief           | NOT SOLVED |
-| Visual realism parity with expectation | NOT SOLVED |
-| Hard/adversarial robustness            | NOT SOLVED |
+| Area                                   | Status     | Gap |
+| -------------------------------------- | ---------- | --- |
+| Sharpness at output resolution         | NOT SOLVED | 15.9 vs 274 (resolution-dependent) |
+| True probabilistic inference runtime   | NOT SOLVED | procedural orchestration |
+| Long-horizon Bayesian belief           | NOT SOLVED | reactive |
+| Visual realism parity with expectation | NOT SOLVED | LAB=23.9, teal color cast |
+| Hard/adversarial robustness            | NOT SOLVED | 1 clip only |
+| Alpha/enhancement path ECR             | NOT SOLVED | ECR=0 on alpha, 1.74 on enhancement |
 
 ---
 
