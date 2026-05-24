@@ -204,14 +204,21 @@ def push(include_data: bool = False) -> bool:
 
         log.info(f"  {len(changed_files)} files changed locally.")
 
-        # 4. Resolve subfolder IDs (pre-create them)
-        subfolder_map = {}  # folder_name -> folder_id
+        # 4. Resolve subfolder IDs (pre-create them, including nested)
+        subfolder_map = {}  # "a/b/c" -> folder_id
         for fp in changed_files:
             if len(fp.parts) > 1:
-                subfolder_name = fp.parts[0]
-                if subfolder_name not in subfolder_map:
-                    subfolder_map[subfolder_name] = find_or_create_folder(
-                        service, subfolder_name, folder_id)
+                # Build nested folder path: automation/seo/seo.py → "automation/seo"
+                folder_parts = fp.parent.parts  # ('automation', 'seo')
+                # Create each level
+                current_parent = folder_id
+                path_so_far = ""
+                for part in folder_parts:
+                    path_so_far = f"{path_so_far}/{part}" if path_so_far else part
+                    if path_so_far not in subfolder_map:
+                        subfolder_map[path_so_far] = find_or_create_folder(
+                            service, part, current_parent)
+                    current_parent = subfolder_map[path_so_far]
 
         # 5. Batch list Drive contents (1 call per folder instead of N per file)
         drive_files = _batch_list_all_folders(service, folder_id, subfolder_map)
@@ -219,12 +226,15 @@ def push(include_data: bool = False) -> bool:
         # 6. Determine what to upload
         to_upload = []
         for fp in changed_files:
-            sub = fp.parts[0] if len(fp.parts) > 1 else "__root__"
+            if len(fp.parts) > 1:
+                sub = str(fp.parent)  # "automation/seo"
+            else:
+                sub = "__root__"
             drive_folder = drive_files.get(sub, {})
             existing = drive_folder.get(fp.name)
             if existing and existing.get("md5") == local_hashes[str(fp)]:
                 continue  # Already up to date on Drive
-            to_upload.append((fp, existing))
+            to_upload.append((fp, existing, sub))
 
         if not to_upload:
             log.info("✅ All changed files already up to date on Drive.")
@@ -236,8 +246,7 @@ def push(include_data: bool = False) -> bool:
         # 7. Sequential upload (parallel causes SSL issues with Drive API)
         updated = 0
         created = 0
-        for fp, existing in to_upload:
-            sub = fp.parts[0] if len(fp.parts) > 1 else "__root__"
+        for fp, existing, sub in to_upload:
             target_id = subfolder_map.get(sub, folder_id)
             drive_id = existing["id"] if existing else None
             try:
