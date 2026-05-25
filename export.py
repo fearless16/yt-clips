@@ -745,8 +745,8 @@ def export_clip(
         log.warning("[%s] Logo not readable; skipping logo.", clip_id)
         use_logo = False
         
-    cta_file = Path("cta.mp3")
-    use_cta = cta_file.exists()
+    # AI voice (cta.mp3) disabled — no longer mixing intro audio
+    use_cta = False
     
     has_audio = _has_audio_stream(video_path)
     if not has_audio:
@@ -868,17 +868,13 @@ def export_clip(
     if use_logo:
         cmd.extend(["-i", str(logo_file)])
         
-    if use_cta:
-        cmd.extend(["-i", str(cta_file)])
-        
+    # CTA audio disabled — no intro voice
     cta_idx = 2 if use_logo else 1
 
     a_map = "0:a:0?"
     if has_audio:
-        if use_cta:
-            video_filter_complex += f";[0:a]{a_filter},volume=0.8[main_a];[{cta_idx}:a]volume=1.5[cta_a];[main_a][cta_a]amix=inputs=2:duration=first:dropout_transition=2[a_out]"
-            a_map = "[a_out]"
-            a_filter = None
+        # AI voice mixing disabled — using original audio only
+        pass
 
     cmd.extend([
         "-filter_complex", video_filter_complex,

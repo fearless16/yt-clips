@@ -268,7 +268,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
         log.info("[phase 7] Upload")
         try:
             from upload import upload_video
-            privacy = cfg.get("youtube", {}).get("privacy_status", "private")
+            privacy = cfg.get("youtube", {}).get("privacy_status", "public")
             interval = cfg.get("upload_schedule", {}).get(
                 "interval_hours",
                 cfg.get("youtube", {}).get("schedule_interval_hours", 1)
@@ -297,15 +297,19 @@ def run(url: str, skip_download=False, skip_transcribe=False,
                 slot_map = {stem: dt for stem, dt in assignments}
                 log.info("Schedule generated for %d clips", len(assignments))
 
-            for clip_path in result.exported:
+            for clip_idx, clip_path in enumerate(result.exported):
                 meta_path = clip_path.with_name("%s_metadata.json" % clip_path.stem)
                 if not meta_path.exists():
                     log.warning("No metadata for %s — skipping upload", clip_path.name)
                     continue
                 publish_at = None
-                if auto_schedule:
+                if auto_schedule and clip_idx > 0:
+                    import random
                     slot = slot_map.get(clip_path.stem)
                     if slot:
+                        jitter_hours = random.uniform(2, 3)
+                        from datetime import timedelta
+                        slot = slot + timedelta(hours=jitter_hours * (clip_idx - 1))
                         publish_at = format_for_youtube(slot)
                 try:
                     upload_video(
@@ -332,5 +336,10 @@ def run(url: str, skip_download=False, skip_transcribe=False,
             result.failures.append("phase8: %s" % e)
 
     result.total_seconds = time.monotonic() - start
-    log.info("pipeline done %.1fs failures=%d", result.total_seconds, len(result.failures))
+    log.info("[EXIT] pipeline url=%s exported=%d uploaded=%d failures=%d elapsed=%.1fs transcript=%s",
+             url, len(result.exported), result.uploaded_count, len(result.failures),
+             result.total_seconds, result.transcript_source)
+    if result.failures:
+        for f in result.failures:
+            log.warning("  failure: %s", f)
     return result

@@ -133,24 +133,36 @@ a title. Never reference "Target 234" unless this clip is actually about the cha
 
 ══ STEP 3: GENERATE SEO METADATA ════════════════════════════════════════════
 
-TITLE (max 100 chars, MAX 1 emoji):
-  Must describe what ACTUALLY happens in this clip based on the transcript.
-  Format: "<Player> <Action> | <Tournament>"  e.g. "Rabada Yorker Dube | IPL 2026"
+TITLE (max 100 chars):
+  Format: "🔴 <Team1 short> vs <Team2 short> Live Match | <Team1 full> vs <Team2 full> Live | <Tournament> Live Commentary"
+  e.g. "🔴 GT vs SRH Live Match | Gujarat Titans vs Sunrisers Hyderabad Live | IPL 2026 Live Commentary"
   RULES:
-    - Describe the specific moment from the transcript, not a generic summary
-    - Include the actual player name from the transcript (corrected spelling)
-    - NEVER prefix with "cricket live:" — each title must be clip-unique
-    - NEVER invent player names not in the transcript
-    - NEVER mention teams not in this match (only the two match teams from scorecard)
+    - Always start with 🔴
+    - Use both short team codes AND full team names from the scorecard
+    - End with "<Tournament> Live Commentary"
+    - NEVER invent team names not in the scorecard
 
-DESCRIPTION (600-900 chars total, PLAIN TEXT ONLY — no JSON, no dicts, no templates):
-  Write a flowing paragraph of Hinglish (Hindi + English mixed naturally).
-  Include:
-  - What happens in this specific clip (based ONLY on transcript)
-  - Player names from the transcript with corrected spelling
-  - Match context (teams from scorecard)
-  - An emotional reaction
-  - A CTA asking viewers to like/subscribe
+DESCRIPTION (600-900 chars total, PLAIN TEXT ONLY):
+  Use this EXACT structure:
+
+  Welcome line: One engaging Hinglish sentence welcoming viewers to the live match.
+
+  🏏 Match Details
+  Teams, venue, and match context from the scorecard.
+
+  🔥 LIVE MATCH UPDATE
+  Current match situation — score, overs, key moments from the transcript.
+
+  ⚡ Key Highlights
+  • Bullet point 1 (player action from transcript)
+  • Bullet point 2
+  • Bullet point 3
+
+  🎙️ Live Hindi Commentary
+  One line of Hindi commentary flavor text.
+
+  Hashtags: [paste hashtags here as plain text]
+
   IMPORTANT: PLAIN TEXT only. Do NOT wrap in dicts or JSON.
   IMPORTANT: Use the SAME player names, team names, and cricket action words
   that will appear in your search_terms below. SEO consistency is critical.

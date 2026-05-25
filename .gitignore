@@ -7,7 +7,6 @@ __pycache__/
 .venv/
 env/
 venv/
-.env
 .ai.env
 
 # Project Folders (Data/Output)
@@ -22,10 +21,16 @@ highlights/
 output/
 archive/
 
-# Configuration & Secrets (CRITICAL: DO NOT PUSH THESE)
+# Configuration & Secrets (NOT in git — pushed to Drive only)
 yt_token.json
-client_secrets.json
+yt_tokens.json
+yt_token_*.json
 token.json
+client_secrets.json
+client_secret_*.json
+yt_analytics_token.json
+.env
+cookies.txt
 scheduler_state.json
 processed_videos.txt
 colab_url.txt
@@ -44,9 +49,8 @@ scratch/
 *pipeline.log
 .ai.env
 
-# User Data (DO NOT PUSH)
+# User Data
 data/
-cookies.txt
 
 # AI Assistant Artifacts
 .aider*
@@ -63,9 +67,6 @@ kaggle_url.txt
 # Test artifacts
 test_frames/
 .pytest_cache/
-
-# Analytics token (contains OAuth secrets)
-yt_analytics_token.json
 
 # Colab/Kaggle specific
 colab_setup.py

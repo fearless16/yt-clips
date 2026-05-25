@@ -135,6 +135,12 @@ def _upload_one(service, file_path: Path, target_folder_id: str,
 def push(include_data: bool = False) -> bool:
     """Sync local code files to Google Drive with batch API + local cache."""
     try:
+        from utils.token_refresh import ensure_fresh_tokens
+        ensure_fresh_tokens()
+    except Exception as e:
+        log.warning(f"Token refresh check skipped: {e}")
+
+    try:
         from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
 
         service = get_drive_service()
@@ -149,7 +155,7 @@ def push(include_data: bool = False) -> bool:
         # 1. Get or Create the 'yt-clips' folder
         folder_id = find_or_create_folder(service, "yt-clips")
 
-        # 2. Build file list to sync
+        # 2. Build file list to sync — NO face_os (separate module, not for Colab)
         root = Path(".")
         files_to_sync = (
             list(root.glob("*.py"))
@@ -161,14 +167,13 @@ def push(include_data: bool = False) -> bool:
             + list(root.glob("utils/*.yaml"))
             + list(root.glob("automation/*.py"))
             + list(root.glob("automation/seo/*.py"))
-            + list(root.glob("face_os/**/*.py"))
-            + list(root.glob("face_os/subsystems/*.py"))
             + list(root.glob("transcripts/*.json"))
             + list(root.glob("highlights/*.yaml"))
             + list(root.glob("photos/*.png"))
             + list(root.glob("photos/*.jpg"))
             + list(root.glob("photos/*.jpeg"))
         )
+        # face_os/ is intentionally excluded: it's a standalone module with its own lifecycle
 
         if include_data:
             log.info("📦 Including input data (video) in sync...")
@@ -176,8 +181,15 @@ def push(include_data: bool = False) -> bool:
             files_to_sync += list(root.glob("input/*.json"))
 
         for special_file in [
-            "channel_logo.png", "client_secrets.json", "yt_token.json",
-            "remote_job.json", "colab_url.txt",
+            "channel_logo.png",
+            "client_secrets.json",
+            "yt_token.json",
+            "yt_analytics_token.json",
+            ".env",
+            "cookies.txt",
+            "remote_job.json",
+            "colab_url.txt",
+            "face_landmarker.task",
         ]:
             p = Path(special_file)
             if p.exists():

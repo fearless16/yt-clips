@@ -33,6 +33,9 @@ transcription:
   language: "hi"                        # Hindi commentary — use hi for better accuracy
   device: "cuda"            # Prioritizes GPU, auto-falls back to CPU if missing
   compute_type: "float16"    # Optimized for GPU; auto-switches to int8 on CPU fallback
+  batch_size: 16                        # Parallel segments; higher = more GPU use (T4: 16-32)
+  beam_size: 5                          # Search width; 5=balanced, higher=slower+better
+  vad_filter: true                      # Filter out non-speech for 2-3x speedup
 # ─── Highlight Detection ──────────────────────────────────────────────────────
 highlight:
   # AI-powered highlight refinement
@@ -123,6 +126,8 @@ export:
 
 # ─── YouTube Upload ──────────────────────────────────────────────────────────
 youtube:
+  token_path: "yt_analytics_token.json"
+  channel_id: "UCQtCMKPc41MHd7hujVuGm5g"
   privacy_status: "private"              # private | unlisted | public
   category_id: "17"                     # 17 = Sports
   self_declared_made_for_kids: false
