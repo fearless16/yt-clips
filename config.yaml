@@ -128,7 +128,7 @@ export:
 youtube:
   token_path: "yt_analytics_token.json"
   channel_id: "UCQtCMKPc41MHd7hujVuGm5g"
-  privacy_status: "private"              # private | unlisted | public
+  privacy_status: "scheduled"            # private | unlisted | public | scheduled
   category_id: "17"                     # 17 = Sports
   self_declared_made_for_kids: false
   enforce_shorts_eligibility: true      # Refuse landscape/too-long files before upload
