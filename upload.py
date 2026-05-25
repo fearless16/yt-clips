@@ -328,6 +328,18 @@ def upload_video(
             video_id = response["id"]
             log.info(f"✅ Upload successful! Video ID: {video_id}")
 
+            # Save the YouTube video ID to the metadata file
+            try:
+                if Path(metadata_path).exists():
+                    with open(metadata_path, "r") as f:
+                        meta_data = json.load(f)
+                    meta_data["youtube_video_id"] = video_id
+                    with open(metadata_path, "w") as f:
+                        json.dump(meta_data, f, indent=2)
+                    log.info(f"📝 Saved youtube_video_id: {video_id} to {Path(metadata_path).name}")
+            except Exception as e:
+                log.warning(f"Failed to write video_id to metadata: {e}")
+
             # ── Upload Thumbnail ──────────────────────────────────────────────────────
             if thumb_path.exists():
                 try:
