@@ -256,9 +256,14 @@ def upload_video(
     all_tags = list(dict.fromkeys([str(t).strip() for t in seo_tags + search_terms if str(t).strip()]))
     title, description, all_tags = _ensure_shorts_metadata(title, description, all_tags)
 
-    if publish_at:
-        log.info(f"⏰ Scheduled for: {publish_at}")
-        privacy = privacy  # Keep privacy as-is for scheduling
+    if publish_at or privacy == "scheduled":
+        if not publish_at:
+            from scheduler import get_next_upload_time
+            publish_at = get_next_upload_time()
+            log.info(f"⏰ Privacy set to 'scheduled'. Auto-scheduling for: {publish_at}")
+        else:
+            log.info(f"⏰ Scheduled for: {publish_at}")
+        privacy = "private"  # YouTube API requires "private" for scheduled videos
 
     body = {
         "snippet": {
