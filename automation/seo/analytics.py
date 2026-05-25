@@ -224,19 +224,20 @@ def feed_seo_learner(shorts: List[Dict], videos: List[Dict] = None, lives: List[
             model = None
 
             shorts_dir = Path("shorts")
-            for meta_path in shorts_dir.rglob(f"{clip_id}_metadata.json"):
+            for meta_path in shorts_dir.rglob("*_metadata.json"):
                 if meta_path.is_file():
                     try:
-                        meta = json.loads(meta_path.read_text())
-                        desc = meta.get("description", "")
-                        hashtags = meta.get("hashtags", [])
-                        search_terms = meta.get("search_terms", [])
-                        tags = meta.get("tags", [])
-                        provider = meta.get("_generated_by_provider")
-                        model = meta.get("_generated_by_model")
+                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                        if meta.get("youtube_video_id") == clip_id or meta_path.stem == f"{clip_id}_metadata":
+                            desc = meta.get("description", "")
+                            hashtags = meta.get("hashtags", [])
+                            search_terms = meta.get("search_terms", [])
+                            tags = meta.get("tags", [])
+                            provider = meta.get("_generated_by_provider")
+                            model = meta.get("_generated_by_model")
+                            break
                     except Exception:
                         pass
-                    break
 
             learner.record_performance(
                 clip_id=clip_id,

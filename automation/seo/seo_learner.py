@@ -194,6 +194,8 @@ class SEOLearner:
             "has_team_hashtag": any(any(team in h.lower() for team in [
                 "rcb", "csk", "mi", "kkr", "srh", "dc", "pbks", "rr", "gt", "lsg"
             ]) for h in hashtags),
+            "starts_with_live_emoji": title.startswith("🔴"),
+            "has_multiple_pipes": title.count("|") >= 2,
         }
         return features
 
@@ -204,7 +206,9 @@ class SEOLearner:
 
         views_score = min(1.0, math.log(max(1, views)) / 15)
         engagement_rate = (likes + comments) / max(1, views)
-        engagement_score = min(1.0, engagement_rate * 20)
+        # Apply view-based credibility scaling to avoid noise on low-view clips
+        credibility = min(1.0, views / 100.0)
+        engagement_score = min(1.0, engagement_rate * 20) * credibility
 
         has_retention = analytics.get("retention") is not None
         has_ctr = analytics.get("ctr") is not None
@@ -432,6 +436,7 @@ class SEOLearner:
             "has_pipe_format", "has_power_word", "has_player_name",
             "has_score", "has_emoji", "has_sections", "has_cta",
             "has_shorts_hashtag", "has_ipl_hashtag", "has_team_hashtag",
+            "starts_with_live_emoji", "has_multiple_pipes",
         ]
         importance = {}
         for feat in bool_features:
@@ -777,6 +782,8 @@ def _pattern_to_readable(pattern: str) -> str:
             "has_ipl_hashtag": "#IPL hashtag",
             "has_team_hashtag": "Team hashtag",
             "hashtag_count_bin": "Hashtag count",
+            "starts_with_live_emoji": "Live circle emoji prefix (🔴)",
+            "has_multiple_pipes": "Multiple structure separators (|)",
         }.get(key, key.replace("_", " ").replace("has ", "").title())
         readable.append(label)
     if not readable:
