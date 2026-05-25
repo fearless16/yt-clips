@@ -118,17 +118,27 @@ def _fetch_via_api(video_id: str) -> dict | None:
                 return None
 
         raw = transcript.fetch()
-        # v1.x returns FetchedTranscript with .snippets
+        # Handle different response formats from youtube-transcript-api
         if hasattr(raw, "snippets"):
-            segments = [
-                {"start": s.start, "end": s.start + s.duration, "text": s.text}
-                for s in raw.snippets
-            ]
+            raw_snippets = raw.snippets
         else:
-            segments = [
-                {"start": s["start"], "end": s["start"] + s["duration"], "text": s["text"]}
-                for s in raw
-            ]
+            raw_snippets = raw
+
+        segments = []
+        for s in raw_snippets:
+            if isinstance(s, dict):
+                start = s["start"]
+                duration = s["duration"]
+                text = s["text"]
+            else:
+                start = getattr(s, "start")
+                duration = getattr(s, "duration")
+                text = getattr(s, "text")
+            segments.append({
+                "start": start,
+                "end": start + duration,
+                "text": text
+            })
         return {"segments": segments, "language": transcript.language_code, "source": "api"}
     except Exception:
         return None

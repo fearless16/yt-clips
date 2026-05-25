@@ -70,7 +70,7 @@ def get_drive_service():
                 from google.auth.transport.requests import Request
                 credentials = Credentials.from_authorized_user_file(
                     str(kaggle_token),
-                    scopes=["https://www.googleapis.com/auth/drive.file"],
+                    scopes=["https://www.googleapis.com/auth/drive"],
                 )
                 if credentials and credentials.expired and credentials.refresh_token:
                     credentials.refresh(Request())
@@ -88,7 +88,7 @@ def get_drive_service():
                 from google_auth_oauthlib.flow import InstalledAppFlow
                 flow = InstalledAppFlow.from_client_secrets_file(
                     str(kaggle_secrets),
-                    scopes=["https://www.googleapis.com/auth/drive.file"],
+                    scopes=["https://www.googleapis.com/auth/drive"],
                 )
                 # Headless: run console flow (no browser on Kaggle)
                 creds = flow.run_local_server(port=0, open_browser=False)
@@ -103,45 +103,44 @@ def get_drive_service():
 
     credentials = None
 
-    # ─── Method 1: Application Default Credentials (gcloud auth) ─────────────
-    try:
-        import google.auth.exceptions
-        from google.auth.transport.requests import Request
-        credentials, project = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/drive.file"]
-        )
-        # Probe test: verify credentials actually work
-        if hasattr(credentials, "refresh"):
-            credentials.refresh(Request())
-        log.info("✅ Using gcloud Application Default Credentials")
-    except Exception as e:
-        log.debug("ADC validation failed: %s", e)
-        credentials = None
+    # ─── Method 1: Saved OAuth token.json ────────────────────────────────────
+    token_path = Path("token.json")
+    if token_path.exists():
+        try:
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import Request
+            credentials = Credentials.from_authorized_user_file(
+                str(token_path),
+                scopes=["https://www.googleapis.com/auth/drive"],
+            )
+            if credentials and credentials.expired and credentials.refresh_token:
+                credentials.refresh(Request())
+            log.info("✅ Using saved OAuth token")
+        except Exception as e:
+            log.warning("Token refresh failed: %s", e)
+            credentials = None
 
-    # ─── Method 2: Saved OAuth token.json ────────────────────────────────────
+    # ─── Method 2: Application Default Credentials (gcloud auth) ─────────────
     if not credentials:
-        token_path = Path("token.json")
-        if token_path.exists():
-            try:
-                from google.oauth2.credentials import Credentials
-                from google.auth.transport.requests import Request
-                credentials = Credentials.from_authorized_user_file(
-                    str(token_path),
-                    scopes=["https://www.googleapis.com/auth/drive.file"],
-                )
-                if credentials and credentials.expired and credentials.refresh_token:
-                    credentials.refresh(Request())
-                log.info("✅ Using saved OAuth token")
-            except Exception as e:
-                log.warning("Token refresh failed: %s", e)
-                credentials = None
+        try:
+            import google.auth.exceptions
+            from google.auth.transport.requests import Request
+            credentials, project = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            # Probe test: verify credentials actually work
+            if hasattr(credentials, "refresh"):
+                credentials.refresh(Request())
+            log.info("✅ Using gcloud Application Default Credentials")
+        except Exception as e:
+            log.debug("ADC validation failed: %s", e)
+            credentials = None
 
     if not credentials:
         log.error(
             "❌ No Google credentials found.\n"
-            "   Option 1: Run 'gcloud auth application-default login'\n"
-            "   Option 2: Place a valid 'token.json' in project root\n"
-            "   Option 3: If on Colab, ensure you mounted Drive."
+            "   Run: .venv/bin/python setup_auth.py  (option 2 for Drive)\n"
+            "   This will open a browser to log into your Drive Google account."
         )
         return None
 

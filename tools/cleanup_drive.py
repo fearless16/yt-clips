@@ -106,16 +106,26 @@ def cleanup_old_shorts(service, days: int, dry_run: bool):
 
 
 def cleanup_all(service, dry_run: bool):
-    """Remove everything under yt-clips/ on Drive."""
-    from utils.drive_auth import find_or_create_folder
+    """Remove everything under yt-clips/ on Drive.
 
-    root_id = find_or_create_folder(service, "yt-clips")
-    all_items = _list_all(service, root_id)
-    # Also trash the root folder itself (but not if it's the only thing)
-    for item in all_items:
-        _trash_item(service, item, dry_run)
-    _trash_item(service, {"name": "yt-clips", "id": root_id, "mimeType": "folder"}, dry_run)
-    log.info("%s: %d items under yt-clips/", "Would remove" if dry_run else "Removed", len(all_items) + 1)
+    Trashes the root yt-clips folder directly — Drive cascades the deletion
+    server-side. This avoids recursive listing timeouts with large folder trees.
+    After trashing, the folder is permanently gone from Drive (moved to Trash).
+    """
+    from utils.drive_auth import find_folder
+
+    root_id = find_folder(service, "yt-clips")
+    if not root_id:
+        log.info("yt-clips folder not found on Drive — nothing to clean.")
+        return
+    if dry_run:
+        log.info("[dry-run] Would trash yt-clips root folder (id=%s) — cascades to all children.", root_id)
+        return
+    try:
+        service.files().update(fileId=root_id, body={"trashed": True}).execute()
+        log.info("✅ Trashed yt-clips root folder (id=%s). All children removed.", root_id)
+    except Exception as e:
+        log.error("Failed to trash yt-clips root: %s", e)
 
 
 def cleanup_orphans(service, dry_run: bool):
@@ -128,7 +138,8 @@ def cleanup_orphans(service, dry_run: bool):
         fields="files(id, name, mimeType)",
     ).execute()
     items = resp.get("files", [])
-    known_folders = {"shorts", "input", "transcripts", "highlights", "output", "photos", "utils", "automation", "face_os", "tools", "logs", "data", "temp"}
+    # face_os is intentionally excluded from Drive sync — never protect it here
+    known_folders = {"shorts", "input", "transcripts", "highlights", "output", "photos", "utils", "automation", "tools", "logs", "data", "temp"}
     removed = 0
     for item in items:
         is_folder = item["mimeType"] == "application/vnd.google-apps.folder"

@@ -238,17 +238,17 @@ def process_queue():
                 }, f, indent=2)
             continue
 
+        status = "done" if result.returncode == 0 else "failed"
         with open(RESULT_FILE, "w") as f:
             json.dump({
-                "status": "done" if result.returncode == 0 else "failed",
+                "status": status,
                 "returncode": result.returncode,
                 "url": url,
             }, f, indent=2)
 
         status_label = "OK" if result.returncode == 0 else "FAILED"
-        write_status("done" if result.returncode == 0 else "failed", url,
-                     f"Exit code {result.returncode} ({elapsed:.0f}s)")
-        log_info(f"Job {status_label} (exit={result.returncode}, {elapsed:.0f}s)\n")
+        write_status(status, url, f"Exit code {result.returncode} ({elapsed:.0f}s)")
+        log_info(f"[EXIT] Job {status_label} url={url} exit={result.returncode} elapsed={elapsed:.0f}s\n")
 
 
 def poll_job_file():
@@ -264,11 +264,22 @@ def poll_job_file():
                     job = json.load(f)
                 url = job.get("url", "")
                 if url:
-                    log_info(f"Job detected via file: {url}")
+                    # ─── Extract secrets delivered via Drive job ─────────────
+                    for secret_file in ["client_secrets.json", "yt_token.json"]:
+                        if secret_file in job and job[secret_file]:
+                            Path(secret_file).write_text(job[secret_file], encoding="utf-8")
+                            log_info(f"Saved {secret_file} ({len(job[secret_file])} bytes) from Drive job")
+                            del job[secret_file]
+                    log_info(f"Queued: {url}")
                     write_status("queued", url, "Job detected on Drive, queued for processing")
                     with processing_lock:
                         job_queue.append(job)
                     threading.Thread(target=process_queue, daemon=True).start()
+                else:
+                    log_info("Skipping job file: missing 'url' field")
+                job_path.unlink(missing_ok=True)
+            except json.JSONDecodeError as e:
+                log_info(f"Invalid JSON in job file: {e}")
                 job_path.unlink(missing_ok=True)
             except Exception as e:
                 log_info(f"File poll error: {e}")

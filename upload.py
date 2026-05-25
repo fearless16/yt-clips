@@ -135,45 +135,74 @@ def _ensure_shorts_metadata(title: str, description: str, tags: List[str]) -> Tu
     return title[:100], description[:5000], _limit_youtube_tags(tags)
 
 
-def get_authenticated_service():
+def _is_colab() -> bool:
+    try:
+        import google.colab
+        return True
+    except ImportError:
+        return False
+
+
+def get_authenticated_service(token_index=0):
     """
-    Authenticate with YouTube Data API.
-    Uses yt_token.json for saved credentials, client_secrets.json for OAuth flow.
+    Authenticate with YouTube Data API using token array rotation.
+    Reads from yt_tokens.json which contains an array of token objects.
     """
     creds = None
+    tokens_path = Path("yt_tokens.json")
+    
+    # Fallback to standard yt_token.json if array doesn't exist
+    if not tokens_path.exists():
+        tokens_path = Path("yt_token.json")
+        if not tokens_path.exists():
+            log.error("No yt_tokens.json or yt_token.json found.")
+            return None
+            
+    try:
+        with open(tokens_path, "r") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                tokens_array = data
+            else:
+                tokens_array = [data] # Wrap single token in list
+    except Exception as e:
+        log.error("Failed to parse %s: %s", tokens_path, e)
+        return None
+        
+    if token_index >= len(tokens_array):
+        log.error("Token index %d is out of bounds (array length %d)", token_index, len(tokens_array))
+        return None
+        
+    token_data = tokens_array[token_index]
+    
+    try:
+        creds = Credentials.from_authorized_user_info(token_data, SCOPES)
+        log.info("Loaded token %d (expired=%s, has_refresh=%s)",
+                 token_index,
+                 not creds.valid if creds else "N/A",
+                 bool(creds.refresh_token) if creds else "N/A")
+    except Exception as e:
+        log.warning("Failed to construct credentials for token %d: %s", token_index, e)
+        return None
 
-    # Load saved token
-    if os.path.exists("yt_token.json"):
+    if creds and creds.expired and creds.refresh_token:
         try:
-            creds = Credentials.from_authorized_user_file("yt_token.json", SCOPES)
+            creds.refresh(Request())
+            log.info("YouTube token %d refreshed successfully", token_index)
+            tokens_array[token_index] = json.loads(creds.to_json())
+            
+            # If we were using the single token fallback, overwrite it as an array to migrate seamlessly
+            with open("yt_tokens.json", "w") as f:
+                json.dump(tokens_array, f, indent=2)
+                
         except Exception as e:
-            log.warning(f"Failed to load yt_token.json: {e}")
-            creds = None
+            log.warning("Token %d refresh failed: %s", token_index, e)
+            return None
 
-    # Refresh or create new credentials
     if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                log.warning(f"Token refresh failed: {e}. Starting new auth flow.")
-                creds = None
+        log.error("Token %d is invalid and could not be refreshed.", token_index)
+        return None
 
-        if not creds:
-            if not os.path.exists("client_secrets.json"):
-                log.error(
-                    "❌ client_secrets.json not found!\n"
-                    "   Create a project in Google Cloud Console and download the OAuth secrets."
-                )
-                return None
-            flow = InstalledAppFlow.from_client_secrets_file("client_secrets.json", SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        # Save the credentials for the next run
-        with open("yt_token.json", "w") as token:
-            token.write(creds.to_json())
-
-    # Build service with robust httplib2 transport
     base_http = httplib2.Http(timeout=60)
     auth_http = google_auth_httplib2.AuthorizedHttp(creds, http=base_http)
     return build("youtube", "v3", http=auth_http)
@@ -182,7 +211,7 @@ def get_authenticated_service():
 def upload_video(
     video_path: str,
     metadata_path: str,
-    privacy: str = "private",
+    privacy: str = "public",
     publish_at: Optional[str] = None,
 ) -> Optional[str]:
     """
@@ -211,6 +240,7 @@ def upload_video(
 
     youtube = get_authenticated_service()
     if not youtube:
+        log.error("[EXIT] upload_video failed: no YouTube service (check yt_token.json)")
         return None
 
     # Load and validate SEO metadata
@@ -226,10 +256,9 @@ def upload_video(
     all_tags = list(dict.fromkeys([str(t).strip() for t in seo_tags + search_terms if str(t).strip()]))
     title, description, all_tags = _ensure_shorts_metadata(title, description, all_tags)
 
-    log.info(f"🚀 Uploading to YouTube: {title}...")
     if publish_at:
         log.info(f"⏰ Scheduled for: {publish_at}")
-        privacy = "private"  # Must be private to be scheduled
+        privacy = privacy  # Keep privacy as-is for scheduling
 
     body = {
         "snippet": {
@@ -240,7 +269,7 @@ def upload_video(
         },
         "status": {
             "privacyStatus": privacy,
-            "selfDeclaredMadeForKids": cfg["youtube"]["self_declared_made_for_kids"],
+            "selfDeclaredMadeForKids": False,
             "selfDeclaredContentAltered": False,
         },
     }
@@ -248,45 +277,78 @@ def upload_video(
     if publish_at:
         body["status"]["publishAt"] = publish_at
 
-    # Check for thumbnail
     thumb_path = Path(video_path).with_name(f"{Path(video_path).stem}_thumb.jpg")
-    media_body = MediaFileUpload(video_path, chunksize=-1, resumable=True)
-
-    insert_request = youtube.videos().insert(
-        part=",".join(body.keys()),
-        body=body,
-        media_body=media_body,
-    )
-
-    response = None
-    last_progress = -10
-    last_progress_time = time.monotonic()
-    while response is None:
-        status, response = insert_request.next_chunk()
-        if status:
-            progress = int(status.progress() * 100)
-            now = time.monotonic()
-            if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
-                log.info(f"   Upload Progress: {progress}%")
-                last_progress = progress
-                last_progress_time = now
-
-    video_id = response["id"]
-    log.info(f"✅ Upload successful! Video ID: {video_id}")
-
-    # ── Upload Thumbnail ──────────────────────────────────────────────────────
-    if thumb_path.exists():
+    
+    # ── Token Rotation Loop ──────────────────────────────────────────────────────
+    tokens_path = Path("yt_tokens.json")
+    max_tokens = 1
+    if tokens_path.exists():
         try:
-            log.info(f"🖼️ Uploading thumbnail: {thumb_path.name}...")
-            youtube.thumbnails().set(
-                videoId=video_id,
-                media_body=MediaFileUpload(str(thumb_path))
-            ).execute()
-            log.info("✅ Thumbnail uploaded!")
+            data = json.load(open(tokens_path))
+            if isinstance(data, list):
+                max_tokens = len(data)
+        except Exception:
+            pass
+
+    for token_idx in range(max_tokens):
+        youtube = get_authenticated_service(token_index=token_idx)
+        if not youtube:
+            log.warning("Could not get YouTube service for token %d. Trying next...", token_idx)
+            continue
+            
+        log.info(f"🚀 Uploading to YouTube: {title[:80]}... (using token {token_idx})")
+        
+        media_body = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+        insert_request = youtube.videos().insert(
+            part=",".join(body.keys()),
+            body=body,
+            media_body=media_body,
+        )
+
+        response = None
+        last_progress = -10
+        last_progress_time = time.monotonic()
+        
+        try:
+            while response is None:
+                status, response = insert_request.next_chunk()
+                if status:
+                    progress = int(status.progress() * 100)
+                    now = time.monotonic()
+                    if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
+                        log.info(f"   Upload Progress: {progress}%")
+                        last_progress = progress
+                        last_progress_time = now
+
+            video_id = response["id"]
+            log.info(f"✅ Upload successful! Video ID: {video_id}")
+
+            # ── Upload Thumbnail ──────────────────────────────────────────────────────
+            if thumb_path.exists():
+                try:
+                    log.info(f"🖼️ Uploading thumbnail: {thumb_path.name}...")
+                    youtube.thumbnails().set(
+                        videoId=video_id,
+                        media_body=MediaFileUpload(str(thumb_path))
+                    ).execute()
+                    log.info("✅ Thumbnail uploaded!")
+                except Exception as e:
+                    log.warning(f"Failed to upload thumbnail: {e}")
+                    
+            log.info(f"🔗 URL: https://youtu.be/{video_id}")
+            return video_id
+            
         except Exception as e:
-            log.warning(f"Failed to upload thumbnail: {e}")
-    log.info(f"🔗 URL: https://youtu.be/{video_id}")
-    return video_id
+            err_str = str(e)
+            if "quotaExceeded" in err_str or "rateLimitExceeded" in err_str or "429" in err_str:
+                log.warning("⚠️ Quota exceeded on token %d. Seamlessly rotating to next token...", token_idx)
+                continue  # Try the next token in the loop
+            else:
+                log.error("❌ Error uploading %s: %s", video_path, e)
+                return None
+                
+    log.error("[EXIT] All available tokens exhausted their quotas.")
+    return None
 
 
 if __name__ == "__main__":

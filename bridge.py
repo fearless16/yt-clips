@@ -30,6 +30,13 @@ def push_job(url: str, flags: list, via: str | None = None):
         flags: Additional CLI flags for the pipeline.
         via: Delivery method — "tunnel", "drive", or None for default (tunnel→drive→file).
     """
+    # ─── Refresh tokens before push ──────────────────────────────────────────
+    try:
+        from utils.token_refresh import ensure_fresh_tokens
+        ensure_fresh_tokens()
+    except Exception as e:
+        log.warning(f"Token refresh check skipped: {e}")
+
     job = {
         "url": url,
         "flags": flags,

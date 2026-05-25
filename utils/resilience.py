@@ -60,6 +60,20 @@ class CircuitBreaker:
             self._record_failure()
             raise
 
+    def allow_request(self) -> bool:
+        """Return True if request is allowed, False otherwise."""
+        return self.state != "OPEN"
+
+    def record_success(self) -> None:
+        """Record success and reset the circuit."""
+        self._failure_count = 0
+        self._state = "CLOSED"
+        self._last_failure_time = None
+
+    def record_failure(self) -> None:
+        """Record a failure."""
+        self._record_failure()
+
     def _record_failure(self) -> None:
         self._failure_count += 1
         self._last_failure_time = time.time()

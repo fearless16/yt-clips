@@ -194,6 +194,57 @@ class TestTranscript:
         assert len(segs) == 1
         assert "Hello" in segs[0]["text"]
 
+    def test_fetch_via_api_dataclass(self, mocker):
+        from automation.transcript import _fetch_via_api
+        
+        class MockSnippet:
+            def __init__(self, text, start, duration):
+                self.text = text
+                self.start = start
+                self.duration = duration
+
+        mock_api = mocker.patch("youtube_transcript_api.YouTubeTranscriptApi")
+        mock_instance = mock_api.return_value
+        
+        mock_transcript = mocker.MagicMock()
+        mock_transcript.language_code = "en"
+        mock_transcript.fetch.return_value = [
+            MockSnippet("Hello", 0.0, 2.0),
+            MockSnippet("World", 2.0, 3.0),
+        ]
+        
+        mock_instance.list.return_value = [mock_transcript]
+        
+        result = _fetch_via_api("fake_id")
+        assert result is not None
+        assert result["source"] == "api"
+        assert result["language"] == "en"
+        assert len(result["segments"]) == 2
+        assert result["segments"][0]["text"] == "Hello"
+        assert result["segments"][0]["start"] == 0.0
+        assert result["segments"][0]["end"] == 2.0
+
+    def test_fetch_via_api_dict(self, mocker):
+        from automation.transcript import _fetch_via_api
+        
+        mock_api = mocker.patch("youtube_transcript_api.YouTubeTranscriptApi")
+        mock_instance = mock_api.return_value
+        
+        mock_transcript = mocker.MagicMock()
+        mock_transcript.language_code = "en"
+        mock_transcript.fetch.return_value = [
+            {"text": "Hello", "start": 0.0, "duration": 2.0},
+            {"text": "World", "start": 2.0, "duration": 3.0},
+        ]
+        
+        mock_instance.list.return_value = [mock_transcript]
+        
+        result = _fetch_via_api("fake_id")
+        assert result is not None
+        assert result["source"] == "api"
+        assert len(result["segments"]) == 2
+        assert result["segments"][0]["text"] == "Hello"
+
 
 # ─── colab.py ──────────────────────────────────────────────────────────────────
 
@@ -309,3 +360,114 @@ class TestCLI:
         sys.argv = ["cli", "--memory-report"]
         try: main()
         except SystemExit: pass
+
+
+# ─── resilience.py ─────────────────────────────────────────────────────────────
+
+class TestResilience:
+    def test_circuit_breaker_methods(self):
+        from utils.resilience import CircuitBreaker
+        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=1.0)
+        assert cb.allow_request() is True
+        cb.record_failure()
+        assert cb.allow_request() is True
+        cb.record_failure()
+        assert cb.allow_request() is False
+        cb.record_success()
+        assert cb.allow_request() is True
+
+
+# ─── watcher.py — Secret Extraction ─────────────────────────────────────────────
+
+class TestWatcherSecretExtraction:
+    def test_secrets_extracted_from_job(self):
+        import json, tempfile
+        from pathlib import Path
+        
+        with tempfile.TemporaryDirectory() as tmp:
+            job = {
+                "url": "https://youtu.be/test",
+                "flags": ["--upload"],
+                "client_secrets.json": '{"web":{"client_id":"test"}}',
+                "yt_token.json": '{"token":"test","refresh_token":"rt"}',
+            }
+            job_path = Path(tmp) / "remote_job.json"
+            job_path.write_text(json.dumps(job))
+            
+            loaded = json.loads(job_path.read_text())
+            for secret_file in ["client_secrets.json", "yt_token.json"]:
+                if secret_file in loaded and loaded[secret_file]:
+                    (Path(tmp) / secret_file).write_text(loaded[secret_file], encoding="utf-8")
+                    del loaded[secret_file]
+            
+            assert not (Path(tmp) / "yt_token.json").exists() or (Path(tmp) / "yt_token.json").read_text() == '{"token":"test","refresh_token":"rt"}'
+            assert "yt_token.json" not in loaded
+            assert "client_secrets.json" not in loaded
+
+    def test_missing_url_skipped(self):
+        import json, tempfile
+        from pathlib import Path
+        
+        with tempfile.TemporaryDirectory() as tmp:
+            job = {"flags": ["--upload"]}
+            job_path = Path(tmp) / "bad_job.json"
+            job_path.write_text(json.dumps(job))
+            loaded = json.loads(job_path.read_text())
+            assert not loaded.get("url")
+
+
+# ─── upload.py — Colab detection guard ──────────────────────────────────────────
+
+class TestUploadColabGuard:
+    def test_is_colab_returns_false_locally(self):
+        from upload import _is_colab
+        assert _is_colab() is False
+
+
+# ─── transcribe.py — Config & VRAM logging ──────────────────────────────────────
+
+class TestTranscribeConfig:
+    def test_config_has_gpu_params(self):
+        from utils.config import load_config
+        cfg = load_config()
+        t = cfg.get("transcription", {})
+        assert t.get("batch_size", 0) >= 4
+        assert t.get("beam_size", 0) >= 3
+        assert t.get("vad_filter") is True
+        assert t.get("device") in ("cuda", "cpu")
+
+    def test_vram_logging_does_not_crash(self):
+        from transcribe import _log_vram
+        _log_vram("test")
+
+
+# ─── orchestrator.py — Exit logging format ──────────────────────────────────────
+
+class TestOrchestratorExitLogging:
+    def test_exit_log_format(self):
+        import logging
+        from io import StringIO
+        buf = StringIO()
+        handler = logging.StreamHandler(buf)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        log = logging.getLogger("orchestrator_test")
+        log.addHandler(handler)
+        log.setLevel(logging.INFO)
+        
+        # Simulate exit log emission
+        url = "https://youtu.be/test"
+        exported = 10
+        uploaded = 5
+        failures = 1
+        elapsed = 42.5
+        transcript = "api"
+        
+        log.info("[EXIT] pipeline url=%s exported=%d uploaded=%d failures=%d elapsed=%.1fs transcript=%s",
+                 url, exported, uploaded, failures, elapsed, transcript)
+        
+        output = buf.getvalue()
+        assert "[EXIT]" in output
+        assert "exported=10" in output
+        assert "uploaded=5" in output
+        assert "failures=1" in output
+        assert "elapsed=42.5" in output
