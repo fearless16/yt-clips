@@ -209,29 +209,52 @@ def format_for_llm(segments: list[dict], max_seconds: float | None = None, max_s
     return "\n".join(out)
 
 
-def fetch(url: str, output_path: str | None = None) -> dict:
+def fetch(url: str, output_path: str | None = None, video_path: str | None = None) -> dict:
     """Fetch transcript for *url*.
 
     Tries youtube-transcript-api first, then yt-dlp VTT fallback.
+    If both fail and video_path is provided, falls back to local whisper transcription.
     Results cached 1h per video_id.
 
     Args:
         url: YouTube video URL (standard, short, shorts, or embed).
         output_path: Optional path to write JSON transcript file.
+        video_path: Optional path to local video file for local transcription fallback.
 
     Returns:
         dict with keys: segments, language, source.
-        source is "api", "vtt", or "unavailable".
+        source is "api", "vtt", "local_whisper", or "unavailable".
     """
     video_id = _extract_video_id(url)
     if not video_id:
         return {"segments": [], "language": "unknown", "source": "unavailable"}
     cached = TRANSCRIPT_CACHE.get(video_id)
-    if cached is not None:
+    if cached is not None and not (cached.get("source") == "unavailable" and video_path):
         return cached
     result = _fetch_via_api(video_id)
     if result is None:
         result = _fetch_via_ytdlp(video_id)
+    if (result is None or result.get("source") == "unavailable") and video_path:
+        try:
+            from transcribe import transcribe
+            import tempfile
+            temp_out = output_path or str(Path(tempfile.gettempdir()) / f"transcribe_{video_id}.json")
+            transcribe(video_path, temp_out)
+            if Path(temp_out).exists():
+                with open(temp_out, "r", encoding="utf-8") as f:
+                    local_data = json.load(f)
+                result = {
+                    "segments": local_data.get("segments", []),
+                    "language": local_data.get("language", "unknown"),
+                    "source": "local_whisper"
+                }
+                if not output_path:
+                    try:
+                        Path(temp_out).unlink()
+                    except OSError:
+                        pass
+        except Exception:
+            pass
     if result is None:
         result = {"segments": [], "language": "unknown", "source": "unavailable"}
     TRANSCRIPT_CACHE.set(video_id, result)

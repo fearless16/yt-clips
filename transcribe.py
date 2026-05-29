@@ -150,6 +150,9 @@ def transcribe(video_path: str, output_path: str):
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
         r["text"] = text
 
+    # LLM-based cricket context correction pass
+    results = correct_segments_with_llm(results)
+
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w", encoding="utf-8") as f:
@@ -160,3 +163,52 @@ def transcribe(video_path: str, output_path: str):
         }, f, indent=2, ensure_ascii=False)
 
     log.info("Transcription complete: %d segments -> %s", len(results), output_path)
+
+
+def correct_segments_with_llm(segments: list[dict]) -> list[dict]:
+    """Correct misheard player/team names in transcript segments using LLM."""
+    if not segments:
+        return segments
+
+    from utils.ai_client import AIClient
+    try:
+        ai = AIClient()
+    except Exception:
+        return segments
+
+    if not (ai.groq_api_key or ai.openrouter_api_key or ai.nvidia_api_key or ai.deepseek_api_key):
+        return segments
+
+    log.info("Running LLM transcript correction pass...")
+    lines = [f"{i}: {seg['text']}" for i, seg in enumerate(segments)]
+    input_text = "\n".join(lines)
+
+    system_instruction = (
+        "You are an expert Indian/Pakistani cricket transcript editor. "
+        "Your task is to correct misheard player names (e.g. Kohli, Dhoni, Rohit, Starc, Bumrah, Shami, Hardik), "
+        "team names, tournaments, and venues in the provided indexed transcript lines. "
+        "Preserve the index (number followed by colon) at the start of each line. "
+        "Do NOT change the meaning or translate. Output ONLY the corrected lines, one per line."
+    )
+
+    try:
+        response = ai.generate_text(f"Correct these transcript lines:\n\n{input_text}", system_instruction=system_instruction)
+        if response:
+            corrected_map = {}
+            for line in response.strip().splitlines():
+                parts = line.split(":", 1)
+                if len(parts) == 2:
+                    try:
+                        idx = int(parts[0].strip())
+                        val = parts[1].strip()
+                        corrected_map[idx] = val
+                    except ValueError:
+                        pass
+
+            for i, seg in enumerate(segments):
+                if i in corrected_map and corrected_map[i]:
+                    seg["text"] = corrected_map[i]
+    except Exception as e:
+        log.warning(f"LLM transcript correction failed: {e}")
+
+    return segments
