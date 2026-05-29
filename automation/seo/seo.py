@@ -1,10 +1,10 @@
 """seo.py — Per-clip SEO generation for Indian cricket Shorts.
 
 Uses parallel fastest-first model racing: fires the fastest available models
-concurrently and takes the first valid JSON response. No backoff — on failure
-the next tier of models is tried immediately. Three-tier fallback: AI → salvage
-→ transcript-aware dynamic generation. Every title is clip-specific — no
-generic templates or prefixes.
+concurrently and takes the first valid JSON response. On failure it ESCALATES
+(stricter JSON-only prompt via the full provider failover chain), and if that
+still fails it raises SEOGenerationError so the clip is SKIPPED + QUEUED for
+retry — it never emits generic/template SEO. Every title is clip-specific.
 """
 import json
 import re
@@ -24,6 +24,40 @@ TREND_CACHE = TTLCache(maxsize=4, ttl=300)
 cfg = load_config()
 log = get_logger("seo", cfg["logging"]["log_file"], cfg["logging"]["level"])
 ai = AIClient()
+
+
+class SEOGenerationError(RuntimeError):
+    """Raised when LLM SEO generation fails after escalation.
+
+    The product contract forbids generic/template fallback SEO. When all
+    providers/models fail (even after a stricter-prompt retry), we raise this
+    instead of degrading — callers SKIP + QUEUE the clip for retry rather than
+    upload generic metadata.
+    """
+
+
+def _current_season_year() -> int:
+    """Derive the current cricket/IPL season year from the clock.
+
+    Avoids hardcoding a season (e.g. '2026'). IPL runs Mar–May; before March we
+    still reference the upcoming season's calendar year, which matches how the
+    audience searches.
+    """
+    from datetime import datetime
+    return datetime.now().year
+
+
+def _season_tag() -> str:
+    return "IPL %d" % _current_season_year()
+
+
+def _season_hashtag() -> str:
+    return "#IPL%d" % _current_season_year()
+
+
+def _default_hashtags() -> List[str]:
+    """Season-aware default hashtag seed (no hardcoded year)."""
+    return [_season_hashtag(), "#Cricket", "#Shorts"]
 
 
 def _maybe_auto_benchmark():
@@ -474,13 +508,28 @@ def _extract_keywords(text: str, limit: int = 14) -> List[str]:
 
 
 def _inject_viral_elements(title: str, description: str, hashtags: List[str], extra: Dict = None) -> Dict:
-    """Inject viral hooks and CTAs into SEO output."""
+    """Optionally inject viral hooks and CTAs into SEO output.
+
+    DISABLED by default (config ``seo.inject_viral_elements``). The random
+    hardcoded hooks/CTAs were generic, non-clip-specific templated copy — the
+    product contract prefers per-clip LLM-generated hooks. When disabled this
+    function is a pass-through that only normalizes hashtags (no generic year).
+    """
+    if not cfg.get("seo", {}).get("inject_viral_elements", False):
+        norm = hashtags[:8] if hashtags else _default_hashtags()
+        return {
+            **(extra or {}),
+            "title": title,
+            "description": description,
+            "hashtags": norm,
+        }
+
     if description and "Disclaimer:" in description and "CHAPTERS" in description:
         return {
             **(extra or {}),
             "title": title,
             "description": description,
-            "hashtags": hashtags[:8] if hashtags else ["#IPL2026", "#Cricket", "#Shorts"]
+            "hashtags": hashtags[:8] if hashtags else _default_hashtags()
         }
 
     import random
@@ -511,7 +560,7 @@ def _inject_viral_elements(title: str, description: str, hashtags: List[str], ex
 
     # Ensure hashtags have proper structure
     if len(hashtags) < 3:
-        hashtags = ["#IPL2026", "#Cricket", "#Shorts"] + hashtags
+        hashtags = _default_hashtags() + hashtags
 
     return {
         **(extra or {}),
@@ -748,7 +797,7 @@ def _consolidate_seo(title: str, description: str, hashtags: List[str], search_t
     for t in search_terms[:15]:
         term_words.update(t.lower().replace("#", "").split())
 
-    new_hashtags = ["#IPL2026", "#Cricket", "#Shorts"]
+    new_hashtags = _default_hashtags()
     for word in term_words:
         if word in player_names and len(new_hashtags) < 5:
             new_hashtags.append(f"#{word.capitalize()}")
@@ -817,24 +866,14 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None) -> Dict:
         cleaned.append(t)
         total += extra
 
-    # Ensure at least 10 search terms to avoid only_0_tags_need_10 error
+    # Backfill from real, clip-derived fallback terms (trends/transcript), if any.
+    # NOTE: we deliberately do NOT pad with generic phrases — the product
+    # contract forbids generic tag generation. Fewer specific tags beats
+    # generic ones, and total SEO failure is escalated/queued upstream.
     if len(cleaned) < 10 and fallback_terms:
         for t in fallback_terms:
             t = str(t).strip().lower()
-            if t not in cleaned and t not in GENERIC_TAGS:
-                extra = len(t) + (2 if cleaned else 0)
-                if total + extra > 500:
-                    break
-                cleaned.append(t)
-                total += extra
-            if len(cleaned) >= 10:
-                break
-                
-    # If still not 10, add some safe defaults
-    safe_defaults = ["cricket highlights", "cricket live match", "ipl match video", "t20 cricket live", "best cricket moments", "cricket shorts live", "indian cricket team", "cricket action", "match highlights", "cricket viral shorts"]
-    if len(cleaned) < 10:
-        for t in safe_defaults:
-            if t not in cleaned:
+            if t not in cleaned and t not in GENERIC_TAGS and len(t.split()) >= 2:
                 extra = len(t) + (2 if cleaned else 0)
                 if total + extra > 500:
                     break
@@ -939,18 +978,34 @@ def generate_clip_seo(
     is_shorts: bool = True,
 ) -> Dict:
     """
-    Generate SEO metadata for a single clip.
-    Retries up to 3 times with exponential backoff on 429/593.
-    provider_override/model_override: allow dynamic model selection for A/B testing.
+    Generate SEO metadata for a single clip via LLM reasoning.
+
+    Escalates on failure (fastest-first race -> stricter-prompt failover retry)
+    and raises SEOGenerationError if no valid AI output is produced — never
+    emits generic/template SEO. provider_override/model_override allow dynamic
+    model selection for A/B testing.
     """
     _maybe_auto_benchmark()
     trend_topics = trend_topics or []
-    
-    # Pre-SEO transcript correction
-    from .cricket_context import correct_cricket_spelling
+
+    # Pre-SEO factual correction — applied to ALL context fed to the LLM
+    # (transcript + title + scorecard), so the model reasons over corrected
+    # player/team/venue/tournament names BEFORE generation.
+    from .cricket_context import correct_cricket_spelling, find_canonical_entities
     corrected_transcript = correct_cricket_spelling(transcript)
-    
+    video_title = correct_cricket_spelling(video_title) if video_title else video_title
+    scorecard = correct_cricket_spelling(scorecard) if scorecard else scorecard
+
     local_kw_list = _extract_keywords(corrected_transcript)
+
+    # Ground keywords in verified cricket entities (wires the canonical sets):
+    # canonical players/teams found in the corrected context are prepended as
+    # high-value, factually-correct keywords for tag generation + the prompt.
+    entities = find_canonical_entities(corrected_transcript + " " + (video_title or ""))
+    canonical_kw = [e.lower() for e in (entities["players"] + entities["teams"])]
+    for kw in canonical_kw:
+        if kw not in local_kw_list:
+            local_kw_list.insert(0, kw)
     local_kw = ", ".join(local_kw_list)
 
     # Harvest YouTube autocomplete suggestions (multi-query, cached)
@@ -983,7 +1038,7 @@ def generate_clip_seo(
 
         SUGGEST_CACHE.set(cache_key, yt_suggestions)
 
-    trend_str = ", ".join(trend_topics[:5]) or "IPL 2026, cricket live"
+    trend_str = ", ".join(trend_topics[:5]) or ("%s, cricket live" % _season_tag())
     yt_suggest_str = ", ".join(yt_suggestions[:5]) or "No suggestions available"
     live_cta = (
         f"Watch LIVE: {live_stream_url}" if live_stream_url
@@ -1036,7 +1091,8 @@ def generate_clip_seo(
                                              transcript=corrected_transcript,
                                              video_title=video_title,
                                              scorecard=scorecard,
-                                             system_instruction=system_instruction)
+                                             system_instruction=system_instruction,
+                                             is_shorts=is_shorts)
             return result
         finally:
             ai._provider = old_provider
@@ -1048,7 +1104,8 @@ def generate_clip_seo(
                                      transcript=corrected_transcript,
                                      video_title=video_title,
                                      scorecard=scorecard,
-                                     system_instruction=system_instruction)
+                                     system_instruction=system_instruction,
+                                     is_shorts=is_shorts)
     return result
 
 
@@ -1062,211 +1119,89 @@ def _attempt_seo_generation(
     video_title: str = "",
     scorecard: str = "",
     system_instruction: str = _SYSTEM,
+    is_shorts: bool = True,
 ) -> Dict:
-    """Generate SEO with parallel model racing. Fires fastest available models
-    concurrently and takes the first valid response. No backoff — on failure
-    the next tier of models is tried immediately.
-    CRITICAL: Never uses template fallback — always uses AI content.
-    """
-    import random as _random
+    """Generate SEO via LLM, ESCALATING on failure (never degrading).
 
+    Strategy (escalation, not degradation):
+      1. Race the fastest available models (``generate_fastest_first``).
+      2. If the response is missing/unparseable, ESCALATE: retry once via the
+         full failover chain (``generate_text``) with a stricter JSON-only
+         prompt + JSON-repair parsing.
+      3. If still no valid AI JSON, raise :class:`SEOGenerationError` so the
+         caller SKIPS + QUEUES the clip — we never emit generic/template SEO.
+
+    For Shorts the LLM's short (<400 char) description is preserved; only
+    long-form clips get the structured LIVE/CHAPTERS/Disclaimer layout.
+    """
+    # ── 1. Primary: fastest-first racing ──────────────────────────────────────
     try:
         response_text = ai.generate_fastest_first(prompt, system_instruction=system_instruction)
     except Exception as e:
-        log.warning("[%s] AI Client generate_fastest_first failed: %s", clip_id, e)
+        log.warning("[%s] generate_fastest_first failed: %s", clip_id, e)
         response_text = ""
 
-    if response_text:
-        data = _parse_json_response(response_text)
-        if data:
-            ai_terms = data.get("search_terms", [])
-            optimized_tags = _rank_and_optimize_tags(
-                ai_terms=ai_terms,
-                yt_suggestions=yt_suggestions or [],
-                trend_topics=trend_topics,
-                local_keywords=local_keywords or [],
-                max_chars=500,
-            )
+    data = _parse_json_response(response_text) if response_text else None
 
-            # Assemble description dynamically in the new format
-            assembled_desc = assemble_description(
-                data,
-                scorecard=scorecard,
-                video_title=video_title,
-                transcript=transcript,
-                fallback_search_terms=optimized_tags,
-                fallback_hashtags=data.get("hashtags")
-            )
+    # ── 2. Escalation: stricter JSON-only prompt via full failover chain ──────
+    if not data:
+        log.warning("[%s] SEO attempt-1 unusable — escalating (stricter prompt + failover chain)", clip_id)
+        strict_system = (system_instruction or _SYSTEM) + (
+            " You MUST return ONLY a single minified JSON object. No markdown, no commentary."
+        )
+        strict_prompt = prompt + (
+            "\n\nSTRICT OUTPUT: Return ONLY one JSON object with keys "
+            '"title", "description", "search_terms", "hashtags". '
+            "No code fences, no explanation, no surrounding text."
+        )
+        try:
+            response_text = ai.generate_text(strict_prompt, system_instruction=strict_system)
+        except Exception as e:
+            log.warning("[%s] SEO escalation attempt failed: %s", clip_id, e)
+            response_text = ""
+        data = _parse_json_response(response_text) if response_text else None
 
-            result = _enforce_limits({
-                "clip_id": clip_id,
-                "title": data.get("title", f"LIVE {video_title or 'Cricket Highlights'}"),
-                "description": assembled_desc,
-                "hashtags": data.get("hashtags", ["#IPL2026", "#Cricket", "#Shorts"]),
-                "search_terms": optimized_tags,
-                "tags": optimized_tags,
-            }, fallback_terms=trend_topics)
+    # ── 3. No degradation: signal queue-for-retry ─────────────────────────────
+    if not data:
+        raise SEOGenerationError(
+            "[%s] SEO generation failed after escalation — no valid AI JSON" % clip_id
+        )
 
-            result = _consolidate_seo(
-                result["title"], result["description"],
-                result["hashtags"], result["search_terms"]
-            )
+    # ── Build result from AI data ─────────────────────────────────────────────
+    ai_terms = data.get("search_terms", [])
+    optimized_tags = _rank_and_optimize_tags(
+        ai_terms=ai_terms,
+        yt_suggestions=yt_suggestions or [],
+        trend_topics=trend_topics,
+        local_keywords=local_keywords or [],
+        max_chars=500,
+    )
 
-            result = _inject_viral_elements(
-                result["title"],
-                result["description"],
-                result["hashtags"],
-                extra=result,
-            )
-            result["clip_id"] = clip_id
-            result["ai_generated"] = True
-            result["_generated_by_provider"] = ai.get_used_provider()
-            result["_generated_by_model"] = ai.get_used_model()
+    ai_hashtags = data.get("hashtags") or _default_hashtags()
 
-            log.info("[%s] SEO done — title: %s | tags: %d (%d chars)",
-                     clip_id, result["title"][:100],
-                     len(result.get("search_terms", [])),
-                     sum(len(t) + 1 for t in result.get("search_terms", [])))
-            return result
-
-        # AI responded but JSON parsing failed — salvage raw content
-        log.warning("[%s] AI responded but JSON extract failed — salvaging raw text", clip_id)
-
-        # Extract meaningful text from the raw AI response
-        local_kw = _extract_keywords(transcript, limit=8)
-        kw_str = ", ".join(local_kw[:5]) if local_kw else "cricket highlights"
-
-        # Build title from first meaningful line of AI output
-        lines = [l.strip() for l in response_text.split('\n') if l.strip()]
-        title = ""
-        for line in lines:
-            clean = line.strip('#* ')  # Remove markdown artifacts
-            if clean and len(clean) > 15 and len(clean) < 120:
-                title = clean[:100]
-                break
-
-        if not title:
-            team_str = ""
-            team_map = {"gt", "csk", "mi", "rcb", "srh", "dc", "kkr", "rr", "lsg", "pbks"}
-            teams = [w.upper() for w in (transcript or "").lower().split() if w in team_map]
-            if teams:
-                team_str = " vs ".join(sorted(set(teams)))
-            title = f"{kw_str} | {team_str or 'IPL 2026'}"[:100]
-
-        if not title.startswith("LIVE"):
-            title = f"LIVE {title}"[:100]
-
-        # Generate search terms from transcript keywords + trends
-        fallback_terms = []
-        for t in (trend_topics or [])[:10]:
-            if t not in fallback_terms:
-                fallback_terms.append(t)
-        for w in local_kw[:10]:
-            phrase = f"{w} cricket ipl"
-            if phrase not in fallback_terms:
-                fallback_terms.append(phrase)
-
-        # Assemble description dynamically in the new format
-        salvaged_desc = assemble_description(
-            {"description": ""},
+    if is_shorts:
+        # Preserve the LLM's punchy short description; do NOT overwrite it with
+        # the long LIVE/CHAPTERS/Disclaimer template (that was a Shorts bug).
+        description = str(data.get("description", "")).strip()
+    else:
+        description = assemble_description(
+            data,
             scorecard=scorecard,
             video_title=video_title,
             transcript=transcript,
-            fallback_search_terms=fallback_terms,
-            fallback_hashtags=["#IPL2026", "#Cricket", "#Shorts"]
+            fallback_search_terms=optimized_tags,
+            fallback_hashtags=ai_hashtags,
         )
 
-        result = _enforce_limits({
-            "clip_id": clip_id,
-            "title": title,
-            "description": salvaged_desc,
-            "hashtags": ["#IPL2026", "#Cricket", "#Shorts"],
-            "search_terms": fallback_terms[:20],
-            "tags": fallback_terms[:20],
-        }, fallback_terms=trend_topics)
-
-        result = _consolidate_seo(
-            result["title"], result["description"],
-            result["hashtags"], result["search_terms"]
-        )
-        result["_salvaged"] = True
-        result["clip_id"] = clip_id
-        result["ai_generated"] = True
-
-        log.info("[%s] SEO done (salvaged from raw AI) — title: %s",
-                 clip_id, result["title"][:100])
-        return result
-
-    # AI returned nothing at all — use transcript-based dynamic generation
-    log.warning("[%s] No AI response — generating transcript-aware SEO", clip_id)
-    local_kw = _extract_keywords(transcript, limit=12)
-    kw_str = ", ".join(local_kw[:5]) if local_kw else "cricket highlights"
-
-    # Detect players and teams from BOTH transcript AND video_title
-    players_in_transcript = set()
-    teams_in_transcript = set()
-    all_text = (transcript or "") + " " + (video_title or "")
-    for word in all_text.lower().split():
-        if word in CRICKET_KEYWORDS and word not in GENERIC_TAGS:
-            players_in_transcript.add(word.capitalize())
-
-    team_map = {"gt", "csk", "mi", "rcb", "srh", "dc", "kkr", "rr", "lsg", "pbks"}
-    for word in all_text.lower().split():
-        if word in team_map:
-            teams_in_transcript.add(word.upper())
-
-    player_str = ", ".join(sorted(players_in_transcript)[:3])
-    team_str = " vs ".join(sorted(teams_in_transcript)) if teams_in_transcript else "IPL 2026"
-
-    # Build title — prefer structured format with teams from video_title
-    if teams_in_transcript and len(teams_in_transcript) >= 2:
-        t_list = sorted(teams_in_transcript)
-        title = f"LIVE {t_list[0]} vs {t_list[1]}"
-        if player_str:
-            title += f" — {player_str}"
-        title = f"{title} | {team_str} | Aaj Ka Match Hindi Commentary"[:100]
-    elif player_str:
-        title = f"LIVE {player_str} {kw_str} | {team_str} | Aaj Ka Match Hindi Commentary"[:100]
-    else:
-        title = f"LIVE {kw_str} | {team_str} | Aaj Ka Match Hindi Commentary"[:100]
-
-    hashtags = ["#IPL2026"]
-    if teams_in_transcript:
-        for t in sorted(teams_in_transcript):
-            if len(hashtags) < 4:
-                hashtags.append(f"#{t}")
-    else:
-        hashtags.append("#Cricket")
-    hashtags.extend([f"#{w.capitalize()}" for w in local_kw[:2] if len(w) > 2])
-    hashtags.append("#Shorts")
-    hashtags = list(dict.fromkeys(hashtags))[:5]
-
-    search_terms = []
-    for kw in local_kw[:8]:
-        search_terms.append(f"{kw} cricket ipl")
-        search_terms.append(f"{kw} {team_str.lower()}")
-    for t in (trend_topics or [])[:8]:
-        if t not in search_terms:
-            search_terms.append(t)
-    search_terms = list(dict.fromkeys(search_terms))[:25]
-
-    # Assemble description dynamically in the new format
-    fallback_desc = assemble_description(
-        {"description": ""},
-        scorecard=scorecard,
-        video_title=video_title,
-        transcript=transcript,
-        fallback_search_terms=search_terms,
-        fallback_hashtags=hashtags
-    )
+    title = data.get("title") or ("LIVE %s" % (video_title or "Cricket Highlights"))
 
     result = _enforce_limits({
         "clip_id": clip_id,
         "title": title,
-        "description": fallback_desc,
-        "hashtags": hashtags,
-        "search_terms": search_terms,
-        "tags": search_terms,
+        "description": description,
+        "hashtags": ai_hashtags,
+        "search_terms": optimized_tags,
+        "tags": optimized_tags,
     }, fallback_terms=trend_topics)
 
     result = _consolidate_seo(
@@ -1274,12 +1209,19 @@ def _attempt_seo_generation(
         result["hashtags"], result["search_terms"]
     )
 
+    result = _inject_viral_elements(
+        result["title"], result["description"], result["hashtags"], extra=result,
+    )
     result["clip_id"] = clip_id
-    result["ai_generated"] = False
-    result["_transcript_generated"] = True
+    result["ai_generated"] = True
+    result["is_shorts"] = is_shorts
+    result["_generated_by_provider"] = ai.get_used_provider()
+    result["_generated_by_model"] = ai.get_used_model()
 
-    log.info("[%s] SEO done (transcript-aware, no AI) — title: %s | %d tags",
-             clip_id, result["title"][:100], len(search_terms))
+    log.info("[%s] SEO done — title: %s | tags: %d (%d chars)",
+             clip_id, result["title"][:100],
+             len(result.get("search_terms", [])),
+             sum(len(t) + 1 for t in result.get("search_terms", [])))
     return result
 
 
@@ -1317,16 +1259,32 @@ def generate_seo_for_exported_clip(
     except Exception:
         pass
 
-    result = generate_clip_seo(
-        clip_id=clip_id,
-        transcript=transcript,
-        video_title=video_title,
-        scorecard=scorecard,
-        trend_topics=trend_topics or [],
-        live_stream_url=live_stream_url,
-        provider_override=provider_override,
-        model_override=model_override,
-    )
+    try:
+        result = generate_clip_seo(
+            clip_id=clip_id,
+            transcript=transcript,
+            video_title=video_title,
+            scorecard=scorecard,
+            trend_topics=trend_topics or [],
+            live_stream_url=live_stream_url,
+            provider_override=provider_override,
+            model_override=model_override,
+        )
+    except SEOGenerationError as e:
+        # No generic fallback: write a queue marker and return WITHOUT a
+        # *_metadata.json so the upload phase skips this clip (queued for retry).
+        log.error("[%s] SEO failed — queued for retry (no generic fallback): %s",
+                  clip_id, e,
+                  extra={"stage": "seo", "status": "failed",
+                         "error_type": type(e).__name__,
+                         "metadata": {"clip_id": clip_id}})
+        from datetime import datetime as _dt
+        marker = Path(output_dir) / f"{clip_id}_seo_failed.json"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"clip_id": clip_id, "reason": str(e), "queued_at": _dt.now().isoformat()}
+        with open(marker, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        return {"clip_id": clip_id, "_seo_failed": True, "_queued": True, "reason": str(e)}
 
     out_path = Path(output_dir) / f"{clip_id}_metadata.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1386,19 +1344,40 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
     all_results = []
 
     clips = list(highlights.items())
+    queued = []
     for idx, (clip_id, info) in enumerate(clips, start=1):
         transcript = info.get("text", "Cricket Live")
         log.info("SEO [%d/%d]: %s", idx, len(clips), clip_id)
 
-        result = generate_clip_seo(
-            clip_id=clip_id,
-            transcript=transcript,
-            video_title=video_title,
-            scorecard=scorecard,
-            trend_topics=trend_topics,
-            live_stream_url=live_stream_url,
-            teams=teams,
-        )
+        try:
+            result = generate_clip_seo(
+                clip_id=clip_id,
+                transcript=transcript,
+                video_title=video_title,
+                scorecard=scorecard,
+                trend_topics=trend_topics,
+                live_stream_url=live_stream_url,
+                teams=teams,
+            )
+        except SEOGenerationError as e:
+            # No generic fallback: queue the clip for retry instead of writing
+            # generic metadata. A *_seo_failed.json marker is written; NO
+            # *_metadata.json is produced, so the upload phase skips this clip.
+            log.error("[%s] SEO failed — queued for retry (no generic fallback): %s",
+                      clip_id, e,
+                      extra={"stage": "seo", "status": "failed",
+                             "error_type": type(e).__name__,
+                             "metadata": {"clip_id": clip_id}})
+            queued.append(clip_id)
+            marker = Path(output_dir) / f"{clip_id}_seo_failed.json"
+            with open(marker, "w", encoding="utf-8") as f:
+                json.dump({"clip_id": clip_id, "reason": str(e),
+                           "queued_at": __import__("datetime").datetime.now().isoformat()},
+                          f, ensure_ascii=False, indent=2)
+            if idx < len(clips):
+                time.sleep(5)
+            continue
+
         all_results.append(result)
 
         # Save individual file immediately (safe even if later clips fail)
@@ -1416,7 +1395,8 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
     with open(combined_path, "w", encoding="utf-8") as f:
         json.dump(all_results, f, ensure_ascii=False, indent=2)
 
-    log.info("SEO complete: %d clips → %s", len(all_results), output_dir)
+    log.info("SEO complete: %d ok, %d queued-for-retry → %s",
+             len(all_results), len(queued), output_dir)
     return str(combined_path)
 
 
