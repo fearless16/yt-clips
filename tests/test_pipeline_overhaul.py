@@ -451,3 +451,68 @@ class TestDryRun:
         missing = [k for k, ok, _ in checks if not ok]
         assert not missing, f"Missing: {missing}"
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 10. MODEL DIVERSITY — randomization + prefer_provider
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestModelDiversity:
+    """The racer must shuffle models within tiers for diversity, and
+    prefer_provider must boost that provider to front-of-tier."""
+
+    def test_available_plan_shuffles_within_tiers(self):
+        from utils.ai_client import AIClient
+        ai = AIClient()
+        ai.groq_api_key = "k"
+        ai.openrouter_api_key = "k"
+        ai.deepseek_api_key = "k"
+        ai.nvidia_api_key = "k"
+        # Run multiple times and check we get different orderings
+        orderings = set()
+        for _ in range(20):
+            plan = ai._available_plan()
+            # Tier 1 has multiple groq models
+            if plan:
+                orderings.add(tuple(plan[0]))
+        # With 3 groq models in tier 1, we should see >1 ordering across 20 calls
+        assert len(orderings) > 1, "Models should be shuffled for diversity"
+
+    def test_prefer_provider_boosts_to_front(self):
+        from utils.ai_client import AIClient
+        ai = AIClient()
+        ai.groq_api_key = "k"
+        ai.openrouter_api_key = "k"
+        ai.deepseek_api_key = "k"
+        ai.nvidia_api_key = "k"
+        # Tier 2 has deepseek + nvidia + openrouter mixed
+        # With prefer_provider="nvidia", nvidia should be first in tier 2
+        found_nvidia_first = False
+        for _ in range(10):
+            plan = ai._available_plan(prefer_provider="nvidia")
+            # Find the tier containing nvidia
+            for tier in plan:
+                nvidia_in_tier = [x for x in tier if x[0] == "nvidia"]
+                if nvidia_in_tier:
+                    assert tier[0][0] == "nvidia", \
+                        f"nvidia should be first in its tier but got {tier[0]}"
+                    found_nvidia_first = True
+                    break
+        assert found_nvidia_first
+
+    def test_seo_does_not_mutate_shared_ai_singleton(self):
+        """generate_clip_seo must NOT mutate ai._provider/_model (bug #1 fix)."""
+        from automation.seo.seo import generate_clip_seo, ai as seo_ai
+        original_provider = seo_ai._provider
+        original_model = seo_ai._model
+        good = json.dumps({"title": "T #Shorts", "description": "D #Shorts",
+                           "search_terms": ["a b"], "hashtags": ["#Shorts"]})
+        with patch("utils.ai_client.AIClient.generate_fastest_first",
+                   return_value=good):
+            generate_clip_seo("c1", "kohli six", "RCB vs CSK",
+                              provider_override="openrouter",
+                              model_override="some-model",
+                              is_shorts=True)
+        # Shared singleton must be unchanged
+        assert seo_ai._provider == original_provider
+        assert seo_ai._model == original_model

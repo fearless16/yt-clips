@@ -309,8 +309,15 @@ class AIClient:
 
         raise RuntimeError(f"All LLM providers failed. Errors: {'; '.join(errors)}")
 
-    def _available_plan(self) -> List[List[tuple]]:
-        """Return FASTEST_TIERS filtered to only available (have API key) providers."""
+    def _available_plan(self, prefer_provider: Optional[str] = None) -> List[List[tuple]]:
+        """Return FASTEST_TIERS filtered to available providers, shuffled within
+        each tier for model diversity across calls.
+
+        If *prefer_provider* is set (e.g. from self-learner's best model), that
+        provider's models are moved to the FRONT of each tier they appear in, so
+        they get first shot while still racing others for resilience.
+        """
+        import random as _random
         has_key = {
             "groq": bool(self.groq_api_key),
             "deepseek": bool(self.deepseek_api_key),
@@ -320,11 +327,20 @@ class AIClient:
         plan = []
         for tier in self.FASTEST_TIERS:
             available = [(p, m) for p, m in tier if has_key.get(p)]
-            if available:
-                plan.append(available)
+            if not available:
+                continue
+            # Shuffle for diversity: different clips hit different models first
+            _random.shuffle(available)
+            # If a preferred provider is set, boost it to front of the tier
+            if prefer_provider:
+                preferred = [x for x in available if x[0] == prefer_provider]
+                others = [x for x in available if x[0] != prefer_provider]
+                available = preferred + others
+            plan.append(available)
         return plan
 
-    def generate_fastest_first(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+    def generate_fastest_first(self, prompt: str, system_instruction: Optional[str] = None,
+                               prefer_provider: Optional[str] = None) -> str:
         """Race available models in parallel speed-tiers; return first valid response.
 
         Health-aware: each candidate is gated by the shared token bucket + circuit
@@ -334,11 +350,15 @@ class AIClient:
         until one returns valid text or a tier deadline elapses — so a slow but
         valid response is no longer dropped by a short result() timeout.
 
+        Models within each tier are SHUFFLED for diversity (different clips hit
+        different models), with *prefer_provider* boosted to the front of each
+        tier it appears in (so the learner's best model gets first shot).
+
         Returns "" only when every available provider/model failed or was in
         cooldown — callers should ESCALATE (next strategy / queue), never emit a
         generic fallback.
         """
-        plan = self._available_plan()
+        plan = self._available_plan(prefer_provider=prefer_provider)
         if not plan:
             return self.generate_ollama(prompt, system_instruction)
 
