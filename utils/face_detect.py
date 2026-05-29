@@ -1,108 +1,52 @@
 """
 face_detect.py — Shared face detection for the enhancement pipeline.
-
-Uses OpenCV DNN SSD face detector (ResNet-10, Caffe backend).
-Model auto-downloads on first use — no manual setup required.
-
-Model: res10_300x300_ssd_iter_140000.caffemodel (~10 MB)
-Accuracy: ~90% mAP on constrained video (vs ~60-70% for Haar/HOG).
-Runs comfortably on CPU for batch/automation workflows.
-
-Usage:
-    from utils.face_detect import detect_face, detect_faces
-    face = detect_face(frame)        # largest face, (x, y, w, h) or None
-    faces = detect_faces(frame)      # all faces, list of (x, y, w, h)
+Uses MediaPipe FaceDetector with face_detector.tflite.
+Model instances are cached (Singleton pattern) to avoid reloading.
 """
 
 import sys
-import ssl
-import urllib.request
+import threading
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
 
-_DNN_URLS = {
-    "deploy.prototxt": (
-        "https://raw.githubusercontent.com/opencv/opencv/master/"
-        "samples/dnn/face_detector/deploy.prototxt"
-    ),
-    "res10_300x300_ssd_iter_140000.caffemodel": (
-        "https://raw.githubusercontent.com/opencv/opencv_3rdparty/"
-        "dnn_samples_face_detector_20170830/"
-        "res10_300x300_ssd_iter_140000.caffemodel"
-    ),
-}
+from utils.config import load_config
+from utils.logger import get_logger
 
-_DNN_CACHE = Path.home() / ".cache" / "opencv_face_dnn"
-_NET: Optional[cv2.dnn.Net] = None
+cfg = load_config()
+log = get_logger("face_detect", cfg.get("logging", {}).get("log_file", "logs/pipeline.log"), cfg.get("logging", {}).get("level", "INFO"))
+
+_MP_DETECTOR: Optional[vision.FaceDetector] = None
+_MP_LOCK = threading.Lock()
 
 
-def _ensure_model() -> Tuple[str, str]:
-    """Download DNN model files if not cached. Returns (prototxt, caffemodel) paths."""
-    _DNN_CACHE.mkdir(parents=True, exist_ok=True)
-
-    prototxt = str(_DNN_CACHE / "deploy.prototxt")
-    caffemodel = str(_DNN_CACHE / "res10_300x300_ssd_iter_140000.caffemodel")
-
-    for name, url in _DNN_URLS.items():
-        dest = _DNN_CACHE / name
-        if not dest.exists():
-            print(f"[face_detect] Downloading {name}...", file=sys.stderr)
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-            try:
-                opener = urllib.request.build_opener(
-                    urllib.request.HTTPSHandler(context=ctx)
-                )
-                with opener.open(url) as resp, open(dest, "wb") as f:
-                    f.write(resp.read())
-                print(f"[face_detect] Downloaded {name} ({dest.stat().st_size / 1024:.0f} KB)", file=sys.stderr)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to download face detection model {name} from {url}: {e}"
-                ) from e
-    return prototxt, caffemodel
+def _get_mp_detector() -> vision.FaceDetector:
+    """Singleton getter for the MediaPipe FaceDetector instance."""
+    global _MP_DETECTOR
+    if _MP_DETECTOR is None:
+        with _MP_LOCK:
+            if _MP_DETECTOR is None:
+                # Find path to face_detector.tflite relative to project root
+                model_path = Path(__file__).resolve().parent.parent / "face_detector.tflite"
+                if not model_path.exists():
+                    model_path = Path("face_detector.tflite")
+                
+                if not model_path.exists():
+                    raise FileNotFoundError(f"MediaPipe face detector model file not found: {model_path}")
+                
+                log.info(f"Initializing MediaPipe FaceDetector with model: {model_path}")
+                base_options = python.BaseOptions(model_asset_path=str(model_path))
+                options = vision.FaceDetectorOptions(base_options=base_options)
+                _MP_DETECTOR = vision.FaceDetector.create_from_options(options)
+    return _MP_DETECTOR
 
 
-def _get_net() -> cv2.dnn.Net:
-    global _NET
-    if _NET is None:
-        prototxt, caffemodel = _ensure_model()
-        _NET = cv2.dnn.readNetFromCaffe(prototxt, caffemodel)
-    return _NET
-
-
-def _dnn_detect(frame: np.ndarray, score_threshold: float = 0.7) -> List[Tuple[int, int, int, int]]:
-    """Run DNN face detection. Returns list of (x, y, w, h) in original frame coords."""
-    net = _get_net()
-    h, w = frame.shape[:2]
-
-    blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), [104, 117, 123], False, False)
-    net.setInput(blob)
-    detections = net.forward()
-
-    faces = []
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence < score_threshold:
-            continue
-        box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-        x1, y1, x2, y2 = box.astype(int)
-        x1 = max(0, x1)
-        y1 = max(0, y1)
-        x2 = min(w, x2)
-        y2 = min(h, y2)
-        if x2 <= x1 or y2 <= y1:
-            continue
-        faces.append((x1, y1, x2 - x1, y2 - y1))
-
-    return faces
-
-
-def detect_face(frame: np.ndarray, score_threshold: float = 0.7) -> Optional[Tuple[int, int, int, int]]:
+def detect_face(frame: np.ndarray, score_threshold: float = 0.5) -> Optional[Tuple[int, int, int, int]]:
     """Detect the largest face in a BGR frame. Returns (x, y, w, h) or None.
 
     Parameters
@@ -110,19 +54,19 @@ def detect_face(frame: np.ndarray, score_threshold: float = 0.7) -> Optional[Tup
     frame : np.ndarray
         BGR image array.
     score_threshold : float
-        Minimum confidence (0-1). Lower = more detections but more false positives.
+        Minimum confidence (0-1). Lower = more detections.
 
     Returns
     -------
     (x, y, w, h) tuple or None
     """
-    faces = _dnn_detect(frame, score_threshold)
+    faces = detect_faces(frame, score_threshold)
     if not faces:
         return None
     return max(faces, key=lambda r: r[2] * r[3])
 
 
-def detect_faces(frame: np.ndarray, score_threshold: float = 0.7) -> List[Tuple[int, int, int, int]]:
+def detect_faces(frame: np.ndarray, score_threshold: float = 0.5) -> List[Tuple[int, int, int, int]]:
     """Detect all faces in a BGR frame. Returns list of (x, y, w, h).
 
     Parameters
@@ -130,13 +74,43 @@ def detect_faces(frame: np.ndarray, score_threshold: float = 0.7) -> List[Tuple[
     frame : np.ndarray
         BGR image array.
     score_threshold : float
-        Minimum confidence (0-1). Lower = more detections but more false positives.
+        Minimum confidence (0-1).
 
     Returns
     -------
     List of (x, y, w, h) tuples, empty list if none found.
     """
-    return _dnn_detect(frame, score_threshold)
+    if frame is None or frame.size == 0:
+        return []
+
+    try:
+        detector = _get_mp_detector()
+        # Convert BGR to RGB (MediaPipe expects RGB)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        
+        res = detector.detect(mp_image)
+        faces = []
+        h, w = frame.shape[:2]
+        
+        for d in res.detections:
+            score = d.categories[0].score if d.categories else 1.0
+            if score < score_threshold:
+                continue
+                
+            box = d.bounding_box
+            x1 = max(0, int(box.origin_x))
+            y1 = max(0, int(box.origin_y))
+            x2 = min(w, x1 + int(box.width))
+            y2 = min(h, y1 + int(box.height))
+            
+            if x2 > x1 and y2 > y1:
+                faces.append((x1, y1, x2 - x1, y2 - y1))
+                
+        return faces
+    except Exception as e:
+        log.warning(f"MediaPipe face detection failed: {e}")
+        return []
 
 
 def crop_face_with_padding(

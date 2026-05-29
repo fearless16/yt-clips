@@ -983,16 +983,16 @@ def generate_clip_seo(
 
         SUGGEST_CACHE.set(cache_key, yt_suggestions)
 
-    trend_str = ", ".join(trend_topics[:8]) or "IPL 2026, cricket live"
-    yt_suggest_str = ", ".join(yt_suggestions[:8]) or "No suggestions available"
+    trend_str = ", ".join(trend_topics[:5]) or "IPL 2026, cricket live"
+    yt_suggest_str = ", ".join(yt_suggestions[:5]) or "No suggestions available"
     live_cta = (
         f"Watch LIVE: {live_stream_url}" if live_stream_url
         else "Match chal raha hai LIVE — channel pe aao."
     )
 
-    # Truncate all large fields to keep prompt within API limits
-    scorecard_trimmed = (scorecard or "Live match in progress")[:1500]
-    transcript_trimmed = corrected_transcript[:2000]
+    # Truncate aggressively to stay within Groq free-tier ~32KB limit
+    scorecard_trimmed = (scorecard or "Live match in progress")[:800]
+    transcript_trimmed = corrected_transcript[:1200]
     
     if is_shorts:
         system_instruction = _SYSTEM_SHORTS
