@@ -136,6 +136,13 @@ youtube:
   upload_enabled: true                  # 🚀 GO LIVE!
   schedule_interval_hours: 1            # Upload every hour (jittered, not fixed :00)
   niche: "Cricket"                      # Used for SEO trend analysis
+  # ── Upload reliability (feat/youtube-upload) ──────────────────────────────
+  region_code: "IN"                     # Region for categoryId validation
+  contains_synthetic_media: false       # Default; per-clip metadata may override
+  notify_subscribers: true              # Notify subs on publish
+  upload_chunk_size_mb: 8               # Resumable chunk size (finite => real progress + resume)
+  upload_max_retries: 6                 # Max transient-error retries per upload
+  upload_deadline_seconds: 1800         # Hard wall-clock cap per upload (prevents hangs)
 
 # ─── Upload Schedule ─────────────────────────────────────────────────────────
 # Controls the jittered hourly scheduling strategy.
