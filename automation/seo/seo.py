@@ -160,6 +160,58 @@ Disclaimer: Live score updates and commentary only. For official broadcast watch
 Return ONLY valid JSON.
 """
 
+_SYSTEM_SHORTS = (
+    "You are an elite YouTube Shorts SEO expert specializing in viral cricket shorts for Indian and Pakistani audiences. "
+    "Your goal: Maximize click-through rate (CTR), engagement, and viral potential. "
+    "Use highly engaging, emotional, and catchy titles (under 60 characters) with emojis and relevant hashtags. "
+    "Only use players and events that appear in the transcript or scorecard. Do NOT invent events. "
+    "Return ONLY valid JSON — no markdown, no explanation."
+)
+
+_PROMPT_TMPL_SHORTS = """
+CONTEXT:
+  Match: {video_title}
+  Scorecard: {scorecard}
+  Live Trending / Search Spikes: {trend_topics}
+  Actual YouTube Search Suggestions: {yt_suggestions}
+  CTA: {live_cta}
+
+CLIP CONTENT:
+  Raw Transcript: {transcript}
+  Key moments: {local_kw}
+
+══ REQUIRED JSON FORMAT ═════════════════════════════════════════════════════
+Return a JSON object with these EXACT keys:
+{{
+  "title": "<Catchy clickbait title under 60 characters with emojis and #Shorts>",
+  "description": "<Short viral description under 400 characters, targeting Indian/Pakistani viewers, with engaging hook, CTA to subscribe, and key search terms/hashtags>",
+  "search_terms": [
+    "<term1>",
+    "<term2>",
+    ...
+  ],
+  "hashtags": [
+    "#Shorts",
+    "#...",
+    "#..."
+  ]
+}}
+
+══ SHORTS TITLE RULES ═══════════════════════════════════════════════════════
+- Keep it under 60 characters. Must be extremely punchy, capitalizing key words.
+- Always include 1-2 relevant emojis (e.g. 😱, 🔥, 💥, 🤯) and #Shorts.
+- Target Indian/Pakistani emotions (e.g. "KOHLI DESTROYS PAKISTAN! 😱🔥 #Shorts" or "BABAR AZAM CLASS CLASS CLASS! 🤯🔥 #Shorts").
+
+══ SHORTS DESCRIPTION RULES ═════════════════════════════════════════════════
+- Keep it short and sweet (under 400 characters).
+- Start with a viral hook in Hindi/Hinglish (e.g., "Kohli ne phir se kar dikhaya!").
+- Include a CTA to like/subscribe (e.g., "Subscribe and like for more IPL updates!").
+- Embed hashtags and a few top search terms naturally at the end.
+- Target audience context: subcontinent viewers (India/Pakistan).
+
+Return ONLY valid JSON.
+"""
+
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -884,6 +936,7 @@ def generate_clip_seo(
     provider_override: str = "",
     model_override: str = "",
     teams: List[str] = None,
+    is_shorts: bool = True,
 ) -> Dict:
     """
     Generate SEO metadata for a single clip.
@@ -892,7 +945,12 @@ def generate_clip_seo(
     """
     _maybe_auto_benchmark()
     trend_topics = trend_topics or []
-    local_kw_list = _extract_keywords(transcript)
+    
+    # Pre-SEO transcript correction
+    from .cricket_context import correct_cricket_spelling
+    corrected_transcript = correct_cricket_spelling(transcript)
+    
+    local_kw_list = _extract_keywords(corrected_transcript)
     local_kw = ", ".join(local_kw_list)
 
     # Harvest YouTube autocomplete suggestions (multi-query, cached)
@@ -934,17 +992,31 @@ def generate_clip_seo(
 
     # Truncate all large fields to keep prompt within API limits
     scorecard_trimmed = (scorecard or "Live match in progress")[:1500]
-    transcript_trimmed = transcript[:2000]
-    prompt = _PROMPT_TMPL.format(
-        video_title=video_title or "Cricket Live Match",
-        scorecard=scorecard_trimmed,
-        trend_topics=trend_str,
-        yt_suggestions=yt_suggest_str,
-        live_cta=live_cta,
-        transcript=transcript_trimmed,
-        local_kw=local_kw,
-        clip_id=clip_id,
-    )
+    transcript_trimmed = corrected_transcript[:2000]
+    
+    if is_shorts:
+        system_instruction = _SYSTEM_SHORTS
+        prompt = _PROMPT_TMPL_SHORTS.format(
+            video_title=video_title or "Cricket Live Match",
+            scorecard=scorecard_trimmed,
+            trend_topics=trend_str,
+            yt_suggestions=yt_suggest_str,
+            live_cta=live_cta,
+            transcript=transcript_trimmed,
+            local_kw=local_kw,
+        )
+    else:
+        system_instruction = _SYSTEM
+        prompt = _PROMPT_TMPL.format(
+            video_title=video_title or "Cricket Live Match",
+            scorecard=scorecard_trimmed,
+            trend_topics=trend_str,
+            yt_suggestions=yt_suggest_str,
+            live_cta=live_cta,
+            transcript=transcript_trimmed,
+            local_kw=local_kw,
+            clip_id=clip_id,
+        )
     
     # Enhance prompt with learned insights from performance data (lazy import)
     from .seo_learner import enhance_seo_prompt
@@ -961,9 +1033,10 @@ def generate_clip_seo(
             result = _attempt_seo_generation(clip_id, prompt, trend_topics,
                                              yt_suggestions=yt_suggestions,
                                              local_keywords=local_kw_list,
-                                             transcript=transcript,
+                                             transcript=corrected_transcript,
                                              video_title=video_title,
-                                             scorecard=scorecard)
+                                             scorecard=scorecard,
+                                             system_instruction=system_instruction)
             return result
         finally:
             ai._provider = old_provider
@@ -972,9 +1045,10 @@ def generate_clip_seo(
     result = _attempt_seo_generation(clip_id, prompt, trend_topics,
                                      yt_suggestions=yt_suggestions,
                                      local_keywords=local_kw_list,
-                                     transcript=transcript,
+                                     transcript=corrected_transcript,
                                      video_title=video_title,
-                                     scorecard=scorecard)
+                                     scorecard=scorecard,
+                                     system_instruction=system_instruction)
     return result
 
 
@@ -987,6 +1061,7 @@ def _attempt_seo_generation(
     transcript: str = "",
     video_title: str = "",
     scorecard: str = "",
+    system_instruction: str = _SYSTEM,
 ) -> Dict:
     """Generate SEO with parallel model racing. Fires fastest available models
     concurrently and takes the first valid response. No backoff — on failure
@@ -996,7 +1071,7 @@ def _attempt_seo_generation(
     import random as _random
 
     try:
-        response_text = ai.generate_fastest_first(prompt, system_instruction=_SYSTEM)
+        response_text = ai.generate_fastest_first(prompt, system_instruction=system_instruction)
     except Exception as e:
         log.warning("[%s] AI Client generate_fastest_first failed: %s", clip_id, e)
         response_text = ""
