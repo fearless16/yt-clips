@@ -45,7 +45,7 @@ def push_job(url: str, flags: list, via: str | None = None):
     }
 
     # ─── Attach secrets (client_secrets.json, yt_token.json) ────────────────
-    for secret_file in ["client_secrets.json", "yt_token.json"]:
+    for secret_file in ["client_secrets.json", "yt_token.json", "yt_tokens.json"]:
         secret_path = Path(secret_file)
         if secret_path.exists() and secret_path.stat().st_size > 0:
             job[secret_file] = secret_path.read_text(encoding="utf-8")

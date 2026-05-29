@@ -751,20 +751,23 @@ def generate_clip_seo(
 
         SUGGEST_CACHE.set(cache_key, yt_suggestions)
 
-    trend_str = ", ".join(trend_topics) or "IPL 2026, cricket live"
-    yt_suggest_str = ", ".join(yt_suggestions[:15]) or "No suggestions available"
+    trend_str = ", ".join(trend_topics[:5]) or "IPL 2026, cricket live"
+    yt_suggest_str = ", ".join(yt_suggestions[:5]) or "No suggestions available"
     live_cta = (
         f"Watch LIVE: {live_stream_url}" if live_stream_url
         else "Match chal raha hai LIVE — channel pe aao."
     )
 
+    # Truncate aggressively to stay within Groq free-tier ~32KB limit
+    scorecard_trimmed = (scorecard or "Live match in progress")[:800]
+    transcript_trimmed = transcript[:1200]
     prompt = _PROMPT_TMPL.format(
         video_title=video_title or "Cricket Live Match",
-        scorecard=scorecard or "Live match in progress",
+        scorecard=scorecard_trimmed,
         trend_topics=trend_str,
         yt_suggestions=yt_suggest_str,
         live_cta=live_cta,
-        transcript=transcript[:2500],   # keep prompt tight
+        transcript=transcript_trimmed,
         local_kw=local_kw,
         clip_id=clip_id,
     )
@@ -818,7 +821,12 @@ def _attempt_seo_generation(
     """
     import random as _random
 
-    response_text = ai.generate_fastest_first(prompt, system_instruction=_SYSTEM)
+    try:
+        response_text = ai.generate_fastest_first(prompt, system_instruction=_SYSTEM)
+    except Exception as e:
+        log.warning("[%s] AI Client generate_fastest_first failed: %s", clip_id, e)
+        response_text = ""
+
     if response_text:
         data = _parse_json_response(response_text)
         if data:
@@ -926,65 +934,89 @@ def _attempt_seo_generation(
                  clip_id, result["title"][:100])
         return result
 
-    # AI returned nothing at all — use transcript-based dynamic generation
+    # AI returned nothing at all — use video_title + transcript for dynamic generation
     log.warning("[%s] No AI response — generating transcript-aware SEO", clip_id)
     local_kw = _extract_keywords(transcript, limit=12)
     kw_str = ", ".join(local_kw[:5]) if local_kw else "cricket highlights"
 
-    # Detect players and teams from transcript
+    # Detect players and teams from BOTH transcript AND video_title
     players_in_transcript = set()
     teams_in_transcript = set()
-    for word in (transcript or "").lower().split():
+    all_text = (transcript or "") + " " + (video_title or "")
+    for word in all_text.lower().split():
         if word in CRICKET_KEYWORDS and word not in GENERIC_TAGS:
             players_in_transcript.add(word.capitalize())
 
     team_map = {"gt", "csk", "mi", "rcb", "srh", "dc", "kkr", "rr", "lsg", "pbks"}
-    for word in (transcript or "").lower().split():
+    for word in all_text.lower().split():
         if word in team_map:
             teams_in_transcript.add(word.upper())
 
     player_str = ", ".join(sorted(players_in_transcript)[:3])
     team_str = " vs ".join(sorted(teams_in_transcript)) if teams_in_transcript else "IPL 2026"
 
-    title = f"{player_str} {kw_str} | {team_str}"[:100]
-    if not player_str:
-        title = f"{kw_str} | {team_str}"[:100]
-
-    description = f"{_random.choice(VIRAL_HOOKS)}\n\n{transcript[:500]}\n\n{_random.choice(ENGAGING_CTAS)}"
-
-    hashtags = ["#IPL2026"]
-    if teams_in_transcript:
-        hashtags.append(f"#{list(teams_in_transcript)[0]}")
+    # Build title — prefer video_title structure if it has team names
+    if teams_in_transcript and len(teams_in_transcript) >= 2:
+        t_list = sorted(teams_in_transcript)
+        title = f"LIVE {t_list[0]} vs {t_list[1]}"
+        if player_str:
+            title += f" — {player_str}"
+        title = f"{title} | {team_str} | Aaj Ka Match Hindi Commentary"[:100]
+    elif player_str:
+        title = f"LIVE {player_str} {kw_str} | {team_str} | Aaj Ka Match Hindi Commentary"[:100]
     else:
-        hashtags.append("#Cricket")
-    hashtags.extend([f"#{w.capitalize()}" for w in local_kw[:2] if len(w) > 2])
-    hashtags.append("#Shorts")
-    hashtags = list(dict.fromkeys(hashtags))[:5]
+        title = f"LIVE {kw_str} | {team_str} | Aaj Ka Match Hindi Commentary"[:100]
 
-    search_terms = []
+    # Use assemble_description for proper format instead of raw transcript dump
+    fallback_search_terms = []
     for kw in local_kw[:8]:
-        search_terms.append(f"{kw} cricket ipl")
-        search_terms.append(f"{kw} {team_str.lower()}")
+        fallback_search_terms.append(f"{kw} cricket ipl")
+        fallback_search_terms.append(f"{kw} {team_str.lower()}")
     for t in (trend_topics or [])[:8]:
-        if t not in search_terms:
-            search_terms.append(t)
-    search_terms = list(dict.fromkeys(search_terms))[:25]
+        if t not in fallback_search_terms:
+            fallback_search_terms.append(t)
+    fallback_search_terms = list(dict.fromkeys(fallback_search_terms))[:20]
+
+    fallback_hashtags = ["#IPL2026"]
+    if teams_in_transcript:
+        for t in sorted(teams_in_transcript):
+            if len(fallback_hashtags) < 4:
+                fallback_hashtags.append(f"#{t}")
+    else:
+        fallback_hashtags.append("#Cricket")
+    fallback_hashtags.extend([f"#{w.capitalize()}" for w in local_kw[:2] if len(w) > 2])
+    fallback_hashtags.append("#Shorts")
+    fallback_hashtags = list(dict.fromkeys(fallback_hashtags))[:5]
+
+    description = assemble_description(
+        {"description": ""},
+        scorecard=scorecard,
+        video_title=video_title,
+        transcript=transcript,
+        fallback_search_terms=fallback_search_terms,
+        fallback_hashtags=fallback_hashtags,
+    )
 
     result = _enforce_limits({
         "clip_id": clip_id,
         "title": title,
         "description": description[:5000],
-        "hashtags": hashtags,
-        "search_terms": search_terms,
-        "tags": search_terms,
+        "hashtags": fallback_hashtags,
+        "search_terms": fallback_search_terms,
+        "tags": fallback_search_terms,
     }, fallback_terms=trend_topics)
 
+    result = _consolidate_seo(
+        result["title"], result["description"],
+        result["hashtags"], result["search_terms"]
+    )
+
     result["clip_id"] = clip_id
-    result["ai_generated"] = True
+    result["ai_generated"] = False
     result["_transcript_generated"] = True
 
     log.info("[%s] SEO done (transcript-aware, no AI) — title: %s | %d tags",
-             clip_id, result["title"][:100], len(search_terms))
+             clip_id, result["title"][:100], len(fallback_search_terms))
     return result
 
 

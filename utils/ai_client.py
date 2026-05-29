@@ -1,5 +1,6 @@
 import json
 import os
+import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed, FIRST_COMPLETED, wait
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
@@ -12,6 +13,7 @@ from utils.config import load_config
 
 load_dotenv()
 
+log = logging.getLogger("ai_client")
 _cfg = load_config()
 
 
@@ -246,6 +248,14 @@ class AIClient:
         if not self.groq_api_key:
             return "Groq API key missing"
 
+        # Pre-trim to stay within Groq free-tier ~32KB request limit
+        total = len(system_instruction or "") + len(prompt)
+        if total > 24000:
+            excess = total - 24000
+            prompt = prompt[:max(len(prompt) - excess - 500, 6000)]
+            if system_instruction:
+                system_instruction = system_instruction[:2000]
+
         client = OpenAI(
             api_key=self.groq_api_key,
             base_url=self.groq_base_url,
@@ -259,12 +269,33 @@ class AIClient:
         self._last_provider = "groq"
         self._last_model = self._model
 
-        response = client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=8192,
-        )
+        try:
+            response = client.chat.completions.create(
+                model=self._model,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=8192,
+            )
+        except Exception as e:
+            err_str = str(e)
+            # 413 Payload Too Large — retry with aggressively trimmed prompt
+            if "413" in err_str or "too large" in err_str.lower():
+                log.warning("Groq 413 — retrying with shorter prompt (was %d chars)", len(prompt))
+                prompt = prompt[:min(len(prompt), 8000)]
+                if system_instruction:
+                    system_instruction = system_instruction[:1500]
+                messages = []
+                if system_instruction:
+                    messages.append({"role": "system", "content": system_instruction})
+                messages.append({"role": "user", "content": prompt})
+                response = client.chat.completions.create(
+                    model=self._model,
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=8192,
+                )
+            else:
+                raise
 
         content = response.choices[0].message.content
         if content is None:

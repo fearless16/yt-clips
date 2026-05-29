@@ -104,7 +104,7 @@ class JobHandler(BaseHTTPRequestHandler):
                     return
 
                 # ─── Save secrets delivered via tunnel ───────────────────────
-                for secret_file in ["client_secrets.json", "yt_token.json"]:
+                for secret_file in ["client_secrets.json", "yt_token.json", "yt_tokens.json"]:
                     if secret_file in job and job[secret_file]:
                         Path(secret_file).write_text(job[secret_file], encoding="utf-8")
                         log_info(f"🔑 Saved {secret_file} ({len(job[secret_file])} bytes)")
@@ -199,7 +199,14 @@ def process_queue():
             job = job_queue.pop(0)
             currently_processing = True
         url = job.get("url", "")
-        flags = job.get("flags", [])
+        flags = list(job.get("flags", []))
+
+        # Always ensure upload + schedule flags are present — the Kaggle worker's
+        # entire job is to process AND upload.  If the bridge didn't send them we
+        # inject them here so clips don't silently sit on disk.
+        for required in ("--upload", "--schedule"):
+            if required not in flags:
+                flags.append(required)
 
         cmd = [sys.executable, "-m", "automation.cli", url] + flags
 
@@ -265,7 +272,7 @@ def poll_job_file():
                 url = job.get("url", "")
                 if url:
                     # ─── Extract secrets delivered via Drive job ─────────────
-                    for secret_file in ["client_secrets.json", "yt_token.json"]:
+                    for secret_file in ["client_secrets.json", "yt_token.json", "yt_tokens.json"]:
                         if secret_file in job and job[secret_file]:
                             Path(secret_file).write_text(job[secret_file], encoding="utf-8")
                             log_info(f"Saved {secret_file} ({len(job[secret_file])} bytes) from Drive job")
