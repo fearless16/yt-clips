@@ -149,9 +149,10 @@ class ReferenceProfile:
 
 
 # ─── Region Mask Generation (Geometric) ───────────────────────────────────
-# Uses the existing Haar Cascade face bounding box to derive approximate
-# per-region masks.  This avoids any extra dependency while achieving the
-# same practical effect: eyes escape sharpening, lips get saturation, etc.
+# Uses the MediaPipe face bounding box (utils/face_detect.py) to derive
+# approximate per-region masks.  This avoids any extra dependency while
+# achieving the same practical effect: eyes escape sharpening, lips get
+# saturation, etc.
 
 
 def _gaussian_mask(h: int, w: int, cy: int, cx: int, ry: int, rx: int) -> np.ndarray:
