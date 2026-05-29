@@ -88,7 +88,46 @@ class SEOLearner:
         self.performance_db = Path("data/seo_performance.json")
         self.performance_db.parent.mkdir(exist_ok=True)
         self.learned_insights = self._load_performance_data()
+        self._loaded_mtime = self._db_mtime()
         self._benchmark_lock = threading.Lock()
+
+    def _db_mtime(self) -> float:
+        """Last-modified time of the perf DB file (0.0 if it doesn't exist)."""
+        try:
+            return self.performance_db.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _maybe_reload(self):
+        """Re-read the perf DB from disk if it changed since we last loaded it.
+
+        Fixes Bug 4: ``get_best_model()`` used to return whatever was loaded at
+        process/instance start (or last in-memory write). The benchmark and real
+        performance ingestion can run in a *different* process or instance and
+        write ``seo_performance.json``; without this, readers never saw those
+        updates (stale best-model). We detect file changes via mtime, refresh
+        ``learned_insights`` (and the shared TTL cache), so cross-process /
+        cross-instance writes become visible — while still avoiding redundant
+        disk reads when nothing changed.
+        """
+        current = self._db_mtime()
+        if current <= self._loaded_mtime:
+            return
+        try:
+            with open(self.performance_db, "r") as f:
+                data = json.load(f)
+            if "version" not in data:
+                data["version"] = 1
+                data.setdefault("feature_importance", {})
+                data.setdefault("llm_insights", [])
+            self.learned_insights = data
+            PERF_CACHE.set("perf_data", data)
+            self._loaded_mtime = current
+            log.info("Reloaded seo_performance.json (changed on disk) — best model now %s/%s",
+                     data.get("current_best_provider") or "-",
+                     data.get("current_best_model") or "-")
+        except Exception as e:
+            log.warning("Perf DB changed but reload failed; keeping in-memory state: %s", e)
 
     def _load_performance_data(self) -> Dict:
         cached = PERF_CACHE.get("perf_data")
@@ -129,6 +168,11 @@ class SEOLearner:
         self.learned_insights["version"] = 2
         with open(self.performance_db, "w") as f:
             json.dump(self.learned_insights, f, indent=2)
+        # Keep our reload watermark + shared cache in sync with what we just
+        # wrote, so a subsequent _maybe_reload() doesn't needlessly re-read our
+        # own data (and other in-process readers see it immediately).
+        self._loaded_mtime = self._db_mtime()
+        PERF_CACHE.set("perf_data", self.learned_insights)
 
     def _dedup_clips(self, new_record: Dict):
         """Replace existing entry for same clip_id, keeping the newer one."""
@@ -342,6 +386,9 @@ class SEOLearner:
         return None
 
     def get_best_model(self) -> Tuple[Optional[str], Optional[str]]:
+        # Pick up benchmark / real-performance writes made by another instance
+        # or process before answering (Bug 4: avoid returning stale data).
+        self._maybe_reload()
         return (
             self.learned_insights.get("current_best_provider"),
             self.learned_insights.get("current_best_model"),

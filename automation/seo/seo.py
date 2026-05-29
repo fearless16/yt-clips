@@ -1082,10 +1082,14 @@ def generate_clip_seo(
     from .seo_learner import enhance_seo_prompt
     prompt = enhance_seo_prompt(prompt)
 
-    # Apply dynamic model override if set (used by self-learner for A/B testing)
+    # Apply dynamic model override if set (used by self-learner for A/B testing).
     # Instead of mutating the shared ai._provider/_model (which the racer ignores
-    # anyway), pass it as prefer_provider so the racer BOOSTS that provider's
-    # models to front-of-tier while still racing others for resilience.
+    # anyway), pass them as prefer_provider/prefer_model so the racer BOOSTS that
+    # exact provider+model to front-of-tier while still racing others for
+    # resilience and keeping per-clip model diversity via the in-tier shuffle.
+    if provider_override or model_override:
+        log.info("[%s] Learner model preference: provider=%s model=%s",
+                 clip_id, provider_override or "-", model_override or "-")
     result = _attempt_seo_generation(clip_id, prompt, trend_topics,
                                      yt_suggestions=yt_suggestions,
                                      local_keywords=local_kw_list,
@@ -1094,7 +1098,8 @@ def generate_clip_seo(
                                      scorecard=scorecard,
                                      system_instruction=system_instruction,
                                      is_shorts=is_shorts,
-                                     prefer_provider=provider_override or None)
+                                     prefer_provider=provider_override or None,
+                                     prefer_model=model_override or None)
     return result
 
 
@@ -1110,13 +1115,15 @@ def _attempt_seo_generation(
     system_instruction: str = _SYSTEM,
     is_shorts: bool = True,
     prefer_provider: Optional[str] = None,
+    prefer_model: Optional[str] = None,
 ) -> Dict:
     """Generate SEO via LLM, ESCALATING on failure (never degrading).
 
     Strategy (escalation, not degradation):
       1. Race the fastest available models (``generate_fastest_first``), with
-         *prefer_provider* boosted to front-of-tier and models shuffled within
-         tiers for diversity across clips.
+         *prefer_provider* / *prefer_model* (the self-learner's best choice)
+         boosted to front-of-tier and models shuffled within tiers for diversity
+         across clips.
       2. If the response is missing/unparseable, ESCALATE: retry once via the
          full failover chain (``generate_text``) with a stricter JSON-only
          prompt + JSON-repair parsing.
@@ -1126,11 +1133,11 @@ def _attempt_seo_generation(
     For Shorts the LLM's short (<400 char) description is preserved; only
     long-form clips get the structured LIVE/CHAPTERS/Disclaimer layout.
     """
-    # ── 1. Primary: fastest-first racing (shuffled + provider-boosted) ────────
+    # ── 1. Primary: fastest-first racing (shuffled + provider/model-boosted) ──
     try:
         response_text = ai.generate_fastest_first(
             prompt, system_instruction=system_instruction,
-            prefer_provider=prefer_provider)
+            prefer_provider=prefer_provider, prefer_model=prefer_model)
     except Exception as e:
         log.warning("[%s] generate_fastest_first failed: %s", clip_id, e)
         response_text = ""
@@ -1149,7 +1156,8 @@ def _attempt_seo_generation(
             "No code fences, no explanation, no surrounding text."
         )
         try:
-            response_text = ai.generate_text(strict_prompt, system_instruction=strict_system)
+            response_text = ai.generate_text(strict_prompt, system_instruction=strict_system,
+                                             prefer_model=prefer_model)
         except Exception as e:
             log.warning("[%s] SEO escalation attempt failed: %s", clip_id, e)
             response_text = ""
