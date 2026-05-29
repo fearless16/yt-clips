@@ -173,6 +173,12 @@ testing:
   timeout_seconds: 120              # Max time per test
   fail_fast: true                   # Stop on first failure (-x mode)
 
+# ── SEO ────────────────────────────────────────────────────────────────────────
+seo:
+  # Inject random hardcoded viral hooks/CTAs into descriptions. OFF by default:
+  # the product contract prefers per-clip LLM-generated hooks over generic copy.
+  inject_viral_elements: false
+
 # ── SEO Learner ─────────────────────────────────────────────────────────────────
 # Self-improving SEO system — learns from past performance to boost future clips.
 learner:

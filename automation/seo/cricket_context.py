@@ -1,6 +1,7 @@
 """
 cricket_context.py — Cricket player names, team names, venues, and corrections.
 """
+import re
 from typing import Dict, List, Set
 
 # Spelling corrections for common Whisper audio transcript errors
@@ -49,7 +50,6 @@ CRICKET_SPELLING_CORRECTIONS = {
     "de kock": "Quinton de Kock",
     "klassen": "Heinrich Klaasen",
     "cummins": "Pat Cummins",
-    "head": "Travis Head",
     "abhishek": "Abhishek Sharma",
     "samson": "Sanju Samson",
     "parag": "Riyan Parag",
@@ -123,3 +123,32 @@ def correct_cricket_spelling(text: str) -> str:
         replacement = CRICKET_SPELLING_CORRECTIONS[misheard]
         corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
     return corrected
+
+
+def find_canonical_entities(text: str) -> Dict[str, List[str]]:
+    """Find canonical players/teams mentioned in *text* (post-correction).
+
+    Wires the canonical name sets into SEO enrichment so tags/hashtags can be
+    grounded in verified cricket entities rather than raw transcript tokens.
+
+    Returns a dict ``{"players": [...], "teams": [...]}`` of canonical names
+    found (case-insensitive substring match on full or last name).
+    """
+    if not text:
+        return {"players": [], "teams": []}
+    low = text.lower()
+    players = []
+    for name in sorted(CRICKET_PLAYERS, key=len, reverse=True):
+        # Match the full canonical name or its last token (e.g. "Bumrah").
+        last = name.split()[-1].lower()
+        if name.lower() in low or (len(last) > 3 and re.search(r"\b" + re.escape(last) + r"\b", low)):
+            players.append(name)
+    teams = []
+    for name in sorted(CRICKET_TEAMS, key=len, reverse=True):
+        if name.lower() in low:
+            teams.append(name)
+    # De-dup while preserving order.
+    return {
+        "players": list(dict.fromkeys(players)),
+        "teams": list(dict.fromkeys(teams)),
+    }
