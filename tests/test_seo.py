@@ -160,3 +160,57 @@ def test_find_canonical_entities_grounds_names():
 def test_head_false_positive_removed():
     """'head' must no longer be force-corrected to 'Travis Head' (English word)."""
     assert "Travis Head" not in correct_cricket_spelling("over the head for six")
+
+
+
+# ─── feat: SEO retry queue (closes the escalate-not-degrade loop) ─────────────
+
+from automation.seo.seo import retry_failed_seo
+
+
+def test_retry_failed_seo_recovers_and_dequeues(tmp_path):
+    """A queued clip (*_seo_failed.json) is retried; on success the metadata is
+    written and the marker removed."""
+    # First, force a failure so a self-contained marker is written.
+    with patch("utils.ai_client.AIClient.generate_fastest_first", return_value=""), \
+         patch("utils.ai_client.AIClient.generate_text", side_effect=RuntimeError("down")):
+        generate_seo_for_exported_clip(
+            clip_id="clipR", transcript="kohli six at wankhede",
+            output_dir=str(tmp_path), video_title="RCB vs CSK",
+        )
+    marker = tmp_path / "clipR_seo_failed.json"
+    assert marker.exists()
+    assert not (tmp_path / "clipR_metadata.json").exists()
+    # Marker is self-contained (carries transcript/context for retry).
+    ctx = json.loads(marker.read_text())
+    assert ctx["transcript"] == "kohli six at wankhede"
+    assert ctx["video_title"] == "RCB vs CSK"
+
+    # Now the LLM recovers -> retry must succeed, write metadata, drop marker.
+    good = json.dumps({"title": "KOHLI SIX! #Shorts", "description": "chakka! #Shorts",
+                       "search_terms": ["kohli six", "ipl live hindi"], "hashtags": ["#Shorts"]})
+    with patch("utils.ai_client.AIClient.generate_fastest_first", return_value=good):
+        summary = retry_failed_seo(str(tmp_path))
+
+    assert summary["recovered"] == 1
+    assert summary["still_failed"] == 0
+    assert (tmp_path / "clipR_metadata.json").exists()
+    assert not marker.exists()  # dequeued
+
+
+def test_retry_failed_seo_keeps_marker_on_repeated_failure(tmp_path):
+    with patch("utils.ai_client.AIClient.generate_fastest_first", return_value=""), \
+         patch("utils.ai_client.AIClient.generate_text", side_effect=RuntimeError("down")):
+        generate_seo_for_exported_clip(
+            clip_id="clipS", transcript="dhoni finish", output_dir=str(tmp_path),
+            video_title="CSK vs MI",
+        )
+        # Still down on retry -> marker stays, no metadata.
+        summary = retry_failed_seo(str(tmp_path))
+    assert summary["still_failed"] == 1
+    assert (tmp_path / "clipS_seo_failed.json").exists()
+    assert not (tmp_path / "clipS_metadata.json").exists()
+
+
+def test_retry_failed_seo_noop_when_empty(tmp_path):
+    assert retry_failed_seo(str(tmp_path)) == {"retried": 0, "recovered": 0, "still_failed": 0}

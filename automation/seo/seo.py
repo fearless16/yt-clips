@@ -1281,7 +1281,14 @@ def generate_seo_for_exported_clip(
         from datetime import datetime as _dt
         marker = Path(output_dir) / f"{clip_id}_seo_failed.json"
         marker.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"clip_id": clip_id, "reason": str(e), "queued_at": _dt.now().isoformat()}
+        # Self-contained payload so retry_failed_seo() can re-run without the
+        # original highlights file or pipeline context.
+        payload = {
+            "clip_id": clip_id, "reason": str(e), "queued_at": _dt.now().isoformat(),
+            "transcript": transcript, "video_title": video_title,
+            "scorecard": scorecard, "trend_topics": trend_topics or [],
+            "live_stream_url": live_stream_url,
+        }
         with open(marker, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         return {"clip_id": clip_id, "_seo_failed": True, "_queued": True, "reason": str(e)}
@@ -1372,7 +1379,10 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
             marker = Path(output_dir) / f"{clip_id}_seo_failed.json"
             with open(marker, "w", encoding="utf-8") as f:
                 json.dump({"clip_id": clip_id, "reason": str(e),
-                           "queued_at": __import__("datetime").datetime.now().isoformat()},
+                           "queued_at": __import__("datetime").datetime.now().isoformat(),
+                           "transcript": transcript, "video_title": video_title,
+                           "scorecard": scorecard, "trend_topics": trend_topics or [],
+                           "live_stream_url": live_stream_url},
                           f, ensure_ascii=False, indent=2)
             if idx < len(clips):
                 time.sleep(5)
@@ -1400,7 +1410,53 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
     return str(combined_path)
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
+# ── Retry queue: re-run SEO for clips that were queued on prior failure ───────
+
+def retry_failed_seo(output_dir: str) -> Dict:
+    """Re-attempt SEO for clips queued by a prior failure (``*_seo_failed.json``).
+
+    Closes the escalate-not-degrade loop: a clip that failed all LLM attempts
+    earlier is retried from its self-contained marker (which stores transcript +
+    context). On success the ``*_metadata.json`` is written and the marker is
+    removed (so the upload phase will now pick it up). On repeated failure the
+    marker is left in place (still queued). Returns a summary dict.
+    """
+    out = Path(output_dir)
+    markers = sorted(out.glob("*_seo_failed.json")) if out.exists() else []
+    if not markers:
+        log.info("No queued SEO failures to retry in %s", output_dir)
+        return {"retried": 0, "recovered": 0, "still_failed": 0}
+
+    recovered, still_failed = 0, 0
+    for i, marker in enumerate(markers):
+        try:
+            ctx = json.loads(marker.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning("Skipping unreadable marker %s: %s", marker.name, e)
+            continue
+        clip_id = ctx.get("clip_id") or marker.stem.replace("_seo_failed", "")
+        log.info("Retrying queued SEO [%d/%d]: %s", i + 1, len(markers), clip_id)
+        res = generate_seo_for_exported_clip(
+            clip_id=clip_id,
+            transcript=ctx.get("transcript", "Cricket Live"),
+            output_dir=output_dir,
+            video_title=ctx.get("video_title", ""),
+            scorecard=ctx.get("scorecard", ""),
+            trend_topics=ctx.get("trend_topics", []),
+            live_stream_url=ctx.get("live_stream_url", ""),
+            inter_clip_pause=8.0 if i > 0 else 0.0,
+        )
+        if res.get("_seo_failed"):
+            still_failed += 1
+        else:
+            recovered += 1
+            try:
+                marker.unlink()  # success -> dequeue
+            except OSError:
+                pass
+
+    log.info("SEO retry complete: %d recovered, %d still queued", recovered, still_failed)
+    return {"retried": len(markers), "recovered": recovered, "still_failed": still_failed}
 
 if __name__ == "__main__":
     process_all_seo("highlights/video.yaml", "shorts/test")

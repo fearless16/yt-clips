@@ -618,12 +618,21 @@ class PremiumAnalyzer:
         layouts = []
         chats = []
 
+        # Pass 1: extract the sampled frames (kept in temporal order).
+        sampled = []  # list of (timestamp, frame_bgr)
         for t in sample_times:
             frame = _extract_frame(video_path, float(t), frame_w, frame_h)
-            if frame is None:
-                continue
+            if frame is not None:
+                sampled.append((float(t), frame))
 
-            xyxy, conf = self.face_detector.detect(frame)
+        # Pass 2: ONE batched face detection over all sampled frames. On the T4
+        # this runs YOLOv8-face as a single batched forward pass instead of 12
+        # sequential calls (falls back to per-frame on CPU/when YOLO absent).
+        det_results = self.face_detector.detect_batch([f for _, f in sampled])
+
+        # Pass 3: feed detections into ByteTrack IN TEMPORAL ORDER (tracking is
+        # inherently sequential — Kalman predict/update depends on frame order).
+        for (t, frame), (xyxy, conf) in zip(sampled, det_results):
             tracks = self.tracker.update(xyxy, conf)
 
             layout = _classify_layout(frame)
