@@ -1,6 +1,9 @@
 import logging
 import json
 import sys
+import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -107,6 +110,37 @@ class ProgressManager:
             self._progress.update(tid, visible=False)
 
 
+# Structured fields lifted from LogRecord.__dict__ into the JSON entry when present.
+# Keeping this list explicit makes the on-disk log schema stable and queryable.
+_STRUCTURED_FIELDS = (
+    "stage",         # logical pipeline stage, e.g. "export", "seo"
+    "status",        # "start" | "ok" | "failed" | "skipped" | "partial"
+    "phase",         # human phase label, e.g. "phase 4 Export"
+    "phase_index",   # 1-based position in the run
+    "phase_total",   # total phases in the run
+    "run_id",        # correlation id shared by every record in one run()
+    "duration_ms",   # elapsed wall-clock for the stage
+    "error_type",    # exception class name on failure
+    "metadata",      # free-form dict of counts/model info/etc.
+)
+
+
+def _build_log_entry(handler: logging.Handler, record: logging.LogRecord) -> dict:
+    """Build the structured JSON entry for a log record (shared by handlers)."""
+    entry = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "level": record.levelname,
+        "logger": record.name,
+        "msg": record.getMessage(),
+    }
+    for field in _STRUCTURED_FIELDS:
+        if hasattr(record, field):
+            entry[field] = getattr(record, field)
+    if record.exc_info and record.exc_info[0]:
+        entry["exc"] = handler.format(record)
+    return entry
+
+
 class JsonFileHandler(logging.Handler):
     """Writes structured JSON lines to a log file."""
 
@@ -119,20 +153,7 @@ class JsonFileHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            entry = {
-                "ts": datetime.utcnow().isoformat() + "Z",
-                "level": record.levelname,
-                "logger": record.name,
-                "msg": record.getMessage(),
-            }
-            if hasattr(record, "stage"):
-                entry["stage"] = record.stage
-            if hasattr(record, "duration_ms"):
-                entry["duration_ms"] = record.duration_ms
-            if hasattr(record, "metadata"):
-                entry["metadata"] = record.metadata
-            if record.exc_info and record.exc_info[0]:
-                entry["exc"] = self.format(record)
+            entry = _build_log_entry(self, record)
             self._file.write(json.dumps(entry, ensure_ascii=False) + "\n")
             self._file.flush()
         except Exception:
@@ -151,20 +172,7 @@ class JsonStreamHandler(logging.StreamHandler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            entry = {
-                "ts": datetime.utcnow().isoformat() + "Z",
-                "level": record.levelname,
-                "logger": record.name,
-                "msg": record.getMessage(),
-            }
-            if hasattr(record, "stage"):
-                entry["stage"] = record.stage
-            if hasattr(record, "duration_ms"):
-                entry["duration_ms"] = record.duration_ms
-            if hasattr(record, "metadata"):
-                entry["metadata"] = record.metadata
-            if record.exc_info and record.exc_info[0]:
-                entry["exc"] = self.format(record)
+            entry = _build_log_entry(self, record)
             self.stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
             self.flush()
         except Exception:
@@ -210,3 +218,108 @@ def get_logger(name: str, log_file: str = "logs/pipeline.log", level: str = "INF
 
 
 phase_tracker = PhaseTracker()
+
+
+# ─── Structured phase instrumentation ─────────────────────────────────────────
+
+def new_run_id() -> str:
+    """Return a short correlation id for one pipeline run."""
+    return uuid.uuid4().hex[:8]
+
+
+class _PhaseHandle:
+    """Yielded by :func:`run_phase`; lets the phase body attach result metadata.
+
+    Example::
+
+        with run_phase(log, "phase 4 Export", "export", run_id=rid) as ph:
+            clips = export_all(...)
+            ph.set(exported=len(clips))
+    """
+
+    __slots__ = ("metadata",)
+
+    def __init__(self) -> None:
+        self.metadata: dict = {}
+
+    def set(self, **kwargs) -> None:
+        """Attach key/value metadata recorded on the phase's completion log."""
+        self.metadata.update(kwargs)
+
+
+@contextmanager
+def run_phase(
+    logger: logging.Logger,
+    name: str,
+    stage: str,
+    run_id: Optional[str] = None,
+    phase_index: Optional[int] = None,
+    phase_total: Optional[int] = None,
+):
+    """Instrument a pipeline phase with start/end/failure structured logging.
+
+    Guarantees that a record carrying ``stage`` + ``duration_ms`` is emitted
+    whether the phase succeeds OR fails — so timing and stage visibility are
+    never lost on the error path. On failure the exception is logged AT THE
+    SITE with ``exc_info=True``, ``error_type`` and the elapsed time, then
+    re-raised so callers can record/aggregate it.
+
+    Args:
+        logger: The caller's logger (so log records are attributed to the
+            caller's module — important for tests that patch ``module.log``).
+        name: Human-readable phase label, e.g. ``"phase 4 Export"``.
+        stage: Stable machine-queryable stage key, e.g. ``"export"``.
+        run_id: Correlation id shared across the whole run.
+        phase_index / phase_total: Position for progress visibility.
+
+    Yields:
+        A :class:`_PhaseHandle` whose ``.set(**meta)`` attaches metadata to the
+        completion log (counts, model info, etc.).
+    """
+    def _extra(status: str, duration_ms: int, **extra) -> dict:
+        d = {
+            "stage": stage,
+            "status": status,
+            "phase": name,
+            "duration_ms": duration_ms,
+            "run_id": run_id,
+        }
+        if phase_index is not None:
+            d["phase_index"] = phase_index
+        if phase_total is not None:
+            d["phase_total"] = phase_total
+        d.update(extra)
+        return d
+
+    handle = _PhaseHandle()
+    t0 = time.monotonic()
+    prog = ""
+    if phase_index is not None and phase_total is not None:
+        prog = " [%d/%d]" % (phase_index, phase_total)
+    # Start event: duration_ms=0 keeps the "stage implies duration_ms" invariant.
+    logger.info("[%s]%s start", name, prog, extra=_extra("start", 0))
+
+    try:
+        yield handle
+    except Exception as e:
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        logger.error(
+            "[%s]%s FAILED after %dms: %s",
+            name, prog, duration_ms, e,
+            exc_info=True,
+            extra=_extra(
+                "failed", duration_ms,
+                error_type=type(e).__name__,
+                metadata=handle.metadata or None,
+            ),
+        )
+        raise
+    else:
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        logger.info(
+            "[%s]%s done %.1fs", name, prog, duration_ms / 1000.0,
+            extra=_extra(
+                "ok", duration_ms,
+                metadata=handle.metadata or None,
+            ),
+        )

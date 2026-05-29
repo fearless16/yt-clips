@@ -116,6 +116,80 @@ class AIClient:
                 cls._provider_cooldown_until[provider] = time.time() + 300
                 log.warning(f"Provider {provider} hit circuit breaker! Cooldown for 5 minutes.")
 
+    # ── Error classification + rate-limit aware cooldown ────────────────────────
+
+    @staticmethod
+    def _status_code(exc: Exception) -> Optional[int]:
+        """Best-effort HTTP status extraction from openai/requests exceptions."""
+        for attr in ("status_code", "code", "http_status"):
+            val = getattr(exc, attr, None)
+            if isinstance(val, int):
+                return val
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            val = getattr(resp, "status_code", None)
+            if isinstance(val, int):
+                return val
+        return None
+
+    @classmethod
+    def _is_rate_limited(cls, exc: Exception) -> bool:
+        if cls._status_code(exc) == 429:
+            return True
+        name = type(exc).__name__.lower()
+        return "ratelimit" in name or "429" in str(exc)
+
+    @classmethod
+    def _is_retryable(cls, exc: Exception) -> bool:
+        """True for transient errors worth backing off on (429 + 5xx + network)."""
+        status = cls._status_code(exc)
+        if status is not None and (status == 429 or 500 <= status < 600):
+            return True
+        name = type(exc).__name__.lower()
+        return any(s in name for s in (
+            "ratelimit", "timeout", "apiconnection", "internalserver",
+            "serviceunavailable", "connectionerror",
+        ))
+
+    @staticmethod
+    def _retry_after_seconds(exc: Exception) -> Optional[float]:
+        """Read a Retry-After header (seconds) from the exception, if present."""
+        resp = getattr(exc, "response", None)
+        headers = getattr(resp, "headers", None) if resp is not None else None
+        if not headers:
+            return None
+        try:
+            raw = headers.get("retry-after") or headers.get("Retry-After")
+        except Exception:
+            raw = None
+        if not raw:
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _note_provider_error(cls, provider: str, exc: Exception, default_cooldown: float = 30.0):
+        """Record a failure and, for rate-limit errors, set a provider cooldown.
+
+        Honors a server-provided Retry-After when available; otherwise applies a
+        conservative default so the racer/failover skips the provider until it
+        is likely healthy again. Always feeds the circuit breaker.
+        """
+        if cls._is_rate_limited(exc):
+            wait_s = cls._retry_after_seconds(exc) or default_cooldown
+            with cls._shared_lock:
+                prev = cls._provider_cooldown_until.get(provider, 0.0)
+                cls._provider_cooldown_until[provider] = max(prev, time.time() + wait_s)
+            log.warning("Provider %s rate-limited (429) — cooling down %.0fs", provider, wait_s)
+        cls._record_failure(provider)
+
+    @classmethod
+    def _in_cooldown(cls, provider: str) -> bool:
+        with cls._shared_lock:
+            return cls._provider_cooldown_until.get(provider, 0.0) > time.time()
+
     def _get_failover_chain(self, start_provider: str) -> List[str]:
         chain = ["groq", "deepseek", "openrouter", "nvidia"]
         if start_provider in chain:
@@ -164,9 +238,14 @@ class AIClient:
                  extra={"stage": "llm_cost", "metadata": {"provider": provider, "model": model, "cost": cost}})
 
     def generate_text(self, prompt: str, system_instruction: Optional[str] = None) -> str:
-        """Text generation wrapper with rate limit checking, circuit breaker, failover, and token/cost tracking."""
+        """Text generation with rate-limit awareness, circuit breaker, 429-aware
+        cooldown/backoff, failover, and token/cost tracking."""
+        ai_cfg = _cfg.get("ai", {})
+        base_delay = float(ai_cfg.get("retry_base_delay_seconds", 2.0))
+        max_delay = float(ai_cfg.get("retry_max_delay_seconds", 30.0))
+
         chain = self._get_failover_chain(self._provider)
-        
+
         available_chain = []
         for p in chain:
             if p == "groq" and self.groq_api_key:
@@ -177,13 +256,14 @@ class AIClient:
                 available_chain.append(p)
             elif p == "nvidia" and self.nvidia_api_key:
                 available_chain.append(p)
-                
+
         errors = []
+        retryable_seen = False
         for provider in available_chain:
             if not self._check_and_consume_token(provider):
                 log.info(f"Skipping provider {provider} due to rate limiting or circuit breaker cooldown.")
                 continue
-                
+
             try:
                 res = self._call_provider(provider, prompt, system_instruction)
                 if res:
@@ -191,17 +271,22 @@ class AIClient:
                     self._log_cost(provider, self.get_used_model(), len(prompt) + len(system_instruction or ""), len(res))
                     return res
             except Exception as e:
-                self._record_failure(provider)
+                retryable_seen = retryable_seen or self._is_retryable(e)
+                self._note_provider_error(provider, e)
                 log.warning(f"Provider {provider} failed: {e}")
                 errors.append(f"{provider}: {e}")
-                
-        # Retry ignoring token bucket if all failed/skipped
-        for provider in available_chain:
+
+        # Backoff once before the retry round, but only if failures were transient
+        # (429/5xx/network). Generic errors fail over immediately (no sleep).
+        if retryable_seen:
+            delay = min(max_delay, base_delay)
+            log.info("Transient LLM errors — backing off %.1fs before retry round", delay)
+            time.sleep(delay)
+
+        # Retry round: ignore token bucket but still respect provider cooldowns.
+        for attempt, provider in enumerate(available_chain):
             try:
-                now = time.time()
-                with self._shared_lock:
-                    cooldown = self._provider_cooldown_until.get(provider, 0.0)
-                if cooldown > now:
+                if self._in_cooldown(provider):
                     continue
                 res = self._call_provider(provider, prompt, system_instruction)
                 if res:
@@ -209,7 +294,7 @@ class AIClient:
                     self._log_cost(provider, self.get_used_model(), len(prompt) + len(system_instruction or ""), len(res))
                     return res
             except Exception as e:
-                self._record_failure(provider)
+                self._note_provider_error(provider, e)
                 log.warning(f"Provider {provider} failed on retry: {e}")
                 errors.append(f"{provider} (retry): {e}")
 
@@ -240,62 +325,77 @@ class AIClient:
         return plan
 
     def generate_fastest_first(self, prompt: str, system_instruction: Optional[str] = None) -> str:
-        """Race multiple models in parallel tiers, return first successful response.
+        """Race available models in parallel speed-tiers; return first valid response.
 
-        Fires all models in tier 1 concurrently. If none succeed, moves to tier 2,
-        and so on. Never blocks waiting for a slow model — first valid response wins.
-        Cancels remaining in-flight calls once a result is received.
+        Health-aware: each candidate is gated by the shared token bucket + circuit
+        breaker (providers in cooldown are skipped), and success/failure (incl.
+        429 Retry-After cooldown) is recorded so the racer cooperates with the
+        rest of the pipeline. Within a tier it keeps collecting completed futures
+        until one returns valid text or a tier deadline elapses — so a slow but
+        valid response is no longer dropped by a short result() timeout.
+
+        Returns "" only when every available provider/model failed or was in
+        cooldown — callers should ESCALATE (next strategy / queue), never emit a
+        generic fallback.
         """
         plan = self._available_plan()
         if not plan:
             return self.generate_ollama(prompt, system_instruction)
 
-        provider_map = {
-            "groq": self.generate_groq,
-            "deepseek": self.generate_deepseek,
-            "openrouter": self.generate_openrouter,
-            "nvidia": self.generate_nvidia,
-        }
+        ai_cfg = _cfg.get("ai", {})
+        tier_timeout = float(ai_cfg.get("race_tier_timeout_seconds", 45.0))
+
+        def make_call(p, m):
+            thread_client = AIClient()
+            thread_client._provider = p
+            thread_client._model = m
+            fn = getattr(thread_client, f"generate_{p}")
+            return fn(prompt, system_instruction)
 
         for tier in plan:
-            calls: List[tuple] = []
+            # Gate each candidate through the shared health layer (token bucket +
+            # circuit-breaker cooldown). Skip what we shouldn't hit right now.
+            runnable = []
             for provider, model in tier:
-                fn = provider_map.get(provider)
-                def make_call(p=provider, m=model):
-                    thread_client = AIClient()
-                    thread_client._provider = p
-                    thread_client._model = m
-                    fn_name = f"generate_{p}"
-                    fn = getattr(thread_client, fn_name)
-                    return fn(prompt, system_instruction)
-                calls.append((provider, model, make_call))
-
-            if not calls:
+                if not self._check_and_consume_token(provider):
+                    log.info("Racer skipping %s/%s (rate-limited or in cooldown)", provider, model)
+                    continue
+                runnable.append((provider, model))
+            if not runnable:
                 continue
 
-            with ThreadPoolExecutor(max_workers=len(calls)) as exc:
-                fut_map = {exc.submit(c[2]): (c[0], c[1]) for c in calls}
-                try:
-                    done, not_done = wait(
-                        fut_map, return_when=FIRST_COMPLETED, timeout=45,
-                    )
+            with ThreadPoolExecutor(max_workers=len(runnable)) as exc:
+                fut_map = {exc.submit(make_call, p, m): (p, m) for p, m in runnable}
+                pending = set(fut_map)
+                deadline = time.monotonic() + tier_timeout
+                winner = None
+                while pending:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    done, pending = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+                    if not done:
+                        break  # tier deadline hit
                     for fut in done:
                         p, m = fut_map[fut]
                         try:
-                            text = fut.result(timeout=5)
-                            if text and text.strip() and "API key missing" not in text:
-                                self._last_provider = p
-                                self._last_model = m
-                                for f in not_done:
-                                    f.cancel()
-                                return text.strip()
-                        except Exception:
+                            text = fut.result()
+                        except Exception as e:
+                            self._note_provider_error(p, e)
+                            log.warning("Racer %s/%s failed: %s", p, m, e)
                             continue
-                    for f in not_done:
-                        f.cancel()
-                except Exception:
-                    for f in fut_map:
-                        f.cancel()
+                        if text and text.strip() and "API key missing" not in text:
+                            self._record_success(p)
+                            self._last_provider = p
+                            self._last_model = m
+                            winner = text.strip()
+                            break
+                    if winner:
+                        break
+                for f in pending:
+                    f.cancel()
+                if winner:
+                    return winner
 
         return ""
 
