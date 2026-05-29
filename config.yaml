@@ -201,6 +201,10 @@ ai:
   # Speed path: set provider=groq model=llama-4-scout-17b-16e-instruct (0.5s)
   # Auto-benchmark: seo_learner.py can dynamically test and select best model
   auto_benchmark: false                 # Set true to auto-discover best model on startup
+  # ── LLM orchestration resilience (feat/llm-orchestration) ──────────────────
+  retry_base_delay_seconds: 2.0         # Backoff before the failover retry round (transient/429/5xx only)
+  retry_max_delay_seconds: 30.0         # Cap on backoff delay
+  race_tier_timeout_seconds: 45.0       # Per-tier deadline for fastest-first racing (keeps slow-but-valid responses)
   system_prompt: |
     You are a YouTube SEO expert specializing in Cricket Shorts.
     Generate high-CTR titles, engaging descriptions, and optimized tags.
