@@ -314,12 +314,15 @@ def upload_video(
         response = None
         last_progress = -10
         last_progress_time = time.monotonic()
+        retry_sleep = 5
+        max_sleep = 60
         
         try:
             while response is None:
                 try:
                     status, response = insert_request.next_chunk()
                     if status:
+                        retry_sleep = 5  # Reset backoff on progress
                         progress = int(status.progress() * 100)
                         now = time.monotonic()
                         if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
@@ -329,13 +332,11 @@ def upload_video(
                 except Exception as e:
                     import http.client
                     from googleapiclient.errors import HttpError
-                    if isinstance(e, HttpError) and e.resp.status in [500, 502, 503, 504]:
-                        log.warning(f"Transient HTTP {e.resp.status} error, retrying in 5 seconds...")
-                        time.sleep(5)
-                        continue
-                    elif isinstance(e, (http.client.IncompleteRead, http.client.CannotSendRequest, ConnectionError)):
-                        log.warning(f"Network error: {e}, retrying in 5 seconds...")
-                        time.sleep(5)
+                    if (isinstance(e, HttpError) and e.resp.status in [500, 502, 503, 504]) or \
+                       isinstance(e, (http.client.IncompleteRead, http.client.CannotSendRequest, ConnectionError)):
+                        log.warning(f"Transient error: {e}, retrying in {retry_sleep} seconds...")
+                        time.sleep(retry_sleep)
+                        retry_sleep = min(retry_sleep * 2, max_sleep)
                         continue
                     else:
                         raise e
