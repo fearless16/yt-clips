@@ -57,7 +57,10 @@ def test_cricket_terms_substitution(tmp_path):
         with open(output_file, "r") as f:
             data = json.load(f)
             
-        assert data["segments"][0]["text"] == "Kohli and Bumrah and SKY did well"
+        # NOTE: "sky" is intentionally NOT uppercased anymore — it's an ordinary
+        # English word (false-positive guard). Player-nickname disambiguation is
+        # delegated to the context-aware LLM correction pass.
+        assert data["segments"][0]["text"] == "Kohli and Bumrah and sky did well"
         assert data["source"] == "whisper"
 
 def test_fetch_unified_path_fallback(tmp_path):
