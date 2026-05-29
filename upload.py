@@ -105,19 +105,76 @@ def _has_shorts_marker(text: str) -> bool:
     return "#shorts" in (text or "").lower()
 
 
-def _limit_youtube_tags(tags: List[str], max_chars: int = 450) -> List[str]:
+def _truncate_bytes(text: str, max_bytes: int = 5000) -> str:
+    """Truncate *text* so its UTF-8 encoding fits in *max_bytes*.
+
+    YouTube's description limit is 5000 **bytes**, not characters — emoji and
+    Hindi/Devanagari text use 3-4 bytes each, so char-based slicing could exceed
+    the limit and get the upload rejected.
+    """
+    if text is None:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    # Cut on a valid UTF-8 boundary.
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _limit_youtube_tags(tags: List[str], max_chars: int = 480) -> List[str]:
+    """Limit tags to YouTube's ~500-char budget, accounting for quote overhead.
+
+    YouTube counts multi-word (space-containing) tags as quoted, adding 2 chars
+    per such tag. We budget conservatively (480) and include the +2 overhead so
+    we never silently blow the real 500-char server-side cap.
+    """
     limited: List[str] = []
     total = 0
     for tag in tags:
         cleaned = str(tag).strip()
         if not cleaned:
             continue
-        extra = len(cleaned) + (1 if limited else 0)
+        quote_overhead = 2 if " " in cleaned else 0
+        extra = len(cleaned) + quote_overhead + (1 if limited else 0)
         if total + extra > max_chars:
-            break
+            continue  # skip this one but keep trying shorter later tags
         limited.append(cleaned)
         total += extra
     return limited
+
+
+def _assignable_category_id(youtube, desired: str, region: str = "IN") -> str:
+    """Return *desired* if it's an assignable YouTube category, else a safe fallback.
+
+    An invalid/non-assignable categoryId causes a hard ``invalidCategoryId``
+    upload failure. We validate against ``videoCategories.list`` (cached) and
+    fall back to Sports(17)->Entertainment(24)->People(22) if needed. On any API
+    error we return *desired* unchanged (don't block the upload).
+    """
+    desired = str(desired)
+    cache_key = "yt_categories_%s" % region
+    cached = _CATEGORY_CACHE.get(cache_key)
+    try:
+        if cached is None:
+            resp = youtube.videoCategories().list(part="snippet", regionCode=region).execute()
+            cached = {
+                item["id"]: item["snippet"].get("assignable", False)
+                for item in resp.get("items", [])
+            }
+            _CATEGORY_CACHE[cache_key] = cached
+        if cached.get(desired):
+            return desired
+        for fallback in ("17", "24", "22"):  # Sports, Entertainment, People & Blogs
+            if cached.get(fallback):
+                log.warning("categoryId %s not assignable in %s — falling back to %s",
+                            desired, region, fallback)
+                return fallback
+    except Exception as e:
+        log.warning("Category validation skipped (%s) — using configured id %s", e, desired)
+    return desired
+
+
+_CATEGORY_CACHE: Dict[str, Dict[str, bool]] = {}
 
 
 def _ensure_shorts_metadata(title: str, description: str, tags: List[str]) -> Tuple[str, str, List[str]]:
@@ -130,9 +187,9 @@ def _ensure_shorts_metadata(title: str, description: str, tags: List[str]) -> Tu
 
     if not (_has_shorts_marker(title) or _has_shorts_marker(description)):
         marker = "\n\n#Shorts"
-        description = (description[:5000 - len(marker)] + marker) if description else "#Shorts"
+        description = (_truncate_bytes(description, 5000 - len(marker)) + marker) if description else "#Shorts"
 
-    return title[:100], description[:5000], _limit_youtube_tags(tags)
+    return title[:100], _truncate_bytes(description, 5000), _limit_youtube_tags(tags)
 
 
 def _is_colab() -> bool:
@@ -265,17 +322,29 @@ def upload_video(
             log.info(f"⏰ Scheduled for: {publish_at}")
         privacy = "private"  # YouTube API requires "private" for scheduled videos
 
+    # Validate category against assignable categories (avoids invalidCategoryId).
+    category_id = _assignable_category_id(
+        youtube, cfg["youtube"]["category_id"],
+        region=cfg.get("youtube", {}).get("region_code", "IN"),
+    )
+    # Synthetic-media disclosure: default false, but allow per-clip metadata or
+    # config override (e.g. AI-generated thumbnails/voiceover/clips).
+    contains_synthetic = bool(
+        meta.get("contains_synthetic_media",
+                 cfg.get("youtube", {}).get("contains_synthetic_media", False))
+    )
+
     body = {
         "snippet": {
             "title": title[:100],
-            "description": description[:5000],
+            "description": _truncate_bytes(description, 5000),
             "tags": all_tags,
-            "categoryId": cfg["youtube"]["category_id"],
+            "categoryId": category_id,
         },
         "status": {
             "privacyStatus": privacy,
             "selfDeclaredMadeForKids": cfg.get("youtube", {}).get("self_declared_made_for_kids", False),
-            "containsSyntheticMedia": False,
+            "containsSyntheticMedia": contains_synthetic,
         },
     }
 
@@ -302,13 +371,16 @@ def upload_video(
             continue
             
         log.info(f"🚀 Uploading to YouTube: {title[:80]}... (using token {token_idx})")
-        
-        media_body = MediaFileUpload(video_path, chunksize=-1, resumable=True)
+
+        # Finite chunk size enables real progress + resumable recovery (a single
+        # -1 chunk uploads the whole file in one shot with no resume on failure).
+        chunk_mb = int(cfg.get("youtube", {}).get("upload_chunk_size_mb", 8))
+        media_body = MediaFileUpload(video_path, chunksize=chunk_mb * 1024 * 1024, resumable=True)
         insert_request = youtube.videos().insert(
             part=",".join(body.keys()),
             body=body,
             media_body=media_body,
-            notifySubscribers=True,
+            notifySubscribers=cfg.get("youtube", {}).get("notify_subscribers", True),
         )
 
         response = None
@@ -316,13 +388,19 @@ def upload_video(
         last_progress_time = time.monotonic()
         retry_sleep = 5
         max_sleep = 60
-        
+        # Bounded retries: cap attempts AND wall-clock so a flapping connection
+        # can no longer hang the pipeline indefinitely.
+        max_retries = int(cfg.get("youtube", {}).get("upload_max_retries", 6))
+        deadline = time.monotonic() + float(cfg.get("youtube", {}).get("upload_deadline_seconds", 1800))
+        transient_retries = 0
+
         try:
             while response is None:
                 try:
                     status, response = insert_request.next_chunk()
                     if status:
                         retry_sleep = 5  # Reset backoff on progress
+                        transient_retries = 0  # progress => reset retry budget
                         progress = int(status.progress() * 100)
                         now = time.monotonic()
                         if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
@@ -332,9 +410,16 @@ def upload_video(
                 except Exception as e:
                     import http.client
                     from googleapiclient.errors import HttpError
-                    if (isinstance(e, HttpError) and e.resp.status in [500, 502, 503, 504]) or \
-                       isinstance(e, (http.client.IncompleteRead, http.client.CannotSendRequest, ConnectionError)):
-                        log.warning(f"Transient error: {e}, retrying in {retry_sleep} seconds...")
+                    is_transient = (isinstance(e, HttpError) and e.resp.status in [500, 502, 503, 504]) or \
+                        isinstance(e, (http.client.IncompleteRead, http.client.CannotSendRequest, ConnectionError))
+                    if is_transient:
+                        transient_retries += 1
+                        if transient_retries > max_retries or time.monotonic() > deadline:
+                            log.error("Giving up on %s after %d transient retries / deadline",
+                                      video_path, transient_retries)
+                            raise
+                        log.warning("Transient error (%d/%d): %s — retrying in %ds...",
+                                    transient_retries, max_retries, e, retry_sleep)
                         time.sleep(retry_sleep)
                         retry_sleep = min(retry_sleep * 2, max_sleep)
                         continue
