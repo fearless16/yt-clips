@@ -788,7 +788,7 @@ def _detect_dead_air(video_path: str, start: float, end: float) -> Dict:
 class HostDetector:
     """
     Identifies the host among multiple detected faces using reference photos.
-    Uses simple template matching (histogram comparison) for host identification.
+    Uses face_recognition embeddings for high-accuracy host identification.
     Falls back to largest face + facecam region when no references provided.
     """
 
@@ -796,15 +796,19 @@ class HostDetector:
         self.reference_embeddings: List[np.ndarray] = []
         self.has_host_reference = len(reference_photos) > 0
 
+        try:
+            import face_recognition
+        except ImportError:
+            log.warning("face_recognition not installed, identity tracking disabled")
+            return
+
         for ref_img in reference_photos:
             if ref_img is not None and ref_img.size > 0:
                 try:
-                    gray = cv2.cvtColor(ref_img, cv2.COLOR_BGR2GRAY)
-                    if gray.size > 0:
-                        resized = cv2.resize(gray, (64, 64))
-                        hist = cv2.calcHist([resized], [0], None, [32], [0, 256])
-                        hist = cv2.normalize(hist, hist).flatten()
-                        self.reference_embeddings.append(hist)
+                    rgb = cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB)
+                    encodings = face_recognition.face_encodings(rgb)
+                    if encodings:
+                        self.reference_embeddings.append(encodings[0])
                 except Exception as e:
                     log.warning("Failed to process reference photo: %s", e)
 
@@ -814,27 +818,30 @@ class HostDetector:
             log.info("HostDetector initialized in fallback mode (largest face + facecam region)")
 
     def _compute_face_embedding(self, face_img: np.ndarray) -> Optional[np.ndarray]:
-        """Compute histogram embedding for a face region."""
+        """Compute structural embedding for a face region."""
         try:
             if face_img is None or face_img.size == 0:
                 return None
-            gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
-            if gray.size == 0:
-                return None
-            resized = cv2.resize(gray, (64, 64))
-            hist = cv2.calcHist([resized], [0], None, [32], [0, 256])
-            hist = cv2.normalize(hist, hist).flatten()
-            return hist
+            import face_recognition
+            rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
+            encodings = face_recognition.face_encodings(rgb)
+            if encodings:
+                return encodings[0]
+            return None
         except Exception:
             return None
 
     def _histogram_similarity(self, hist1: np.ndarray, hist2: np.ndarray) -> float:
-        """Compute similarity between two histograms (0-1)."""
+        """Compute similarity between two embeddings (0-1)."""
         if hist1 is None or hist2 is None:
             return 0.0
-        if len(hist1) != len(hist2):
+        try:
+            import face_recognition
+            dist = face_recognition.face_distance([hist1], hist2)[0]
+            # Convert distance (lower is better, typically <0.6 is match) to similarity score
+            return float(max(0.0, 1.0 - dist))
+        except Exception:
             return 0.0
-        return float(np.clip(np.dot(hist1, hist2), 0, 1))
 
     def identify_host(self, faces: List[Dict]) -> int:
         """

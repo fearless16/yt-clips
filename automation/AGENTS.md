@@ -39,7 +39,7 @@ Root backward-compat stubs (re-export automation.seo.*):
     trends.py         → automation/seo/trends.py
 
 tests/
-└── test_automation.py  45 tests (all passing)
+└── test_automation.py  52 tests (all passing)
 ```
 
 ---

@@ -88,7 +88,8 @@ ENGAGING_CTAS = [
 _SYSTEM = (
     "You are an elite YouTube Shorts SEO expert for Indian cricket. "
     "Your goal: Maximize CTR (Click-Through Rate) and watch time. "
-    "CRITICAL: Only use player names, teams, and events that appear in the transcript. "
+    "CRITICAL: Generate title, description, and tags matching the EXACT format requested. "
+    "Only use player names, teams, and events that appear in the transcript or scorecard. "
     "NEVER invent or hallucinate player names or match events. "
     "Return ONLY valid JSON — no markdown, no explanation."
 )
@@ -105,108 +106,60 @@ CLIP CONTENT:
   Raw Transcript (may have misspellings): {transcript}
   Key moments: {local_kw}
 
-CRITICAL: This clip is one of several highlights from the same match. Each clip
-MUST have a COMPLETELY UNIQUE title describing THIS SPECIFIC MOMENT. Never reuse
-a title. Never reference "Target 234" unless this clip is actually about the chase.
-
-══ STEP 1: GROUND YOUR RESPONSE IN THE TRANSCRIPT ═══════════════════════════
-  BEFORE writing any output, do this:
-  1. Read the Raw Transcript carefully
-  2. List every cricket player name mentioned in the transcript
-  3. List every team name mentioned in the transcript
-  4. Describe in one sentence what happens in this clip based ONLY on the transcript
-
-  RULES — NEVER VIOLATE THESE:
-  - ONLY use player names that appear in the transcript or scorecard
-  - If a player is NOT mentioned in the transcript, DO NOT put them in the title
-  - If a team is NOT mentioned in the transcript, DO NOT put them in the title
-  - NEVER invent events, controversies, or moments not supported by the transcript
-  - Match teams are from the Scorecard context above — do NOT mention other teams
-  - Only use teams that appear in the Scorecard section
-
-══ STEP 2: TRANSCRIPTION CORRECTION ══════════════════════════════════════════
-  Fix misspelled cricket names:
-  - Cross-reference against the Scorecard above (has correct player/venue names)
-  - Fix mistakes e.g. "Sunder" → "Sundar", "Sirage" → "Siraj"
-  - For Hindi names transliterated wrong, use your cricket knowledge
-  - Use CORRECTED names in ALL output fields below
-
-══ STEP 3: GENERATE SEO METADATA ════════════════════════════════════════════
-
-TITLE (max 100 chars):
-  Format: "🔴 <Team1 short> vs <Team2 short> Live Match | <Team1 full> vs <Team2 full> Live | <Tournament> Live Commentary"
-  e.g. "🔴 GT vs SRH Live Match | Gujarat Titans vs Sunrisers Hyderabad Live | IPL 2026 Live Commentary"
-  RULES:
-    - Always start with 🔴
-    - Use both short team codes AND full team names from the scorecard
-    - End with "<Tournament> Live Commentary"
-    - NEVER invent team names not in the scorecard
-
-DESCRIPTION (600-900 chars total, PLAIN TEXT ONLY):
-  Use this EXACT structure:
-
-  Welcome line: One engaging Hinglish sentence welcoming viewers to the live match.
-
-  🏏 Match Details
-  Teams, venue, and match context from the scorecard.
-
-  🔥 LIVE MATCH UPDATE
-  Current match situation — score, overs, key moments from the transcript.
-
-  ⚡ Key Highlights
-  • Bullet point 1 (player action from transcript)
-  • Bullet point 2
-  • Bullet point 3
-
-  🎙️ Live Hindi Commentary
-  One line of Hindi commentary flavor text.
-
-  Hashtags: [paste hashtags here as plain text]
-
-  IMPORTANT: PLAIN TEXT only. Do NOT wrap in dicts or JSON.
-  IMPORTANT: Use the SAME player names, team names, and cricket action words
-  that will appear in your search_terms below. SEO consistency is critical.
-
-HASHTAGS (exactly 4-5):
-  1. Tournament (#IPL2026)
-  2. Team from the match (e.g. #GT or #SRH)
-  3. Star player mentioned in transcript (e.g. #KrunalPandya)
-  4. #Shorts (ALWAYS include)
-  5. Optional: venue
-
-SEARCH TERMS (25-35 terms — maximize the 500 char budget):
-  These are the MOST IMPORTANT field for discoverability.
-  CRITICAL: Use the "Actual YouTube Search Suggestions" above — these are REAL
-  queries people type. Prioritize them over invented terms.
-
-  Include ALL of these categories:
-  Tier 1 — Player + action + tournament:
-    e.g. "ishan kishan batting ipl", "rabada yorker gt", "kohli six rcb"
-  Tier 2 — Match + team phrases:
-    e.g. "gt vs srh highlights", "csk vs srh live", "ipl 2026 live"
-  Tier 3 — Hindi search patterns (massive Indian search volume):
-    e.g. "kohli ka six", "dhoni finish", "ipl ka best moment", "cricket live hindi"
-  Tier 4 — Moment-specific:
-    e.g. "last over six ipl", "hat trick ipl 2026", "catch of the match"
-  Tier 5 — Broad but relevant:
-    e.g. "ipl highlights", "cricket live", "t20 cricket", "cricket shorts"
-
-  RULES:
-    - Every term in search_terms MUST be something a real person would type on YouTube
-    - Mix Hindi and English (Hinglish) — Indian users search in both
-    - NO generic single words like "cricket" or "six" alone
-    - Each term must be 2-5 words (search phrase, not hashtag)
-    - Aim for 25-35 terms to maximize the 500 char budget
-
-Return ONLY valid JSON — no markdown, no explanation:
+══ REQUIRED JSON FORMAT ═════════════════════════════════════════════════════
+Return a JSON object with these EXACT keys:
 {{
-  "clip_id": "{clip_id}",
-  "title": "<title based on actual transcript content>",
-  "description": "<plain text description>",
-  "hashtags": ["#...", "#...", "#...", "#..."],
-  "search_terms": ["<term1>", "<term2>", "..."]
+  "title": "<LIVE Team1 vs Team2 Score | Team1 vs Team2 Tournament Match No | Aaj Ka Match Hindi Commentary>",
+  "description": "<entire finished description string matching the format rules below>",
+  "search_terms": [
+    "<term1>",
+    "<term2>",
+    ...
+  ],
+  "hashtags": [
+    "#...",
+    "#..."
+  ]
 }}
+
+══ TITLE RULES ══════════════════════════════════════════════════════════════
+- Always start with "LIVE "
+- Format: "LIVE <Team1 short> vs <Team2 short> <Score> | <Team1 city/full> vs <Team2 city/full> <Tournament> Match <MatchNo> | Aaj Ka Match Hindi Commentary"
+- Example: "LIVE GT vs CSK 189/1 | Gujarat vs Chennai IPL 2026 Match 66 | Aaj Ka Match Hindi Commentary"
+- Never use 🔴 in the title.
+- If score is not available, use current match situation/runs/wickets from transcript.
+
+══ DESCRIPTION FORMAT RULES ═════════════════════════════════════════════════
+Inside the "description" JSON string, you must generate the entire text matching this EXACT layout (use actual newlines `\\n` inside the JSON string value):
+
+LIVE: <Team1 full> vs <Team2 full> – <Tournament> Match <MatchNo>, <Venue>
+<Toss winner> won toss and chose to <bowl/bat> first
+Current: <Team short> <Score> (<Overs>) – <Batsman1> <runs>(<balls>) <wicket details if any>, <Batsman2> <runs>*, ...
+
+🇮🇳 India: JioHotstar, Star Sports
+🇵🇰 Pakistan: Yupp TV
+
+<Engaging Hinglish/Hindi flavor sentence about the match situation, commentary, pitch/dew factor, etc.>
+
+CHAPTERS
+00:00 Live Start & Toss
+02:15 <Moment 1 description>
+12:20 <Moment 2 description>
+17:00 <Moment 3 description>
+20:00 <Moment 4 description>
+
+Search: <comma-separated list of 7 key search terms from your search_terms field>
+
+#<Space-separated list of hashtags from your hashtags field>
+
+Disclaimer: Live score updates and commentary only. For official broadcast watch JioHotstar (India) or Yupp TV (Pakistan).
+
+══ EXAMPLE DESCRIPTION VALUE ════════════════════════════════════════════════
+"LIVE: Gujarat Titans vs Chennai Super Kings – IPL 2026 Match 66, Narendra Modi Stadium Ahmedabad\\nCSK won toss and chose to bowl first\\nCurrent: GT 189/1 (17.2) – Shubman Gill 64(37) c Dube b Johnson, Sai Sudharsan 68*, Jos Buttler 34*\\n\\n🇮🇳 India: JioHotstar, Star Sports\\n🇵🇰 Pakistan: Yupp TV\\n\\nAaj ka match live score, Hindi commentary, ball by ball updates. Dew factor active in Ahmedabad second innings.\\n\\nCHAPTERS\\n00:00 Live Start & Toss\\n02:15 GT Powerplay 62/0\\n12:20 WICKET – Gill 64\\n17:00 Buttler Acceleration\\n20:00 CSK Chase Starts\\n\\nSearch: gt vs csk live, csk vs gt live score today, ipl 2026 live hindi, aaj ka match live, live cricket match today online, ipl live kaise dekhe, ipl live pakistan\\n\\n#GTvsCSK #IPL2026Live #LiveCricket #AajKaMatch #CSKvsGT #IPLPakistan #HindiCommentary\\n\\nDisclaimer: Live score updates and commentary only. For official broadcast watch JioHotstar (India) or Yupp TV (Pakistan)."
+
+Return ONLY valid JSON.
 """
+
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -245,6 +198,210 @@ CRICKET_KEYWORDS = {
     "angle", "replay", "slowmo", "slow", "motion", "dismissal", "partnership",
 }
 
+FULL_TEAM_NAMES = {
+    "CSK": "Chennai Super Kings",
+    "MI": "Mumbai Indians",
+    "RCB": "Royal Challengers Bengaluru",
+    "KKR": "Kolkata Knight Riders",
+    "SRH": "Sunrisers Hyderabad",
+    "DC": "Delhi Capitals",
+    "PBKS": "Punjab Kings",
+    "RR": "Rajasthan Royals",
+    "LSG": "Lucknow Super Giants",
+    "GT": "Gujarat Titans"
+}
+
+CITY_TEAM_NAMES = {
+    "CSK": "Chennai",
+    "MI": "Mumbai",
+    "RCB": "Bengaluru",
+    "KKR": "Kolkata",
+    "SRH": "Hyderabad",
+    "DC": "Delhi",
+    "PBKS": "Punjab",
+    "RR": "Rajasthan",
+    "LSG": "Lucknow",
+    "GT": "Gujarat"
+}
+
+def assemble_description(
+    data: Dict,
+    scorecard: str = "",
+    video_title: str = "",
+    transcript: str = "",
+    fallback_search_terms: List[str] = None,
+    fallback_hashtags: List[str] = None
+) -> str:
+    """
+    Assemble description in the exact requested format:
+    LIVE: <Team1 full> vs <Team2 full> – <Tournament> Match <MatchNo>, <Venue>
+    <Toss details>
+    Current: <Current Score (Overs)> – <Batsman1> <runs>(<balls>) <wicket details>, ...
+
+    🇮🇳 India: JioHotstar, Star Sports
+    🇵🇰 Pakistan: Yupp TV
+
+    <Flavor text commentary / match updates / pitch / dew factor>
+
+    CHAPTERS
+    00:00 Live Start & Toss
+    ...
+
+    Search: <comma-separated list of search queries>
+
+    #Hashtags
+
+    Disclaimer: Live score updates and commentary only. For official broadcast watch JioHotstar (India) or Yupp TV (Pakistan).
+    """
+    # If the description is already fully formatted and has the new style, keep it
+    desc_str = data.get("description", "")
+    if desc_str and "Disclaimer:" in desc_str and "CHAPTERS" in desc_str and "Search:" in desc_str:
+        return desc_str
+
+    # Extract team names
+    from .trends import extract_match_teams, TEAM_MAPPINGS
+    teams_list, match_type = [], "ipl"
+    if video_title:
+        teams_list, match_type = extract_match_teams(video_title)
+    
+    # Try scorecard if video_title didn't yield enough
+    if len(teams_list) < 2 and scorecard:
+        for abbr, name in TEAM_MAPPINGS.items():
+            if abbr in scorecard.lower() and name not in teams_list:
+                teams_list.append(name)
+
+    t1_full, t2_full = "Team 1", "Team 2"
+    t1_short, t2_short = "T1", "T2"
+    if len(teams_list) >= 2:
+        t1_short, t2_short = teams_list[0], teams_list[1]
+        t1_full = FULL_TEAM_NAMES.get(t1_short, t1_short)
+        t2_full = FULL_TEAM_NAMES.get(t2_short, t2_short)
+    elif len(teams_list) == 1:
+        t1_short = teams_list[0]
+        t1_full = FULL_TEAM_NAMES.get(t1_short, t1_short)
+
+    # 1. Match Details
+    match_info = data.get("match_info")
+    if not match_info:
+        # Match No
+        match_no = ""
+        if video_title:
+            m = re.search(r"match\s*(\d+)", video_title, re.IGNORECASE)
+            if m:
+                match_no = f" Match {m.group(1)}"
+            else:
+                match_no = ""
+        else:
+            match_no = ""
+            
+        # Venue
+        venue = ""
+        if scorecard:
+            m = re.search(r"Stadium|Ahmedabad|Chennai|Mumbai|Bangalore|Kolkata|Delhi|Mohali|Jaipur|Hyderabad|Pune", scorecard, re.IGNORECASE)
+            if m:
+                # simple heuristic to find stadium/city
+                lines = scorecard.split("\n")
+                for line in lines[:3]:
+                    if "stadium" in line.lower() or "ground" in line.lower() or "park" in line.lower():
+                        venue = line.strip()
+                        break
+        
+        from datetime import datetime
+        current_year = str(datetime.now().year)
+        match_info = f"LIVE: {t1_full} vs {t2_full} – {match_type.upper() or 'IPL'} {current_year}{match_no}"
+        if venue:
+            match_info += f", {venue}"
+
+    # 2. Toss Info
+    toss_info = data.get("toss_info")
+    if not toss_info:
+        if scorecard:
+            # Look for toss statement in scorecard
+            for line in scorecard.split("\n"):
+                if "toss" in line.lower() or "opted" in line.lower() or "chose" in line.lower():
+                    toss_info = line.strip()
+                    break
+        if not toss_info:
+            toss_info = "Toss details not available"
+
+    # 3. Current Score
+    current_score = data.get("current_score")
+    if not current_score:
+        if scorecard:
+            # Construct a dynamic current score string from Cricbuzz parsed scorecard
+            score_line = ""
+            batsmen = []
+            for line in scorecard.split("\n"):
+                if "/" in line and any(char.isdigit() for char in line):
+                    score_line = line.strip()
+                elif "Top:" in line:
+                    batsmen_text = line.replace("Top:", "").strip()
+                    batsmen = [b.strip() for b in batsmen_text.split(",") if b.strip()]
+            if score_line:
+                current_score = f"Current: {score_line}"
+                if batsmen:
+                    current_score += " – " + ", ".join(batsmen[:3])
+        if not current_score:
+            current_score = f"Current: {t1_short} score updates in progress"
+
+    # Assemble sections
+    parts = [match_info, toss_info, current_score]
+
+    # Broadcasters
+    parts.append("\n🇮🇳 India: JioHotstar, Star Sports\n🇵🇰 Pakistan: Yupp TV")
+
+    # Flavor text
+    flavor_text = data.get("flavor_text")
+    if not flavor_text:
+        # Generate some Hinglish flavor text from transcript/keywords
+        flavor_text = "Aaj ka match live score, Hindi commentary, ball by ball updates."
+        if "dew" in (transcript or "").lower() or "dew" in scorecard.lower():
+            flavor_text += " Dew factor active in second innings."
+    parts.append("\n" + flavor_text)
+
+    # Chapters
+    chapters = data.get("chapters")
+    ch_lines = ["\nCHAPTERS"]
+    if chapters:
+        if isinstance(chapters, list):
+            for ch in chapters:
+                if isinstance(ch, dict):
+                    ch_lines.append(f"{ch.get('time', '00:00')} {ch.get('event', '')}")
+                else:
+                    ch_lines.append(str(ch))
+        else:
+            ch_lines.append(str(chapters))
+    else:
+        # Default dynamic chapters based on video duration / clip
+        ch_lines.extend([
+            "00:00 Live Start & Toss",
+            f"02:15 {t1_short} Powerplay batting",
+            "12:20 Key Wicket moment",
+            "17:00 Innings Acceleration",
+            f"20:00 {t2_short} Chase Starts"
+        ])
+    parts.append("\n".join(ch_lines))
+
+    # Search Terms
+    search_list = data.get("search_terms") or fallback_search_terms or []
+    if search_list:
+        # Select first 7 search terms for "Search:" section in description
+        search_line = ", ".join(search_list[:7])
+        parts.append(f"\nSearch: {search_line}")
+
+    # Hashtags
+    hashtags_list = data.get("hashtags") or fallback_hashtags or []
+    if hashtags_list:
+        # Format as space separated hashtags
+        ht_line = " ".join([h if h.startswith("#") else f"#{h}" for h in hashtags_list[:8]])
+        parts.append(f"\n{ht_line}")
+
+    # Disclaimer
+    parts.append("\nDisclaimer: Live score updates and commentary only. For official broadcast watch JioHotstar (India) or Yupp TV (Pakistan).")
+
+    return "\n".join(parts)
+
+
 def _extract_keywords(text: str, limit: int = 14) -> List[str]:
     words = re.findall(r"[A-Za-z0-9']+", (text or "").lower())
     kw = [w for w in words if w not in STOP_WORDS and len(w) > 2]
@@ -266,6 +423,14 @@ def _extract_keywords(text: str, limit: int = 14) -> List[str]:
 
 def _inject_viral_elements(title: str, description: str, hashtags: List[str], extra: Dict = None) -> Dict:
     """Inject viral hooks and CTAs into SEO output."""
+    if description and "Disclaimer:" in description and "CHAPTERS" in description:
+        return {
+            **(extra or {}),
+            "title": title,
+            "description": description,
+            "hashtags": hashtags[:8] if hashtags else ["#IPL2026", "#Cricket", "#Shorts"]
+        }
+
     import random
 
     # Pick random hook and CTA
@@ -498,6 +663,15 @@ def _consolidate_seo(title: str, description: str, hashtags: List[str], search_t
     Ensure search terms, description, and hashtags are CONSISTENT.
     Search terms are the source of truth — inject them everywhere.
     """
+    if description and "Disclaimer:" in description and "CHAPTERS" in description:
+        return {
+            "title": title,
+            "description": description,
+            "hashtags": hashtags,
+            "search_terms": search_terms,
+            "tags": search_terms,
+        }
+
     if not search_terms:
         return {"title": title, "description": description, "hashtags": hashtags, "search_terms": search_terms}
 
@@ -751,20 +925,23 @@ def generate_clip_seo(
 
         SUGGEST_CACHE.set(cache_key, yt_suggestions)
 
-    trend_str = ", ".join(trend_topics) or "IPL 2026, cricket live"
-    yt_suggest_str = ", ".join(yt_suggestions[:15]) or "No suggestions available"
+    trend_str = ", ".join(trend_topics[:8]) or "IPL 2026, cricket live"
+    yt_suggest_str = ", ".join(yt_suggestions[:8]) or "No suggestions available"
     live_cta = (
         f"Watch LIVE: {live_stream_url}" if live_stream_url
         else "Match chal raha hai LIVE — channel pe aao."
     )
 
+    # Truncate all large fields to keep prompt within API limits
+    scorecard_trimmed = (scorecard or "Live match in progress")[:1500]
+    transcript_trimmed = transcript[:2000]
     prompt = _PROMPT_TMPL.format(
         video_title=video_title or "Cricket Live Match",
-        scorecard=scorecard or "Live match in progress",
+        scorecard=scorecard_trimmed,
         trend_topics=trend_str,
         yt_suggestions=yt_suggest_str,
         live_cta=live_cta,
-        transcript=transcript[:2500],   # keep prompt tight
+        transcript=transcript_trimmed,
         local_kw=local_kw,
         clip_id=clip_id,
     )
@@ -818,7 +995,12 @@ def _attempt_seo_generation(
     """
     import random as _random
 
-    response_text = ai.generate_fastest_first(prompt, system_instruction=_SYSTEM)
+    try:
+        response_text = ai.generate_fastest_first(prompt, system_instruction=_SYSTEM)
+    except Exception as e:
+        log.warning("[%s] AI Client generate_fastest_first failed: %s", clip_id, e)
+        response_text = ""
+
     if response_text:
         data = _parse_json_response(response_text)
         if data:
@@ -831,10 +1013,20 @@ def _attempt_seo_generation(
                 max_chars=500,
             )
 
+            # Assemble description dynamically in the new format
+            assembled_desc = assemble_description(
+                data,
+                scorecard=scorecard,
+                video_title=video_title,
+                transcript=transcript,
+                fallback_search_terms=optimized_tags,
+                fallback_hashtags=data.get("hashtags")
+            )
+
             result = _enforce_limits({
                 "clip_id": clip_id,
-                "title": data.get("title", f"Cricket Live Highlights | {clip_id}"),
-                "description": data.get("description", ""),
+                "title": data.get("title", f"LIVE {video_title or 'Cricket Highlights'}"),
+                "description": assembled_desc,
                 "hashtags": data.get("hashtags", ["#IPL2026", "#Cricket", "#Shorts"]),
                 "search_terms": optimized_tags,
                 "tags": optimized_tags,
@@ -886,14 +1078,8 @@ def _attempt_seo_generation(
                 team_str = " vs ".join(sorted(set(teams)))
             title = f"{kw_str} | {team_str or 'IPL 2026'}"[:100]
 
-        # Use raw response as description base
-        description = response_text.strip()
-        # Strip markdown code fences
-        description = re.sub(r'```(?:json)?\s*', '', description)
-        description = re.sub(r'\s*```', '', description)
-        # Clean up excessive whitespace
-        description = re.sub(r'\n{3,}', '\n\n', description)
-        description = description[:5000]
+        if not title.startswith("LIVE"):
+            title = f"LIVE {title}"[:100]
 
         # Generate search terms from transcript keywords + trends
         fallback_terms = []
@@ -905,10 +1091,20 @@ def _attempt_seo_generation(
             if phrase not in fallback_terms:
                 fallback_terms.append(phrase)
 
+        # Assemble description dynamically in the new format
+        salvaged_desc = assemble_description(
+            {"description": ""},
+            scorecard=scorecard,
+            video_title=video_title,
+            transcript=transcript,
+            fallback_search_terms=fallback_terms,
+            fallback_hashtags=["#IPL2026", "#Cricket", "#Shorts"]
+        )
+
         result = _enforce_limits({
             "clip_id": clip_id,
             "title": title,
-            "description": description or f"{_random.choice(VIRAL_HOOKS)}\n\n{kw_str} — watch full highlights!",
+            "description": salvaged_desc,
             "hashtags": ["#IPL2026", "#Cricket", "#Shorts"],
             "search_terms": fallback_terms[:20],
             "tags": fallback_terms[:20],
@@ -946,11 +1142,9 @@ def _attempt_seo_generation(
     player_str = ", ".join(sorted(players_in_transcript)[:3])
     team_str = " vs ".join(sorted(teams_in_transcript)) if teams_in_transcript else "IPL 2026"
 
-    title = f"{player_str} {kw_str} | {team_str}"[:100]
+    title = f"LIVE {player_str} {kw_str} | {team_str}"[:100]
     if not player_str:
-        title = f"{kw_str} | {team_str}"[:100]
-
-    description = f"{_random.choice(VIRAL_HOOKS)}\n\n{transcript[:500]}\n\n{_random.choice(ENGAGING_CTAS)}"
+        title = f"LIVE {kw_str} | {team_str}"[:100]
 
     hashtags = ["#IPL2026"]
     if teams_in_transcript:
@@ -970,17 +1164,27 @@ def _attempt_seo_generation(
             search_terms.append(t)
     search_terms = list(dict.fromkeys(search_terms))[:25]
 
+    # Assemble description dynamically in the new format
+    fallback_desc = assemble_description(
+        {"description": ""},
+        scorecard=scorecard,
+        video_title=video_title,
+        transcript=transcript,
+        fallback_search_terms=search_terms,
+        fallback_hashtags=hashtags
+    )
+
     result = _enforce_limits({
         "clip_id": clip_id,
         "title": title,
-        "description": description[:5000],
+        "description": fallback_desc,
         "hashtags": hashtags,
         "search_terms": search_terms,
         "tags": search_terms,
     }, fallback_terms=trend_topics)
 
     result["clip_id"] = clip_id
-    result["ai_generated"] = True
+    result["ai_generated"] = False
     result["_transcript_generated"] = True
 
     log.info("[%s] SEO done (transcript-aware, no AI) — title: %s | %d tags",

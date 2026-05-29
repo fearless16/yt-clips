@@ -90,23 +90,25 @@ Face OS decomposes into 4 isolated subsystems (face_os/subsystems/):
 
 ---
 
-## Legacy Cricket Pipeline
+## Legacy Cricket Pipeline (automation/)
 
-```text
-URL → Download (yt-dlp + aria2c)
-    → Transcribe (faster-whisper, Hindi/English)
-    → Video Analysis (face/lighting map)
-    → Highlight Detection (audio RMS + transcript scoring + Gemini AI)
-    → Frame Analysis (cheap=Haar / premium=YOLO+ByteTrack)
-    → Export (crop + enhance + interpolate + encode)
-    → Selective Enhancement (3-pass: state→enhance→temporal)
-    → SEO + Thumbnails
-    → Upload to YouTube
-```
+The automation pipeline is managed by `automation/orchestrator.py` which executes in 8 skippable phases:
 
-Two analysis paths:
-- **Cheap** (`frame_analyzer.py`): Haar Cascade + heuristics, no GPU
-- **Premium** (`premium_analyzer.py` + `premium_render.py`): YOLOv8-face + ByteTrack + Kalman + RIFE + GFPGAN, GPU required
+1. **Download (Phase 1):** `download.py` (yt-dlp + aria2c)
+2. **Transcribe (Phase 2):** `transcribe.py` (faster-whisper, Hindi/English)
+   - *Phase 2.5 (Video Analysis):* `video_analyzer.py` (face/lighting map)
+3. **Highlight Detection (Phase 3):** `highlight.py` (Audio RMS + transcript scoring + LLM refinement)
+4. **Export Shorts (Phase 4):** `export.py` + `frame_analyzer.py` (crop + encode + Haar/YOLO)
+   - *Phase 4.25 (Enhancement):* `ref_grade.py` or `face_mapper.py`
+   - *Phase 4.5 (SEO & Thumbnails):* `seo.py` + `thumbnail.py`
+5. **SEO Generation (Phase 5):** `automation/seo/seo.py` (LLM-based cricket-aware SEO)
+6. **Sync (Phase 6):** `sync.py` (Google Drive backup)
+7. **Upload (Phase 7):** `upload.py` (YouTube Data API v3 + jittered scheduling)
+8. **Analytics (Phase 8):** `automation/seo/analytics.py` (Performance metrics + learning feedback)
+
+Two analysis paths exist for crop planning during export:
+- **Cheap** (`frame_analyzer.py`): Haar Cascade / OpenCV DNN + heuristics (CPU)
+- **Premium** (`premium_analyzer.py` + `premium_render.py`): YOLOv8-face + ByteTrack + Kalman + RIFE + GFPGAN (GPU)
 
 ---
 
@@ -134,45 +136,12 @@ Both `_process_frame_v2()` (forward) and `_render_frame_v2()` (bidirectional) ha
 
 ---
 
-## Test Suite (773 Face OS tests)
+## Test Suite
 
-```
-tests/face_os/
-├── test_strict_regression.py       # 31 — Frame contract, mask stability, render core
-├── test_math_hardening.py          # 37 — Invariant classes
-├── test_v2_subsystems.py           # 20 — Subsystem isolation
-├── test_phase1_hardening.py        # 37 — Long-horizon drift, system identifiability
-├── test_detection.py               # 14 — MediaPipe detection
-├── test_identity_state.py          # 17 — Frequency decomposition
-├── test_identity_state_fixes.py    #  5 — LastUpdateFrame
-├── test_patch_memory.py            # 18 — Region patches
-├── test_temporal_solve.py          # 10 — Bidirectional solver
-├── test_face_enhance.py            # 18 — Blink detection, eye freeze
-├── test_quality_gates.py           # 13 — Procrustes, jitter, occupancy
-├── test_appearance_field.py        # 14 — Appearance field
-├── test_neural_codec.py            # 12 — Neural codec
-├── test_hypothesis_matching.py     #  4 — Hypothesis space
-├── test_region_confidence.py       #  4 — Region confidence
-├── test_renderer_mode.py           # 21 — RendererMode state machine
-├── test_adversarial.py             # 31 — Pathological inputs
-├── test_visibility_calibration.py  # 16 — VisibilityCalibrator
-├── test_identity_manifold.py       # 26 — Riemannian manifold
-├── test_mathematical_foundation.py # 25 — StateEvolution, EnergyScaler
-├── test_long_horizon.py            #  9 — 1000-frame drift
-├── test_architectural_completeness.py # 10 — Completeness levels
-├── test_phase0_contract.py         # 28 — FrameContract, EnergyReport
-├── test_intrinsic_decomposition.py # 26 — IntrinsicDecomposer
-├── test_physical_renderer.py       # 26 — PhysicalRenderer
-├── test_dense_geometry.py          # 23 — DenseGeometry (de-scoped)
-├── test_lie_group.py               # 23 — SE2/SIM2 transforms
-├── test_state_space.py             # 39 — LatentState
-├── test_optimizer_architecture.py  # 32 — GaussNewton, LM
-├── test_observability.py           # 28 — ObservabilityAnalyzer
-├── test_state_separation.py        # 34 — PhysicalState, BeliefState
-├── test_map_estimation.py          # 19 — MAPOptimizer
-├── test_energy_normalization.py    #  6 — Normalize energy
-├── test_recovery_dynamics.py       # 38 — RecoveryTransitionMatrix
-└── conftest.py
+Refer to `face_os/STATE.md` and `automation/AGENTS.md` for current test suite status.
+To run the full suite:
+```bash
+.venv/bin/python -m pytest tests/
 ```
 
 ---

@@ -84,7 +84,6 @@ def transcribe(video_path: str, output_path: str):
         video, language=language,
         beam_size=beam_size,
         word_timestamps=True,
-        batch_size=batch_size,
         vad_filter=vad_filter,
         vad_parameters=dict(min_silence_duration_ms=500, threshold=0.5),
     )
@@ -130,6 +129,26 @@ def transcribe(video_path: str, output_path: str):
         })
 
     _log_vram("done")
+
+    # Post-processing: Cricket Terminology Correction
+    CRICKET_TERMS = {
+        r"\bcoaly\b": "Kohli",
+        r"\bkoli\b": "Kohli",
+        r"\bbumra\b": "Bumrah",
+        r"\bdoni\b": "Dhoni",
+        r"\bdhony\b": "Dhoni",
+        r"\bstark\b": "Starc",
+        r"\bshami\b": "Shami",
+        r"\bsky\b": "SKY",
+        r"\bhardic\b": "Hardik",
+        r"\bpandiya\b": "Pandya",
+    }
+    import re
+    for r in results:
+        text = r["text"]
+        for pattern, replacement in CRICKET_TERMS.items():
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        r["text"] = text
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)

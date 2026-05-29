@@ -112,6 +112,7 @@ class ReferenceProfile:
             return profile
 
         h, w = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         from utils.face_detect import detect_face as _dnn_detect_face
         face = _dnn_detect_face(img)
         if face is None:

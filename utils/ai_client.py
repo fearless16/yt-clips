@@ -9,10 +9,12 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from utils.config import load_config
+from utils.logger import get_logger
 
 load_dotenv()
 
 _cfg = load_config()
+log = get_logger("ai_client", _cfg.get("logging", {}).get("log_file", "logs/pipeline.log"), _cfg.get("logging", {}).get("level", "INFO"))
 
 
 class AIClient:
@@ -111,17 +113,13 @@ class AIClient:
             calls: List[tuple] = []
             for provider, model in tier:
                 fn = provider_map.get(provider)
-                if fn is None:
-                    continue
-                old_p, old_m = self._provider, self._model
-                def make_call(f=fn, p=provider, m=model, _op=old_p, _om=old_m):
-                    self._provider = p
-                    self._model = m
-                    try:
-                        return f(prompt, system_instruction)
-                    finally:
-                        self._provider = _op
-                        self._model = _om
+                def make_call(p=provider, m=model):
+                    thread_client = AIClient()
+                    thread_client._provider = p
+                    thread_client._model = m
+                    fn_name = f"generate_{p}"
+                    fn = getattr(thread_client, fn_name)
+                    return fn(prompt, system_instruction)
                 calls.append((provider, model, make_call))
 
             if not calls:
@@ -161,7 +159,7 @@ class AIClient:
         system_instruction: Optional[str] = None,
     ) -> str:
         if not self.openrouter_api_key:
-            return "OpenRouter API key missing"
+            raise ValueError("OpenRouter API key missing")
 
         client = OpenAI(
             api_key=self.openrouter_api_key,
@@ -176,6 +174,8 @@ class AIClient:
         self._last_provider = "openrouter"
         self._last_model = self._model
 
+        import time
+        t0 = time.monotonic()
         response = client.chat.completions.create(
             model=self._model,
             messages=messages,
@@ -183,6 +183,11 @@ class AIClient:
             max_tokens=8192,
             extra_headers={"HTTP-Referer": "https://github.com/prajwalbairagi/yt-clips"},
         )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
+        log.info(f"LLM request: openrouter/{self._model} ({duration_ms}ms, {tokens} tokens)",
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms, 
+                        "metadata": {"provider": "openrouter", "model": self._model, "tokens": tokens}})
 
         content = response.choices[0].message.content
         if content is None:
@@ -197,7 +202,7 @@ class AIClient:
         system_instruction: Optional[str] = None,
     ) -> str:
         if not self.nvidia_api_key:
-            return "NVIDIA API key missing"
+            raise ValueError("NVIDIA API key missing")
 
         client = OpenAI(
             api_key=self.nvidia_api_key,
@@ -224,12 +229,19 @@ class AIClient:
         self._last_provider = "nvidia"
         self._last_model = self._model
 
+        import time
+        t0 = time.monotonic()
         response = client.chat.completions.create(
             model=self._model,
             messages=messages,
             temperature=0.7,
             max_tokens=8192,
         )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
+        log.info(f"LLM request: nvidia/{self._model} ({duration_ms}ms, {tokens} tokens)",
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms, 
+                        "metadata": {"provider": "nvidia", "model": self._model, "tokens": tokens}})
 
         content = response.choices[0].message.content
         if content is None:
@@ -244,7 +256,15 @@ class AIClient:
         system_instruction: Optional[str] = None,
     ) -> str:
         if not self.groq_api_key:
-            return "Groq API key missing"
+            raise ValueError("Groq API key missing")
+
+        # Trim total prompt to stay within API limits
+        total = len(system_instruction or "") + len(prompt)
+        if total > 28000:
+            excess = total - 28000
+            prompt = prompt[:max(len(prompt) - excess - 500, 8000)]
+            if system_instruction:
+                system_instruction = system_instruction[:2000]
 
         client = OpenAI(
             api_key=self.groq_api_key,
@@ -259,12 +279,19 @@ class AIClient:
         self._last_provider = "groq"
         self._last_model = self._model
 
+        import time
+        t0 = time.monotonic()
         response = client.chat.completions.create(
             model=self._model,
             messages=messages,
             temperature=0.7,
             max_tokens=8192,
         )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
+        log.info(f"LLM request: groq/{self._model} ({duration_ms}ms, {tokens} tokens)",
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms, 
+                        "metadata": {"provider": "groq", "model": self._model, "tokens": tokens}})
 
         content = response.choices[0].message.content
         if content is None:
@@ -323,13 +350,13 @@ class AIClient:
             data = response.json()
             return data.get("response", "").strip()
         except requests.ConnectionError:
-            return "Ollama connection refused — is Ollama running?"
+            raise ConnectionError("Ollama connection refused — is Ollama running?")
         except requests.Timeout:
-            return "Ollama request timed out (>120s)"
+            raise TimeoutError("Ollama request timed out (>120s)")
         except requests.HTTPError as e:
-            return f"Ollama HTTP error: {e}"
+            raise RuntimeError(f"Ollama HTTP error: {e}")
         except Exception as e:
-            return f"Ollama error: {e}"
+            raise RuntimeError(f"Ollama error: {e}")
 
     # ---------------- PARALLEL TEST ----------------
 
@@ -350,21 +377,7 @@ class AIClient:
             ),
         }
 
-        if self.groq_api_key:
-            providers["groq"] = lambda: self.generate_groq(
-                prompt,
-                system_instruction,
-            )
-        if self.deepseek_api_key:
-            providers["deepseek"] = lambda: self.generate_deepseek(
-                prompt,
-                system_instruction,
-            )
-        if self.xai_api_key:
-            providers["grok"] = lambda: self.generate_grok(
-                prompt,
-                system_instruction,
-            )
+
 
         results = {}
 
