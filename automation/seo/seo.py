@@ -1202,28 +1202,39 @@ def _attempt_seo_generation(
     local_kw = _extract_keywords(transcript, limit=12)
     kw_str = ", ".join(local_kw[:5]) if local_kw else "cricket highlights"
 
-    # Detect players and teams from transcript
+    # Detect players and teams from BOTH transcript AND video_title
     players_in_transcript = set()
     teams_in_transcript = set()
-    for word in (transcript or "").lower().split():
+    all_text = (transcript or "") + " " + (video_title or "")
+    for word in all_text.lower().split():
         if word in CRICKET_KEYWORDS and word not in GENERIC_TAGS:
             players_in_transcript.add(word.capitalize())
 
     team_map = {"gt", "csk", "mi", "rcb", "srh", "dc", "kkr", "rr", "lsg", "pbks"}
-    for word in (transcript or "").lower().split():
+    for word in all_text.lower().split():
         if word in team_map:
             teams_in_transcript.add(word.upper())
 
     player_str = ", ".join(sorted(players_in_transcript)[:3])
     team_str = " vs ".join(sorted(teams_in_transcript)) if teams_in_transcript else "IPL 2026"
 
-    title = f"LIVE {player_str} {kw_str} | {team_str}"[:100]
-    if not player_str:
-        title = f"LIVE {kw_str} | {team_str}"[:100]
+    # Build title — prefer structured format with teams from video_title
+    if teams_in_transcript and len(teams_in_transcript) >= 2:
+        t_list = sorted(teams_in_transcript)
+        title = f"LIVE {t_list[0]} vs {t_list[1]}"
+        if player_str:
+            title += f" — {player_str}"
+        title = f"{title} | {team_str} | Aaj Ka Match Hindi Commentary"[:100]
+    elif player_str:
+        title = f"LIVE {player_str} {kw_str} | {team_str} | Aaj Ka Match Hindi Commentary"[:100]
+    else:
+        title = f"LIVE {kw_str} | {team_str} | Aaj Ka Match Hindi Commentary"[:100]
 
     hashtags = ["#IPL2026"]
     if teams_in_transcript:
-        hashtags.append(f"#{list(teams_in_transcript)[0]}")
+        for t in sorted(teams_in_transcript):
+            if len(hashtags) < 4:
+                hashtags.append(f"#{t}")
     else:
         hashtags.append("#Cricket")
     hashtags.extend([f"#{w.capitalize()}" for w in local_kw[:2] if len(w) > 2])
@@ -1257,6 +1268,11 @@ def _attempt_seo_generation(
         "search_terms": search_terms,
         "tags": search_terms,
     }, fallback_terms=trend_topics)
+
+    result = _consolidate_seo(
+        result["title"], result["description"],
+        result["hashtags"], result["search_terms"]
+    )
 
     result["clip_id"] = clip_id
     result["ai_generated"] = False
