@@ -55,12 +55,22 @@ highlight:
   silence_penalty_seconds: 1.5
 
 # ─── Premium Mode ──────────────────────────────────────────────────────────────
-# Toggle between cheap (Haar Cascade) and premium (YOLOv8-face + ByteTrack)
+# Cheap path = MediaPipe BlazeFace (utils/face_detect.py, CPU) + EMA crop.
+# Premium path = YOLOv8-face (GPU) + ByteTrack + Kalman + bezier crop.
 premium:
   enabled: false                     # Set true on Colab T4 for studio-grade quality
   face_enhancement: true             # GFPGAN face restoration (GPU only)
   frame_interpolation: true          # FILM 30→60fps (GPU only)
   host_ref_photos: ""                # Path to reference photos for host ID (optional)
+  # ── Face detection (feat/face-detection-gpu) ───────────────────────────────
+  yolo_weights: "yolov8n-face.pt"    # YOLOv8-face weights (resolved against repo root)
+  yolo_device: "auto"                # auto | cuda | cuda:0 | cpu  (auto => cuda if torch.cuda available)
+  yolo_conf: 0.3                     # Detection confidence threshold
+  yolo_iou: 0.5                      # NMS IoU threshold
+  yolo_batch_size: 8                 # Batched inference over sampled frames (T4-friendly)
+  yolo_require: false                # If true, fail loudly when weights/GPU unavailable (no silent CPU fallback)
+  # Identity references for host face-locking (photos/ + expectation.png).
+  identity_refs: ["photos", "expectation.png"]
 
 # ─── Reference-Derived Color Grade (Phase 4.25) ───────────────────────────────
 # Enrollment-once, apply-always paradigm (Apple Face ID style).

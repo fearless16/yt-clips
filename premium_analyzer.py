@@ -1,6 +1,7 @@
 """
 premium_analyzer.py — YOLOv8-face + ByteTrack + Kalman filter + bezier crop.
-Replaces frame_analyzer.py's cheap Haar Cascade + EMA with proper tracking.
+GPU-accelerated face tracking for studio-grade 9:16 crop planning. Supersedes
+frame_analyzer.py's cheap MediaPipe + EMA path with proper multi-object tracking.
 
 Usage:
     from premium_analyzer import PremiumAnalyzer
@@ -230,16 +231,77 @@ class ByteTrack:
 # ─── Face Detection ────────────────────────────────────────────────────────
 
 class FaceDetector:
+    """YOLOv8-face detector with explicit device selection + batched inference.
+
+    Device is resolved from ``premium.yolo_device`` ("auto" picks cuda when
+    torch reports a GPU, else cpu). The weight file is resolved against the repo
+    root so it loads regardless of CWD. With ``premium.yolo_require: true`` a
+    missing model/GPU raises instead of silently degrading to the CPU MediaPipe
+    DNN fallback — useful to guarantee the premium path actually runs on the T4.
+    """
+
     def __init__(self):
+        pcfg = cfg.get("premium", {})
         self.backend = "dnn"
         self.yolo_model = None
+        self.device = self._resolve_device(pcfg.get("yolo_device", "auto"))
+        self.conf = float(pcfg.get("yolo_conf", 0.3))
+        self.iou = float(pcfg.get("yolo_iou", 0.5))
+        self.batch_size = int(pcfg.get("yolo_batch_size", 8))
+        require = bool(pcfg.get("yolo_require", False))
+
         if HAS_YOLO:
             try:
-                self.yolo_model = YOLO("yolov8n-face.pt")
+                weights = self._resolve_weights(pcfg.get("yolo_weights", "yolov8n-face.pt"))
+                self.yolo_model = YOLO(weights)
+                # Move model to the chosen device once (ultralytics also accepts
+                # device= per-call, but setting it here makes intent explicit).
+                try:
+                    self.yolo_model.to(self.device)
+                except Exception:
+                    pass
                 self.backend = "yolo"
-                log.info("Premium: YOLOv8-face loaded")
+                log.info("Premium: YOLOv8-face loaded (weights=%s device=%s batch=%d)",
+                         weights, self.device, self.batch_size)
             except Exception as e:
-                log.warning("YOLOv8-face load failed: %s — falling back to DNN", e)
+                if require:
+                    raise RuntimeError("premium.yolo_require=true but YOLOv8-face failed to load: %s" % e)
+                log.warning("YOLOv8-face load failed: %s — falling back to MediaPipe DNN", e)
+        elif require:
+            raise RuntimeError("premium.yolo_require=true but ultralytics/torch is not installed")
+
+    @staticmethod
+    def _resolve_device(want: str) -> str:
+        """Resolve the configured device string to a concrete torch device."""
+        want = (want or "auto").lower()
+        if want == "auto":
+            if HAS_TORCH:
+                try:
+                    return "cuda:0" if torch.cuda.is_available() else "cpu"
+                except Exception:
+                    return "cpu"
+            return "cpu"
+        if want.startswith("cuda") and HAS_TORCH:
+            try:
+                if not torch.cuda.is_available():
+                    log.warning("yolo_device=%s requested but CUDA unavailable — using cpu", want)
+                    return "cpu"
+            except Exception:
+                return "cpu"
+        return want
+
+    @staticmethod
+    def _resolve_weights(name: str) -> str:
+        """Resolve a YOLO weights filename against the repo root, then CWD."""
+        p = Path(name)
+        if p.is_absolute() and p.exists():
+            return str(p)
+        repo_root = Path(__file__).resolve().parent
+        candidate = repo_root / name
+        if candidate.exists():
+            return str(candidate)
+        # Fall back to the bare name (ultralytics may auto-download known names).
+        return name
 
     def detect(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         if self.backend == "yolo" and self.yolo_model:
@@ -248,8 +310,45 @@ class FaceDetector:
             xyxy, conf = self._detect_dnn(frame_bgr)
         return self._filter_by_facecam_region(xyxy, conf, frame_bgr.shape[1], frame_bgr.shape[0])
 
+    def detect_batch(self, frames_bgr: List[np.ndarray]) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Detect faces over a list of frames, batching on GPU for throughput.
+
+        Returns a list aligned with *frames_bgr* of ``(xyxy, conf)`` tuples,
+        already filtered to the facecam region. Falls back to per-frame DNN when
+        YOLO is unavailable so callers can always use the batched API.
+        """
+        if not frames_bgr:
+            return []
+        if not (self.backend == "yolo" and self.yolo_model):
+            return [self.detect(f) for f in frames_bgr]
+
+        out: List[Tuple[np.ndarray, np.ndarray]] = []
+        bs = max(1, self.batch_size)
+        for i in range(0, len(frames_bgr), bs):
+            chunk = frames_bgr[i:i + bs]
+            try:
+                results = self.yolo_model(
+                    chunk, verbose=False, conf=self.conf, iou=self.iou, device=self.device,
+                )
+            except Exception as e:
+                log.warning("Batched YOLO inference failed (%s) — per-frame fallback", e)
+                out.extend(self.detect(f) for f in chunk)
+                continue
+            for frame_bgr, res in zip(chunk, results):
+                boxes = getattr(res, "boxes", None)
+                if boxes is None or len(boxes) == 0:
+                    out.append((np.empty((0, 4)), np.empty((0,))))
+                    continue
+                xyxy = boxes.xyxy.cpu().numpy()
+                conf = boxes.conf.cpu().numpy()
+                out.append(self._filter_by_facecam_region(
+                    xyxy, conf, frame_bgr.shape[1], frame_bgr.shape[0]))
+        return out
+
     def _detect_yolo(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        results = self.yolo_model(frame_bgr, verbose=False, conf=0.3, iou=0.5)
+        results = self.yolo_model(
+            frame_bgr, verbose=False, conf=self.conf, iou=self.iou, device=self.device,
+        )
         boxes = results[0].boxes
         if boxes is None or len(boxes) == 0:
             return np.empty((0, 4)), np.empty((0,))
@@ -439,32 +538,55 @@ class PremiumAnalyzer:
         self._init_host_detector()
 
     def _init_host_detector(self):
-        """Initialize host detector with reference photos from config."""
-        host_photos_path = cfg.get("premium", {}).get("host_ref_photos", "")
-        if not host_photos_path:
-            self.host_detector = HostDetector([])
-            return
+        """Initialize host detector with identity reference photos from config.
 
-        ref_photos = []
-        photos_dir = Path(host_photos_path)
-        if photos_dir.exists() and photos_dir.is_dir():
-            for img_path in photos_dir.glob("*"):
-                if img_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
-                    try:
-                        img = cv2.imread(str(img_path))
-                        if img is not None:
-                            ref_photos.append(img)
-                    except Exception as e:
-                        log.warning("Failed to load reference photo %s: %s", img_path, e)
-        elif Path(host_photos_path).exists():
-            try:
-                img = cv2.imread(host_photos_path)
-                if img is not None:
-                    ref_photos.append(img)
-            except Exception as e:
-                log.warning("Failed to load reference photo: %s", e)
+        Resolves ``premium.identity_refs`` (default: ["photos", "expectation.png"])
+        — each entry may be a directory (all images loaded) or a single image —
+        so the creator's face is locked using the repo's existing reference
+        assets. The legacy ``premium.host_ref_photos`` entry is still honored.
+        """
+        pcfg = cfg.get("premium", {})
+        refs = list(pcfg.get("identity_refs", ["photos", "expectation.png"]) or [])
+        legacy = pcfg.get("host_ref_photos", "")
+        if legacy:
+            refs.insert(0, legacy)
 
+        ref_photos = self._load_identity_images(refs)
+        if ref_photos:
+            log.info("Premium: loaded %d identity reference image(s) for host-lock", len(ref_photos))
         self.host_detector = HostDetector(ref_photos)
+
+    @staticmethod
+    def _load_identity_images(refs: List[str]) -> List["np.ndarray"]:
+        """Load reference images from a list of dir/file paths (repo-root aware)."""
+        exts = {".jpg", ".jpeg", ".png", ".webp"}
+        repo_root = Path(__file__).resolve().parent
+        out: List[np.ndarray] = []
+        seen = set()
+        for ref in refs:
+            if not ref:
+                continue
+            p = Path(ref)
+            if not p.is_absolute() and not p.exists():
+                p = repo_root / ref  # resolve against repo root regardless of CWD
+            if p.is_dir():
+                paths = sorted(q for q in p.glob("*") if q.suffix.lower() in exts)
+            elif p.exists() and p.suffix.lower() in exts:
+                paths = [p]
+            else:
+                continue
+            for q in paths:
+                key = str(q.resolve())
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    img = cv2.imread(str(q))
+                    if img is not None:
+                        out.append(img)
+                except Exception as e:
+                    log.warning("Failed to load identity reference %s: %s", q, e)
+        return out
 
     def reset(self):
         self.tracker = ByteTrack()
