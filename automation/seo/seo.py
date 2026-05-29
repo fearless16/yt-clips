@@ -61,7 +61,13 @@ def _default_hashtags() -> List[str]:
 
 
 def _maybe_auto_benchmark():
-    """Lazy auto-benchmark: runs once on first SEO call if enabled in config."""
+    """Lazy auto-benchmark: runs once on first SEO call if enabled in config.
+    
+    NOTE: Does NOT mutate ai._provider/_model (the racer uses FASTEST_TIERS with
+    shuffle + prefer_provider, not the singleton's fields). The benchmark result
+    is persisted in seo_performance.json and read via get_best_model() -> 
+    prefer_provider on each clip call.
+    """
     if not getattr(_maybe_auto_benchmark, "_done", False):
         _maybe_auto_benchmark._done = True
         if cfg.get("ai", {}).get("auto_benchmark", False):
@@ -71,9 +77,8 @@ def _maybe_auto_benchmark():
                 run_auto_benchmark()
                 best_provider, best_model = get_best_model()
                 if best_provider and best_model:
-                    log.info("Applying best model: %s/%s", best_provider, best_model)
-                    ai._provider = best_provider
-                    ai._model = best_model
+                    log.info("Auto-benchmark result: best=%s/%s (used as prefer_provider)",
+                             best_provider, best_model)
             except Exception as e:
                 log.warning("Auto-benchmark failed: %s", e)
 
@@ -1078,26 +1083,9 @@ def generate_clip_seo(
     prompt = enhance_seo_prompt(prompt)
 
     # Apply dynamic model override if set (used by self-learner for A/B testing)
-    if provider_override:
-        old_provider = ai._provider
-        old_model = ai._model
-        ai._provider = provider_override
-        if model_override:
-            ai._model = model_override
-        try:
-            result = _attempt_seo_generation(clip_id, prompt, trend_topics,
-                                             yt_suggestions=yt_suggestions,
-                                             local_keywords=local_kw_list,
-                                             transcript=corrected_transcript,
-                                             video_title=video_title,
-                                             scorecard=scorecard,
-                                             system_instruction=system_instruction,
-                                             is_shorts=is_shorts)
-            return result
-        finally:
-            ai._provider = old_provider
-            ai._model = old_model
-
+    # Instead of mutating the shared ai._provider/_model (which the racer ignores
+    # anyway), pass it as prefer_provider so the racer BOOSTS that provider's
+    # models to front-of-tier while still racing others for resilience.
     result = _attempt_seo_generation(clip_id, prompt, trend_topics,
                                      yt_suggestions=yt_suggestions,
                                      local_keywords=local_kw_list,
@@ -1105,7 +1093,8 @@ def generate_clip_seo(
                                      video_title=video_title,
                                      scorecard=scorecard,
                                      system_instruction=system_instruction,
-                                     is_shorts=is_shorts)
+                                     is_shorts=is_shorts,
+                                     prefer_provider=provider_override or None)
     return result
 
 
@@ -1120,11 +1109,14 @@ def _attempt_seo_generation(
     scorecard: str = "",
     system_instruction: str = _SYSTEM,
     is_shorts: bool = True,
+    prefer_provider: Optional[str] = None,
 ) -> Dict:
     """Generate SEO via LLM, ESCALATING on failure (never degrading).
 
     Strategy (escalation, not degradation):
-      1. Race the fastest available models (``generate_fastest_first``).
+      1. Race the fastest available models (``generate_fastest_first``), with
+         *prefer_provider* boosted to front-of-tier and models shuffled within
+         tiers for diversity across clips.
       2. If the response is missing/unparseable, ESCALATE: retry once via the
          full failover chain (``generate_text``) with a stricter JSON-only
          prompt + JSON-repair parsing.
@@ -1134,9 +1126,11 @@ def _attempt_seo_generation(
     For Shorts the LLM's short (<400 char) description is preserved; only
     long-form clips get the structured LIVE/CHAPTERS/Disclaimer layout.
     """
-    # ── 1. Primary: fastest-first racing ──────────────────────────────────────
+    # ── 1. Primary: fastest-first racing (shuffled + provider-boosted) ────────
     try:
-        response_text = ai.generate_fastest_first(prompt, system_instruction=system_instruction)
+        response_text = ai.generate_fastest_first(
+            prompt, system_instruction=system_instruction,
+            prefer_provider=prefer_provider)
     except Exception as e:
         log.warning("[%s] generate_fastest_first failed: %s", clip_id, e)
         response_text = ""
