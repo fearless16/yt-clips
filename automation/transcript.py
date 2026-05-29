@@ -257,6 +257,18 @@ def fetch(url: str, output_path: str | None = None, video_path: str | None = Non
             pass
     if result is None:
         result = {"segments": [], "language": "unknown", "source": "unavailable"}
+
+    # Centralized cricket spelling correction for ALL sources (api/vtt/local).
+    # The local_whisper path is already corrected inside transcribe(); applying
+    # the (idempotent) spelling pass here ensures api/vtt transcripts — the
+    # common case — are corrected too. Cheap, deterministic, no network.
+    if result.get("segments") and result.get("source") in ("api", "vtt"):
+        try:
+            from utils.transcript_postproc import correct_segments
+            result["segments"], _n = correct_segments(result["segments"])
+        except Exception:
+            pass
+
     TRANSCRIPT_CACHE.set(video_id, result)
     if output_path and result.get("segments"):
         p = Path(output_path)
