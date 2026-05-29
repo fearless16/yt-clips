@@ -99,7 +99,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
             if transcript.get("segments"):
                 skip_transcribe = True
                 result.transcript_source = transcript.get("source", "api")
-                log.info("[phase 0] done %s source=%s segments=%d", _t(t0), result.transcript_source, len(transcript["segments"]))
+                log.info("[phase 0] done %s source=%s segments=%d", _t(t0), result.transcript_source, len(transcript["segments"]), extra={"stage": "transcript_fetch", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase0: %s" % e)
 
@@ -127,7 +127,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
             stem = Path(video_path).stem
             transcript_path = str(Path(transcripts_dir) / ("%s.json" % stem))
             highlights_path = str(Path(highlights_dir) / ("%s.yaml" % stem))
-            log.info("[phase 1] done %s", _t(t0))
+            log.info("[phase 1] done %s", _t(t0), extra={"stage": "download", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase1: %s" % e)
 
@@ -138,7 +138,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
         try:
             from transcribe import transcribe
             transcribe(video_path, transcript_path)
-            log.info("[phase 2] done %s", _t(t0))
+            log.info("[phase 2] done %s", _t(t0), extra={"stage": "transcribe", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase2: %s" % e)
 
@@ -149,7 +149,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
         try:
             from highlight import detect_highlights
             detect_highlights(transcript_path, video_path, highlights_path)
-            log.info("[phase 3] done %s", _t(t0))
+            log.info("[phase 3] done %s", _t(t0), extra={"stage": "highlight", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase3: %s" % e)
 
@@ -164,7 +164,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
                 transcript_path=transcript_path,
                 generate_seo=False,
             )
-            log.info("[phase 4] done %s exported=%d", _t(t0), len(result.exported))
+            log.info("[phase 4] done %s exported=%d", _t(t0), len(result.exported), extra={"stage": "export", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase4: %s" % e)
     else:
@@ -220,7 +220,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
                         log.warning("[%s] Face-mapper failed — keeping original", clip_path.stem)
 
             result.exported = enhanced
-            log.info("[phase 4.5] done %s enhanced=%d", _t(t0), len(result.exported))
+            log.info("[phase 4.5] done %s enhanced=%d", _t(t0), len(result.exported), extra={"stage": "enhancement", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase4.5: %s" % e)
 
@@ -232,7 +232,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
             from .seo.seo import process_all_seo
             export_dir = str(result.exported[0].parent)
             process_all_seo(highlights_path, export_dir)
-            log.info("[phase 5] done %s", _t(t0))
+            log.info("[phase 5] done %s", _t(t0), extra={"stage": "seo", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase5: %s" % e)
 
@@ -244,7 +244,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
             from thumbnail import process_all_thumbnails
             export_dir = str(result.exported[0].parent)
             process_all_thumbnails(export_dir)
-            log.info("[phase 5.5] done %s", _t(t0))
+            log.info("[phase 5.5] done %s", _t(t0), extra={"stage": "thumbnails", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase5.5: %s" % e)
 
@@ -257,7 +257,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
             from sync import sync_to_drive
             export_folder = str(result.exported[0].parent)
             sync_to_drive(folder_path=export_folder)
-            log.info("[phase 6] done %s", _t(t0))
+            log.info("[phase 6] done %s", _t(t0), extra={"stage": "sync", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase6: %s" % e)
     elif skip_sync:
@@ -321,7 +321,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
                 except Exception as e:
                     result.failures.append("phase7 %s: %s" % (clip_path.name, e))
 
-            log.info("[phase 7] done %s uploaded=%d", _t(t0), result.uploaded_count)
+            log.info("[phase 7] done %s uploaded=%d", _t(t0), result.uploaded_count, extra={"stage": "upload", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase7: %s" % e)
 
@@ -332,14 +332,15 @@ def run(url: str, skip_download=False, skip_transcribe=False,
         try:
             from .seo.analytics import generate_daily_insights
             generate_daily_insights()
-            log.info("[phase 8] done %s", _t(t0))
+            log.info("[phase 8] done %s", _t(t0), extra={"stage": "analytics", "duration_ms": int((time.monotonic() - t0) * 1000)})
         except Exception as e:
             result.failures.append("phase8: %s" % e)
 
     result.total_seconds = time.monotonic() - start
     log.info("[EXIT] pipeline url=%s exported=%d uploaded=%d failures=%d elapsed=%.1fs transcript=%s",
              url, len(result.exported), result.uploaded_count, len(result.failures),
-             result.total_seconds, result.transcript_source)
+             result.total_seconds, result.transcript_source,
+             extra={"stage": "pipeline_total", "duration_ms": int(result.total_seconds * 1000)})
     if result.failures:
         for f in result.failures:
             log.warning("  failure: %s", f)

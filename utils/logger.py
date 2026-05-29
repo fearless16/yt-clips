@@ -143,6 +143,34 @@ class JsonFileHandler(logging.Handler):
         super().close()
 
 
+class JsonStreamHandler(logging.StreamHandler):
+    """Writes structured JSON lines to a stream (e.g. stdout)."""
+    def __init__(self, stream=None):
+        super().__init__(stream)
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            entry = {
+                "ts": datetime.utcnow().isoformat() + "Z",
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": record.getMessage(),
+            }
+            if hasattr(record, "stage"):
+                entry["stage"] = record.stage
+            if hasattr(record, "duration_ms"):
+                entry["duration_ms"] = record.duration_ms
+            if hasattr(record, "metadata"):
+                entry["metadata"] = record.metadata
+            if record.exc_info and record.exc_info[0]:
+                entry["exc"] = self.format(record)
+            self.stream.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+
 def get_logger(name: str, log_file: str = "logs/pipeline.log", level: str = "INFO") -> logging.Logger:
     logger = logging.getLogger(name)
     if logger.handlers:
@@ -151,13 +179,26 @@ def get_logger(name: str, log_file: str = "logs/pipeline.log", level: str = "INF
     logger.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.propagate = False
 
-    c_handler = RichHandler(
-        console=_CONSOLE,
-        show_time=False,
-        show_path=False,
-        rich_tracebacks=True,
-        tracebacks_show_locals=False,
-    )
+    # Dynamic check for console log format
+    console_format = "text"
+    try:
+        from utils.config import load_config
+        cfg = load_config()
+        if isinstance(cfg, dict) and "logging" in cfg:
+            console_format = cfg["logging"].get("console_format", "text")
+    except Exception:
+        pass
+
+    if console_format == "json":
+        c_handler = JsonStreamHandler(sys.stdout)
+    else:
+        c_handler = RichHandler(
+            console=_CONSOLE,
+            show_time=False,
+            show_path=False,
+            rich_tracebacks=True,
+            tracebacks_show_locals=False,
+        )
     c_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.addHandler(c_handler)
 
