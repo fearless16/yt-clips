@@ -56,6 +56,7 @@ class ReferenceTarget:
             return
         
         h, w = img.shape[:2]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         from utils.face_detect import detect_face
         face = detect_face(img, score_threshold=0.5)
         if face is None:

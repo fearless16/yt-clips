@@ -125,6 +125,12 @@ class JsonFileHandler(logging.Handler):
                 "logger": record.name,
                 "msg": record.getMessage(),
             }
+            if hasattr(record, "stage"):
+                entry["stage"] = record.stage
+            if hasattr(record, "duration_ms"):
+                entry["duration_ms"] = record.duration_ms
+            if hasattr(record, "metadata"):
+                entry["metadata"] = record.metadata
             if record.exc_info and record.exc_info[0]:
                 entry["exc"] = self.format(record)
             self._file.write(json.dumps(entry, ensure_ascii=False) + "\n")

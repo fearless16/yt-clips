@@ -274,8 +274,8 @@ def upload_video(
         },
         "status": {
             "privacyStatus": privacy,
-            "selfDeclaredMadeForKids": False,
-            "selfDeclaredContentAltered": False,
+            "selfDeclaredMadeForKids": cfg.get("youtube", {}).get("self_declared_made_for_kids", False),
+            "containsSyntheticMedia": False,
         },
     }
 
@@ -308,6 +308,7 @@ def upload_video(
             part=",".join(body.keys()),
             body=body,
             media_body=media_body,
+            notifySubscribers=True,
         )
 
         response = None
@@ -316,14 +317,28 @@ def upload_video(
         
         try:
             while response is None:
-                status, response = insert_request.next_chunk()
-                if status:
-                    progress = int(status.progress() * 100)
-                    now = time.monotonic()
-                    if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
-                        log.info(f"   Upload Progress: {progress}%")
-                        last_progress = progress
-                        last_progress_time = now
+                try:
+                    status, response = insert_request.next_chunk()
+                    if status:
+                        progress = int(status.progress() * 100)
+                        now = time.monotonic()
+                        if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
+                            log.info(f"   Upload Progress: {progress}%")
+                            last_progress = progress
+                            last_progress_time = now
+                except Exception as e:
+                    import http.client
+                    from googleapiclient.errors import HttpError
+                    if isinstance(e, HttpError) and e.resp.status in [500, 502, 503, 504]:
+                        log.warning(f"Transient HTTP {e.resp.status} error, retrying in 5 seconds...")
+                        time.sleep(5)
+                        continue
+                    elif isinstance(e, (http.client.IncompleteRead, http.client.CannotSendRequest, ConnectionError)):
+                        log.warning(f"Network error: {e}, retrying in 5 seconds...")
+                        time.sleep(5)
+                        continue
+                    else:
+                        raise e
 
             video_id = response["id"]
             log.info(f"✅ Upload successful! Video ID: {video_id}")

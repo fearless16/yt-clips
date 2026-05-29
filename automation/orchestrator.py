@@ -22,7 +22,8 @@ from typing import Optional
 
 from . import config
 
-log = logging.getLogger("orchestrator")
+from utils.logger import get_logger
+log = get_logger("orchestrator")
 
 
 @dataclass

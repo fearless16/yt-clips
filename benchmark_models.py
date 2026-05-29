@@ -21,7 +21,7 @@ PROVIDERS = {
     },
     "Xiaomi Mimo 2.5 Pro": {
         "url": "https://opengateway.gitlawb.com/v1/xiaomi-mimo/chat/completions",
-        "key": os.environ.get("XIAOMI_API_KEY", "sk-d2baf638bcfe4313a909538f27886f84"),
+        "key": os.environ.get("XIAOMI_API_KEY", ""),
         "model": "mimo-v2.5-pro",
     },
     "Alibaba Qwen Max": {
