@@ -1,5 +1,7 @@
 import json
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed, FIRST_COMPLETED, wait
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
@@ -18,8 +20,15 @@ log = get_logger("ai_client", _cfg.get("logging", {}).get("log_file", "logs/pipe
 
 
 class AIClient:
+    # Shared state for health and rate limiting across all AIClient instances
+    _shared_lock = threading.Lock()
+    _provider_failures = {}        # provider -> count
+    _provider_cooldown_until = {}  # provider -> timestamp
+    _provider_token_buckets = {}   # provider -> dict
+
     PROVIDER_MODELS = {
         "groq": ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "qwen/qwen3-32b"],
+        "deepseek": ["deepseek-chat"],
         "openrouter": ["deepseek/deepseek-v4-flash", "google/gemini-2.0-flash-001", "qwen/qwen3.5-122b-a10b", "anthropic/claude-sonnet-4"],
         "nvidia": ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1"],
     }
@@ -30,7 +39,7 @@ class AIClient:
     # Tier 3: >10s (Claude - slower but high quality)
     FASTEST_TIERS = [
         [("groq", "meta-llama/llama-4-scout-17b-16e-instruct"), ("groq", "llama-3.3-70b-versatile"), ("groq", "qwen/qwen3-32b")],
-        [("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1"), ("openrouter", "deepseek/deepseek-v4-flash"), ("openrouter", "google/gemini-2.0-flash-001")],
+        [("deepseek", "deepseek-chat"), ("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1"), ("openrouter", "deepseek/deepseek-v4-flash"), ("openrouter", "google/gemini-2.0-flash-001")],
         [("nvidia", "meta/llama-3.3-70b-instruct"), ("openrouter", "qwen/qwen3.5-122b-a10b")],
         [("openrouter", "anthropic/claude-sonnet-4")],  # Slow but smart
     ]
@@ -54,6 +63,12 @@ class AIClient:
             "https://api.groq.com/openai/v1",
         )
 
+        self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
+        self.deepseek_base_url = os.getenv(
+            "DEEPSEEK_BASE_URL",
+            "https://api.deepseek.com/v1",
+        )
+
         self.ollama_url = "http://localhost:11434/api/generate"
         ai_cfg = _cfg.get("ai", {})
         self._provider = ai_cfg.get("provider", "groq")
@@ -61,27 +76,159 @@ class AIClient:
         self._last_provider = None
         self._last_model = None
 
+    @classmethod
+    def _check_and_consume_token(cls, provider: str) -> bool:
+        with cls._shared_lock:
+            now = time.time()
+            if provider not in cls._provider_token_buckets:
+                cls._provider_token_buckets[provider] = {
+                    "capacity": 30.0,
+                    "tokens": 30.0,
+                    "last_update": now,
+                    "refill_rate": 0.5
+                }
+            
+            bucket = cls._provider_token_buckets[provider]
+            elapsed = now - bucket["last_update"]
+            bucket["tokens"] = min(bucket["capacity"], bucket["tokens"] + elapsed * bucket["refill_rate"])
+            bucket["last_update"] = now
+            
+            cooldown = cls._provider_cooldown_until.get(provider, 0.0)
+            if cooldown > now:
+                return False
+                
+            if bucket["tokens"] >= 1.0:
+                bucket["tokens"] -= 1.0
+                return True
+            return False
+
+    @classmethod
+    def _record_success(cls, provider: str):
+        with cls._shared_lock:
+            cls._provider_failures[provider] = 0
+            cls._provider_cooldown_until[provider] = 0.0
+
+    @classmethod
+    def _record_failure(cls, provider: str):
+        with cls._shared_lock:
+            cls._provider_failures[provider] = cls._provider_failures.get(provider, 0) + 1
+            if cls._provider_failures[provider] >= 5:
+                cls._provider_cooldown_until[provider] = time.time() + 300
+                log.warning(f"Provider {provider} hit circuit breaker! Cooldown for 5 minutes.")
+
+    def _get_failover_chain(self, start_provider: str) -> List[str]:
+        chain = ["groq", "deepseek", "openrouter", "nvidia"]
+        if start_provider in chain:
+            chain.remove(start_provider)
+            chain.insert(0, start_provider)
+        return chain
+
+    def _call_provider(self, provider: str, prompt: str, system_instruction: Optional[str] = None) -> str:
+        old_provider = self._provider
+        old_model = self._model
+        
+        # Temporarily route to correct model/provider
+        self._provider = provider
+        if provider == "groq":
+            self._model = self.PROVIDER_MODELS["groq"][1] if self._model not in self.PROVIDER_MODELS["groq"] else self._model
+            res = self.generate_groq(prompt, system_instruction)
+        elif provider == "deepseek":
+            self._model = "deepseek-chat"
+            res = self.generate_deepseek(prompt, system_instruction)
+        elif provider == "openrouter":
+            self._model = self.PROVIDER_MODELS["openrouter"][0] if self._model not in self.PROVIDER_MODELS["openrouter"] else self._model
+            res = self.generate_openrouter(prompt, system_instruction)
+        elif provider == "nvidia":
+            self._model = self.PROVIDER_MODELS["nvidia"][0] if self._model not in self.PROVIDER_MODELS["nvidia"] else self._model
+            res = self.generate_nvidia(prompt, system_instruction)
+        else:
+            raise ValueError(f"Unknown provider {provider}")
+            
+        self._provider = old_provider
+        self._model = old_model
+        return res
+
+    def _log_cost(self, provider: str, model: str, input_chars: int, output_chars: int):
+        in_tokens = input_chars // 4
+        out_tokens = output_chars // 4
+        rates = {
+            "groq": {"in": 0.59, "out": 0.79},
+            "deepseek": {"in": 0.14, "out": 0.28},
+            "openrouter": {"in": 0.20, "out": 0.40},
+            "nvidia": {"in": 0.07, "out": 0.07},
+            "ollama": {"in": 0.0, "out": 0.0}
+        }
+        rate = rates.get(provider, {"in": 0.50, "out": 0.50})
+        cost = (in_tokens * rate["in"] + out_tokens * rate["out"]) / 1_000_000
+        log.info(f"LLM request cost: {provider}/{model} -> input_tokens={in_tokens}, output_tokens={out_tokens}, est_cost=${cost:.6f}",
+                 extra={"stage": "llm_cost", "metadata": {"provider": provider, "model": model, "cost": cost}})
+
     def generate_text(self, prompt: str, system_instruction: Optional[str] = None) -> str:
-        """Generic text generation wrapper, prioritizes configured provider."""
-        provider = self._provider
-        if provider == "openrouter" and self.openrouter_api_key:
-            return self.generate_openrouter(prompt, system_instruction)
-        elif provider == "nvidia" and self.nvidia_api_key:
-            return self.generate_nvidia(prompt, system_instruction)
-        elif provider == "groq" and self.groq_api_key:
-            return self.generate_groq(prompt, system_instruction)
-        elif self.openrouter_api_key:
-            return self.generate_openrouter(prompt, system_instruction)
-        elif self.groq_api_key:
-            return self.generate_groq(prompt, system_instruction)
-        elif self.nvidia_api_key:
-            return self.generate_nvidia(prompt, system_instruction)
-        return self.generate_ollama(prompt, system_instruction)
+        """Text generation wrapper with rate limit checking, circuit breaker, failover, and token/cost tracking."""
+        chain = self._get_failover_chain(self._provider)
+        
+        available_chain = []
+        for p in chain:
+            if p == "groq" and self.groq_api_key:
+                available_chain.append(p)
+            elif p == "deepseek" and self.deepseek_api_key:
+                available_chain.append(p)
+            elif p == "openrouter" and self.openrouter_api_key:
+                available_chain.append(p)
+            elif p == "nvidia" and self.nvidia_api_key:
+                available_chain.append(p)
+                
+        errors = []
+        for provider in available_chain:
+            if not self._check_and_consume_token(provider):
+                log.info(f"Skipping provider {provider} due to rate limiting or circuit breaker cooldown.")
+                continue
+                
+            try:
+                res = self._call_provider(provider, prompt, system_instruction)
+                if res:
+                    self._record_success(provider)
+                    self._log_cost(provider, self.get_used_model(), len(prompt) + len(system_instruction or ""), len(res))
+                    return res
+            except Exception as e:
+                self._record_failure(provider)
+                log.warning(f"Provider {provider} failed: {e}")
+                errors.append(f"{provider}: {e}")
+                
+        # Retry ignoring token bucket if all failed/skipped
+        for provider in available_chain:
+            try:
+                now = time.time()
+                with self._shared_lock:
+                    cooldown = self._provider_cooldown_until.get(provider, 0.0)
+                if cooldown > now:
+                    continue
+                res = self._call_provider(provider, prompt, system_instruction)
+                if res:
+                    self._record_success(provider)
+                    self._log_cost(provider, self.get_used_model(), len(prompt) + len(system_instruction or ""), len(res))
+                    return res
+            except Exception as e:
+                self._record_failure(provider)
+                log.warning(f"Provider {provider} failed on retry: {e}")
+                errors.append(f"{provider} (retry): {e}")
+
+        # Local fallback
+        try:
+            log.info("All primary LLM providers failed or unavailable, attempting Ollama...")
+            res = self.generate_ollama(prompt, system_instruction)
+            if res:
+                return res
+        except Exception as e:
+            errors.append(f"ollama: {e}")
+
+        raise RuntimeError(f"All LLM providers failed. Errors: {'; '.join(errors)}")
 
     def _available_plan(self) -> List[List[tuple]]:
         """Return FASTEST_TIERS filtered to only available (have API key) providers."""
         has_key = {
             "groq": bool(self.groq_api_key),
+            "deepseek": bool(self.deepseek_api_key),
             "openrouter": bool(self.openrouter_api_key),
             "nvidia": bool(self.nvidia_api_key),
         }
@@ -105,6 +252,7 @@ class AIClient:
 
         provider_map = {
             "groq": self.generate_groq,
+            "deepseek": self.generate_deepseek,
             "openrouter": self.generate_openrouter,
             "nvidia": self.generate_nvidia,
         }
@@ -298,6 +446,48 @@ class AIClient:
             raise ValueError(f"Groq returned empty content (finish_reason={response.choices[0].finish_reason})")
         return content.strip()
 
+    # ---------------- DEEPSEEK ----------------
+
+    def generate_deepseek(
+        self,
+        prompt: str,
+        system_instruction: Optional[str] = None,
+    ) -> str:
+        if not self.deepseek_api_key:
+            raise ValueError("DeepSeek API key missing")
+
+        client = OpenAI(
+            api_key=self.deepseek_api_key,
+            base_url=self.deepseek_base_url,
+        )
+
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+
+        self._last_provider = "deepseek"
+        self._last_model = "deepseek-chat"
+
+        import time
+        t0 = time.monotonic()
+        response = client.chat.completions.create(
+            model=self._last_model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=8192,
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
+        log.info(f"LLM request: deepseek/{self._last_model} ({duration_ms}ms, {tokens} tokens)",
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms, 
+                        "metadata": {"provider": "deepseek", "model": self._last_model, "tokens": tokens}})
+
+        content = response.choices[0].message.content
+        if content is None:
+            raise ValueError(f"DeepSeek returned empty content (finish_reason={response.choices[0].finish_reason})")
+        return content.strip()
+
     def get_used_provider(self) -> str:
         return self._last_provider or self._provider
 
@@ -309,6 +499,8 @@ class AIClient:
         available = {}
         if self.groq_api_key:
             available["groq"] = self.PROVIDER_MODELS["groq"]
+        if self.deepseek_api_key:
+            available["deepseek"] = self.PROVIDER_MODELS["deepseek"]
         if self.openrouter_api_key:
             available["openrouter"] = self.PROVIDER_MODELS["openrouter"]
         if self.nvidia_api_key:
