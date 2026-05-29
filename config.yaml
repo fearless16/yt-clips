@@ -228,6 +228,18 @@ ai:
   retry_base_delay_seconds: 2.0         # Backoff before the failover retry round (transient/429/5xx only)
   retry_max_delay_seconds: 30.0         # Cap on backoff delay
   race_tier_timeout_seconds: 45.0       # Per-tier deadline for fastest-first racing (keeps slow-but-valid responses)
+  # Token-bucket rate limiting is applied PER provider:model (not per provider),
+  # so racing several models of one provider in a tier no longer drains a single
+  # shared bucket. Tune for your providers' free-tier request limits.
+  rate_limit:
+    capacity: 30                        # Burst size per provider:model bucket
+    refill_per_sec: 0.5                 # Sustained refill (0.5/s ≈ 30 req/min per model)
+  # Per-(provider, model) token bucket — guards each model's rate limit
+  # independently so racing several models in a tier no longer drains one shared
+  # provider bucket. capacity = burst size; refill_per_sec = sustained rate.
+  rate_limit:
+    capacity: 30                        # Max burst requests per provider:model
+    refill_per_sec: 0.5                 # Token refill rate (0.5/s ≈ 30/min sustained)
   system_prompt: |
     You are a YouTube SEO expert specializing in Cricket Shorts.
     Generate high-CTR titles, engaging descriptions, and optimized tags.

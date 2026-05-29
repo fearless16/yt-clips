@@ -76,30 +76,68 @@ class AIClient:
         self._last_provider = None
         self._last_model = None
 
+    @staticmethod
+    def _bucket_key(provider: str, model: Optional[str] = None) -> str:
+        """Token-bucket identity.
+
+        Rate limits are enforced PER MODEL by the upstream APIs, not per
+        provider account. So we bucket per ``provider:model`` — racing three
+        Groq models in a tier draws one token from each of three independent
+        buckets instead of draining a single shared provider bucket (Bug 3).
+        When *model* is unknown (e.g. the ``generate_text`` failover loop gates
+        before it has chosen a concrete model) we fall back to a provider-level
+        bucket so behavior stays well-defined.
+        """
+        return f"{provider}:{model}" if model else provider
+
     @classmethod
-    def _check_and_consume_token(cls, provider: str) -> bool:
+    def _rate_limit_cfg(cls) -> tuple:
+        """(capacity, refill_per_sec) for token buckets — config-overridable.
+
+        Defaults preserve the historical 30-token / 0.5-per-sec burst, but it is
+        now applied per ``provider:model`` (see ``_bucket_key``) so concurrent
+        racing is no longer throttled by a single shared bucket.
+        """
+        rl = _cfg.get("ai", {}).get("rate_limit", {})
+        capacity = float(rl.get("capacity", 30.0))
+        refill = float(rl.get("refill_per_sec", 0.5))
+        return capacity, refill
+
+    @classmethod
+    def _check_and_consume_token(cls, provider: str, model: Optional[str] = None) -> bool:
+        key = cls._bucket_key(provider, model)
+        capacity, refill_rate = cls._rate_limit_cfg()
         with cls._shared_lock:
             now = time.time()
-            if provider not in cls._provider_token_buckets:
-                cls._provider_token_buckets[provider] = {
-                    "capacity": 30.0,
-                    "tokens": 30.0,
+
+            # Circuit-breaker / 429 cooldown is account-wide, so it is keyed by
+            # PROVIDER (not per model). Gate on it first.
+            cooldown = cls._provider_cooldown_until.get(provider, 0.0)
+            if cooldown > now:
+                log.debug("Token gate: provider %s in cooldown for %.1fs — skip %s",
+                          provider, cooldown - now, key)
+                return False
+
+            bucket = cls._provider_token_buckets.get(key)
+            if bucket is None:
+                bucket = {
+                    "capacity": capacity,
+                    "tokens": capacity,
                     "last_update": now,
-                    "refill_rate": 0.5
+                    "refill_rate": refill_rate,
                 }
-            
-            bucket = cls._provider_token_buckets[provider]
+                cls._provider_token_buckets[key] = bucket
+
             elapsed = now - bucket["last_update"]
             bucket["tokens"] = min(bucket["capacity"], bucket["tokens"] + elapsed * bucket["refill_rate"])
             bucket["last_update"] = now
-            
-            cooldown = cls._provider_cooldown_until.get(provider, 0.0)
-            if cooldown > now:
-                return False
-                
+
             if bucket["tokens"] >= 1.0:
                 bucket["tokens"] -= 1.0
                 return True
+
+            log.debug("Token gate: bucket %s exhausted (%.2f tokens, refill %.2f/s)",
+                      key, bucket["tokens"], bucket["refill_rate"])
             return False
 
     @classmethod
@@ -197,30 +235,54 @@ class AIClient:
             chain.insert(0, start_provider)
         return chain
 
-    def _call_provider(self, provider: str, prompt: str, system_instruction: Optional[str] = None) -> str:
+    def _select_model_for_provider(self, provider: str, prefer_model: Optional[str] = None) -> str:
+        """Pick a concrete model for *provider*.
+
+        Selection precedence (fixes Bug 2 — failover used to always land on a
+        fixed ``models[0]``/``models[1]``):
+          1. *prefer_model* if it belongs to this provider (e.g. the
+             self-learner's current best model).
+          2. The currently-selected ``self._model`` if it is valid for this
+             provider (keeps an explicit/benchmark choice intact).
+          3. A RANDOM model from the provider's list — gives diversity across
+             clips and stops every failover from hammering the same model.
+        """
+        models = self.PROVIDER_MODELS.get(provider, [])
+        if not models:
+            return self._model
+        if prefer_model and prefer_model in models:
+            return prefer_model
+        if self._model in models:
+            return self._model
+        import random as _random
+        return _random.choice(models)
+
+    def _call_provider(self, provider: str, prompt: str, system_instruction: Optional[str] = None,
+                       prefer_model: Optional[str] = None) -> str:
         old_provider = self._provider
         old_model = self._model
-        
-        # Temporarily route to correct model/provider
+
+        chosen_model = self._select_model_for_provider(provider, prefer_model=prefer_model)
+        # Temporarily route to the chosen model/provider; ALWAYS restore even on
+        # error so a failed provider can't leave the singleton mis-pointed.
         self._provider = provider
-        if provider == "groq":
-            self._model = self.PROVIDER_MODELS["groq"][1] if self._model not in self.PROVIDER_MODELS["groq"] else self._model
-            res = self.generate_groq(prompt, system_instruction)
-        elif provider == "deepseek":
-            self._model = "deepseek-chat"
-            res = self.generate_deepseek(prompt, system_instruction)
-        elif provider == "openrouter":
-            self._model = self.PROVIDER_MODELS["openrouter"][0] if self._model not in self.PROVIDER_MODELS["openrouter"] else self._model
-            res = self.generate_openrouter(prompt, system_instruction)
-        elif provider == "nvidia":
-            self._model = self.PROVIDER_MODELS["nvidia"][0] if self._model not in self.PROVIDER_MODELS["nvidia"] else self._model
-            res = self.generate_nvidia(prompt, system_instruction)
-        else:
-            raise ValueError(f"Unknown provider {provider}")
-            
-        self._provider = old_provider
-        self._model = old_model
-        return res
+        self._model = chosen_model
+        log.debug("Routing call to %s/%s (failover/single-call path)", provider, chosen_model)
+        try:
+            if provider == "groq":
+                return self.generate_groq(prompt, system_instruction)
+            elif provider == "deepseek":
+                self._model = "deepseek-chat"
+                return self.generate_deepseek(prompt, system_instruction)
+            elif provider == "openrouter":
+                return self.generate_openrouter(prompt, system_instruction)
+            elif provider == "nvidia":
+                return self.generate_nvidia(prompt, system_instruction)
+            else:
+                raise ValueError(f"Unknown provider {provider}")
+        finally:
+            self._provider = old_provider
+            self._model = old_model
 
     def _log_cost(self, provider: str, model: str, input_chars: int, output_chars: int):
         in_tokens = input_chars // 4
@@ -237,9 +299,15 @@ class AIClient:
         log.info(f"LLM request cost: {provider}/{model} -> input_tokens={in_tokens}, output_tokens={out_tokens}, est_cost=${cost:.6f}",
                  extra={"stage": "llm_cost", "metadata": {"provider": provider, "model": model, "cost": cost}})
 
-    def generate_text(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+    def generate_text(self, prompt: str, system_instruction: Optional[str] = None,
+                      prefer_model: Optional[str] = None) -> str:
         """Text generation with rate-limit awareness, circuit breaker, 429-aware
-        cooldown/backoff, failover, and token/cost tracking."""
+        cooldown/backoff, failover, and token/cost tracking.
+
+        *prefer_model* (optional) lets callers (e.g. the SEO escalation path with
+        the self-learner's best model) bias model selection inside each provider;
+        when it doesn't belong to the provider being tried, a random model from
+        that provider is used instead of a fixed one (Bug 2)."""
         ai_cfg = _cfg.get("ai", {})
         base_delay = float(ai_cfg.get("retry_base_delay_seconds", 2.0))
         max_delay = float(ai_cfg.get("retry_max_delay_seconds", 30.0))
@@ -261,19 +329,20 @@ class AIClient:
         retryable_seen = False
         for provider in available_chain:
             if not self._check_and_consume_token(provider):
-                log.info(f"Skipping provider {provider} due to rate limiting or circuit breaker cooldown.")
+                log.info("Skipping provider %s (rate-limited or circuit-breaker cooldown)", provider)
                 continue
 
             try:
-                res = self._call_provider(provider, prompt, system_instruction)
+                res = self._call_provider(provider, prompt, system_instruction, prefer_model=prefer_model)
                 if res:
                     self._record_success(provider)
                     self._log_cost(provider, self.get_used_model(), len(prompt) + len(system_instruction or ""), len(res))
+                    log.info("LLM ok via %s/%s (primary round)", provider, self.get_used_model())
                     return res
             except Exception as e:
                 retryable_seen = retryable_seen or self._is_retryable(e)
                 self._note_provider_error(provider, e)
-                log.warning(f"Provider {provider} failed: {e}")
+                log.warning("Provider %s failed: %s", provider, e)
                 errors.append(f"{provider}: {e}")
 
         # Backoff once before the retry round, but only if failures were transient
@@ -287,15 +356,17 @@ class AIClient:
         for attempt, provider in enumerate(available_chain):
             try:
                 if self._in_cooldown(provider):
+                    log.info("Retry round: skipping %s (still in cooldown)", provider)
                     continue
-                res = self._call_provider(provider, prompt, system_instruction)
+                res = self._call_provider(provider, prompt, system_instruction, prefer_model=prefer_model)
                 if res:
                     self._record_success(provider)
                     self._log_cost(provider, self.get_used_model(), len(prompt) + len(system_instruction or ""), len(res))
+                    log.info("LLM ok via %s/%s (retry round)", provider, self.get_used_model())
                     return res
             except Exception as e:
                 self._note_provider_error(provider, e)
-                log.warning(f"Provider {provider} failed on retry: {e}")
+                log.warning("Provider %s failed on retry: %s", provider, e)
                 errors.append(f"{provider} (retry): {e}")
 
         # Local fallback
@@ -309,13 +380,20 @@ class AIClient:
 
         raise RuntimeError(f"All LLM providers failed. Errors: {'; '.join(errors)}")
 
-    def _available_plan(self, prefer_provider: Optional[str] = None) -> List[List[tuple]]:
+    def _available_plan(self, prefer_provider: Optional[str] = None,
+                        prefer_model: Optional[str] = None) -> List[List[tuple]]:
         """Return FASTEST_TIERS filtered to available providers, shuffled within
         each tier for model diversity across calls.
 
-        If *prefer_provider* is set (e.g. from self-learner's best model), that
-        provider's models are moved to the FRONT of each tier they appear in, so
-        they get first shot while still racing others for resilience.
+        Boosting (so the self-learner's best choice gets first shot while still
+        racing the rest for resilience):
+          * *prefer_model* — the exact ``(provider, model)`` pair is moved to the
+            very front of the tier it appears in (highest precedence).
+          * *prefer_provider* — all of that provider's models are moved ahead of
+            the others within their tier.
+
+        Within a tier the order is otherwise SHUFFLED, so across many clips
+        different models lead the race (Bug 5: model diversity).
         """
         import random as _random
         has_key = {
@@ -331,35 +409,45 @@ class AIClient:
                 continue
             # Shuffle for diversity: different clips hit different models first
             _random.shuffle(available)
-            # If a preferred provider is set, boost it to front of the tier
+            # Boost preferred PROVIDER's models to the front of the tier.
             if prefer_provider:
                 preferred = [x for x in available if x[0] == prefer_provider]
                 others = [x for x in available if x[0] != prefer_provider]
                 available = preferred + others
+            # Boost the exact preferred MODEL to the very front (wins over the
+            # provider-level boost above).
+            if prefer_model:
+                exact = [x for x in available if x[1] == prefer_model]
+                rest = [x for x in available if x[1] != prefer_model]
+                available = exact + rest
             plan.append(available)
         return plan
 
     def generate_fastest_first(self, prompt: str, system_instruction: Optional[str] = None,
-                               prefer_provider: Optional[str] = None) -> str:
+                               prefer_provider: Optional[str] = None,
+                               prefer_model: Optional[str] = None) -> str:
         """Race available models in parallel speed-tiers; return first valid response.
 
-        Health-aware: each candidate is gated by the shared token bucket + circuit
-        breaker (providers in cooldown are skipped), and success/failure (incl.
-        429 Retry-After cooldown) is recorded so the racer cooperates with the
-        rest of the pipeline. Within a tier it keeps collecting completed futures
-        until one returns valid text or a tier deadline elapses — so a slow but
-        valid response is no longer dropped by a short result() timeout.
+        Health-aware: each candidate is gated by the shared PER-MODEL token bucket
+        + per-provider circuit breaker (providers in cooldown are skipped), and
+        success/failure (incl. 429 Retry-After cooldown) is recorded so the racer
+        cooperates with the rest of the pipeline. Within a tier it keeps
+        collecting completed futures until one returns valid text or a tier
+        deadline elapses — so a slow but valid response is no longer dropped by a
+        short result() timeout.
 
         Models within each tier are SHUFFLED for diversity (different clips hit
         different models), with *prefer_provider* boosted to the front of each
-        tier it appears in (so the learner's best model gets first shot).
+        tier it appears in and *prefer_model* (the learner's exact best model)
+        boosted to the very front — so the learner's best model gets first shot.
 
         Returns "" only when every available provider/model failed or was in
         cooldown — callers should ESCALATE (next strategy / queue), never emit a
         generic fallback.
         """
-        plan = self._available_plan(prefer_provider=prefer_provider)
+        plan = self._available_plan(prefer_provider=prefer_provider, prefer_model=prefer_model)
         if not plan:
+            log.info("Racer: no API-keyed providers available — falling back to local Ollama")
             return self.generate_ollama(prompt, system_instruction)
 
         ai_cfg = _cfg.get("ai", {})
@@ -372,17 +460,22 @@ class AIClient:
             fn = getattr(thread_client, f"generate_{p}")
             return fn(prompt, system_instruction)
 
-        for tier in plan:
-            # Gate each candidate through the shared health layer (token bucket +
-            # circuit-breaker cooldown). Skip what we shouldn't hit right now.
+        for tier_idx, tier in enumerate(plan):
+            # Gate each candidate through the shared health layer: a PER-MODEL
+            # token bucket (so racing N models in a tier no longer drains one
+            # shared provider bucket — Bug 3) + per-provider circuit-breaker
+            # cooldown. Skip what we shouldn't hit right now.
             runnable = []
             for provider, model in tier:
-                if not self._check_and_consume_token(provider):
+                if not self._check_and_consume_token(provider, model):
                     log.info("Racer skipping %s/%s (rate-limited or in cooldown)", provider, model)
                     continue
                 runnable.append((provider, model))
             if not runnable:
+                log.debug("Racer tier %d: no runnable candidates after health gating", tier_idx)
                 continue
+            log.info("Racer tier %d: racing %s", tier_idx,
+                     ", ".join(f"{p}/{m}" for p, m in runnable))
 
             with ThreadPoolExecutor(max_workers=len(runnable)) as exc:
                 fut_map = {exc.submit(make_call, p, m): (p, m) for p, m in runnable}
@@ -409,6 +502,7 @@ class AIClient:
                             self._last_provider = p
                             self._last_model = m
                             winner = text.strip()
+                            log.info("Racer winner: %s/%s", p, m)
                             break
                     if winner:
                         break
@@ -417,6 +511,7 @@ class AIClient:
                 if winner:
                     return winner
 
+        log.warning("Racer: all available models failed/cooled down — escalating (no generic fallback)")
         return ""
 
     # ---------------- OPENROUTER ----------------

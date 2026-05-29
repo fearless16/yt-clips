@@ -107,3 +107,50 @@ def test_fetch_advanced_metrics_parses_analytics_api():
 def test_fetch_advanced_metrics_degrades_without_auth():
     with patch.object(analytics, "_auth_analytics", return_value=None):
         assert analytics.fetch_advanced_metrics(["x"]) == {}
+
+
+
+def _empty_insights():
+    return {
+        "clips": [], "title_patterns": {}, "hooks_performance": {},
+        "ctas_performance": {}, "hashtag_performance": {}, "feature_importance": {},
+        "model_performance": {}, "benchmark_history": [],
+        "current_best_provider": None, "current_best_model": None,
+        "last_updated": None, "llm_insights": [], "version": 2,
+    }
+
+
+def test_get_best_model_reloads_on_cross_instance_write(tmp_path):
+    """Bug 4: a reader must observe best-model updates written by a *different*
+    instance/process (benchmark writer) to the same perf DB, not stale data."""
+    db = tmp_path / "perf.json"
+
+    reader = SEOLearner()
+    reader.performance_db = db
+    reader.learned_insights = _empty_insights()
+    reader._loaded_mtime = 0.0
+    assert reader.get_best_model() == (None, None)
+
+    # Separate writer instance commits a best model to the SAME file.
+    writer = SEOLearner()
+    writer.performance_db = db
+    writer.learned_insights = _empty_insights()
+    writer.learned_insights["current_best_provider"] = "groq"
+    writer.learned_insights["current_best_model"] = "scout"
+    writer._save_performance_data()
+
+    # Reader picks it up via mtime-triggered reload.
+    assert reader.get_best_model() == ("groq", "scout")
+
+
+def test_get_best_model_no_reload_when_unchanged(tmp_path):
+    """No disk change => reader keeps its in-memory state (no needless reload)."""
+    db = tmp_path / "perf.json"
+    reader = SEOLearner()
+    reader.performance_db = db
+    reader.learned_insights = _empty_insights()
+    reader.learned_insights["current_best_provider"] = "deepseek"
+    reader.learned_insights["current_best_model"] = "deepseek-chat"
+    # File never written; mtime stays 0 -> no reload, in-memory value preserved.
+    reader._loaded_mtime = reader._db_mtime()
+    assert reader.get_best_model() == ("deepseek", "deepseek-chat")
