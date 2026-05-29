@@ -366,3 +366,59 @@ class TestParseISO8601Duration:
         assert _parse_iso8601_duration("PT5M") == 300
         assert _parse_iso8601_duration("PT1H") == 3600
         assert _parse_iso8601_duration("PT30S") == 30
+
+
+# ─── frame_analyzer.py: cheap path tracking & matching ───────────────────────
+
+class TestCheapPathEnhancements:
+    """Verify MediaPipe frame analyzer, identity matching, and IOU tracking in cheap path."""
+
+    @patch("utils.face_detect.detect_faces")
+    def test_mediapipe_frame_analyzer(self, mock_detect):
+        from frame_analyzer import detect_face_crop
+        mock_detect.return_value = [(100, 100, 50, 50)]
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        res = detect_face_crop(frame, 640, 480)
+        assert res is not None
+        assert res["face_x"] == 100
+        assert res["face_y"] == 100
+        mock_detect.assert_called_once_with(frame, score_threshold=0.5)
+
+    @patch("utils.face_detect.detect_faces")
+    @patch("utils.face_matcher.get_host_encodings")
+    @patch("face_recognition.face_encodings")
+    @patch("face_recognition.compare_faces")
+    def test_cheap_path_identity_matching(self, mock_compare, mock_enc, mock_get_hosts, mock_detect):
+        from frame_analyzer import detect_face_crop, reset_crop_state
+        reset_crop_state()
+        mock_detect.return_value = [(10, 10, 40, 40), (200, 200, 60, 60)]
+        mock_get_hosts.return_value = [np.zeros(128)]
+        mock_enc.side_effect = [[np.zeros(128)], [np.zeros(128)]]
+        mock_compare.side_effect = [[True], [False]]
+        
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        res = detect_face_crop(frame, 640, 480)
+        assert res is not None
+        assert res["face_x"] == 10
+        assert res["face_y"] == 10
+
+    @patch("utils.face_detect.detect_faces")
+    def test_cheap_path_tracking(self, mock_detect):
+        from frame_analyzer import detect_face_crop, reset_crop_state
+        reset_crop_state()
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        
+        mock_detect.return_value = [(100, 100, 50, 50)]
+        res1 = detect_face_crop(frame, 640, 480)
+        assert res1 is not None
+        
+        mock_detect.return_value = [(300, 300, 60, 60), (105, 105, 50, 50)]
+        res2 = detect_face_crop(frame, 640, 480)
+        assert res2 is not None
+        assert res2["face_x"] == 105
+
+    def test_face_detector_caching(self):
+        from utils.face_detect import _get_mp_detector
+        d1 = _get_mp_detector()
+        d2 = _get_mp_detector()
+        assert d1 is d2, "Should return the same singleton detector instance"

@@ -28,27 +28,16 @@ def _sample_frames(video_path: str = None, n: int = SAMPLES):
     cap.release()
 
 
-class TestDNNModel:
-    """Verify the DNN model downloads and initialises correctly."""
+class TestMediaPipeModel:
+    """Verify the MediaPipe model initialises correctly."""
 
-    def test_model_downloads_and_initializes(self):
-        """Test that _ensure_model() creates model files and _get_net() returns a valid net."""
-        from utils.face_detect import _ensure_model, _get_net
-        prototxt, caffemodel = _ensure_model()
-        assert Path(prototxt).exists(), "prototxt not found"
-        assert Path(caffemodel).exists(), "caffemodel not found"
-        assert Path(prototxt).stat().st_size > 500, "prototxt too small"
-        assert Path(caffemodel).stat().st_size > 500_000, "caffemodel too small"
-        net = _get_net()
-        assert net is not None
-        blob = cv2.dnn.blobFromImage(
-            np.zeros((300, 300, 3), dtype=np.uint8),
-            1.0, (300, 300), [104, 117, 123], False, False,
-        )
-        net.setInput(blob)
-        out = net.forward()
-        assert out.ndim == 4 and out.shape[-1] == 7, \
-            f"unexpected output shape: {out.shape}"
+    def test_model_initializes(self):
+        """Test that _get_mp_detector() returns a valid detector instance and the model file exists."""
+        from utils.face_detect import _get_mp_detector
+        detector = _get_mp_detector()
+        assert detector is not None
+        model_path = Path(__file__).resolve().parent.parent / "face_detector.tflite"
+        assert model_path.exists(), "face_detector.tflite not found"
 
 
 class TestDetectFace:

@@ -24,6 +24,14 @@ def _set_prev_crop_x(value: Optional[int]) -> None:
     """Set the previous crop X position for the current thread."""
     _crop_local.prev_crop_x = value
 
+def _get_last_face_bbox() -> Optional[Tuple[int, int, int, int]]:
+    """Get the last detected face bounding box for the current thread."""
+    return getattr(_crop_local, 'last_face_bbox', None)
+
+def _set_last_face_bbox(value: Optional[Tuple[int, int, int, int]]) -> None:
+    """Set the last detected face bounding box for the current thread."""
+    _crop_local.last_face_bbox = value
+
 # Backward-compatible module-level accessor (read-only, for tests)
 _PREV_CROP_X = None  # Only used by tests checking reset; actual state is in _crop_local
 
@@ -31,6 +39,7 @@ def reset_crop_state() -> None:
     """Call once at the start of each new clip to prevent crop history bleeding across clips."""
     global _PREV_CROP_X
     _crop_local.prev_crop_x = None
+    _crop_local.last_face_bbox = None
     _PREV_CROP_X = None  # Keep module-level in sync for backward compat
 
 def _smooth_int(prev: Optional[int], current: int, alpha: float = 0.25) -> int:
@@ -125,9 +134,49 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
     if len(faces) == 0:
         return None
 
+    def _iou(boxA, boxB):
+        xA = max(boxA[0], boxB[0])
+        yA = max(boxA[1], boxB[1])
+        xB = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
+        yB = min(boxA[1] + boxA[3], boxB[1] + boxB[3])
+        interArea = max(0, xB - xA) * max(0, yB - yA)
+        boxAArea = boxA[2] * boxA[3]
+        boxBArea = boxB[2] * boxB[3]
+        return interArea / float(boxAArea + boxBArea - interArea) if (boxAArea + boxBArea - interArea) > 0 else 0.0
+
+    # Load host encodings if available (M3.2 identity matching)
+    host_encs = []
+    try:
+        from utils.face_matcher import get_host_encodings
+        host_encs = get_host_encodings()
+    except Exception:
+        pass
+
+    import face_recognition
+
     best_face = None
     best_score = -1.0
+    last_bbox = _get_last_face_bbox()
+
     for (x, y, w, h) in faces:
+        is_host = False
+        if host_encs:
+            try:
+                face_crop = frame_bgr[y:y+h, x:x+w]
+                if face_crop.size > 0:
+                    rgb_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+                    encs = face_recognition.face_encodings(rgb_crop)
+                    if encs:
+                        matches = face_recognition.compare_faces(host_encs, encs[0], tolerance=0.6)
+                        if any(matches):
+                            is_host = True
+            except Exception:
+                pass
+
+        track_score = 0.0
+        if last_bbox:
+            track_score = _iou((x, y, w, h), last_bbox)
+
         area = float(w * h)
         center_x = x + w / 2.0
         center_y = y + h / 2.0
@@ -145,12 +194,21 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
             score *= 3.0
         if norm_x < 0.35 or norm_x > 0.65:
             score *= 3.0
+
+        if is_host:
+            score *= 20.0
+        if track_score > 0.5:
+            score *= 5.0
+
         if score > best_score:
             best_score = score
             best_face = (x, y, w, h)
 
     if best_face is None or best_score < 10:
         return None
+
+    # Track this face in cheap path
+    _set_last_face_bbox(best_face)
 
     x, y, w, h = best_face
     crop_y, crop_h, crop_w = _apply_top_padding(y, h, w)
