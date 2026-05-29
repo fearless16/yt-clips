@@ -67,6 +67,108 @@ def _auth() -> Optional[any]:
         return None
 
 
+def _auth_analytics() -> Optional[any]:
+    """Authenticate with the YouTube **Analytics** API v2 (reports.query).
+
+    Requires the OAuth token to have the ``yt-analytics.readonly`` scope. If the
+    token lacks it (or the API is unavailable) we degrade gracefully to None and
+    the learner falls back to public view/like/comment signals.
+    """
+    cache_key = "yt_analytics_auth"
+    cached = YT_API_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    token_path = cfg.get("youtube", {}).get("token_path", "yt_token.json")
+    if not Path(token_path).exists():
+        return None
+    try:
+        creds = Credentials.from_authorized_user_file(token_path)
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        if not creds or not creds.valid:
+            return None
+        service = build("youtubeAnalytics", "v2", credentials=creds, cache_discovery=False)
+        YT_API_CACHE.set(cache_key, service)
+        return service
+    except Exception as e:
+        log.warning("Analytics auth failed: %s", e)
+        return None
+
+
+def fetch_advanced_metrics(video_ids: List[str], days: int = 30) -> Dict[str, Dict]:
+    """Fetch real engagement signals (CTR / retention / impressions) per video.
+
+    Uses the YouTube Analytics API (``reports.query``) with metrics
+    ``estimatedMinutesWatched, averageViewPercentage, impressions,
+    impressionClickThroughRate`` dimensioned by video. These are the signals the
+    SEOLearner actually needs to learn from (the previous code only had public
+    view/like/comment counts, so its retention/CTR scoring was dead code).
+
+    Returns ``{video_id: {"retention": 0-1, "ctr": fraction, "impressions": int,
+    "estimated_minutes_watched": float}}``. Missing metrics are simply omitted so
+    the learner degrades gracefully. Never raises.
+    """
+    if not video_ids:
+        return {}
+    cache_key = "adv_metrics_%d_%s" % (days, ",".join(sorted(video_ids))[:200])
+    cached = ANALYTICS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    service = _auth_analytics()
+    if not service:
+        return {}
+
+    start = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    end = datetime.utcnow().strftime("%Y-%m-%d")
+    # Not all channels/tokens expose impressions metrics; request a superset and
+    # fall back to the core set if the API rejects it.
+    metric_sets = [
+        "estimatedMinutesWatched,averageViewPercentage,impressions,impressionClickThroughRate",
+        "estimatedMinutesWatched,averageViewPercentage",
+    ]
+    out: Dict[str, Dict] = {}
+    for metrics in metric_sets:
+        try:
+            resp = service.reports().query(
+                ids="channel==MINE",
+                startDate=start,
+                endDate=end,
+                metrics=metrics,
+                dimensions="video",
+                filters="video==%s" % ",".join(video_ids[:500]),
+                maxResults=500,
+            ).execute()
+        except Exception as e:
+            log.warning("Analytics reports.query failed for metrics '%s': %s", metrics, e)
+            continue
+
+        headers = [h["name"] for h in resp.get("columnHeaders", [])]
+        for row in resp.get("rows", []):
+            record = dict(zip(headers, row))
+            vid = record.get("video")
+            if not vid:
+                continue
+            entry: Dict = {}
+            if "averageViewPercentage" in record:
+                # API returns a 0-100 percentage; learner expects 0-1.
+                entry["retention"] = float(record["averageViewPercentage"]) / 100.0
+            if "impressionClickThroughRate" in record:
+                # API returns a 0-100 percentage; learner expects a fraction.
+                entry["ctr"] = float(record["impressionClickThroughRate"]) / 100.0
+            if "impressions" in record:
+                entry["impressions"] = int(float(record["impressions"]))
+            if "estimatedMinutesWatched" in record:
+                entry["estimated_minutes_watched"] = float(record["estimatedMinutesWatched"])
+            if entry:
+                out[vid] = entry
+        if out:
+            break  # got data from this metric set; don't try the reduced set
+
+    ANALYTICS_CACHE.set(cache_key, out)
+    log.info("Fetched advanced analytics for %d/%d videos", len(out), len(video_ids))
+    return out
+
+
 def _classify_content_type(
     duration: int,
     has_shorts_tag: bool = False,
@@ -213,7 +315,17 @@ def feed_seo_learner(shorts: List[Dict], videos: List[Dict] = None, lives: List[
     lives = lives or []
     learner = SEOLearner()
     feeds = 0
-    for item in shorts + videos + lives:
+
+    # Fetch real engagement signals (CTR / retention / impressions) once for all
+    # items so the learner's retention/CTR scoring branches actually activate.
+    all_items = shorts + videos + lives
+    adv_metrics = {}
+    try:
+        adv_metrics = fetch_advanced_metrics([it["id"] for it in all_items if it.get("id")])
+    except Exception as e:
+        log.warning("Advanced metrics fetch failed (using basic signals): %s", e)
+
+    for item in all_items:
         try:
             clip_id = item["id"]
             desc = ""
@@ -239,6 +351,16 @@ def feed_seo_learner(shorts: List[Dict], videos: List[Dict] = None, lives: List[
                     except Exception:
                         pass
 
+            analytics = {
+                "viewCount": item["views"],
+                "likeCount": item["likes"],
+                "commentCount": item["comments"],
+                # Store the title so LLM-insight prompts no longer render "?".
+                "title": item.get("title", ""),
+            }
+            # Merge real engagement signals when available (retention/ctr/impressions).
+            analytics.update(adv_metrics.get(clip_id, {}))
+
             learner.record_performance(
                 clip_id=clip_id,
                 title=item["title"],
@@ -246,18 +368,14 @@ def feed_seo_learner(shorts: List[Dict], videos: List[Dict] = None, lives: List[
                 hashtags=hashtags,
                 tags=tags,
                 search_terms=search_terms,
-                analytics={
-                    "viewCount": item["views"],
-                    "likeCount": item["likes"],
-                    "commentCount": item["comments"],
-                },
+                analytics=analytics,
                 provider=provider,
                 model=model,
             )
             feeds += 1
         except Exception as e:
             log.warning("Feed error for %s: %s", item.get("id", "?"), e)
-    log.info("Fed %d items to SEOLearner", feeds)
+    log.info("Fed %d items to SEOLearner (%d with advanced metrics)", feeds, len(adv_metrics))
 
 
 def print_seo_learnings():

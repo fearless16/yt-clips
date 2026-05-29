@@ -38,14 +38,23 @@ def _time_decay_weight(timestamp_str: str, now: datetime | None = None) -> float
 
 
 def _stable_pattern_key(features: Dict) -> str:
-    """Build a deterministic pattern key from sorted feature entries."""
+    """Build a deterministic pattern key from LOW-CARDINALITY features only.
+
+    Critically excludes raw numeric features (title_length, description_length,
+    title_words, sections_count, tags_count, ...): including them made nearly
+    every clip a unique pattern, so patterns never reached MIN_CLIPS_FOR_PATTERN
+    and ``title_patterns`` learning was effectively inert. We key on booleans and
+    binned/categorical strings (e.g. ``hashtag_count_bin``) which DO recur.
+    """
     parts = []
     for k in sorted(features.keys()):
         v = features[k]
         if isinstance(v, bool):
             parts.append(f"{k}:{'true' if v else 'false'}")
-        elif isinstance(v, (int, float)):
+        elif isinstance(v, str):
+            # Categorical/binned features (e.g. hashtag_count_bin) — recurring.
             parts.append(f"{k}:{v}")
+        # Numeric features are intentionally excluded (high cardinality).
     return "_".join(parts)
 
 
@@ -79,7 +88,46 @@ class SEOLearner:
         self.performance_db = Path("data/seo_performance.json")
         self.performance_db.parent.mkdir(exist_ok=True)
         self.learned_insights = self._load_performance_data()
+        self._loaded_mtime = self._db_mtime()
         self._benchmark_lock = threading.Lock()
+
+    def _db_mtime(self) -> float:
+        """Last-modified time of the perf DB file (0.0 if it doesn't exist)."""
+        try:
+            return self.performance_db.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _maybe_reload(self):
+        """Re-read the perf DB from disk if it changed since we last loaded it.
+
+        Fixes Bug 4: ``get_best_model()`` used to return whatever was loaded at
+        process/instance start (or last in-memory write). The benchmark and real
+        performance ingestion can run in a *different* process or instance and
+        write ``seo_performance.json``; without this, readers never saw those
+        updates (stale best-model). We detect file changes via mtime, refresh
+        ``learned_insights`` (and the shared TTL cache), so cross-process /
+        cross-instance writes become visible — while still avoiding redundant
+        disk reads when nothing changed.
+        """
+        current = self._db_mtime()
+        if current <= self._loaded_mtime:
+            return
+        try:
+            with open(self.performance_db, "r") as f:
+                data = json.load(f)
+            if "version" not in data:
+                data["version"] = 1
+                data.setdefault("feature_importance", {})
+                data.setdefault("llm_insights", [])
+            self.learned_insights = data
+            PERF_CACHE.set("perf_data", data)
+            self._loaded_mtime = current
+            log.info("Reloaded seo_performance.json (changed on disk) — best model now %s/%s",
+                     data.get("current_best_provider") or "-",
+                     data.get("current_best_model") or "-")
+        except Exception as e:
+            log.warning("Perf DB changed but reload failed; keeping in-memory state: %s", e)
 
     def _load_performance_data(self) -> Dict:
         cached = PERF_CACHE.get("perf_data")
@@ -120,6 +168,11 @@ class SEOLearner:
         self.learned_insights["version"] = 2
         with open(self.performance_db, "w") as f:
             json.dump(self.learned_insights, f, indent=2)
+        # Keep our reload watermark + shared cache in sync with what we just
+        # wrote, so a subsequent _maybe_reload() doesn't needlessly re-read our
+        # own data (and other in-process readers see it immediately).
+        self._loaded_mtime = self._db_mtime()
+        PERF_CACHE.set("perf_data", self.learned_insights)
 
     def _dedup_clips(self, new_record: Dict):
         """Replace existing entry for same clip_id, keeping the newer one."""
@@ -144,6 +197,10 @@ class SEOLearner:
         features["search_terms_count"] = len(search_terms or [])
 
         performance_score = self._calculate_performance_score(analytics)
+
+        # Persist the title inside analytics so downstream LLM-insight prompts
+        # (which read analytics.title) show real titles instead of "?".
+        analytics = {**analytics, "title": title}
 
         record = {
             "clip_id": clip_id,
@@ -291,20 +348,47 @@ class SEOLearner:
         self._update_best_model()
 
     def _update_best_model(self):
-        mp = self.learned_insights["model_performance"]
-        if not mp:
-            return
-        candidates = [(k, v["avg_score"], v["count"]) for k, v in mp.items() if v["count"] >= 2]
-        if not candidates:
-            return
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        best_key = candidates[0][0]
-        best = mp[best_key]
-        self.learned_insights["current_best_provider"] = best["provider"]
-        self.learned_insights["current_best_model"] = best["model"]
-        log.info("Best model auto-selected: %s (avg score: %.3f, n=%d)", best_key, candidates[0][1], candidates[0][2])
+        self._recompute_best_model()
+
+    def _recompute_best_model(self) -> Optional[str]:
+        """Single source of truth for current_best_provider/model.
+
+        Precedence (real performance always wins over synthetic benchmarks):
+          1. Real ``model_performance`` entries with count >= MIN_CLIPS_FOR_PATTERN,
+             ranked by avg_score.
+          2. Cold-start fallback: the most recent auto-benchmark top_result
+             (only if it scored >= 40).
+
+        Returns "real" | "benchmark" | None describing which source was used.
+        """
+        mp = self.learned_insights.get("model_performance", {})
+        candidates = [(k, v) for k, v in mp.items()
+                      if v.get("count", 0) >= MIN_CLIPS_FOR_PATTERN]
+        if candidates:
+            candidates.sort(key=lambda kv: kv[1]["avg_score"], reverse=True)
+            best = candidates[0][1]
+            self.learned_insights["current_best_provider"] = best["provider"]
+            self.learned_insights["current_best_model"] = best["model"]
+            log.info("Best model (real data): %s/%s avg=%.3f n=%d",
+                     best["provider"], best["model"], best["avg_score"], best["count"])
+            return "real"
+
+        # Cold-start fallback: latest benchmark top result.
+        history = self.learned_insights.get("benchmark_history", [])
+        if history:
+            top = history[-1].get("top_result")
+            if top and top.get("score", 0) >= 40:
+                self.learned_insights["current_best_provider"] = top["provider"]
+                self.learned_insights["current_best_model"] = top["model"]
+                log.info("Best model (benchmark cold-start): %s/%s score=%d",
+                         top["provider"], top["model"], top["score"])
+                return "benchmark"
+        return None
 
     def get_best_model(self) -> Tuple[Optional[str], Optional[str]]:
+        # Pick up benchmark / real-performance writes made by another instance
+        # or process before answering (Bug 4: avoid returning stale data).
+        self._maybe_reload()
         return (
             self.learned_insights.get("current_best_provider"),
             self.learned_insights.get("current_best_model"),
@@ -417,12 +501,14 @@ class SEOLearner:
             "top_result": results[0] if results else None,
         })
 
+        # Commit best model via the unified precedence (real performance data
+        # wins; this synthetic benchmark only applies as a cold-start fallback).
         if results and results[0]["score"] >= 40:
+            source = self._recompute_best_model()
             best = results[0]
-            self.learned_insights["current_best_provider"] = best["provider"]
-            self.learned_insights["current_best_model"] = best["model"]
-            log.info("Benchmark complete. Best: %s/%s (score=%d, latency=%.1fs)",
-                     best['provider'], best['model'], best['score'], best['latency'])
+            log.info("Benchmark complete. Top: %s/%s (score=%d, latency=%.1fs); selection source=%s",
+                     best['provider'], best['model'], best['score'], best['latency'],
+                     source or "none")
         self._save_performance_data()
 
     def _update_feature_importance(self):

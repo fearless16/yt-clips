@@ -55,12 +55,22 @@ highlight:
   silence_penalty_seconds: 1.5
 
 # ─── Premium Mode ──────────────────────────────────────────────────────────────
-# Toggle between cheap (Haar Cascade) and premium (YOLOv8-face + ByteTrack)
+# Cheap path = MediaPipe BlazeFace (utils/face_detect.py, CPU) + EMA crop.
+# Premium path = YOLOv8-face (GPU) + ByteTrack + Kalman + bezier crop.
 premium:
   enabled: false                     # Set true on Colab T4 for studio-grade quality
   face_enhancement: true             # GFPGAN face restoration (GPU only)
   frame_interpolation: true          # FILM 30→60fps (GPU only)
   host_ref_photos: ""                # Path to reference photos for host ID (optional)
+  # ── Face detection (feat/face-detection-gpu) ───────────────────────────────
+  yolo_weights: "yolov8n-face.pt"    # YOLOv8-face weights (resolved against repo root)
+  yolo_device: "auto"                # auto | cuda | cuda:0 | cpu  (auto => cuda if torch.cuda available)
+  yolo_conf: 0.3                     # Detection confidence threshold
+  yolo_iou: 0.5                      # NMS IoU threshold
+  yolo_batch_size: 8                 # Batched inference over sampled frames (T4-friendly)
+  yolo_require: false                # If true, fail loudly when weights/GPU unavailable (no silent CPU fallback)
+  # Identity references for host face-locking (photos/ + expectation.png).
+  identity_refs: ["photos", "expectation.png"]
 
 # ─── Reference-Derived Color Grade (Phase 4.25) ───────────────────────────────
 # Enrollment-once, apply-always paradigm (Apple Face ID style).
@@ -136,6 +146,13 @@ youtube:
   upload_enabled: true                  # 🚀 GO LIVE!
   schedule_interval_hours: 1            # Upload every hour (jittered, not fixed :00)
   niche: "Cricket"                      # Used for SEO trend analysis
+  # ── Upload reliability (feat/youtube-upload) ──────────────────────────────
+  region_code: "IN"                     # Region for categoryId validation
+  contains_synthetic_media: false       # Default; per-clip metadata may override
+  notify_subscribers: true              # Notify subs on publish
+  upload_chunk_size_mb: 8               # Resumable chunk size (finite => real progress + resume)
+  upload_max_retries: 6                 # Max transient-error retries per upload
+  upload_deadline_seconds: 1800         # Hard wall-clock cap per upload (prevents hangs)
 
 # ─── Upload Schedule ─────────────────────────────────────────────────────────
 # Controls the jittered hourly scheduling strategy.
@@ -211,6 +228,12 @@ ai:
   retry_base_delay_seconds: 2.0         # Backoff before the failover retry round (transient/429/5xx only)
   retry_max_delay_seconds: 30.0         # Cap on backoff delay
   race_tier_timeout_seconds: 45.0       # Per-tier deadline for fastest-first racing (keeps slow-but-valid responses)
+  # Token-bucket rate limiting is applied PER provider:model (not per provider),
+  # so racing several models of one provider in a tier no longer drains a single
+  # shared bucket. Tune for your providers' free-tier request limits.
+  rate_limit:
+    capacity: 30                        # Burst size per provider:model bucket
+    refill_per_sec: 0.5                 # Sustained refill (0.5/s ≈ 30 req/min per model)
   system_prompt: |
     You are a YouTube SEO expert specializing in Cricket Shorts.
     Generate high-CTR titles, engaging descriptions, and optimized tags.

@@ -225,10 +225,15 @@ def run(url: str, skip_download=False, skip_transcribe=False,
     if not skip_seo and result.exported:
         try:
             with run_phase(log, "phase 5 SEO", "seo", run_id=rid) as ph:
-                from .seo.seo import process_all_seo
+                from .seo.seo import process_all_seo, retry_failed_seo
                 export_dir = str(result.exported[0].parent)
                 process_all_seo(highlights_path, export_dir)
-                ph.set(clips=len(result.exported))
+                # Close the escalate-not-degrade loop: retry any clips that were
+                # queued on failure (no generic fallback was written for them).
+                retry = retry_failed_seo(export_dir)
+                ph.set(clips=len(result.exported),
+                       seo_recovered=retry.get("recovered", 0),
+                       seo_still_queued=retry.get("still_failed", 0))
         except Exception as e:
             result.failures.append("phase5: %s" % e)
 

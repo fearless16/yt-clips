@@ -56,6 +56,7 @@ def transcribe(video_path: str, output_path: str):
         devices_to_try = [(target_device, compute_type)]
 
     model = None
+    used_device = None
     for device, comp in devices_to_try:
         try:
             log.info("Loading Whisper: model=%s device=%s compute=%s batch_size=%d",
@@ -64,6 +65,7 @@ def transcribe(video_path: str, output_path: str):
                 t_cfg["model"], device=device, compute_type=comp,
                 cpu_threads=0, num_workers=1,
             )
+            used_device = device
             log.info("Transcription engine ready: %s / %s", device.upper(), comp)
             break
         except Exception as e:
@@ -73,6 +75,7 @@ def transcribe(video_path: str, output_path: str):
         log.error("[EXIT] transcribe: all GPU/CPU Whisper devices failed for model=%s", t_cfg["model"])
         log.error("[EXIT] Falling back to CPU/int8 — this will be very slow")
         model = WhisperModel(t_cfg["model"], device="cpu", compute_type="int8")
+        used_device = "cpu"
 
     _log_vram("model_loaded")
 
@@ -80,13 +83,39 @@ def transcribe(video_path: str, output_path: str):
     log.info("Transcribing: %s language=%s batch_size=%d beam_size=%d vad=%s",
              video, language or "auto", batch_size, beam_size, vad_filter)
 
-    segments, info = model.transcribe(
-        video, language=language,
+    transcribe_kwargs = dict(
+        language=language,
         beam_size=beam_size,
         word_timestamps=True,
         vad_filter=vad_filter,
         vad_parameters=dict(min_silence_duration_ms=500, threshold=0.5),
     )
+
+    # Wire the (previously dead) batch_size config: faster-whisper's
+    # WhisperModel.transcribe has no batch_size; batching requires the
+    # BatchedInferencePipeline. Use it on GPU for higher utilization, with a
+    # safe fallback to sequential decoding if it's unavailable or errors.
+    engine = model
+    if batch_size and batch_size > 1 and used_device == "cuda":
+        try:
+            from faster_whisper import BatchedInferencePipeline
+            engine = BatchedInferencePipeline(model=model)
+            transcribe_kwargs["batch_size"] = batch_size
+            log.info("Using BatchedInferencePipeline (batch_size=%d) for GPU throughput", batch_size)
+        except Exception as e:
+            log.warning("Batched pipeline unavailable (%s) — using sequential decode", e)
+            engine = model
+
+    try:
+        segments, info = engine.transcribe(video, **transcribe_kwargs)
+    except Exception as e:
+        if engine is model:
+            raise
+        # Batched engine failed (unsupported kwargs, decode error, etc.) —
+        # fall back once to sequential decoding on the base model.
+        log.warning("Batched transcribe failed (%s) — falling back to sequential", e)
+        transcribe_kwargs.pop("batch_size", None)
+        segments, info = model.transcribe(video, **transcribe_kwargs)
 
     _log_vram("transcribing")
 
@@ -130,27 +159,14 @@ def transcribe(video_path: str, output_path: str):
 
     _log_vram("done")
 
-    # Post-processing: Cricket Terminology Correction
-    CRICKET_TERMS = {
-        r"\bcoaly\b": "Kohli",
-        r"\bkoli\b": "Kohli",
-        r"\bbumra\b": "Bumrah",
-        r"\bdoni\b": "Dhoni",
-        r"\bdhony\b": "Dhoni",
-        r"\bstark\b": "Starc",
-        r"\bshami\b": "Shami",
-        r"\bsky\b": "SKY",
-        r"\bhardic\b": "Hardik",
-        r"\bpandiya\b": "Pandya",
-    }
-    import re
-    for r in results:
-        text = r["text"]
-        for pattern, replacement in CRICKET_TERMS.items():
-            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
-        r["text"] = text
+    # Post-processing: centralized, guarded cricket spelling correction
+    # (shared with the remote transcript fetcher so ALL sources are corrected).
+    from utils.transcript_postproc import correct_segments
+    results, n_corr = correct_segments(results)
+    if n_corr:
+        log.info("Cricket spelling correction: %d substitutions", n_corr)
 
-    # LLM-based cricket context correction pass
+    # LLM-based cricket context correction pass (validated before applying)
     results = correct_segments_with_llm(results)
 
     out = Path(output_path)
@@ -205,9 +221,11 @@ def correct_segments_with_llm(segments: list[dict]) -> list[dict]:
                     except ValueError:
                         pass
 
-            for i, seg in enumerate(segments):
-                if i in corrected_map and corrected_map[i]:
-                    seg["text"] = corrected_map[i]
+            # Validate before applying: index must exist, non-empty, sane length.
+            # Stops a misbehaving model from silently rewriting/translating lines.
+            from utils.transcript_postproc import validate_and_apply_llm_corrections
+            segments, applied, rejected = validate_and_apply_llm_corrections(segments, corrected_map)
+            log.info("LLM transcript correction: %d applied, %d rejected", applied, rejected)
     except Exception as e:
         log.warning(f"LLM transcript correction failed: {e}")
 

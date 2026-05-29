@@ -61,7 +61,13 @@ def _default_hashtags() -> List[str]:
 
 
 def _maybe_auto_benchmark():
-    """Lazy auto-benchmark: runs once on first SEO call if enabled in config."""
+    """Lazy auto-benchmark: runs once on first SEO call if enabled in config.
+    
+    NOTE: Does NOT mutate ai._provider/_model (the racer uses FASTEST_TIERS with
+    shuffle + prefer_provider, not the singleton's fields). The benchmark result
+    is persisted in seo_performance.json and read via get_best_model() -> 
+    prefer_provider on each clip call.
+    """
     if not getattr(_maybe_auto_benchmark, "_done", False):
         _maybe_auto_benchmark._done = True
         if cfg.get("ai", {}).get("auto_benchmark", False):
@@ -71,9 +77,8 @@ def _maybe_auto_benchmark():
                 run_auto_benchmark()
                 best_provider, best_model = get_best_model()
                 if best_provider and best_model:
-                    log.info("Applying best model: %s/%s", best_provider, best_model)
-                    ai._provider = best_provider
-                    ai._model = best_model
+                    log.info("Auto-benchmark result: best=%s/%s (used as prefer_provider)",
+                             best_provider, best_model)
             except Exception as e:
                 log.warning("Auto-benchmark failed: %s", e)
 
@@ -1077,27 +1082,14 @@ def generate_clip_seo(
     from .seo_learner import enhance_seo_prompt
     prompt = enhance_seo_prompt(prompt)
 
-    # Apply dynamic model override if set (used by self-learner for A/B testing)
-    if provider_override:
-        old_provider = ai._provider
-        old_model = ai._model
-        ai._provider = provider_override
-        if model_override:
-            ai._model = model_override
-        try:
-            result = _attempt_seo_generation(clip_id, prompt, trend_topics,
-                                             yt_suggestions=yt_suggestions,
-                                             local_keywords=local_kw_list,
-                                             transcript=corrected_transcript,
-                                             video_title=video_title,
-                                             scorecard=scorecard,
-                                             system_instruction=system_instruction,
-                                             is_shorts=is_shorts)
-            return result
-        finally:
-            ai._provider = old_provider
-            ai._model = old_model
-
+    # Apply dynamic model override if set (used by self-learner for A/B testing).
+    # Instead of mutating the shared ai._provider/_model (which the racer ignores
+    # anyway), pass them as prefer_provider/prefer_model so the racer BOOSTS that
+    # exact provider+model to front-of-tier while still racing others for
+    # resilience and keeping per-clip model diversity via the in-tier shuffle.
+    if provider_override or model_override:
+        log.info("[%s] Learner model preference: provider=%s model=%s",
+                 clip_id, provider_override or "-", model_override or "-")
     result = _attempt_seo_generation(clip_id, prompt, trend_topics,
                                      yt_suggestions=yt_suggestions,
                                      local_keywords=local_kw_list,
@@ -1105,7 +1097,9 @@ def generate_clip_seo(
                                      video_title=video_title,
                                      scorecard=scorecard,
                                      system_instruction=system_instruction,
-                                     is_shorts=is_shorts)
+                                     is_shorts=is_shorts,
+                                     prefer_provider=provider_override or None,
+                                     prefer_model=model_override or None)
     return result
 
 
@@ -1120,11 +1114,16 @@ def _attempt_seo_generation(
     scorecard: str = "",
     system_instruction: str = _SYSTEM,
     is_shorts: bool = True,
+    prefer_provider: Optional[str] = None,
+    prefer_model: Optional[str] = None,
 ) -> Dict:
     """Generate SEO via LLM, ESCALATING on failure (never degrading).
 
     Strategy (escalation, not degradation):
-      1. Race the fastest available models (``generate_fastest_first``).
+      1. Race the fastest available models (``generate_fastest_first``), with
+         *prefer_provider* / *prefer_model* (the self-learner's best choice)
+         boosted to front-of-tier and models shuffled within tiers for diversity
+         across clips.
       2. If the response is missing/unparseable, ESCALATE: retry once via the
          full failover chain (``generate_text``) with a stricter JSON-only
          prompt + JSON-repair parsing.
@@ -1134,9 +1133,11 @@ def _attempt_seo_generation(
     For Shorts the LLM's short (<400 char) description is preserved; only
     long-form clips get the structured LIVE/CHAPTERS/Disclaimer layout.
     """
-    # ── 1. Primary: fastest-first racing ──────────────────────────────────────
+    # ── 1. Primary: fastest-first racing (shuffled + provider/model-boosted) ──
     try:
-        response_text = ai.generate_fastest_first(prompt, system_instruction=system_instruction)
+        response_text = ai.generate_fastest_first(
+            prompt, system_instruction=system_instruction,
+            prefer_provider=prefer_provider, prefer_model=prefer_model)
     except Exception as e:
         log.warning("[%s] generate_fastest_first failed: %s", clip_id, e)
         response_text = ""
@@ -1155,7 +1156,8 @@ def _attempt_seo_generation(
             "No code fences, no explanation, no surrounding text."
         )
         try:
-            response_text = ai.generate_text(strict_prompt, system_instruction=strict_system)
+            response_text = ai.generate_text(strict_prompt, system_instruction=strict_system,
+                                             prefer_model=prefer_model)
         except Exception as e:
             log.warning("[%s] SEO escalation attempt failed: %s", clip_id, e)
             response_text = ""
@@ -1281,7 +1283,14 @@ def generate_seo_for_exported_clip(
         from datetime import datetime as _dt
         marker = Path(output_dir) / f"{clip_id}_seo_failed.json"
         marker.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"clip_id": clip_id, "reason": str(e), "queued_at": _dt.now().isoformat()}
+        # Self-contained payload so retry_failed_seo() can re-run without the
+        # original highlights file or pipeline context.
+        payload = {
+            "clip_id": clip_id, "reason": str(e), "queued_at": _dt.now().isoformat(),
+            "transcript": transcript, "video_title": video_title,
+            "scorecard": scorecard, "trend_topics": trend_topics or [],
+            "live_stream_url": live_stream_url,
+        }
         with open(marker, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         return {"clip_id": clip_id, "_seo_failed": True, "_queued": True, "reason": str(e)}
@@ -1372,7 +1381,10 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
             marker = Path(output_dir) / f"{clip_id}_seo_failed.json"
             with open(marker, "w", encoding="utf-8") as f:
                 json.dump({"clip_id": clip_id, "reason": str(e),
-                           "queued_at": __import__("datetime").datetime.now().isoformat()},
+                           "queued_at": __import__("datetime").datetime.now().isoformat(),
+                           "transcript": transcript, "video_title": video_title,
+                           "scorecard": scorecard, "trend_topics": trend_topics or [],
+                           "live_stream_url": live_stream_url},
                           f, ensure_ascii=False, indent=2)
             if idx < len(clips):
                 time.sleep(5)
@@ -1400,7 +1412,53 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
     return str(combined_path)
 
 
-# ── CLI ────────────────────────────────────────────────────────────────────────
+# ── Retry queue: re-run SEO for clips that were queued on prior failure ───────
+
+def retry_failed_seo(output_dir: str) -> Dict:
+    """Re-attempt SEO for clips queued by a prior failure (``*_seo_failed.json``).
+
+    Closes the escalate-not-degrade loop: a clip that failed all LLM attempts
+    earlier is retried from its self-contained marker (which stores transcript +
+    context). On success the ``*_metadata.json`` is written and the marker is
+    removed (so the upload phase will now pick it up). On repeated failure the
+    marker is left in place (still queued). Returns a summary dict.
+    """
+    out = Path(output_dir)
+    markers = sorted(out.glob("*_seo_failed.json")) if out.exists() else []
+    if not markers:
+        log.info("No queued SEO failures to retry in %s", output_dir)
+        return {"retried": 0, "recovered": 0, "still_failed": 0}
+
+    recovered, still_failed = 0, 0
+    for i, marker in enumerate(markers):
+        try:
+            ctx = json.loads(marker.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning("Skipping unreadable marker %s: %s", marker.name, e)
+            continue
+        clip_id = ctx.get("clip_id") or marker.stem.replace("_seo_failed", "")
+        log.info("Retrying queued SEO [%d/%d]: %s", i + 1, len(markers), clip_id)
+        res = generate_seo_for_exported_clip(
+            clip_id=clip_id,
+            transcript=ctx.get("transcript", "Cricket Live"),
+            output_dir=output_dir,
+            video_title=ctx.get("video_title", ""),
+            scorecard=ctx.get("scorecard", ""),
+            trend_topics=ctx.get("trend_topics", []),
+            live_stream_url=ctx.get("live_stream_url", ""),
+            inter_clip_pause=8.0 if i > 0 else 0.0,
+        )
+        if res.get("_seo_failed"):
+            still_failed += 1
+        else:
+            recovered += 1
+            try:
+                marker.unlink()  # success -> dequeue
+            except OSError:
+                pass
+
+    log.info("SEO retry complete: %d recovered, %d still queued", recovered, still_failed)
+    return {"retried": len(markers), "recovered": recovered, "still_failed": still_failed}
 
 if __name__ == "__main__":
     process_all_seo("highlights/video.yaml", "shorts/test")

@@ -161,3 +161,140 @@ def test_fastest_first_keeps_slow_but_valid_response():
         with patch.object(AIClient, "generate_groq", side_effect=slow_ok):
             out = ai.generate_fastest_first("p", "s")
     assert out == "SLOW VALID"
+
+
+
+# ─── Bug 2: failover model selection is no longer deterministic ──────────────
+
+def test_call_provider_random_model_on_failover_not_fixed_index():
+    """_call_provider must NOT always land on a fixed models[0]/[1] when the
+    current model doesn't belong to the target provider. Over many calls it
+    should exercise more than one of the provider's models (Bug 2)."""
+    reset_shared_state()
+    ai = AIClient()
+    ai.groq_api_key = "k"
+    ai._model = "some-non-groq-model"  # forces selection within groq's list
+
+    seen = set()
+
+    def capture(prompt, system_instruction=None):
+        seen.add(ai._model)
+        return "ok"
+
+    with patch.object(ai, "generate_groq", side_effect=capture):
+        for _ in range(40):
+            ai._call_provider("groq", "p", None)
+
+    # All chosen models must be valid groq models...
+    assert seen.issubset(set(AIClient.PROVIDER_MODELS["groq"]))
+    # ...and selection must not be pinned to a single fixed model.
+    assert len(seen) > 1
+
+
+def test_call_provider_honors_prefer_model():
+    reset_shared_state()
+    ai = AIClient()
+    ai.groq_api_key = "k"
+    ai._model = "x"
+    target = AIClient.PROVIDER_MODELS["groq"][2]
+    used = {}
+
+    def capture(prompt, system_instruction=None):
+        used["model"] = ai._model
+        return "ok"
+
+    with patch.object(ai, "generate_groq", side_effect=capture):
+        ai._call_provider("groq", "p", None, prefer_model=target)
+    assert used["model"] == target
+
+
+def test_call_provider_restores_state_on_exception():
+    """A failing provider must not leave the singleton mis-pointed (try/finally)."""
+    reset_shared_state()
+    ai = AIClient()
+    ai.groq_api_key = "k"
+    ai._provider, ai._model = "groq", "meta-llama/llama-4-scout-17b-16e-instruct"
+    with patch.object(ai, "generate_nvidia", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError):
+            ai._call_provider("nvidia", "p", None)
+    assert ai._provider == "groq"
+    assert ai._model == "meta-llama/llama-4-scout-17b-16e-instruct"
+
+
+# ─── Bug 3: token bucket is per (provider, model), not per provider ──────────
+
+def test_token_bucket_is_per_model_not_per_provider():
+    """Racing several models of the same provider must draw from independent
+    buckets. Exhausting one model's bucket must NOT block its siblings."""
+    reset_shared_state()
+    m0, m1 = AIClient.PROVIDER_MODELS["groq"][0], AIClient.PROVIDER_MODELS["groq"][1]
+    # Drain ONLY m0's bucket.
+    with AIClient._shared_lock:
+        AIClient._provider_token_buckets[f"groq:{m0}"] = {
+            "capacity": 30.0, "tokens": 0.0, "last_update": time.time(), "refill_rate": 0.5,
+        }
+    assert AIClient._check_and_consume_token("groq", m0) is False  # drained
+    assert AIClient._check_and_consume_token("groq", m1) is True   # sibling unaffected
+
+
+def test_token_bucket_cooldown_is_per_provider():
+    """A provider cooldown (circuit breaker / 429) blocks ALL of its models."""
+    reset_shared_state()
+    with AIClient._shared_lock:
+        AIClient._provider_cooldown_until["groq"] = time.time() + 300
+    for m in AIClient.PROVIDER_MODELS["groq"]:
+        assert AIClient._check_and_consume_token("groq", m) is False
+
+
+def test_token_bucket_capacity_is_config_driven():
+    reset_shared_state()
+    fake_cfg = {"ai": {"rate_limit": {"capacity": 3, "refill_per_sec": 0.0}}, "logging": {}}
+    with patch("utils.ai_client._cfg", fake_cfg):
+        prov, model = "groq", "m"
+        ok = sum(1 for _ in range(10) if AIClient._check_and_consume_token(prov, model))
+    # Exactly `capacity` calls succeed before the (non-refilling) bucket empties.
+    assert ok == 3
+
+
+# ─── Bugs 1 & 5: racer plan is diverse + honors prefer_provider/prefer_model ──
+
+def _plan_first_picks(ai, n=60, **kw):
+    return [plan[0][0] for plan in (ai._available_plan(**kw) for _ in range(n)) if plan]
+
+
+def test_available_plan_shuffles_for_diversity():
+    """Across calls, tier-1 must not always lead with the same model (Bug 5)."""
+    reset_shared_state()
+    ai = AIClient()
+    ai.groq_api_key = "k"  # only groq -> tier 1 has 3 groq models
+    ai.deepseek_api_key = ai.openrouter_api_key = ai.nvidia_api_key = None
+    leaders = {ai._available_plan()[0][0][1] for _ in range(60)}
+    assert len(leaders) > 1  # more than one model leads over time
+
+
+def test_available_plan_prefer_model_wins_front():
+    reset_shared_state()
+    ai = AIClient()
+    ai.groq_api_key = "k"
+    ai.deepseek_api_key = ai.openrouter_api_key = ai.nvidia_api_key = None
+    target = AIClient.PROVIDER_MODELS["groq"][2]
+    for _ in range(30):
+        first_provider, first_model = ai._available_plan(prefer_model=target)[0][0]
+        assert first_model == target  # exact model always boosted to the front
+
+
+def test_available_plan_prefer_provider_boosts_provider():
+    reset_shared_state()
+    ai = AIClient()
+    ai.groq_api_key = ai.deepseek_api_key = "k"
+    ai.openrouter_api_key = ai.nvidia_api_key = None
+    # Tier 2 contains both deepseek and (no) others available; ensure deepseek
+    # leads its tier when preferred.
+    for _ in range(20):
+        plan = ai._available_plan(prefer_provider="deepseek")
+        # find the tier that contains deepseek
+        for tier in plan:
+            provs = [p for p, _ in tier]
+            if "deepseek" in provs:
+                assert tier[0][0] == "deepseek"
+                break
