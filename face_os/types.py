@@ -477,6 +477,11 @@ class LatentRenderTelemetry:
     albedo_drift_from_anchor: float = 0.0
     uncertainty_mean: float = 0.0
     contract_assertions_passed: bool = True
+    gate_state: str = "disabled"           # Phase 2B gate decision: 'engaged' |
+    #   'below_floor' | 'confidence_spike' | 'uninitialized' | 'disabled'
+    hybrid_alpha_mean: float = 1.0         # Phase 2B: mean per-pixel LATENT
+    #   authority (1.0 = pure latent; <1 = low-freq observation blended in where
+    #   uncertain). Proves the uncertainty hybrid actually engaged.
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -488,4 +493,6 @@ class LatentRenderTelemetry:
             "albedo_drift_from_anchor": self.albedo_drift_from_anchor,
             "uncertainty_mean": self.uncertainty_mean,
             "contract_assertions_passed": self.contract_assertions_passed,
+            "gate_state": self.gate_state,
+            "hybrid_alpha_mean": self.hybrid_alpha_mean,
         }
