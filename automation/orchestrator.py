@@ -300,9 +300,9 @@ def run(url: str, skip_download=False, skip_transcribe=False,
                         import random
                         slot = slot_map.get(clip_path.stem)
                         if slot:
-                            jitter_hours = random.uniform(2, 3)
+                            jitter_hours = random.uniform(0.5, 2.0)
                             from datetime import timedelta
-                            slot = slot + timedelta(hours=jitter_hours * (clip_idx - 1))
+                            slot = slot + timedelta(hours=jitter_hours)
                             publish_at = format_for_youtube(slot)
                     try:
                         upload_video(str(clip_path), str(meta_path),
@@ -317,7 +317,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
             result.failures.append("stage8b: %s" % e)
 
     # ── Stage 9: Self-learning ────────────────────────────────────────────────
-    if auto_upload:
+    if auto_upload or auto_schedule:
         try:
             with run_phase(log, "stage 9 Analytics + Learning", "analytics", run_id=rid):
                 from .seo.analytics import generate_daily_insights

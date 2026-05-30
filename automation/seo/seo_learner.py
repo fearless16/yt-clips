@@ -4,6 +4,7 @@ feature importance analysis, and optional LLM-enhanced insights.
 """
 import json
 import math
+import os
 import re
 import threading
 import time
@@ -164,10 +165,24 @@ class SEOLearner:
         return default
 
     def _save_performance_data(self):
+        import tempfile
         self.learned_insights["last_updated"] = datetime.now().isoformat()
         self.learned_insights["version"] = 2
-        with open(self.performance_db, "w") as f:
-            json.dump(self.learned_insights, f, indent=2)
+        # Atomic write: write to temp file then rename
+        db_path = Path(self.performance_db)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=str(db_path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(self.learned_insights, f, indent=2)
+            os.replace(tmp_path, str(db_path))
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         # Keep our reload watermark + shared cache in sync with what we just
         # wrote, so a subsequent _maybe_reload() doesn't needlessly re-read our
         # own data (and other in-process readers see it immediately).

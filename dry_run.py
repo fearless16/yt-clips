@@ -63,6 +63,17 @@ EXPECTED_PHASE_STAGES = [
     "enhancement", "seo", "thumbnails", "sync", "upload", "analytics",
 ]
 
+# Prompts module must be importable and all templates must format cleanly.
+REQUIRED_PROMPTS = [
+    "HIGHLIGHT_RANKER_SYSTEM", "HIGHLIGHT_RANKER_USER_TEMPLATE",
+    "CANDIDATE_EVAL_SYSTEM", "CANDIDATE_EVAL_USER_TEMPLATE",
+    "SEO_SYSTEM", "SEO_USER_TEMPLATE",
+    "ANALYTICS_SYSTEM", "ANALYTICS_USER_TEMPLATE",
+    "ORCHESTRATOR_SYSTEM",
+    "DEFAULT_SCORING_WEIGHTS", "MIN_QUALITY_THRESHOLD",
+    "MAX_SELECTED_CLIPS", "MAX_CANDIDATES",
+]
+
 
 @dataclass
 class PipelineResult:
@@ -72,6 +83,8 @@ class PipelineResult:
     total_seconds: float = 0.0
     transcript_source: str = "none"
     run_id: str = ""
+    selected_clips: int = 0
+    seo_generated: int = 0
 
 
 def _stub(name: str, *args, **kwargs):
@@ -535,19 +548,21 @@ def dry_run(url: str,
         except Exception as e:
             result.failures.append("phase7: %s" % e)
 
-    # ── Phase 8: Analytics ────────────────────────────────────────────────────
-    if auto_upload:
+    # ── Phase 8: Analytics + Self-learning ───────────────────────────────────
+    if auto_upload or auto_schedule:
         try:
-            with run_phase(plog, "phase 8 Analytics", "analytics", run_id=rid):
+            with run_phase(plog, "phase 8 Analytics + Learning", "analytics", run_id=rid):
                 stub_generate_daily_insights()
         except Exception as e:
             result.failures.append("phase8: %s" % e)
 
     result.total_seconds = time.monotonic() - start
     status = "partial" if result.failures else "ok"
-    log.info("[EXIT] run_id=%s exported=%d uploaded=%d failures=%d elapsed=%.2fs transcript=%s",
-             rid, len(result.exported), result.uploaded_count, len(result.failures),
-             result.total_seconds, result.transcript_source)
+    log.info("[EXIT] run_id=%s exported=%d uploaded=%d selected=%d seo=%d "
+             "failures=%d elapsed=%.2fs transcript=%s",
+             rid, len(result.exported), result.uploaded_count,
+             result.selected_clips, result.seo_generated,
+             len(result.failures), result.total_seconds, result.transcript_source)
 
     # Parse the captured structured log to validate observability.
     struct_records = []
@@ -562,10 +577,24 @@ def dry_run(url: str,
     logged_stages = sorted({r.get("stage") for r in struct_records
                             if r.get("run_id") == rid and r.get("stage")})
 
+    # Validate prompts module
+    prompts_ok = True
+    try:
+        import prompts as _p
+        for name in REQUIRED_PROMPTS:
+            if not hasattr(_p, name):
+                prompts_ok = False
+                log.warning("Missing prompt: %s", name)
+    except Exception as e:
+        prompts_ok = False
+        log.warning("Prompts module import failed: %s", e)
+
     return {
         "run_id": rid,
         "exported": [str(p) for p in result.exported],
         "uploaded_count": result.uploaded_count,
+        "selected_clips": result.selected_clips,
+        "seo_generated": result.seo_generated,
         "failures": result.failures,
         "total_seconds": result.total_seconds,
         "transcript_source": result.transcript_source,
@@ -574,6 +603,7 @@ def dry_run(url: str,
         "struct_records": len(struct_records),
         "logged_stages": logged_stages,
         "validation": validation,
+        "prompts_ok": prompts_ok,
     }
 
 
@@ -617,6 +647,8 @@ def _print_validation_report(result: dict):
     print(f"  run_id:             {result['run_id']}")
     print(f"  Exported:           {len(result['exported'])} clips")
     print(f"  Uploaded:           {result['uploaded_count']}")
+    print(f"  Selected clips:     {result.get('selected_clips', 0)}")
+    print(f"  SEO generated:      {result.get('seo_generated', 0)}")
     print(f"  Failures:           {len(result['failures'])}")
     print(f"  Elapsed:            {result['total_seconds']:.2f}s")
     print(f"  Transcript source:  {result['transcript_source']}")
@@ -647,8 +679,12 @@ def _print_validation_report(result: dict):
     print(f"        failure marker written:  {'PASS' if v['seo_marker_written'] else 'n/a'}")
     print(f"        recovered on retry:      {v['seo_recovered']}")
     print()
+    print("  [5] Prompts module:")
+    prompts_ok = result.get("prompts_ok", False)
+    print(f"        all templates present: {'PASS' if prompts_ok else 'FAIL'}")
+    print()
     missing = expected_stages - logged
-    print("  [5] Phase coverage:")
+    print("  [6] Phase coverage:")
     print(f"        expected stages present: {sorted(expected_stages & logged)}")
     if missing:
         print(f"        not run (flag-dependent):{sorted(missing)}")
@@ -659,7 +695,7 @@ def _print_validation_report(result: dict):
             print(f"    - {f}")
     # Overall verdict
     ok = (cfg_ok == len(cfg_checks) and result["run_id"] and
-          transcript_ok and not result["failures"])
+          transcript_ok and prompts_ok and not result["failures"])
     print("=" * 70)
     print(f"  OVERALL: {'PASS ✅' if ok else 'CHECK ⚠'}")
     print("=" * 70)

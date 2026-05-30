@@ -914,9 +914,12 @@ def _parse_json_response(text: str) -> Optional[Dict]:
         except json.JSONDecodeError:
             pass
         # 3. Replace single quotes with double quotes (for Python-style dicts)
-        single_quoted = re.sub(r"'([^']*)'", r'"\1"', cleaned)
-        # Also fix: {'key': "value"} -> {"key": "value"}
+        # Only replace single quotes that are used as JSON delimiters, not apostrophes
+        # First, protect apostrophes inside words (e.g., "Kohli's")
+        protected = re.sub(r"(\w)'(\w)", r"\1__APOST__\2", cleaned)
+        single_quoted = re.sub(r"'([^']*)'", r'"\1"', protected)
         single_quoted = re.sub(r"'([^']*)'\s*:", r'"\1":', single_quoted)
+        single_quoted = single_quoted.replace("__APOST__", "'")
         try:
             return json.loads(single_quoted)
         except json.JSONDecodeError:
@@ -1157,7 +1160,7 @@ def _attempt_seo_generation(
         )
         try:
             response_text = ai.generate_text(strict_prompt, system_instruction=strict_system,
-                                             prefer_model=prefer_model)
+                                             prefer_provider=prefer_provider, prefer_model=prefer_model)
         except Exception as e:
             log.warning("[%s] SEO escalation attempt failed: %s", clip_id, e)
             response_text = ""

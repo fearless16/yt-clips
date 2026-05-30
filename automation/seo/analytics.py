@@ -7,7 +7,7 @@ Worker hook:     auto-runs from worker.py
 
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 import re
@@ -118,8 +118,8 @@ def fetch_advanced_metrics(video_ids: List[str], days: int = 30) -> Dict[str, Di
     if not service:
         return {}
 
-    start = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
-    end = datetime.utcnow().strftime("%Y-%m-%d")
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    end = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     # Not all channels/tokens expose impressions metrics; request a superset and
     # fall back to the core set if the API rejects it.
     metric_sets = [
@@ -201,7 +201,7 @@ def _fetch_all_recent(days: int = 30) -> Dict[str, List[Dict]]:
         log.warning("No channel_id configured")
         return {"shorts": [], "videos": [], "lives": []}
     try:
-        published_after = (datetime.utcnow() - timedelta(days=days)).isoformat() + "Z"
+        published_after = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         all_video_ids = []
         page_token = None
         while True:
@@ -250,7 +250,7 @@ def _fetch_all_recent(days: int = 30) -> Dict[str, List[Dict]]:
                     duration=duration,
                     has_shorts_tag="#shorts" in snippet.get("tags", []),
                     title=snippet.get("title", ""),
-                    is_live=snippet.get("liveBroadcastContent") == "upcoming",
+                    is_live=snippet.get("liveBroadcastContent") in ("upcoming", "live"),
                 )
                 if ctype == "shorts":
                     shorts.append(entry)
