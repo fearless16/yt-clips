@@ -85,13 +85,19 @@ def _fetch_via_api(video_id: str) -> dict | None:
 
     Tries English first, then any available language (auto-generated or manual).
     Supports youtube-transcript-api v1.x API.
+    Passes cookies.txt if available to bypass Colab IP blocks.
     """
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
         return None
     try:
-        api = YouTubeTranscriptApi()
+        # Pass cookies if available (bypasses Colab IP blocks)
+        cookie_path = Path("cookies.txt")
+        if cookie_path.exists() and cookie_path.stat().st_size > 0:
+            api = YouTubeTranscriptApi(cookies=str(cookie_path))
+        else:
+            api = YouTubeTranscriptApi()
         transcript_list = api.list(video_id)
 
         # Try English first (manual > generated)
@@ -155,6 +161,10 @@ def _fetch_via_ytdlp(video_id: str) -> dict | None:
             "yt-dlp", "--skip-download", "--write-auto-subs", "--sub-langs", "en",
             "-o", tmp_path.replace(".vtt", ""), f"https://www.youtube.com/watch?v={video_id}",
         ]
+        # Pass cookies if available (bypasses Colab IP blocks)
+        cookie_path = Path("cookies.txt")
+        if cookie_path.exists() and cookie_path.stat().st_size > 0:
+            cmd.extend(["--cookies", str(cookie_path)])
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         vtt_files = list(Path(tmp_path).parent.glob(f"{Path(tmp_path).stem}*.vtt"))
         if not vtt_files and not result.returncode:
