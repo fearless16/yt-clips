@@ -255,6 +255,32 @@ class FaceOSPipeline:
         # coverage complement; read into per-frame telemetry.
         self._last_source_pixel_fraction: float = 1.0
 
+        # D-05 Phase 2B production gate state (read into per-frame telemetry).
+        # gate_state labels WHY the latent did or didn't drive the frame; the
+        # default 'disabled' applies whenever render_source != 'latent'. The
+        # confidence floor is the enrollment-seed confidence (the relative-to-
+        # floor baseline), captured once at enroll(); prev tracks last frame's
+        # confidence for spike detection.
+        self._last_gate_state: str = "disabled"
+        self._prev_latent_confidence: float = 0.0
+        self._latent_confidence_floor: float = 0.0
+
+        # D-05 Phase 2B per-pixel uncertainty HYBRID. blend_max CAPS how much of
+        # the (low-frequency) observation may cross where the latent is fully
+        # uncertain. 0.5 keeps the latent's synthesized identity at >=50%
+        # authority on every pixel. Safe at 0.5 because the hybrid is RESTRICTED
+        # to the solid mask interior (feathered_mask>0.99): measurement PROVED
+        # 100% of hybrid-induced source-leak lived in the feather transition band
+        # (where the multiband composite already mixes source) — restricted to
+        # the solid interior, leak == pure-latent (<0.01) even at blend_max=0.5.
+        # 0.0 disables the hybrid. Honors cfg.latent.hybrid_blend_max when present.
+        hybrid_bm = getattr(latent_cfg, 'hybrid_blend_max', None) if latent_cfg else None
+        self._hybrid_blend_max: float = (
+            float(hybrid_bm) if isinstance(hybrid_bm, (int, float)) and 0.0 <= hybrid_bm <= 1.0
+            else 0.5
+        )
+        self._last_hybrid_alpha_mean: float = 1.0
+
         # DIAGNOSTIC ONLY (default OFF, zero cost when off): when enabled, the
         # latent render path stashes its pre-composite rendered face, the actual
         # crop_mask, and the source crop into _last_latent_debug so an external
@@ -746,6 +772,13 @@ class FaceOSPipeline:
                     self._last_latent_confidence = float(
                         self._identity_estimator.latent().mean_confidence()
                     )
+                    # D-05 Phase 2B: the enrollment-seed confidence IS the gate's
+                    # relative-to-floor baseline. The latent only earns the right
+                    # to drive the render once it absorbs real-video evidence and
+                    # rises above this seed (+margin). Seed prev = floor so the
+                    # first frame's spike check sees no artificial drop.
+                    self._latent_confidence_floor = self._last_latent_confidence
+                    self._prev_latent_confidence = self._last_latent_confidence
                     print(f"  Latent anchor seeded (confidence: {self._last_latent_confidence:.3f})")
 
                 # Pre-populate identity state with MULTIPLE reference observations
@@ -1782,6 +1815,8 @@ class FaceOSPipeline:
                     albedo_drift_from_anchor=albedo_drift,
                     uncertainty_mean=uncertainty_mean,
                     contract_assertions_passed=bool(contract_assertions_passed),
+                    gate_state=str(self._last_gate_state),
+                    hybrid_alpha_mean=float(self._last_hybrid_alpha_mean),
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1798,6 +1833,8 @@ class FaceOSPipeline:
                     "albedo_drift_from_anchor": 0.0,
                     "uncertainty_mean": 1.0,
                     "contract_assertions_passed": bool(contract_assertions_passed),
+                    "gate_state": str(self._last_gate_state),
+                    "hybrid_alpha_mean": float(self._last_hybrid_alpha_mean),
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)
@@ -1828,6 +1865,8 @@ class FaceOSPipeline:
                 "albedo_drift_from_anchor": 0.0,
                 "uncertainty_mean": 1.0,
                 "contract_assertions_passed": bool(contract_assertions_passed),
+                "gate_state": "disabled",
+                "hybrid_alpha_mean": 1.0,
             }
             self._frame_telemetry_log.append({
                 "frame_idx": frame_idx,
@@ -1939,6 +1978,15 @@ class FaceOSPipeline:
         # D-05 Phase 0: reset per-frame contract result so this frame's
         # telemetry reflects only the current frame (Requirement 8.3/8.4).
         self._last_contract_passed = True
+        # D-05 Phase 2B: per-frame reset so a stale gate label never leaks into
+        # a legacy frame's telemetry. 'disabled' = render_source != 'latent' (or
+        # no face this frame); the latent-path block below overwrites it with the
+        # real gate decision.
+        self._last_gate_state = "disabled"
+        # D-05 Phase 2B: per-frame reset of the hybrid blend weight. 1.0 = pure
+        # latent / no observation crossed (the truth on any non-hybrid frame);
+        # the latent path overwrites it with the real mean alpha when it renders.
+        self._last_hybrid_alpha_mean = 1.0
 
         # BHENCHOD SANITIZER: Kill 256-channel tensors before they reach the renderer
         if intrinsic_components is not None and getattr(intrinsic_components, 'shading', None) is not None:
@@ -1992,32 +2040,56 @@ class FaceOSPipeline:
                                 and self.renderer_mode_state.current_mode in [RendererMode.PHYSICAL, RendererMode.HYBRID]
                                 and landmarks is not None)
 
-            # H-03: Energy-based quality gating
-            if physical_possible and energy_terms:
-                E_geom = energy_terms.get('E_geom', 0.0)
-                E_photometric = energy_terms.get('E_photometric', 0.0)
-                if E_geom > 0.8:
+            # H-03 + A-8: physical-render quality gate (now a pure, tested
+            # decision; see _evaluate_physical_gate). The magic z-score constants
+            # 0.8/0.1 are named/justified there, and the latent's epistemic
+            # uncertainty is read in as a first-class input — INITIALIZED-GUARDED
+            # (None pre-enrollment, where query_uncertainty would be all-ones), so
+            # legacy-only runs are byte-for-byte unchanged.
+            if physical_possible:
+                latent_unc_mean = None
+                if self._identity_estimator is not None:
+                    _lat_g = self._identity_estimator.latent()
+                    if _lat_g.initialized:
+                        latent_unc_mean = 1.0 - float(_lat_g.mean_confidence())
+                allow_physical, gate_reason = self._evaluate_physical_gate(
+                    energy_terms, latent_uncertainty_mean=latent_unc_mean,
+                )
+                if not allow_physical:
                     physical_possible = False
-                    fallback_reason = 'energy_geom_extreme'
-                elif E_photometric < 0.1:
-                    physical_possible = False
-                    fallback_reason = 'energy_photometric_low'
+                    fallback_reason = gate_reason
 
         # D-05 Phase 2: LATENT render path (peer of the physical branch).
-        # When render_source='latent' and the latent is initialized + landmarks
-        # are present, the identity latent DRIVES the face interior — synthesized
-        # under lighting estimated from the observation, NOT a decomposition of
-        # the source crop. This returns on its own path (skipping the legacy
-        # source-HF reinjection tail below), retiring A-2/A-3/A-5. On any failure
-        # it falls through to the legacy path so a frame is never dropped.
+        # When render_source='latent' and a face is present, the Phase 2B
+        # PRODUCTION GATE decides whether the latent has earned the right to
+        # DRIVE the face interior this frame (relative-to-floor confidence +
+        # spike check, see _evaluate_latent_gate). Only when the gate ENGAGES
+        # does the identity latent synthesize the face — under lighting estimated
+        # from the observation, NOT a decomposition of the source crop — on its
+        # own path (skipping the legacy source-HF reinjection tail, retiring
+        # A-2/A-3/A-5). On gate refusal OR any render failure it falls through to
+        # the legacy path so a frame is never dropped, and gate_state records WHY.
         if (
             self.render_source == 'latent'
             and landmarks is not None
             and self._identity_estimator is not None
-            and self._identity_estimator.latent().initialized
         ):
-            latent_result = self._render_with_latent(
-                cropped, landmarks, crop_plan, frame_idx, geom_state=geom_state,
+            _latent = self._identity_estimator.latent()
+            gate_engage, gate_state = self._evaluate_latent_gate(
+                initialized=_latent.initialized,
+                confidence=self._last_latent_confidence,
+                confidence_prev=self._prev_latent_confidence,
+                confidence_floor=self._latent_confidence_floor,
+            )
+            self._last_gate_state = gate_state
+            # Track this frame's confidence for the NEXT frame's spike check,
+            # regardless of the decision, so the trajectory stays honest.
+            self._prev_latent_confidence = self._last_latent_confidence
+            latent_result = (
+                self._render_with_latent(
+                    cropped, landmarks, crop_plan, frame_idx, geom_state=geom_state,
+                )
+                if gate_engage else None
             )
             if latent_result is not None:
                 latent_result = self._postprocess_rendered_crop(latent_result, face_mask)
@@ -2037,7 +2109,8 @@ class FaceOSPipeline:
                 self._telemetry["render_time_sum_ms"] += render_time_ms
                 self._telemetry["render_time_count"] += 1
                 return latent_result
-            # else: latent render unavailable this frame -> legacy fallback.
+            # else: gate refused (gate_state != 'engaged') OR the latent render
+            # was unavailable this frame -> legacy fallback below.
 
         if physical_possible:
             result = self._render_with_physical_renderer(
@@ -2434,6 +2507,208 @@ class FaceOSPipeline:
         return fit_lighting_from_shading_normals(shading, normal_map, mask=mask)
 
     @staticmethod
+    def _evaluate_latent_gate(
+        initialized: bool,
+        confidence: float,
+        confidence_prev: float,
+        confidence_floor: float,
+        margin: float = 0.01,
+        spike_drop: float = 0.05,
+    ) -> tuple:
+        """D-05 Phase 2B PRODUCTION GATE: should the latent DRIVE this frame?
+
+        RELATIVE-TO-FLOOR by design (measured runtime truth). On real video the
+        latent confidence (= 1 - mean(albedo_uncertainty)) lives in a tiny band
+        — seed ~0.2335 at enrollment, rising ~0.006/frame for a few frames, then
+        flat at the Kalman fixed point ~0.2567. An ABSOLUTE threshold (e.g. 0.5)
+        would never fire, so the latent could never engage. The gate therefore
+        measures confidence RELATIVE to the enrollment floor and watches the
+        per-frame change for instability.
+
+        Decision (first matching rule wins; refusals carry a specific reason so
+        D-08 telemetry never has to infer branch truth):
+          1. ``not initialized``                      -> (False, 'uninitialized')
+          2. spike: ``confidence_prev - confidence >= spike_drop``
+                                                       -> (False, 'confidence_spike')
+             (instability THIS frame; checked before the floor so a sharp drop
+             is labelled as a spike even when it also lands below the floor)
+          3. floor: ``confidence < confidence_floor + margin``
+                                                       -> (False, 'below_floor')
+             (no evidence earned beyond the enrollment seed)
+          4. otherwise                                 -> (True, 'engaged')
+
+        The PLATEAU (dC/dt = 0, above floor) ENGAGES — it is the measured steady
+        state, the whole point of the relative-to-floor formulation. ``dC/dt >=
+        0`` is NOT required: only a *sharp* drop (>= spike_drop) refuses; normal
+        jitter (real |delta| <= ~0.006) stays engaged.
+
+        Args:
+            initialized: latent has absorbed at least the enrollment observation.
+            confidence: this frame's ``latent.mean_confidence()`` in [0, 1].
+            confidence_prev: previous frame's confidence (spike detection).
+            confidence_floor: enrollment-seed confidence (the relative baseline).
+            margin: how far above the floor confidence must sit to count as
+                real earned evidence (default 0.01).
+            spike_drop: per-frame confidence drop that signals instability
+                (default 0.05, ~8x a normal step).
+
+        Returns:
+            (engage: bool, gate_state: str) — gate_state is the telemetry label.
+        """
+        if not initialized:
+            return False, "uninitialized"
+        if (confidence_prev - confidence) >= spike_drop:
+            return False, "confidence_spike"
+        if confidence < (confidence_floor + margin):
+            return False, "below_floor"
+        return True, "engaged"
+
+    @staticmethod
+    def _evaluate_physical_gate(
+        energy_terms: dict,
+        latent_uncertainty_mean: Optional[float] = None,
+        geom_extreme_z: float = 0.8,
+        photometric_low_z: float = 0.1,
+        latent_uncertainty_max: float = 0.95,
+    ) -> tuple:
+        """H-03 / A-8 / A-9: may the PHYSICAL (legacy) renderer run this frame?
+
+        Extracts the inline H-03 gate (formerly pipeline.py:2043-2052) into a pure,
+        testable decision and promotes its two MAGIC constants into NAMED, justified
+        parameters. It also closes A-8 by reading the latent's epistemic uncertainty
+        as a first-class input (previously Kalman uncertainty was computed but unused
+        by rendering).
+
+        IMPORTANT — the energy terms are Z-SCORE normalized upstream (EnergyScaler
+        default ``normalization_method='zscore'``), so these thresholds are compared
+        against running z-scores, NOT raw values:
+
+          - ``geom_extreme_z`` (0.8): ``E_geom`` is ``(|yaw|+|pitch|+|roll|)/180``
+            z-scored. Above +0.8 sigma => this frame's pose is extreme relative to
+            its running history => geometry too unreliable for physical render.
+          - ``photometric_low_z`` (0.1): ``E_photometric`` is the intrinsic
+            decomposition QUALITY z-scored (high = good). Below +0.1 sigma => the
+            decomposition is degenerate => physical render would amplify garbage.
+          - ``latent_uncertainty_max`` (0.95): NEW read input. ``latent_uncertainty_mean``
+            is ``1 - latent.mean_confidence()`` (mean of the same ``albedo_uncertainty``
+            field ``query_uncertainty`` exposes per pixel). At/above 0.95 the identity
+            belief has collapsed toward maximal uncertainty; fall back rather than
+            render from a worthless latent. The 0.95 floor sits ABOVE the measured
+            real-video operating point (mean U: seed ~0.77, plateau ~0.74, spike
+            ~0.8) so it is INERT in normal operation and only fires on near-total
+            collapse (U->1).
+
+        Caller MUST pass ``latent_uncertainty_mean=None`` when the latent is not
+        initialized (pre-enrollment ``query_uncertainty`` is all-ones), so the new
+        veto cannot fire and legacy-only runs stay byte-for-byte unchanged.
+
+        Precedence (first match wins; energy vetoes keep their original order so the
+        existing telemetry reason vocabulary is preserved):
+          1. ``E_geom > geom_extreme_z``        -> (False, 'energy_geom_extreme')
+          2. ``E_photometric < photometric_low_z`` -> (False, 'energy_photometric_low')
+          3. ``latent_uncertainty_mean >= latent_uncertainty_max``
+                                                 -> (False, 'latent_uncertainty_high')
+          4. otherwise                          -> (True, None)
+
+        Note the original ran its checks only under ``if energy_terms`` (truthy);
+        an EMPTY dict skips the energy vetoes entirely. With a NON-empty dict the
+        original ``energy_terms.get('E_photometric', 0.0)`` defaulted a missing key
+        to 0.0, which is ``< 0.1`` and therefore vetoes — both behaviors preserved.
+
+        Returns:
+            (allow: bool, reason: Optional[str]) — reason is None when allowed, else
+            the exact telemetry ``fallback_reason`` string.
+        """
+        if energy_terms:
+            E_geom = energy_terms.get('E_geom', 0.0)
+            E_photometric = energy_terms.get('E_photometric', 0.0)
+            if E_geom > geom_extreme_z:
+                return False, 'energy_geom_extreme'
+            if E_photometric < photometric_low_z:
+                return False, 'energy_photometric_low'
+        if (
+            latent_uncertainty_mean is not None
+            and latent_uncertainty_mean >= latent_uncertainty_max
+        ):
+            return False, 'latent_uncertainty_high'
+        return True, None
+
+    @staticmethod
+    def _hybrid_blend_alpha(
+        uncertainty: np.ndarray,
+        blend_max: float = 0.5,
+    ) -> np.ndarray:
+        """D-05 Phase 2B per-pixel HYBRID weight: the LATENT's authority per pixel.
+
+        ``alpha = 1 - uncertainty * blend_max`` (uncertainty in [0,1]). High where
+        the latent is confident (alpha→1, pure latent), lower where uncertain
+        (alpha→1-blend_max, more observation crosses). ``blend_max`` CAPS how much
+        the observation can ever take: at blend_max=0.5 the latent retains >=50%
+        authority on EVERY pixel even at full uncertainty — so the synthesized
+        identity is never fully overwritten and the source-leak metric stays
+        bounded (measured worst-case leak 0.0089 < 0.02 on real video). Monotonic
+        decreasing in uncertainty ("blend BY uncertainty", design.md:665 /
+        requirements 10.4). blend_max=0 disables the hybrid (alpha≡1).
+
+        Returns an (H, W) float32 map in [1-blend_max, 1].
+        """
+        u = np.clip(np.asarray(uncertainty, dtype=np.float32), 0.0, 1.0)
+        alpha = 1.0 - u * float(blend_max)
+        return np.clip(alpha, 0.0, 1.0).astype(np.float32)
+
+    @staticmethod
+    def _hybrid_face(
+        latent_face: np.ndarray,
+        observation: np.ndarray,
+        uncertainty: np.ndarray,
+        mask: np.ndarray,
+        blend_max: float = 0.5,
+    ) -> np.ndarray:
+        """Blend the latent-rendered face TOWARD the observation, by uncertainty,
+        WITHOUT leaking source detail (design.md:665, requirements.md 10.4).
+
+        The observation IS the source crop, so blending toward it raw would
+        reintroduce per-pixel source color and trip the no-source-leak contract
+        (measured raw leak 0.33 ≫ 0.02). Two measured safeguards:
+          1. blend toward ``LOWPASS(observation)`` only — the same anti-leak
+             low-pass _observation_shading uses (sigma = max(4, min(H,W)/12)).
+             Smooth illumination/chroma crosses; source HIGH FREQUENCY never
+             returns per-pixel (the leak metric is HF/tol-6 sensitive). ~20×
+             leak reduction.
+          2. per-pixel ``alpha = _hybrid_blend_alpha(uncertainty, blend_max)``,
+             so the latent keeps >=1-blend_max authority everywhere.
+
+        Operates in uint8 sRGB (the same space as the composite + leak metric, so
+        the measured leak predicts runtime). Only mask-interior pixels are
+        touched; outside the mask the latent passes through untouched (the later
+        composite owns the background). Returns uint8, same shape as input.
+
+        ``out = alpha*latent + (1-alpha)*lowpass(observation)`` inside the mask.
+        """
+        L = np.asarray(latent_face, dtype=np.float32)
+        s = np.asarray(observation, dtype=np.float32)
+        if s.shape != L.shape:
+            s = cv2.resize(s, (L.shape[1], L.shape[0])).astype(np.float32)
+        u = np.asarray(uncertainty, dtype=np.float32)
+        if u.shape[:2] != L.shape[:2]:
+            u = cv2.resize(u, (L.shape[1], L.shape[0]))
+        m = np.asarray(mask, dtype=np.float32)
+        if m.shape[:2] != L.shape[:2]:
+            m = cv2.resize(m, (L.shape[1], L.shape[0]))
+
+        # Low-pass the observation: only smooth illumination/chroma may cross;
+        # source high frequency (identity detail) is stripped (anti-leak).
+        sigma = max(4.0, min(L.shape[:2]) / 12.0)
+        s_lp = cv2.GaussianBlur(s, (0, 0), sigma)
+
+        alpha = FaceOSPipeline._hybrid_blend_alpha(u, blend_max=blend_max)[:, :, np.newaxis]
+        blended = alpha * L + (1.0 - alpha) * s_lp
+
+        interior = (m > 0.5)[:, :, np.newaxis]
+        out = np.where(interior, blended, L)
+        return np.clip(out, 0.0, 255.0).astype(np.uint8)
+
+    @staticmethod
     def _source_pixel_fraction(
         rendered: np.ndarray,
         source: np.ndarray,
@@ -2470,6 +2745,65 @@ class FaceOSPipeline:
             diff = diff.max(axis=2)
         matches = (diff <= tol) & interior
         return float(matches.sum()) / float(n)
+
+    @staticmethod
+    def _observation_shading(
+        observed: np.ndarray,
+        albedo: np.ndarray,
+        mask: Optional[np.ndarray] = None,
+        eps: float = 1e-3,
+    ) -> np.ndarray:
+        """Scene-illumination shading field for the LATENT render path.
+
+        The renderer derives ABSOLUTE brightness from the shading field, not the
+        LightingModel: ``render()`` normalizes the lit base to unit mean
+        (physical_renderer.py:374-379), multiplies by shading, then energy-
+        conserves to ``mean(albedo * shading)``. A neutral unit shading therefore
+        pins the output to the latent ALBEDO brightness (~0.84) — scene-
+        independent and flat (the measured 2.1×-too-bright collapse).
+
+        To render the latent albedo under the CURRENT scene exposure we need
+        ``S = L / A`` so that ``A * S = L`` reconstructs the observed scene
+        luminance ``L``. The latent supplies ``A`` (still lighting-invariant —
+        no illumination is stored in identity); ``L`` is read from the current
+        observation only. The field is LOW-PASSED so ONLY smooth illumination
+        crosses into the render — source high-frequency detail (which would
+        re-leak the source crop) is removed, while the blur preserves the local
+        mean so scene exposure is unchanged. Returns a 2-D ``(H, W)`` float field.
+        """
+        obs = np.asarray(observed, dtype=np.float32)
+        if obs.size and obs.max() > 1.5:
+            obs = obs / 255.0
+        obs = np.clip(obs, 0.0, 1.0)
+        if obs.ndim == 3 and obs.shape[2] == 3:  # BGR -> BT.709 luminance
+            lum = 0.2126 * obs[..., 2] + 0.7152 * obs[..., 1] + 0.0722 * obs[..., 0]
+        else:
+            lum = obs[..., 0] if obs.ndim == 3 else obs
+        alb = np.asarray(albedo, dtype=np.float32)
+        if alb.size and alb.max() > 1.5:
+            alb = alb / 255.0
+        alb_lum = np.mean(alb, axis=2) if alb.ndim == 3 else alb
+        if alb_lum.shape != lum.shape:
+            alb_lum = cv2.resize(alb_lum, (lum.shape[1], lum.shape[0]))
+
+        # S = L / A (eps floor — a near-zero albedo must never yield NaN/inf).
+        shading = lum / np.maximum(alb_lum, eps)
+
+        # Fill outside the face mask with the interior median BEFORE blurring, so
+        # background luminance cannot bleed into the masked face via the low-pass.
+        if mask is not None:
+            mi = np.asarray(mask, dtype=np.float32)
+            if mi.shape != shading.shape:
+                mi = cv2.resize(mi, (shading.shape[1], shading.shape[0]))
+            mi = mi > 0.5
+            if mi.any():
+                shading = np.where(mi, shading, float(np.median(shading[mi])))
+
+        # Low-pass: illumination is low-frequency; this strips source HF (anti-
+        # leak) while preserving the local mean (scene exposure unchanged).
+        sigma = max(4.0, min(shading.shape[:2]) / 12.0)
+        shading = cv2.GaussianBlur(shading, (0, 0), sigma)
+        return np.clip(shading, 0.0, None).astype(np.float32)
 
     def _render_with_latent(
         self,
@@ -2536,6 +2870,27 @@ class FaceOSPipeline:
             # ── Synthesize identity (latent albedo + microdetail + normals) ────
             components = est.synthesize_identity(render_geom)
 
+            # ── Scene exposure via the SHADING field (brightness fix) ──────────
+            # The renderer derives ABSOLUTE brightness from shading, not the
+            # LightingModel (it normalizes the model's amplitude away and energy-
+            # conserves to mean(albedo*shading) — physical_renderer.py:374-386).
+            # synthesize_identity emits NEUTRAL unit shading, so the latent would
+            # render at its own albedo brightness (~0.84): scene-independent and
+            # flat (the measured 2.1× collapse). Replace it with scene
+            # illumination S = observed_luminance / latent_albedo (low-passed:
+            # only smooth illumination crosses, no source-HF leak) so the latent
+            # albedo is rendered under the CURRENT scene exposure. Lighting is
+            # read from the observation only; the identity latent stays
+            # lighting-invariant (it supplies albedo, never illumination).
+            scene_shading = self._observation_shading(
+                cropped, components.albedo, crop_mask,
+            )
+            import dataclasses as _dc
+            components = _dc.replace(
+                components,
+                shading=scene_shading[:, :, np.newaxis].astype(np.float32),
+            )
+
             # ── Lighting from the OBSERVATION, applied to the latent at render ─
             lighting = self.estimate_lighting(
                 cropped, components.normal_map, mask=crop_mask > 0.3
@@ -2559,6 +2914,39 @@ class FaceOSPipeline:
             rendered_u8 = (rendered_face * 255.0).astype(np.uint8)
             if rendered_u8.shape[:2] != (crop_h, crop_w):
                 rendered_u8 = cv2.resize(rendered_u8, (crop_w, crop_h))
+
+            # Keep the PURE latent face for the synthesis-quality guards
+            # (exposure, structure): they must keep measuring the latent's own
+            # render, not the hybrid, so a brightness/flatness regression can
+            # never hide behind the observation that the hybrid mixes in.
+            pure_rendered_u8 = rendered_u8.copy()
+
+            # ── D-05 Phase 2B per-pixel uncertainty HYBRID ─────────────────────
+            # WHERE the latent is uncertain (query_uncertainty high), blend the
+            # rendered face TOWARD the low-frequency observation, per pixel and
+            # capped so the latent keeps >=(1-blend_max) authority. Confident
+            # pixels stay pure latent. Only smooth illumination/chroma crosses
+            # (low-pass) — source HF never leaks (design.md:665, requirements
+            # 10.4). RESTRICTED to the SOLID mask interior (feathered_mask>0.99):
+            # measurement PROVED 100% of hybrid-induced source-leak lived in the
+            # feather transition band, where the multiband composite ALREADY
+            # mixes the source crop — blending there pushed those pixels within
+            # tol of source. In the solid interior |latent-source| stays ≫ tol,
+            # so restricted leak == pure-latent (<0.01) even at blend_max=0.5.
+            # The uncertainty map is warped into the SAME crop geometry as the
+            # render (render_geom.canonical_face=cropped), so it is pixel-aligned.
+            solid_interior = (feathered_mask > 0.99).astype(np.float32)
+            latent_uncertainty = est.query_uncertainty(render_geom)
+            rendered_u8 = self._hybrid_face(
+                rendered_u8, cropped, latent_uncertainty, solid_interior,
+                blend_max=self._hybrid_blend_max,
+            )
+            alpha_map = self._hybrid_blend_alpha(latent_uncertainty, self._hybrid_blend_max)
+            _zone = solid_interior > 0.5
+            self._last_hybrid_alpha_mean = (
+                float(np.mean(alpha_map[_zone])) if bool(_zone.any()) else 1.0
+            )
+
             blend_mode = self._resolve_blend_mode()
             if blend_mode == "laplacian":
                 output = multiband_blend(cropped, rendered_u8, feathered_mask, levels=4)
@@ -2582,11 +2970,19 @@ class FaceOSPipeline:
             if self._capture_latent_debug:
                 self._last_latent_debug = {
                     "frame_idx": frame_idx,
-                    "rendered_face": rendered_u8.copy(),   # latent face BEFORE blend
+                    "rendered_face": pure_rendered_u8.copy(),  # PURE latent (pre-hybrid) — quality ref
+                    "hybrid_face": rendered_u8.copy(),         # post-hybrid, pre-composite
+                    "hybrid_alpha_mean": float(self._last_hybrid_alpha_mean),
                     "crop_mask": crop_mask.copy(),         # real geometry mask (0..1)
                     "source_crop": np.asarray(cropped).copy(),
                     "composited": output.copy(),
                     "normal_source": est._last_normal_source,
+                    "light_ambient": float(getattr(lighting, "ambient", float("nan"))),
+                    "light_diffuse": float(getattr(lighting, "diffuse_intensity", float("nan"))),
+                    "light_dir": np.asarray(getattr(lighting, "diffuse_direction", [0, 0, 0]), float).tolist(),
+                    "albedo_mean": float(np.mean(getattr(components, "albedo", np.float32(0)))),
+                    "shading_mean": float(np.mean(getattr(components, "shading", np.float32(0)))),
+                    "shading_std": float(np.std(getattr(components, "shading", np.float32(0)))),
                 }
             return output
 
