@@ -165,8 +165,9 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
     - **DONE.** Both `albedo_weight = ... * 0.4` blends (lines 1415, 1538) gated behind `render_source == 'legacy'`. Shading channel sanitizer (lines 2010-2015) gated behind `render_source == 'legacy'`. Latent path creates its own shading via `synthesize_identity` → `estimate_lighting` → `render_from_latent`; legacy sanitizers are unused and now skipped. Fast suite: 278 passed, 0 regressions.
     - _Requirements: 9.2, 9.3, 5.3_
 
-  - [ ] 4.4 Add color-cast compensation with reject-on-failure guard
+  - [x] 4.4 Add color-cast compensation with reject-on-failure guard
     - In intrinsic albedo handling (`face_os/intrinsic_decomposition.py` and/or `identity_estimator.py`), apply color-cast compensation that removes the teal/green cast and improves albedo color invariance; if a compensation cannot do both, reject it (leave albedo unchanged).
+    - **DONE.** `_compensate_color_cast` replaces `_normalize_white_balance` in `identity_state.py`. Gray-world WB with EMA smoothing. Reject-on-failure: if anchor exists and correction increases LAB drift from anchor, EMA is restored and original albedo returned. `_normalize_white_balance` now delegates to `_compensate_color_cast`. 4 TDD tests in `test_color_cast.py`: teal removal, rejection path, EMA stability, gray-world fallback. Full fast suite: 282 passed, 0 regressions.
     - _Requirements: 6.4, 6.5_
 
   - [ ]* 4.5 Add runtime-truth slow test on real video

@@ -687,15 +687,39 @@ class IdentityState:
         return corrected, confidence
 
     def _normalize_white_balance(self, albedo: np.ndarray) -> np.ndarray:
+        return self._compensate_color_cast(albedo)
+
+    def _compensate_color_cast(self, albedo: np.ndarray) -> np.ndarray:
+        """Remove teal/green cast with reject-on-failure guard.
+
+        Uses gray-world WB as base. If an anchor exists, validates that the
+        correction reduces LAB drift from anchor; if it doesn't, the correction
+        is rejected and the original albedo is returned unchanged.
+        EMA smoothing prevents frame-to-frame flicker.
+        """
         mean_per_channel = np.mean(albedo, axis=(0, 1))
         overall_mean = np.mean(mean_per_channel)
         target_scale = overall_mean / (mean_per_channel + 1e-8)
-        
-        # BEAST MODE FIX: Temporal EMA to kill strobe-light flicker
+
+        prev_ema = self._wb_scale_ema.copy()
         self._wb_scale_ema = (1.0 - self._wb_ema_rate) * self._wb_scale_ema + self._wb_ema_rate * target_scale
-        
-        normalized = albedo * self._wb_scale_ema[np.newaxis, np.newaxis, :]
-        return np.clip(normalized, 0, 1).astype(np.float32)
+        corrected = albedo * self._wb_scale_ema[np.newaxis, np.newaxis, :]
+        corrected = np.clip(corrected, 0, 1).astype(np.float32)
+
+        if self._anchor_lab is not None:
+            import cv2 as _cv2
+            anchor_mean = np.mean(self._anchor_lab, axis=(0, 1))
+            orig_u8 = np.clip(albedo * 255, 0, 255).astype(np.uint8)
+            corr_u8 = np.clip(corrected * 255, 0, 255).astype(np.uint8)
+            orig_lab = _cv2.cvtColor(orig_u8, _cv2.COLOR_BGR2LAB).astype(np.float32)
+            corr_lab = _cv2.cvtColor(corr_u8, _cv2.COLOR_BGR2LAB).astype(np.float32)
+            orig_drift = float(np.sqrt(np.sum((np.mean(orig_lab, axis=(0, 1)) - anchor_mean) ** 2)))
+            corr_drift = float(np.sqrt(np.sum((np.mean(corr_lab, axis=(0, 1)) - anchor_mean) ** 2)))
+            if corr_drift > orig_drift:
+                self._wb_scale_ema = prev_ema
+                return albedo
+
+        return corrected
 
     def has_intrinsic(self) -> bool:
         return self._intrinsic_components is not None
