@@ -84,11 +84,12 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
     """Fetch transcript via YouTube Data API v3 (captions.list + captions.download).
 
     This is the official API — no bot detection, no cookies needed.
-    Requires OAuth2 token (yt_token.json).
+    Requires OAuth2 token with youtube.force-ssl scope.
     Returns None on failure.
     """
     try:
         from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
         from googleapiclient.discovery import build
     except ImportError:
         return None
@@ -98,10 +99,13 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
         return None
 
     try:
-        creds = Credentials.from_authorized_user_file(str(token_path), scopes=[
-            "https://www.googleapis.com/auth/youtube.force-ssl",
-            "https://www.googleapis.com/auth/youtube.readonly",
-        ])
+        # Use the scopes the token was actually created with
+        creds = Credentials.from_authorized_user_file(str(token_path))
+        if not creds.valid and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        if not creds.valid:
+            return None
+
         youtube = build("youtube", "v3", credentials=creds)
 
         # List caption tracks
