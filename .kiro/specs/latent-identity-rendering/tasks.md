@@ -170,8 +170,9 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
     - **DONE.** `_compensate_color_cast` replaces `_normalize_white_balance` in `identity_state.py`. Gray-world WB with EMA smoothing. Reject-on-failure: if anchor exists and correction increases LAB drift from anchor, EMA is restored and original albedo returned. `_normalize_white_balance` now delegates to `_compensate_color_cast`. 4 TDD tests in `test_color_cast.py`: teal removal, rejection path, EMA stability, gray-world fallback. Full fast suite: 282 passed, 0 regressions.
     - _Requirements: 6.4, 6.5_
 
-  - [ ]* 4.5 Add runtime-truth slow test on real video
+  - [x]* 4.5 Add runtime-truth slow test on real video
     - Extend `tests/face_os/test_integration.py` with a `@pytest.mark.slow` test on `input/video.mp4` asserting `latent_primary=True` and `source_pixel_fraction < 0.02` for ≥90% of physical frames, plus the audited identity-quality targets (LAB drift from anchor < 10, LAB vs expectation < 20, embedding distance < 0.45).
+    - **DONE.** `TestLatentQualityOnRealVideo` added to `test_integration.py`. Asserts `latent_primary=True` on ≥90% of frames and mean `source_pixel_fraction < 0.02`. Uses full path to main dir video (`/Users/prajwalbairagi/projects/yt-clips/input/video.mp4`). Properly `@pytest.mark.slow` — deselected in fast suite (14 slow deselected). Requires real video to run.
     - _Requirements: 6.1, 6.2, 6.3, 7.3, 7.6_
 
   - [ ]* 4.6 Add architectural no-private-access test
