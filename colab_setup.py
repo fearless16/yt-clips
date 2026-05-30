@@ -73,22 +73,30 @@ print("=" * 55)
 # ─── Mount Drive ──────────────────────────────────────────────────────────
 from google.colab import drive
 drive.mount("/content/drive", force_remount=True)
-for p in ["/content/drive/MyDrive/yt-clips", "/content/drive/My Drive/yt-clips"]:
-    if Path(p).exists():
-        os.chdir(p)
-        print(f"  Working dir: {p}")
-        break
+
+REPO_DIR = "/content/drive/MyDrive/yt-clips-repo"
+ENV_DIR = "/content/drive/MyDrive/yt-clips"
+REPO = "https://github.com/fearless16/yt-clips.git"
+
+if Path(f"{REPO_DIR}/.git").exists():
+    os.chdir(REPO_DIR)
+    print(f"  Working dir: {REPO_DIR}")
 else:
-    os.chdir("/content")
+    print("  First-time setup — cloning repo to Drive...")
+    run(f"git clone {REPO} {REPO_DIR}", timeout=60)
+    os.chdir(REPO_DIR)
+    print(f"  Working dir: {REPO_DIR}")
 
 # ─── Secrets ──────────────────────────────────────────────────────────────
-if Path(".env").exists():
-    for line in open(".env"):
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ[k.strip()] = v.strip()
-    print("  .env loaded from Drive")
+for d in [Path(ENV_DIR, ".env"), Path(REPO_DIR, ".env")]:
+    if d.exists():
+        for line in open(d):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ[k.strip()] = v.strip()
+        print(f"  .env loaded from {d.parent.name}/")
+        break
 
 try:
     from google.colab import userdata
@@ -111,7 +119,7 @@ run("apt-get install -y -qq aria2 ffmpeg > /dev/null 2>&1")
 print("  Python deps...")
 run("pip install -q yt-dlp faster-whisper rich PyYAML opencv-python-headless numpy "
     "filterpy scipy google-genai google-generativeai openai python-dotenv "
-    "ultralytics torch --extra-index-url https://download.pytorch.org/whl/cu121")
+    "pyngrok ultralytics torch --extra-index-url https://download.pytorch.org/whl/cu121")
 
 # torchvision compat
 try:
@@ -145,44 +153,29 @@ else:
         print(open(WATCHER_LOG).read().strip()[-500:])
     sys.exit(1)
 
-# ─── Start Tunnel (nohup daemon) ──────────────────────────────────────────
-print("  Starting tunnel (serveo.net)...")
+# ─── Start Tunnel (ngrok static domain) ───────────────────────────────────
+NGROK_AUTH = os.environ.get("NGROK_TOKEN")
+STATIC_DOMAIN = "wiry-rubble-boring.ngrok-free.dev"
 
-# Try serveo first (no install needed)
-tunnel_cmd = "nohup ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 80:localhost:5000 serveo.net > tunnel.log 2>&1 &"
-subprocess.run(tunnel_cmd, shell=True)
-time.sleep(5)
-
-url = extract_tunnel_url(45)
-
-# Fallback: try localhost.run if serveo fails
-if not url:
-    print("  serveo.net failed — trying localhost.run...")
-    kill_old()
-    # Re-start watcher (kill_old killed it too)
-    watcher_cmd = f"nohup {sys.executable} watcher.py > {WATCHER_LOG} 2>&1 &"
-    subprocess.run(watcher_cmd, shell=True)
-    time.sleep(3)
-    wait_for_watcher(15)
-
-    tunnel_cmd = "nohup ssh -o StrictHostKeyChecking=no -o ServerAliveInterval=30 -R 80:localhost:5000 nokey@localhost.run > tunnel.log 2>&1 &"
-    subprocess.run(tunnel_cmd, shell=True)
-    time.sleep(8)
-    url = extract_tunnel_url(45)
-
-if url:
+if NGROK_AUTH:
+    from pyngrok import ngrok as _ngrok
+    _ngrok.set_auth_token(NGROK_AUTH)
+    try:
+        tunnel = _ngrok.connect(5000, domain=STATIC_DOMAIN)
+        url = tunnel.public_url
+    except Exception as e:
+        if "ERR_NGROK_334" in str(e):
+            url = f"https://{STATIC_DOMAIN}"
+            print(f"  Tunnel already active at {url}")
+        else:
+            tunnel = _ngrok.connect(5000)
+            url = tunnel.public_url
+            print(f"  Static domain failed, using random URL")
     Path(URL_FILE).write_text(url)
     print(f"  Tunnel URL: {url}")
     print(f"  Saved to: {URL_FILE}")
 else:
-    print("  No tunnel URL found. tunnel.log tail:")
-    try:
-        for l in open(TUNNEL_LOG).read().strip().splitlines()[-10:]:
-            print(f"    {l}")
-    except FileNotFoundError:
-        print("    (no tunnel.log)")
-    print()
-    print("  Tunnel failed.  Jobs will fall back to Drive API or file poll.")
+    print("  NGROK_TOKEN not found — tunnel skipped")
 
 # ─── Done ─────────────────────────────────────────────────────────────────
 print()

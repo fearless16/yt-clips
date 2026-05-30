@@ -1,43 +1,104 @@
 # Face OS — Colab GPU Compute Server
-# Run this cell to set up Face OS on Colab and expose it via tunnel.
+# Run each cell in order on Google Colab (Runtime → T4 GPU).
 
-# ── Step 1: Clone repo + install deps ──────────────────────────────────────
-!git clone https://github.com/YOUR_USER/yt-clips.git 2>/dev/null || true
-%cd yt-clips
-!pip install -q flask pyngrok mediapipe opencv-python-headless numpy
+# ════════════════════════════════════════════════════════════════════════════
+# CELL 1: Mount Drive + git clone/pull + load .env
+# ════════════════════════════════════════════════════════════════════════════
+from google.colab import drive
+drive.mount("/content/drive")
 
-# ── Step 2: Start tunnel (pick one method) ─────────────────────────────────
+import os
+from pathlib import Path
 
-# Option A: ngrok (recommended, stable)
-# !pip install -q pyngrok
-# from pyngrok import ngrok
-# public_url = ngrok.connect(5000).public_url
-# print(f"Tunnel URL: {public_url}")
+REPO_DIR = "/content/drive/MyDrive/yt-clips-repo"
+ENV_DIR = "/content/drive/MyDrive/yt-clips"
+REPO = "https://github.com/fearless16/yt-clips.git"
 
-# Option B: serveo (no install needed)
-import subprocess, re, time
-tunnel_proc = subprocess.Popen(
-    ["ssh", "-o", "StrictHostKeyChecking=no", "-R", "80:localhost:5000", "serveo.net"],
-    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-)
-for _ in range(20):
-    line = tunnel_proc.stdout.readline()
-    m = re.search(r"(https?://[a-zA-Z0-9.-]+\.serveo\.net)", line)
-    if m:
-        public_url = m.group(1)
-        print(f"Tunnel URL: {public_url}")
+if Path(f"{REPO_DIR}/.git").exists():
+    os.chdir(REPO_DIR)
+    !git pull origin main 2>&1
+else:
+    os.chdir("/content/drive/MyDrive")
+    !git clone {REPO} {REPO_DIR} 2>&1
+
+os.chdir(REPO_DIR)
+print(f"Working dir: {REPO_DIR}")
+
+loaded = False
+for d in [Path(ENV_DIR, ".env"), Path(REPO_DIR, ".env")]:
+    if d.exists():
+        for line in open(d):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ[k.strip()] = v.strip()
+        print(f".env loaded from {d.parent.name}/")
+        loaded = True
         break
-    time.sleep(1)
+if not loaded:
+    print("No .env found — check Drive yt-clips/ or yt-clips-repo/")
 
-# ── Step 3: Start Face OS server ──────────────────────────────────────────
-!python face_os/colab_server.py &
+# Also try Colab secrets as fallback
+try:
+    from google.colab import userdata
+    for key in ["OPENROUTER_API_KEY", "GROQ_API_KEY", "GOOGLE_API_KEY"]:
+        val = userdata.get(key)
+        if val:
+            os.environ[key] = val
+            print(f"{key} loaded from secrets")
+except:
+    pass
+
+print(f"Files: {len(list(os.walk('.')))} entries")
+!ls face_os/
+
+# ════════════════════════════════════════════════════════════════════════════
+# CELL 2: Install deps
+# ════════════════════════════════════════════════════════════════════════════
+%cd /content/drive/MyDrive/yt-clips-repo
+!apt-get install -y -qq aria2 ffmpeg > /dev/null 2>&1
+!pip install -q yt-dlp faster-whisper rich PyYAML opencv-python-headless numpy \
+    filterpy scipy google-genai google-generativeai openai python-dotenv \
+    pyngrok ultralytics flask mediapipe torch --extra-index-url https://download.pytorch.org/whl/cu121
+
+# ════════════════════════════════════════════════════════════════════════════
+# CELL 3: Start tunnel (ngrok) + Face OS server
+# ════════════════════════════════════════════════════════════════════════════
+import os, time
+
+NGROK_AUTH = os.environ.get("NGROK_TOKEN")
+STATIC_DOMAIN = "wiry-rubble-boring.ngrok-free.dev"
+TUNNEL_URL = None
+
+if NGROK_AUTH:
+    from pyngrok import ngrok
+    ngrok.set_auth_token(NGROK_AUTH)
+    try:
+        tunnel = ngrok.connect(5000, domain=STATIC_DOMAIN)
+        TUNNEL_URL = tunnel.public_url
+    except Exception as e:
+        if "ERR_NGROK_334" in str(e):
+            TUNNEL_URL = f"https://{STATIC_DOMAIN}"
+            print("Tunnel already active — reusing existing URL")
+        else:
+            tunnel = ngrok.connect(5000)
+            TUNNEL_URL = tunnel.public_url
+            print("Static domain failed, using random URL")
+    print(f"\n{'='*60}")
+    print(f"TUNNEL_URL = {TUNNEL_URL}")
+    print(f"{'='*60}")
+else:
+    print("NGROK_TOKEN not found in .env — tunnel skipped")
+
+# Start Face OS server
+!nohup python face_os/colab_server.py > /tmp/faceos_server.log 2>&1 &
 time.sleep(3)
-print("Server ready. Use the tunnel URL above from your local machine.")
+!cat /tmp/faceos_server.log
+print("\nREADY — run on local:")
+print(f"  python run_on_colab.py {TUNNEL_URL or '<tunnel_url>'} --gpu")
 
-# ── Step 4: Test from local machine ────────────────────────────────────────
-# In your local terminal:
-#   from face_os.colab_client import ColabClient
-#   client = ColabClient("https://xxxx.serveo.net")
-#   client.enroll("expectation.png", "photos/")
-#   result = client.process("clips_test/test_clip.mp4", max_frames=30)
-#   print(result["telemetry"])
+# ════════════════════════════════════════════════════════════════════════════
+# CELL 4: Test from local machine (run in local terminal)
+# ════════════════════════════════════════════════════════════════════════════
+#   python run_on_colab.py https://wiry-rubble-boring.ngrok-free.dev --gpu
+#   python run_on_colab.py https://wiry-rubble-boring.ngrok-free.dev --video clips_test/test_clip.mp4 --frames 10

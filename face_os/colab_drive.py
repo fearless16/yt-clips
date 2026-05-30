@@ -1,60 +1,86 @@
-# Face OS — Colab Server (Google Drive Mount Flow)
-# Run each cell in order on Google Colab.
+# Face OS — Colab Server (git + Drive .env flow)
+# Run each cell in order on Google Colab (Runtime → T4 GPU).
 
 # ════════════════════════════════════════════════════════════════════════════
-# CELL 1: Mount Drive + Verify
+# CELL 1: Mount Drive + git clone/pull + load .env
 # ════════════════════════════════════════════════════════════════════════════
 from google.colab import drive
 drive.mount('/content/drive')
 
 import os
-CODE_DIR = "/content/drive/MyDrive/yt-clips"
+from pathlib import Path
 
-if not os.path.exists(CODE_DIR):
-    print(f"ERROR: {CODE_DIR} not found!")
-    print("Run this on your LOCAL machine first:")
-    print("  python push_code.py")
+REPO_DIR = "/content/drive/MyDrive/yt-clips-repo"
+ENV_DIR = "/content/drive/MyDrive/yt-clips"
+REPO = "https://github.com/fearless16/yt-clips.git"
+
+if Path(f"{REPO_DIR}/.git").exists():
+    os.chdir(REPO_DIR)
+    !git pull origin main 2>&1
 else:
-    print(f"Found: {CODE_DIR}")
-    os.chdir(CODE_DIR)
-    print(f"Files: {len(list(os.walk('.')))} dirs")
-    !ls face_os/ 2>/dev/null || echo "face_os/ not found — run 'python push_code.py' on local first"
+    os.chdir("/content/drive/MyDrive")
+    !git clone {REPO} {REPO_DIR} 2>&1
+
+os.chdir(REPO_DIR)
+print(f"Working dir: {REPO_DIR}")
+print(f"Files: {len(list(os.walk('.')))} dirs")
+!ls face_os/ 2>/dev/null || echo "face_os/ not found"
+
+loaded = False
+for d in [Path(ENV_DIR, ".env"), Path(REPO_DIR, ".env")]:
+    if d.exists():
+        for line in open(d):
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                os.environ[k.strip()] = v.strip()
+        print(f".env loaded from {d.parent.name}/")
+        loaded = True
+        break
+if not loaded:
+    print("No .env found — check Drive yt-clips/ or yt-clips-repo/")
 
 # ════════════════════════════════════════════════════════════════════════════
 # CELL 2: Install deps
 # ════════════════════════════════════════════════════════════════════════════
-%cd /content/drive/MyDrive/yt-clips
-!pip install -q flask mediapipe opencv-python-headless numpy scipy
+%cd /content/drive/MyDrive/yt-clips-repo
+!apt-get install -y -qq aria2 ffmpeg > /dev/null 2>&1
+!pip install -q yt-dlp faster-whisper rich PyYAML opencv-python-headless numpy \
+    filterpy scipy google-genai google-generativeai openai python-dotenv \
+    pyngrok ultralytics flask mediapipe torch --extra-index-url https://download.pytorch.org/whl/cu121
 
 # ════════════════════════════════════════════════════════════════════════════
-# CELL 3: Start tunnel + server
+# CELL 3: Start tunnel (ngrok) + server
 # ════════════════════════════════════════════════════════════════════════════
-import subprocess, re, time
+import os, time
 
-# Start tunnel
-tunnel_proc = subprocess.Popen(
-    ["ssh", "-o", "StrictHostKeyChecking=no", "-R", "80:localhost:5000", "serveo.net"],
-    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-)
+NGROK_AUTH = os.environ.get("NGROK_TOKEN")
+STATIC_DOMAIN = "wiry-rubble-boring.ngrok-free.dev"
 TUNNEL_URL = None
-for _ in range(30):
-    line = tunnel_proc.stdout.readline()
-    m = re.search(r"(https?://\S+\.serveo\.net)", line)
-    if m:
-        TUNNEL_URL = m.group(1)
-        break
-    time.sleep(1)
 
-if TUNNEL_URL:
+if NGROK_AUTH:
+    from pyngrok import ngrok
+    ngrok.set_auth_token(NGROK_AUTH)
+    try:
+        tunnel = ngrok.connect(5000, domain=STATIC_DOMAIN)
+        TUNNEL_URL = tunnel.public_url
+    except Exception as e:
+        if "ERR_NGROK_334" in str(e):
+            TUNNEL_URL = f"https://{STATIC_DOMAIN}"
+            print("Tunnel already active — reusing existing URL")
+        else:
+            tunnel = ngrok.connect(5000)
+            TUNNEL_URL = tunnel.public_url
+            print("Static domain failed, using random URL")
     print(f"\n{'='*60}")
     print(f"TUNNEL_URL = {TUNNEL_URL}")
     print(f"{'='*60}")
 else:
-    print("TUNNEL FAILED. Try: !ssh -R 80:localhost:5000 serveo.net")
+    print("NGROK_TOKEN not found in .env — tunnel skipped")
 
 # Start server in background
 !nohup python face_os/colab_server.py > /tmp/faceos_server.log 2>&1 &
 time.sleep(3)
 !cat /tmp/faceos_server.log
-print("\nREADY — copy TUNNEL_URL above, then run on local:")
-print("  python run_on_colab.py <TUNNEL_URL> --gpu")
+print("\nREADY — run on local:")
+print(f"  python run_on_colab.py {TUNNEL_URL or '<tunnel_url>'} --gpu")
