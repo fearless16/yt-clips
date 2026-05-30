@@ -84,6 +84,62 @@ class GeometryEstimator:
 
         return state
 
+    def assemble_state(
+        self,
+        canonical_face: Optional[np.ndarray] = None,
+        canonical_transform: Optional[np.ndarray] = None,
+        mask: Optional[np.ndarray] = None,
+        mesh: Optional[np.ndarray] = None,
+        landmarks=None,
+        pose=(0.0, 0.0, 0.0),
+        geometry_confidence: float = 0.0,
+    ) -> GeometryState:
+        """Package already-extracted geometry primitives into a GeometryState.
+
+        The orchestration pipeline detects landmarks, warps to canonical, builds
+        the face mask, and reads the 478-point mesh exactly once per frame. This
+        method gives the Geometry subsystem ownership of the resulting
+        ``GeometryState`` WITHOUT re-running detection — there is one geometry
+        truth per frame, not two divergent ones. ``inverse_transform`` is the
+        only derived quantity (computed from ``canonical_transform``); a singular
+        transform leaves it ``None`` rather than raising.
+
+        Args:
+            canonical_face: (H, W, 3) canonical-space face crop (BGR), or None.
+            canonical_transform: 3x3 or 2x3 source→canonical warp, or None.
+            mask: (H, W) float32 face mask in canonical space, or None.
+            mesh: (>=468, 3) dense landmark mesh (mesh_478), or None.
+            landmarks: Landmarks object (optional, for downstream consumers).
+            pose: (yaw, pitch, roll) tuple.
+            geometry_confidence: scalar detection/geometry confidence.
+
+        Returns:
+            A GeometryState assembled from the inputs. Never raises.
+        """
+        state = GeometryState()
+        state.canonical_face = canonical_face
+        state.mask = mask
+        state.mesh = mesh
+        state.landmarks = landmarks
+        state.pose = tuple(pose) if pose is not None else (0.0, 0.0, 0.0)
+        state.geometry_confidence = float(geometry_confidence)
+        if landmarks is not None and hasattr(landmarks, "points"):
+            state.landmarks_478 = landmarks.points
+
+        if canonical_transform is not None:
+            M = np.asarray(canonical_transform, dtype=np.float32)
+            # Promote a 2x3 affine to 3x3 so inverse_transform is well-defined.
+            if M.shape == (2, 3):
+                M = np.vstack([M, [0.0, 0.0, 1.0]]).astype(np.float32)
+            state.canonical_transform = M
+            if M.shape == (3, 3):
+                try:
+                    state.inverse_transform = np.linalg.inv(M).astype(np.float32)
+                except np.linalg.LinAlgError:
+                    state.inverse_transform = None
+
+        return state
+
     def compute_normals(self, geometry: GeometryState) -> GeometryState:
         """Compute face normals from geometry.
 

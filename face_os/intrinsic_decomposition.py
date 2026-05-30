@@ -28,6 +28,7 @@ Beast-mode additions:
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -35,6 +36,8 @@ from typing import Optional, Tuple
 
 import cv2
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -469,3 +472,98 @@ class IntrinsicDecomposer:
         if ref_hf <= 1e-8:
             return 0.0
         return float(out_hf / ref_hf)
+
+
+# ---------------------------------------------------------------------------
+# IntrinsicComponents <-> Renderer type contract (Latent Identity Rendering D-05)
+# ---------------------------------------------------------------------------
+
+class ContractViolation(Exception):
+    """Raised when an IntrinsicComponents value violates the B->D type contract.
+
+    Replaces the silent channel sanitizers (A-10) at the Identity->Renderer
+    boundary: a malformed tensor (e.g. a >1-channel "shading" leak) fails loudly
+    instead of being silently clamped.
+    """
+    pass
+
+
+def assert_intrinsic_contract(
+    c: "IntrinsicComponents",
+    expect_hw: Tuple[int, int],
+    mode: str = "warn",
+) -> bool:
+    """Validate the IntrinsicComponents -> renderer contract.
+
+    Checks, per the design pseudocode:
+      - ``albedo`` is (H, W, 3) and matches ``expect_hw``
+      - ``shading`` is (H, W, 1) — a >1-channel shading tensor is the A-10 leak
+      - ``normal_map`` is ``expect_hw + (3,)``
+      - ``albedo`` dtype is float32 with values in [0, 1]
+      - ``albedo`` / ``shading`` / ``normal_map`` are free of NaN and Inf
+
+    Args:
+        c: the IntrinsicComponents value to validate.
+        expect_hw: the expected ``(H, W)`` render size.
+        mode: ``'fatal'`` raises ContractViolation on the first failure;
+            ``'warn'`` logs a warning and returns ``False`` (does NOT clamp —
+            clamping stays at the existing sanitizer sites for now).
+
+    Returns:
+        ``True`` if every check passes. In ``'warn'`` mode returns ``False`` on
+        the first violation; in ``'fatal'`` mode raises ``ContractViolation``.
+    """
+    expect_hw = (int(expect_hw[0]), int(expect_hw[1]))
+
+    def _fail(msg: str) -> bool:
+        if mode == "fatal":
+            raise ContractViolation(msg)
+        logger.warning("IntrinsicComponents contract violation: %s", msg)
+        return False
+
+    albedo = getattr(c, "albedo", None)
+    shading = getattr(c, "shading", None)
+    normal_map = getattr(c, "normal_map", None)
+
+    # --- albedo: (H, W, 3) ---
+    albedo_arr = np.asarray(albedo)
+    if albedo_arr.ndim != 3 or albedo_arr.shape[2] != 3:
+        return _fail(f"albedo must be (H,W,3), got {albedo_arr.shape}")
+    if albedo_arr.shape[:2] != expect_hw:
+        return _fail(
+            f"albedo spatial shape {albedo_arr.shape[:2]} != expected {expect_hw}"
+        )
+
+    # --- shading: (H, W, 1); >1 channel is the A-10 leak ---
+    shading_arr = np.asarray(shading)
+    if shading_arr.ndim != 3 or shading_arr.shape[2] != 1:
+        return _fail(
+            "shading must be (H,W,1); "
+            f">1 channels is a TYPE BUG, not a clamp target, got {shading_arr.shape}"
+        )
+
+    # --- normal_map: expect_hw + (3,) ---
+    normal_arr = np.asarray(normal_map)
+    if normal_arr.shape != expect_hw + (3,):
+        return _fail(
+            f"normal_map must be {expect_hw + (3,)}, got {normal_arr.shape}"
+        )
+
+    # --- albedo dtype float32 + range [0, 1] ---
+    if albedo_arr.dtype != np.float32:
+        return _fail(f"albedo dtype must be float32, got {albedo_arr.dtype}")
+    if albedo_arr.size > 0:
+        a_min = float(np.min(albedo_arr))
+        a_max = float(np.max(albedo_arr))
+        if a_min < 0.0 or a_max > 1.0:
+            return _fail(
+                f"albedo values must be in [0,1], got [{a_min:.4f}, {a_max:.4f}]"
+            )
+
+    # --- no NaN / Inf in albedo, shading, normal_map ---
+    for name, arr in (("albedo", albedo_arr), ("shading", shading_arr), ("normal_map", normal_arr)):
+        farr = np.asarray(arr, dtype=np.float64)
+        if not np.all(np.isfinite(farr)):
+            return _fail(f"{name} contains NaN or Inf values")
+
+    return True

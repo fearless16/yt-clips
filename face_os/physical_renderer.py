@@ -153,6 +153,114 @@ class LightingModel:
         self.specular_intensity = max(0.0, float(self.specular_intensity))
 
 
+# Documented minimum ambient floor: a rendered face is never pure black, and a
+# degenerate (no-signal) estimate must still yield a usable light. Kept small so
+# it never overrides a real ambient recovered from the observation.
+_MIN_AMBIENT = 0.03
+
+
+def fit_lighting_from_shading_normals(
+    shading: np.ndarray,
+    normals: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+    specular_intensity: float = 0.30,
+) -> "LightingModel":
+    """Invert the Lambertian shading model to recover a directional ``LightingModel``.
+
+    The renderer's forward diffuse term is ``S = ambient + diffuse * max(N·L, 0)``.
+    For lit pixels this is LINEAR in the lighting vector ``b = diffuse * L``::
+
+        S = ambient + N · b          (per pixel: S = a + nx*bx + ny*by + nz*bz)
+
+    so an ordinary least-squares fit over the design matrix ``[1, nx, ny, nz]``
+    recovers ``ambient = a``, ``diffuse_intensity = ||b||`` and the unit light
+    direction ``L = b / ||b||``. This is the exact inverse of the renderer's own
+    diffuse math — the lighting is READ from the observation, not hardcoded.
+
+    A second pass refits over only the pixels the first estimate predicts are lit
+    (``N·b > 0``), so back-facing normals (whose true shading is pure ambient,
+    not ``a + N·b``) do not bias the directional term.
+
+    Degenerate inputs (flat/zero shading, too few pixels, singular system) never
+    raise or return NaN: they fall back to a +Z light at the documented minimum
+    ambient floor.
+
+    Args:
+        shading: ``(H, W)`` or ``(H, W, 1)`` float scalar shading field.
+        normals: ``(H, W, 3)`` unit normal map, co-registered with ``shading``.
+        mask: optional ``(H, W)`` boolean — restricts the fit to face pixels.
+        specular_intensity: carried onto the returned model (not estimated here).
+
+    Returns:
+        ``LightingModel`` (its ``__post_init__`` normalizes the direction and
+        clamps intensities ≥ 0).
+    """
+    S = np.asarray(shading, dtype=np.float64)
+    if S.ndim == 3:
+        S = S[..., 0]
+    N = np.asarray(normals, dtype=np.float64)
+
+    def _degenerate(ambient: float = _MIN_AMBIENT) -> "LightingModel":
+        return LightingModel(
+            ambient=max(_MIN_AMBIENT, float(ambient)),
+            diffuse_direction=np.array([0.0, 0.0, 1.0], dtype=np.float64),
+            diffuse_intensity=0.0,
+            specular_intensity=specular_intensity,
+        )
+
+    if S.ndim != 2 or N.ndim != 3 or N.shape[:2] != S.shape or N.shape[2] != 3:
+        return _degenerate()
+
+    sel = np.isfinite(S) & np.all(np.isfinite(N), axis=-1)
+    if mask is not None:
+        sel &= np.asarray(mask, dtype=bool)
+    if int(np.count_nonzero(sel)) < 8:
+        return _degenerate()
+
+    s = S[sel]                                   # (P,)
+    n = N[sel]                                   # (P, 3)
+    A = np.concatenate([np.ones((n.shape[0], 1)), n], axis=1)  # (P, 4): [1, nx, ny, nz]
+
+    def _solve(A_, s_):
+        try:
+            coeffs, *_ = np.linalg.lstsq(A_, s_, rcond=None)
+        except (np.linalg.LinAlgError, ValueError):
+            return None
+        if not np.all(np.isfinite(coeffs)):
+            return None
+        return coeffs
+
+    coeffs = _solve(A, s)
+    if coeffs is None:
+        return _degenerate()
+
+    # Refit over pixels the first estimate predicts are LIT (N·b > 0), so the
+    # max(,0) clamp on back-facing normals doesn't bias the direction.
+    b0 = coeffs[1:]
+    if float(np.linalg.norm(b0)) > 1e-6:
+        lit = (n @ b0) > 0.0
+        if int(np.count_nonzero(lit)) >= 8:
+            refit = _solve(A[lit], s[lit])
+            if refit is not None:
+                coeffs = refit
+
+    ambient = float(coeffs[0])
+    b = coeffs[1:]
+    diffuse = float(np.linalg.norm(b))
+
+    if diffuse <= 1e-6:
+        # No directional signal: pure-ambient illumination.
+        return _degenerate(ambient=ambient)
+
+    direction = (b / diffuse)
+    return LightingModel(
+        ambient=max(_MIN_AMBIENT, ambient),
+        diffuse_direction=direction,
+        diffuse_intensity=diffuse,
+        specular_intensity=specular_intensity,
+    )
+
+
 @dataclass
 class PhysicalRenderConfig:
     """Configuration for the physically-inspired renderer."""
