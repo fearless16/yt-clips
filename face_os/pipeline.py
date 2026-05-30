@@ -47,8 +47,10 @@ from face_os.types import (
     EnhancementMask,
     FaceTrack,
     FrameData,
+    GeometryState,
     IdentityProfile,
     Landmarks,
+    LatentRenderTelemetry,
     VideoMeta,
 )
 
@@ -72,14 +74,14 @@ from face_os.temporal_solve import TemporalRepairEngine, FrameQuality
 
 # V3 modules
 from face_os.physical_renderer import PhysicalRenderer, LightingModel
-from face_os.intrinsic_decomposition import IntrinsicComponents
+from face_os.intrinsic_decomposition import IntrinsicComponents, assert_intrinsic_contract
 from face_os.lie_group import SIM2Transform, interpolate_sim2
 from face_os.renderer_mode import RendererMode, RendererModeState
 from face_os.state_evolution import StateEvolution
 from face_os.energy_scaling import EnergyScaler
 
 # D-10: Subsystem wrappers (thin delegation, boundary enforcement)
-from face_os.subsystems import IdentityEstimator, TemporalEstimator, FaceRenderer
+from face_os.subsystems import IdentityEstimator, TemporalEstimator, FaceRenderer, GeometryEstimator
 
 
 cfg = get_config()
@@ -212,8 +214,54 @@ class FaceOSPipeline:
 
         # D-08: Per-frame telemetry log (every frame exposed as JSON)
         self._frame_telemetry_log: list = []
+        # D-05 Phase 0: Per-frame LatentRenderTelemetry log (one dict per frame),
+        # mirrors _frame_telemetry_log. Exposed via get_latent_telemetry().
+        self._latent_telemetry_log: list = []
         self._last_geometry_source = "none"
         self._last_transform_det = 1.0
+
+        # D-05 Phase 0: Warn-only IntrinsicComponents contract mode.
+        # Default 'warn' (logs, no clamp, no raise) so the legacy path is
+        # behavior-preserving. An explicitly-configured fatal mode is honored
+        # during legacy migration (Requirement 3.5): read from cfg if present.
+        latent_cfg = getattr(cfg, 'latent', None)
+        contract_mode = getattr(latent_cfg, 'contract_mode', None) if latent_cfg else None
+        self._contract_mode = contract_mode if contract_mode in ('warn', 'fatal') else 'warn'
+
+        # D-05 Phase 0: Per-frame latent telemetry state. Reset each frame so a
+        # record reflects only the current frame (Requirement 8.3/8.4 — no
+        # carryover). Phase 0 is legacy/shadow: latent does not drive rendering.
+        self._last_contract_passed = True
+        self._last_latent_confidence = 0.0
+        self._last_albedo_drift = 0.0
+        self._last_uncertainty_mean = 0.0
+        # D-05 Task 2.6: kill-switch for the shadow-mode latent update. A shadow
+        # subsystem must be toggleable (operational off-switch + clean A/B). On
+        # by default; honors cfg.latent.shadow_enabled when present.
+        self._latent_shadow_enabled = bool(
+            getattr(latent_cfg, 'shadow_enabled', True) if latent_cfg else True
+        )
+
+        # D-05 Phase 2: render-path selector. 'legacy' = the existing
+        # paste-then-relight path (A-2/A-3/A-5); 'latent' = the latent drives the
+        # face interior via synthesize_identity + estimate_lighting +
+        # render_from_latent (no source crop). Default 'legacy' so existing
+        # behavior is untouched until a caller opts in (A/B). Honors
+        # cfg.latent.render_source when present.
+        render_source = getattr(latent_cfg, 'render_source', None) if latent_cfg else None
+        self.render_source: str = render_source if render_source in ('legacy', 'latent') else 'legacy'
+        # Fraction of the rendered crop still driven by source pixels (1.0 =
+        # fully source/legacy). The latent render path lowers this to its face
+        # coverage complement; read into per-frame telemetry.
+        self._last_source_pixel_fraction: float = 1.0
+
+        # DIAGNOSTIC ONLY (default OFF, zero cost when off): when enabled, the
+        # latent render path stashes its pre-composite rendered face, the actual
+        # crop_mask, and the source crop into _last_latent_debug so an external
+        # A/B report can measure latent-vs-legacy-vs-source INSIDE the real face
+        # mask (not the diluted landmark bbox). Never read by the runtime.
+        self._capture_latent_debug: bool = False
+        self._last_latent_debug: Optional[dict] = None
 
         # D-02: A/B validation — render mode override (None = use default, 'alpha' = force alpha)
         self.render_mode_override: Optional[str] = None
@@ -223,6 +271,10 @@ class FaceOSPipeline:
         self._temporal_estimator = TemporalEstimator(self.state_evolution) if self.state_evolution else None
         self._face_renderer = FaceRenderer(self.physical_renderer, config=cfg)
         self._dense_geometry = DenseGeometryEstimator()
+        # A-7: Geometry subsystem gets a real runtime instance. It does NOT
+        # re-detect — assemble_state() packages the geometry the frame loop
+        # already extracted into a single GeometryState (one geometry truth).
+        self._geometry_estimator = GeometryEstimator(config=cfg)
 
         self._start_visibility_run()
         self._log_event(
@@ -569,6 +621,18 @@ class FaceOSPipeline:
         """
         return self._frame_telemetry_log
 
+    def get_latent_telemetry(self) -> list:
+        """Get per-frame LatentRenderTelemetry log.
+
+        D-05 Phase 0: one LatentRenderTelemetry dict per frame (mirrors
+        get_frame_telemetry). On legacy frames each record documents the
+        current truth (latent_primary=False, source_pixel_fraction=1.0).
+
+        Returns:
+            List of per-frame latent telemetry dicts
+        """
+        return self._latent_telemetry_log
+
     def enroll(
         self,
         reference_image: str = "expectation.png",
@@ -674,6 +738,15 @@ class FaceOSPipeline:
                 # This prevents identity drift — all reconstructions must stay close to anchor
                 self.identity_state.set_anchor(ref_bgr)
                 print(f"  Anchor set from reference (LAB distance threshold: {self.identity_state._anchor_threshold})")
+
+                # D-05 Task 2.1/2.6: Seed the lighting-invariant latent from the
+                # same enrollment reference (shadow mode — does not drive render).
+                if self._identity_estimator is not None:
+                    self._identity_estimator.set_anchor(ref_bgr)
+                    self._last_latent_confidence = float(
+                        self._identity_estimator.latent().mean_confidence()
+                    )
+                    print(f"  Latent anchor seeded (confidence: {self._last_latent_confidence:.3f})")
 
                 # Pre-populate identity state with MULTIPLE reference observations
                 # This gives the identity state a strong starting point
@@ -1208,6 +1281,10 @@ class FaceOSPipeline:
                 pass
 
         # 4. Identity state update (skip if USE_IDENTITY=False)
+        # geom_state is built by the shadow-update block below and REUSED by the
+        # Phase 2 latent render path (one geometry truth per frame). Initialize
+        # to None so it is always defined even when the update is skipped.
+        geom_state = None
         if USE_IDENTITY and canonical_face is not None and quality_map is not None and face_track is not None:
             pose = (landmarks.yaw, landmarks.pitch, landmarks.roll) if landmarks else None
             # Mask quality_map to face region only — prevent background learning
@@ -1229,7 +1306,7 @@ class FaceOSPipeline:
 
                 # Update with verification gate
                 mesh_478 = getattr(face_track, 'mesh_478', None)
-                self.identity_state.update(
+                identity_updated = self.identity_state.update(
                     canonical_face, masked_quality, pose=pose,
                     face_bbox=face_bbox,
                     landmarks_pts=landmarks_pts,
@@ -1237,6 +1314,49 @@ class FaceOSPipeline:
                     mesh_478=mesh_478,
                     warp_M=M[:2] if M is not None else None,
                 )
+
+                # D-05 Task 2.6: SHADOW-MODE latent update.
+                # The Geometry subsystem packages the geometry we ALREADY
+                # extracted (no re-detection — one geometry truth per frame).
+                # The Identity subsystem fuses this observation into its
+                # lighting-invariant latent via uncertainty-weighted fusion.
+                # This populates the latent and drives latent_confidence
+                # telemetry, but DOES NOT drive the render path yet (Phase 2).
+                #
+                # Only fuse when identity_state.update() ACCEPTED the frame
+                # (verification gate passed): a gate-rejected observation must
+                # not enter the identity latent, AND its decomposition would be
+                # stale. Reusing the decomposition update() just computed avoids
+                # a redundant second decompose of the same canonical_face.
+                # Shadow mode must never crash the pipeline.
+                if (
+                    self._identity_estimator is not None
+                    and self._latent_shadow_enabled
+                    and identity_updated
+                    and self.identity_state._intrinsic_components is not None
+                ):
+                    try:
+                        geom_state = self._geometry_estimator.assemble_state(
+                            canonical_face=canonical_face,
+                            canonical_transform=M,
+                            mask=canonical_face_mask,
+                            mesh=mesh_478,
+                            landmarks=landmarks,
+                            pose=pose if pose is not None else (0.0, 0.0, 0.0),
+                            geometry_confidence=(
+                                face_track.detection.confidence
+                                if face_track.detection else 0.0
+                            ),
+                        )
+                        latent = self._identity_estimator.update_latent(
+                            canonical_face, geom_state, masked_quality,
+                            intrinsic=self.identity_state._intrinsic_components,
+                        )
+                        self._last_latent_confidence = float(
+                            latent.mean_confidence()
+                        )
+                    except Exception as exc:  # noqa: BLE001 — shadow never crashes
+                        self._log_event("latent_shadow_update_failed", error=str(exc))
 
         # 5. Patch memory update (skip if USE_IDENTITY=False)
         if USE_IDENTITY and canonical_face is not None and quality_map is not None and landmarks:
@@ -1309,6 +1429,7 @@ class FaceOSPipeline:
             frame_idx=frame_idx,
             identity_eyes=identity_eyes,
             eye_confidence=eye_confidence,
+            geom_state=geom_state,
         )
 
         return output
@@ -1596,6 +1717,9 @@ class FaceOSPipeline:
         geometry_source: Optional[str] = None,
         resample_count: int = 0,
         transform_det: Optional[float] = None,
+        contract_assertions_passed: bool = True,
+        latent_primary: bool = False,
+        source_pixel_fraction: float = 1.0,
     ) -> None:
         """D-08: Emit per-frame telemetry JSON.
 
@@ -1626,6 +1750,57 @@ class FaceOSPipeline:
                 "energy_terms": energy_terms if energy_terms else {},
                 "transform_det": sim2_det,
             }
+            # D-05 Phase 0: attach a per-frame LatentRenderTelemetry sub-dict.
+            # Additive only — legacy frames report latent_primary=False and
+            # source_pixel_fraction=1.0 (face is source-derived in paste-then-relight).
+            # Wrapped so a failure here never drops the frame telemetry record.
+            try:
+                # albedo_drift_from_anchor: read from the identity anchor when
+                # available; never let a failure here drop the record.
+                albedo_drift = 0.0
+                if self.identity_state is not None and hasattr(self.identity_state, 'get_anchor_distance'):
+                    try:
+                        albedo_drift = float(self.identity_state.get_anchor_distance())
+                    except Exception:
+                        albedo_drift = 0.0
+                # uncertainty_mean: current-frame mean of intrinsic albedo
+                # uncertainty when available, else 1.0 (no carryover — built from
+                # this frame's intrinsic_components only). Requirement 8.3.
+                uncertainty_mean = 1.0
+                if intrinsic_components is not None:
+                    au = getattr(intrinsic_components, 'albedo_uncertainty', None)
+                    if au is not None:
+                        au_arr = np.asarray(au, dtype=np.float32)
+                        if au_arr.size > 0:
+                            uncertainty_mean = float(np.mean(au_arr))
+                latent_render = LatentRenderTelemetry(
+                    frame_idx=frame_idx,
+                    render_path=render_path,
+                    latent_primary=bool(latent_primary),
+                    source_pixel_fraction=float(source_pixel_fraction),
+                    latent_confidence=float(self._last_latent_confidence),
+                    albedo_drift_from_anchor=albedo_drift,
+                    uncertainty_mean=uncertainty_mean,
+                    contract_assertions_passed=bool(contract_assertions_passed),
+                )
+                latent_dict = latent_render.to_dict()
+                # Embed in the frame record AND append to the dedicated log.
+                record["latent"] = latent_dict
+                self._latent_telemetry_log.append(latent_dict)
+            except Exception:
+                # Keep the dedicated log aligned per-frame even on failure.
+                fallback_latent = {
+                    "frame_idx": frame_idx,
+                    "render_path": render_path,
+                    "latent_primary": False,
+                    "source_pixel_fraction": 1.0,
+                    "latent_confidence": 0.0,
+                    "albedo_drift_from_anchor": 0.0,
+                    "uncertainty_mean": 1.0,
+                    "contract_assertions_passed": bool(contract_assertions_passed),
+                }
+                record["latent"] = fallback_latent
+                self._latent_telemetry_log.append(fallback_latent)
             self._frame_telemetry_log.append(record)
             # JSONL visibility log
             self._append_visibility_record({
@@ -1644,6 +1819,16 @@ class FaceOSPipeline:
             })
         except Exception:
             # Last resort: emit minimal telemetry so the frame is never lost
+            error_latent = {
+                "frame_idx": frame_idx,
+                "render_path": "error",
+                "latent_primary": False,
+                "source_pixel_fraction": 1.0,
+                "latent_confidence": 0.0,
+                "albedo_drift_from_anchor": 0.0,
+                "uncertainty_mean": 1.0,
+                "contract_assertions_passed": bool(contract_assertions_passed),
+            }
             self._frame_telemetry_log.append({
                 "frame_idx": frame_idx,
                 "render_path": "error",
@@ -1654,7 +1839,9 @@ class FaceOSPipeline:
                 "resample_count": 0,
                 "energy_terms": {},
                 "transform_det": 1.0,
+                "latent": error_latent,
             })
+            self._latent_telemetry_log.append(error_latent)
 
     def _resolve_blend_mode(self) -> str:
         """Return an implemented compositor mode."""
@@ -1738,6 +1925,7 @@ class FaceOSPipeline:
         frame_idx: int,
         identity_eyes: Optional[np.ndarray] = None,
         eye_confidence: float = 0.0,
+        geom_state: Optional['GeometryState'] = None,
     ) -> Optional[np.ndarray]:
         """Shared rendering core — single source of truth for all rendering logic.
 
@@ -1748,8 +1936,29 @@ class FaceOSPipeline:
           2. Fallback: identity composite (warp canonical face to crop + blend)
           3. Last resort: enhancement-only (sharpen + denoise)
         """
+        # D-05 Phase 0: reset per-frame contract result so this frame's
+        # telemetry reflects only the current frame (Requirement 8.3/8.4).
+        self._last_contract_passed = True
+
         # BHENCHOD SANITIZER: Kill 256-channel tensors before they reach the renderer
         if intrinsic_components is not None and getattr(intrinsic_components, 'shading', None) is not None:
+            # D-05 Phase 0: warn-only contract check at the B->D boundary. In
+            # 'warn' mode this only logs (no clamp, no raise) so behavior is
+            # unchanged; in explicitly-configured 'fatal' mode it raises. Guard
+            # so warn-only can never break the frame.
+            try:
+                albedo = getattr(intrinsic_components, 'albedo', None)
+                if albedo is not None:
+                    expect_hw = tuple(np.asarray(albedo).shape[:2])
+                    passed = assert_intrinsic_contract(
+                        intrinsic_components, expect_hw=expect_hw, mode=self._contract_mode
+                    )
+                    self._last_contract_passed = self._last_contract_passed and bool(passed)
+            except Exception:
+                if self._contract_mode == 'fatal':
+                    raise
+                self._last_contract_passed = False
+
             shd = intrinsic_components.shading
             if isinstance(shd, np.ndarray):
                 if shd.ndim == 3 and shd.shape[2] > 3:
@@ -1794,6 +2003,42 @@ class FaceOSPipeline:
                     physical_possible = False
                     fallback_reason = 'energy_photometric_low'
 
+        # D-05 Phase 2: LATENT render path (peer of the physical branch).
+        # When render_source='latent' and the latent is initialized + landmarks
+        # are present, the identity latent DRIVES the face interior — synthesized
+        # under lighting estimated from the observation, NOT a decomposition of
+        # the source crop. This returns on its own path (skipping the legacy
+        # source-HF reinjection tail below), retiring A-2/A-3/A-5. On any failure
+        # it falls through to the legacy path so a frame is never dropped.
+        if (
+            self.render_source == 'latent'
+            and landmarks is not None
+            and self._identity_estimator is not None
+            and self._identity_estimator.latent().initialized
+        ):
+            latent_result = self._render_with_latent(
+                cropped, landmarks, crop_plan, frame_idx, geom_state=geom_state,
+            )
+            if latent_result is not None:
+                latent_result = self._postprocess_rendered_crop(latent_result, face_mask)
+                self._telemetry["physical_render_frames"] += 1
+                self._emit_frame_telemetry(
+                    frame_idx, fallback_reason, intrinsic_components,
+                    energy_terms, prev_physical, prev_alpha,
+                    render_path="latent",
+                    intrinsic_used=True,
+                    geometry_source=self._last_geometry_source,
+                    resample_count=1,
+                    contract_assertions_passed=self._last_contract_passed,
+                    latent_primary=True,
+                    source_pixel_fraction=float(self._last_source_pixel_fraction),
+                )
+                render_time_ms = (_time.perf_counter() - _render_start) * 1000
+                self._telemetry["render_time_sum_ms"] += render_time_ms
+                self._telemetry["render_time_count"] += 1
+                return latent_result
+            # else: latent render unavailable this frame -> legacy fallback.
+
         if physical_possible:
             result = self._render_with_physical_renderer(
                 source_frame, cropped, intrinsic_components, intrinsic_conf,
@@ -1818,6 +2063,7 @@ class FaceOSPipeline:
                     intrinsic_used=True,
                     geometry_source=self._last_geometry_source,
                     resample_count=1,
+                    contract_assertions_passed=self._last_contract_passed,
                 )
                 self._logger.info(
                     "frame=%d | render=physical | fallback=%s | det=%.4f | energy=%s",
@@ -1871,6 +2117,7 @@ class FaceOSPipeline:
                         intrinsic_used=False,
                         geometry_source="canonical_identity",
                         resample_count=1,
+                        contract_assertions_passed=self._last_contract_passed,
                     )
                     self._logger.info(
                         "frame=%d | render=alpha | fallback=%s | intrinsic=%s | geom=%s | det=%.4f",
@@ -1930,6 +2177,7 @@ class FaceOSPipeline:
             intrinsic_used=False,
             geometry_source="none",
             resample_count=0,
+            contract_assertions_passed=self._last_contract_passed,
         )
 
         return rendered
@@ -1971,6 +2219,23 @@ class FaceOSPipeline:
 
             # BHENCHOD SANITIZER: Kill 256-channel latent embeddings posing as shading
             if hasattr(source_intrinsic, 'shading') and isinstance(source_intrinsic.shading, np.ndarray):
+                # D-05 Phase 0: warn-only contract check at the B->D boundary.
+                # Warn mode only logs (no clamp, no raise); explicit fatal mode
+                # raises. AND the result into the per-frame flag set in
+                # _render_core so a frame fails the contract if either site does.
+                try:
+                    albedo = getattr(source_intrinsic, 'albedo', None)
+                    if albedo is not None:
+                        expect_hw = tuple(np.asarray(albedo).shape[:2])
+                        passed = assert_intrinsic_contract(
+                            source_intrinsic, expect_hw=expect_hw, mode=self._contract_mode
+                        )
+                        self._last_contract_passed = self._last_contract_passed and bool(passed)
+                except Exception:
+                    if self._contract_mode == 'fatal':
+                        raise
+                    self._last_contract_passed = False
+
                 if source_intrinsic.shading.ndim == 3 and source_intrinsic.shading.shape[2] > 3:
                     source_intrinsic.shading = np.mean(source_intrinsic.shading, axis=2, keepdims=True).astype(np.float32)
                 elif source_intrinsic.shading.ndim == 2:
@@ -2138,6 +2403,195 @@ class FaceOSPipeline:
 
         except Exception as e:
             print(f"  Frame {frame_idx}: OUTPUT-SPACE RENDER FAILED: {e}")
+            return None
+
+    def estimate_lighting(self, cropped: np.ndarray, normal_map: np.ndarray,
+                          mask: Optional[np.ndarray] = None) -> 'LightingModel':
+        """Estimate scene illumination from the OBSERVATION (never the latent).
+
+        Derives a scalar shading field S = luminance(linear(cropped)) and fits it
+        against the render ``normal_map`` via the closed-form inverse of the
+        renderer's Lambertian term (``fit_lighting_from_shading_normals``):
+        ``S = ambient + N·(diffuse·L)``. Lighting is read from the current frame
+        so the latent albedo can be re-lit under the real scene — it is NEVER
+        stored in or read from the identity latent (Requirement: lighting
+        excluded from identity).
+
+        Uses ONLY the source crop's luminance (a photometric observation), not a
+        source albedo decomposition — so this introduces no paste-then-relight
+        (A-2/A-3) coupling. Degenerate frames fall back to a safe floor inside
+        the fit.
+        """
+        from face_os.physical_renderer import fit_lighting_from_shading_normals
+
+        src = np.asarray(cropped, dtype=np.float32)
+        if src.max() > 1.5:
+            src = src / 255.0
+        # BGR -> linear-light luminance (BT.709 on RGB). Crop is BGR.
+        lin = _srgb_to_linear(np.clip(src, 0.0, 1.0))
+        b, g, r = lin[..., 0], lin[..., 1], lin[..., 2]
+        shading = (0.2126 * r + 0.7152 * g + 0.0722 * b).astype(np.float32)
+        return fit_lighting_from_shading_normals(shading, normal_map, mask=mask)
+
+    @staticmethod
+    def _source_pixel_fraction(
+        rendered: np.ndarray,
+        source: np.ndarray,
+        mask: np.ndarray,
+        tol: float = 6.0,
+    ) -> float:
+        """Spec leak metric (design.md:545, requirements.md:32).
+
+        The fraction of pixels INSIDE the face mask whose rendered color still
+        MATCHES the source crop within tolerance — i.e. how much of the
+        synthesized face is a surviving paste of the source (paste-then-relight
+        leak). A pixel "matches source" iff its max per-channel absolute
+        difference from the source is <= ``tol`` intensity levels (0-255). High
+        fraction => the latent is not truly driving the face; target < 0.02 on
+        the latent path. Returns 0.0 for an empty mask interior (never NaN).
+
+        This is the HONEST no-leak proof. The earlier proxy
+        (``1 - mean(feathered_mask)``) measured the background fraction over the
+        whole crop and said nothing about leak.
+        """
+        r = np.asarray(rendered, dtype=np.float32)
+        s = np.asarray(source, dtype=np.float32)
+        if r.shape != s.shape:
+            s = cv2.resize(s, (r.shape[1], r.shape[0]))
+        m = np.asarray(mask, dtype=np.float32)
+        if m.shape[:2] != r.shape[:2]:
+            m = cv2.resize(m, (r.shape[1], r.shape[0]))
+        interior = m > 0.5
+        n = int(interior.sum())
+        if n == 0:
+            return 0.0
+        diff = np.abs(r - s)
+        if diff.ndim == 3:
+            diff = diff.max(axis=2)
+        matches = (diff <= tol) & interior
+        return float(matches.sum()) / float(n)
+
+    def _render_with_latent(
+        self,
+        cropped: np.ndarray,
+        landmarks: Optional[Landmarks],
+        crop_plan: CropPlan,
+        frame_idx: int,
+        geom_state: Optional['GeometryState'] = None,
+    ) -> Optional[np.ndarray]:
+        """D-05 Phase 2: render the face from the identity LATENT (not the source).
+
+        The latent — lighting-invariant reflectance + structure — is synthesized
+        into the current geometry, shaded under lighting ESTIMATED from the
+        observation, and composited into the crop. This is the architectural
+        retirement of paste-then-relight (A-2/A-3) and source-HF reinjection
+        (A-5): the face interior is produced from stored identity, never from a
+        decomposition of the current source crop.
+
+        Returns the rendered crop (BGR uint8) or ``None`` to fall back to legacy.
+        """
+        try:
+            est = self._identity_estimator
+            if est is None or not est.latent().initialized:
+                return None  # nothing to render from yet -> legacy fallback
+
+            crop_h, crop_w = cropped.shape[:2]
+
+            # ── Crop-space render geometry ─────────────────────────────────────
+            # Derive the canonical<->crop transform from the SAME landmarks the
+            # frame already extracted (no re-detection). M: crop->canonical;
+            # M_inv: canonical->crop (used to warp the latent albedo into crop
+            # space). This is the render projection of the one geometry truth.
+            adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
+            if adjusted_lm is None:
+                return None
+            M, _ = canonical_map.compute_alignment(
+                adjusted_lm, canonical_size=tuple(cfg.canonical.atlas_size),
+            )
+            M_inv_2x3 = np.linalg.inv(M)[:2]
+            inverse_transform = np.eye(3, dtype=np.float32)
+            inverse_transform[:2, :] = M_inv_2x3
+
+            # Crop-sized geometry mask (canonical elliptical mask warped to crop).
+            canonical_mask = self._make_canonical_geometry_mask(
+                tuple(cfg.canonical.atlas_size)[::-1]
+            )
+            crop_mask = cv2.warpAffine(
+                canonical_mask, M_inv_2x3, (crop_w, crop_h),
+                flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0,
+            )
+            crop_mask = np.clip(crop_mask, 0.0, 1.0).astype(np.float32)
+
+            mesh_478 = getattr(geom_state, 'mesh', None) if geom_state is not None else None
+            render_geom = GeometryState(
+                landmarks=landmarks,
+                pose=(getattr(geom_state, 'pose', None) or (0.0, 0.0, 0.0)),
+                canonical_transform=np.asarray(M, dtype=np.float32),
+                inverse_transform=inverse_transform,
+                mesh=mesh_478,
+                mask=crop_mask,
+                canonical_face=cropped,  # sets render size = crop (H, W)
+            )
+
+            # ── Synthesize identity (latent albedo + microdetail + normals) ────
+            components = est.synthesize_identity(render_geom)
+
+            # ── Lighting from the OBSERVATION, applied to the latent at render ─
+            lighting = self.estimate_lighting(
+                cropped, components.normal_map, mask=crop_mask > 0.3
+            )
+
+            # ── Render: latent albedo shaded under estimated lighting (no crop) ─
+            rendered = self._face_renderer.render_from_latent(
+                components, render_geom, lighting,
+            )
+            if rendered is None:
+                return None
+            rendered_face = np.clip(np.asarray(rendered, np.float32), 0.0, 1.0)
+
+            # ── Composite the rendered face into the crop (linear-light) ───────
+            # Compositing the face region into the frame is legitimate; only
+            # SOURCE albedo/HF reinjection is forbidden — and we do neither.
+            feather_ksize = max(3, cfg.compositor.feather_pixels * 2 + 1)
+            feathered_mask = cv2.GaussianBlur(
+                crop_mask, (feather_ksize, feather_ksize), cfg.compositor.feather_pixels / 2
+            )
+            rendered_u8 = (rendered_face * 255.0).astype(np.uint8)
+            if rendered_u8.shape[:2] != (crop_h, crop_w):
+                rendered_u8 = cv2.resize(rendered_u8, (crop_w, crop_h))
+            blend_mode = self._resolve_blend_mode()
+            if blend_mode == "laplacian":
+                output = multiband_blend(cropped, rendered_u8, feathered_mask, levels=4)
+            else:
+                output = _blend_linear(cropped, rendered_u8, feathered_mask)
+
+            self._last_geometry_source = est._last_normal_source
+            # SPEC leak metric (design.md:545): fraction of FACE-INTERIOR pixels
+            # whose composited color still matches the SOURCE crop within
+            # tolerance — the honest paste-then-relight leak. Measured over the
+            # geometry mask interior (NOT the whole crop), comparing the final
+            # composited output against the source. Target < 0.02 on the latent
+            # path; a high value means the latent is not truly driving the face.
+            self._last_source_pixel_fraction = self._source_pixel_fraction(
+                output, cropped, crop_mask,
+            )
+            # DIAGNOSTIC capture (opt-in, default off): stash the pre-composite
+            # rendered face, the actual crop_mask, source crop, and composited
+            # output so an external report can measure the TRUE mask-interior
+            # latent-vs-legacy-vs-source signal (no landmark-bbox dilution).
+            if self._capture_latent_debug:
+                self._last_latent_debug = {
+                    "frame_idx": frame_idx,
+                    "rendered_face": rendered_u8.copy(),   # latent face BEFORE blend
+                    "crop_mask": crop_mask.copy(),         # real geometry mask (0..1)
+                    "source_crop": np.asarray(cropped).copy(),
+                    "composited": output.copy(),
+                    "normal_source": est._last_normal_source,
+                }
+            return output
+
+        except Exception as exc:  # noqa: BLE001 — a latent-render failure must fall back, never crash
+            self._log_event("latent_render_failed", error=str(exc), frame_idx=frame_idx)
             return None
 
     @staticmethod
@@ -2405,6 +2859,8 @@ class FaceOSPipeline:
         self.energy_scaler.reset()
         # D-08: Reset per-frame telemetry log
         self._frame_telemetry_log = []
+        # D-05 Phase 0: Reset per-frame latent telemetry log
+        self._latent_telemetry_log = []
         # D-06: Reset SIM2 prediction state
         self._prev_SIM2 = None
         # D-10: Reset temporal estimator wrapper

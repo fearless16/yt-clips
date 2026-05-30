@@ -403,3 +403,89 @@ class PhaseState:
     invariants_total: int = 0
     energy_reports: List[EnergyReport] = field(default_factory=list)
     pass_reports: List[PassReport] = field(default_factory=list)
+
+
+# ─── Latent Identity Rendering (D-05) — Phase 0 additive structures ──────────
+
+@dataclass
+class IdentityLatent:
+    """Lighting-invariant identity latent in CANONICAL UV space.
+
+    This is the renderer's PRIMARY input source (once the latent path is live).
+    It stores reflectance and structure ONLY — NEVER illumination, NEVER raw
+    RGB frames.
+
+    Fields default to ``None`` so an empty (uninitialized) latent can be
+    constructed cheaply; ``IdentityEstimator`` populates them on the first
+    observation. The invariants below hold ONCE ``initialized is True``:
+
+      - ``albedo``: (H, W, 3) float32 in [0, 1], white-balance normalized
+        against ``wb_reference``, in canonical UV (``atlas_size``).
+      - ``appearance_code``: (D,) float32, D = ManifoldConfig.dimension (16).
+      - ``microdetail``: (H, W, 3) float32 zero-mean HF residual,
+        best-observation-only (NEVER an EMA of pixels).
+      - ``wb_reference``: (3,) float32 white-balance reference.
+      - ``albedo_uncertainty`` / ``microdetail_uncertainty``: (H, W) float32 in
+        [0, 1], same HxW as their data field.
+      - ``appearance_uncertainty``: scalar [0, 1] (epistemic, from manifold).
+      - ``observation_count``: (H, W) float32 — accumulated quality, for
+        confidence.
+    """
+    atlas_size: Tuple[int, int] = (256, 256)          # (H, W) canonical UV
+
+    albedo: Optional[np.ndarray] = None               # (H, W, 3) float32 [0,1]
+    appearance_code: Optional[np.ndarray] = None      # (D,) float32
+    microdetail: Optional[np.ndarray] = None          # (H, W, 3) float32 zero-mean
+    wb_reference: Optional[np.ndarray] = None         # (3,) float32
+
+    albedo_uncertainty: Optional[np.ndarray] = None        # (H, W) float32 [0,1]
+    appearance_uncertainty: float = 1.0                    # scalar [0,1]
+    microdetail_uncertainty: Optional[np.ndarray] = None   # (H, W) float32 [0,1]
+
+    observation_count: Optional[np.ndarray] = None    # (H, W) float32
+    initialized: bool = False
+
+    def mean_confidence(self) -> float:
+        """Mean latent confidence = 1 - mean(albedo_uncertainty), clamped [0,1].
+
+        Returns 0.0 when uncertainty is unavailable (None or empty), so an
+        uninitialized latent reads as zero-confidence rather than crashing.
+        """
+        unc = self.albedo_uncertainty
+        if unc is None:
+            return 0.0
+        arr = np.asarray(unc, dtype=np.float32)
+        if arr.size == 0:
+            return 0.0
+        conf = 1.0 - float(np.mean(arr))
+        return float(np.clip(conf, 0.0, 1.0))
+
+
+@dataclass
+class LatentRenderTelemetry:
+    """Per-frame proof that the latent (not the source crop) drove the render.
+
+    Emitted once per frame by the Telemetry_System. On legacy frames it
+    documents the current truth (``latent_primary=False``,
+    ``source_pixel_fraction≈1.0``).
+    """
+    frame_idx: int = 0
+    render_path: str = "physical_legacy"   # 'latent' | 'physical_legacy' | 'alpha' | 'enhancement'
+    latent_primary: bool = False           # True iff face interior synthesized from latent
+    source_pixel_fraction: float = 1.0     # fraction of face-mask pixels traceable to source
+    latent_confidence: float = 0.0
+    albedo_drift_from_anchor: float = 0.0
+    uncertainty_mean: float = 0.0
+    contract_assertions_passed: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "frame_idx": self.frame_idx,
+            "render_path": self.render_path,
+            "latent_primary": self.latent_primary,
+            "source_pixel_fraction": self.source_pixel_fraction,
+            "latent_confidence": self.latent_confidence,
+            "albedo_drift_from_anchor": self.albedo_drift_from_anchor,
+            "uncertainty_mean": self.uncertainty_mean,
+            "contract_assertions_passed": self.contract_assertions_passed,
+        }

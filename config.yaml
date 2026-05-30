@@ -205,8 +205,8 @@ learner:
 
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
-  provider: "groq"            # groq | deepseek | openrouter | nvidia | xai | ollama
-  model: "meta-llama/llama-4-scout-17b-16e-instruct"     # fastest, free tier
+  provider: "nvidia"            # nvidia | blueminds (groq/openrouter/deepseek broken)
+  model: "meta/llama-3.3-70b-instruct"     # reliable, free
   # Benchmark results (16 May 2026, verified live):
   # Provider  Model                                        Score  Latency  Cost
   # ──────────────────────────────────────────────────────────────────────────────
