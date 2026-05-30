@@ -160,8 +160,9 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
     - **DONE.** `USE_LEGACY_RGB_BELIEF = False` added at module top. `BeliefPixel` creation gated behind flag (`update` ~503). `belief.update()` gated behind flag (~519). `is_initialized()` returns False when flag is off → `query()` returns neutral fallback. Intrinsic decomposition (used by latent path) still runs unconditionally. BeliefPixel object preserved for LAB telemetry reads. Fast suite: 278 passed, 0 regressions.
     - _Requirements: 9.1, 6.6_
 
-  - [ ] 4.3 Retire the 0.4 albedo blend and drift-bucket mean-correction
+  - [x] 4.3 Retire the 0.4 albedo blend and drift-bucket mean-correction
     - In `face_os/pipeline.py`, remove the fixed `0.4` albedo blend (~1262/~1384) and the drift-bucket mean-correction (~2010-2017) on the default latent path, relying on uncertainty-weighted fusion instead.
+    - **DONE.** Both `albedo_weight = ... * 0.4` blends (lines 1415, 1538) gated behind `render_source == 'legacy'`. Shading channel sanitizer (lines 2010-2015) gated behind `render_source == 'legacy'`. Latent path creates its own shading via `synthesize_identity` → `estimate_lighting` → `render_from_latent`; legacy sanitizers are unused and now skipped. Fast suite: 278 passed, 0 regressions.
     - _Requirements: 9.2, 9.3, 5.3_
 
   - [ ] 4.4 Add color-cast compensation with reject-on-failure guard

@@ -1411,7 +1411,7 @@ class FaceOSPipeline:
 
             # D-05: Query lighting-invariant albedo for forward path (via subsystem wrapper)
             albedo_face, albedo_conf = self._identity_estimator.query_albedo(quality_map)
-            if albedo_face is not None and albedo_conf is not None:
+            if self.render_source == 'legacy' and albedo_face is not None and albedo_conf is not None:
                 albedo_weight = float(np.mean(albedo_conf)) * 0.4
                 identity_face = (1 - albedo_weight) * identity_face + albedo_weight * albedo_face
 
@@ -1533,8 +1533,8 @@ class FaceOSPipeline:
                     # NOTE: Mode update happens in orchestration layer, not here
                     # D-05: Use albedo as primary identity, fall back to RGB query
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
-                    # Blend albedo into identity face for lighting invariance
-                    if albedo_face is not None and albedo_conf is not None:
+                    # Blend albedo into identity face for lighting invariance (legacy only)
+                    if self.render_source == 'legacy' and albedo_face is not None and albedo_conf is not None:
                         albedo_weight = float(np.mean(albedo_conf)) * 0.4
                         identity_face = (1 - albedo_weight) * identity_face + albedo_weight * albedo_face
 
@@ -2008,7 +2008,7 @@ class FaceOSPipeline:
                 self._last_contract_passed = False
 
             shd = intrinsic_components.shading
-            if isinstance(shd, np.ndarray):
+            if isinstance(shd, np.ndarray) and self.render_source == 'legacy':
                 if shd.ndim == 3 and shd.shape[2] > 3:
                     intrinsic_components.shading = np.mean(shd, axis=2, keepdims=True).astype(np.float32)
                 elif shd.ndim == 2:
