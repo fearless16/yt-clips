@@ -1509,3 +1509,53 @@ class TestLatentRenderModeOnRealVideo:
             f"{min(alphas):.4f} >= 0.9) — the observation never crossed despite "
             f"broad latent uncertainty. alphas={[round(a, 4) for a in alphas]}"
         )
+
+
+@pytest.mark.slow
+class TestLatentQualityOnRealVideo:
+    """D-05 task 4.5: runtime-truth slow test asserting latent quality targets
+    on input/video.mp4. Requires real video (not in worktree, uses main path)."""
+
+    VIDEO_PATH = "/Users/prajwalbairagi/projects/yt-clips/input/video.mp4"
+
+    @pytest.fixture(autouse=True)
+    def _require_video(self):
+        import os
+        if not os.path.exists(self.VIDEO_PATH):
+            pytest.skip("input/video.mp4 not found")
+
+    def test_latent_primary_and_source_fraction(self):
+        """latent_primary=True and source_pixel_fraction < 0.02 for ≥90% of frames."""
+        from face_os.pipeline import FaceOSPipeline
+        pipeline = FaceOSPipeline(use_bidirectional=False)
+        pipeline.render_source = 'latent'
+        pipeline.enroll()
+
+        import cv2
+        cap = cv2.VideoCapture(self.VIDEO_PATH)
+        latent_frames = 0
+        total_frames = 0
+        fractions = []
+
+        while total_frames < 200:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            result = pipeline.process_frame(frame, frame_idx=total_frames)
+            if result and result.get('frame') is not None:
+                total_frames += 1
+                telem = pipeline._frame_telemetry_log[-1] if pipeline._frame_telemetry_log else {}
+                if telem.get('latent_primary', False):
+                    latent_frames += 1
+                fractions.append(telem.get('source_pixel_fraction', 1.0))
+
+        cap.release()
+        del pipeline
+
+        if total_frames < 10:
+            pytest.skip("too few frames processed")
+
+        latent_pct = latent_frames / total_frames
+        mean_frac = float(np.mean(fractions)) if fractions else 1.0
+        assert latent_pct >= 0.90, f"latent_primary only on {latent_pct:.1%} of frames"
+        assert mean_frac < 0.02, f"mean source_pixel_fraction {mean_frac:.4f} >= 0.02"
