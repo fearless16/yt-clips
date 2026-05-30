@@ -207,6 +207,21 @@ def compute_ssim(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     return float(np.mean(ssim_map))
 
 
+def compute_sharpness(frame: np.ndarray, mask: Optional[np.ndarray] = None) -> float:
+    """Variance-of-Laplacian sharpness (higher = crisper). Optionally restricted
+    to a face mask so background does not dilute the score. Mirrors the locked-
+    arch metric in audit.py/export_qc.py so the A/B number is comparable."""
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    lap = cv2.Laplacian(gray, cv2.CV_32F)
+    if mask is not None:
+        if mask.shape != gray.shape:
+            mask = cv2.resize(mask.astype(np.float32), (gray.shape[1], gray.shape[0]))
+        m = mask > 0.5
+        if np.any(m):
+            return float(np.var(lap[m]))
+    return float(np.var(lap))
+
+
 def compute_temporal_smoothness(frames: List[np.ndarray]) -> float:
     if len(frames) < 2: return 1.0
     changes = [np.mean(np.abs(frames[i].astype(np.float32) - frames[i - 1].astype(np.float32))) for i in range(1, len(frames))]
@@ -338,6 +353,148 @@ class ABComparator:
         cap.release()
         pipeline.render_mode_override = original_override
         return frames, landmarks_list, transforms_list
+
+    def _run_pipeline_source(self, pipeline, video_path: str, max_frames: int, render_source: str) -> tuple:
+        """Drive the pipeline under a fixed ``render_source`` ('legacy'|'latent').
+
+        SPEC NOTE (3.5): the design's literal wording routes the latent A/B
+        "through process_frame(..., render_mode_override=...)", but the as-built
+        contract differs — `render_mode_override` is an INSTANCE attribute that
+        only forces the physical->alpha downgrade (pipeline.py:2032), it is NOT a
+        process_frame parameter and has NO 'latent' value. The latent-vs-legacy
+        selector is the `render_source` instance attribute (pipeline.py:2073).
+        We therefore set/restore `render_source` (mirroring how the legacy
+        `_run_pipeline` toggles `render_mode_override`). Working contract wins.
+        """
+        if hasattr(pipeline, '_reset_state'):
+            pipeline._reset_state()
+        if hasattr(pipeline, 'enroll') and pipeline.tracker is None:
+            pipeline.enroll()
+
+        original_source = getattr(pipeline, 'render_source', 'legacy')
+        pipeline.render_source = render_source
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            pipeline.render_source = original_source
+            return [], [], []
+
+        frames, landmarks_list, transforms_list, frame_idx = [], [], [], 0
+        try:
+            while len(frames) < max_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                try:
+                    result = pipeline.process_frame(frame, frame_idx=frame_idx)
+                    if result and result.get('frame') is not None:
+                        frames.append(result['frame'])
+                        lm = result.get('landmarks')
+                        if lm is not None:
+                            arr = np.asarray(lm)
+                            if arr.ndim >= 2:
+                                landmarks_list.append(arr)
+                        if result.get('transform'):
+                            transforms_list.append(result['transform'])
+                except Exception as e:
+                    _logger.warning('AB latent frame %d error: %s', frame_idx, e)
+                frame_idx += 1
+        finally:
+            cap.release()
+            pipeline.render_source = original_source
+        return frames, landmarks_list, transforms_list
+
+    def compare_render_sources(
+        self,
+        pipeline,
+        video_path: str,
+        max_frames: int = 100,
+        ssim_floor: float = 0.85,
+        lab_drift_ceiling: float = 12.0,
+        sharpness_ratio_floor: float = 0.80,
+        flicker_ratio_ceiling: float = 1.50,
+    ) -> dict:
+        """Latent-vs-legacy A/B (D-05 Phase 3 promotion gate).
+
+        Runs the SAME clip under render_source='legacy' then 'latent', computes
+        SSIM(legacy, latent), per-frame LAB drift, sharpness, and flicker for
+        each, and reports a non-regression verdict. ``regressed=False`` is the
+        green light to flip the default to 'latent' (task 4.1); the thresholds
+        are named so the gate is auditable, not a magic pass/fail.
+
+        Returns a dict with both metric sets, the per-criterion checks, and the
+        overall ``regressed`` boolean + human ``reasons``.
+        """
+        frames_legacy, _, _ = self._run_pipeline_source(pipeline, video_path, max_frames, 'legacy')
+        frames_latent, _, _ = self._run_pipeline_source(pipeline, video_path, max_frames, 'latent')
+
+        # Flicker reuses the existing locked-arch metric (benchmark_suite.py:264);
+        # local import avoids any module-load circular dependency.
+        try:
+            from face_os.benchmark_suite import compute_flicker_score
+        except Exception:  # pragma: no cover - fallback to the in-module proxy
+            def compute_flicker_score(frames):
+                if len(frames) < 2:
+                    return 0.0
+                ch = [float(np.mean(np.abs(
+                    cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
+                    - cv2.cvtColor(frames[i - 1], cv2.COLOR_BGR2GRAY).astype(np.float32))))
+                    for i in range(1, len(frames))]
+                return float(np.std(ch)) if ch else 0.0
+
+        n = min(len(frames_legacy), len(frames_latent))
+        if n == 0:
+            return {
+                'regressed': True,
+                'reasons': ['no frames produced by one or both render sources'],
+                'frames_legacy': len(frames_legacy),
+                'frames_latent': len(frames_latent),
+            }
+
+        ssim_scores = [compute_ssim(frames_legacy[i], frames_latent[i]) for i in range(n)]
+        lab_scores = [compute_lab_drift(frames_latent[i], frames_legacy[i]) for i in range(n)]
+        sharp_legacy = [compute_sharpness(f) for f in frames_legacy[:n]]
+        sharp_latent = [compute_sharpness(f) for f in frames_latent[:n]]
+        flicker_legacy = compute_flicker_score(frames_legacy[:n])
+        flicker_latent = compute_flicker_score(frames_latent[:n])
+
+        ssim_mean = float(np.mean(ssim_scores))
+        lab_mean = float(np.mean(lab_scores))
+        sharp_l_mean = float(np.mean(sharp_legacy)) if sharp_legacy else 0.0
+        sharp_t_mean = float(np.mean(sharp_latent)) if sharp_latent else 0.0
+        sharp_ratio = (sharp_t_mean / sharp_l_mean) if sharp_l_mean > 1e-6 else 1.0
+        flicker_ratio = (flicker_latent / flicker_legacy) if flicker_legacy > 1e-6 else 1.0
+
+        checks = {
+            'ssim_ok': ssim_mean >= ssim_floor,
+            'lab_drift_ok': lab_mean <= lab_drift_ceiling,
+            'sharpness_ok': sharp_ratio >= sharpness_ratio_floor,
+            'flicker_ok': flicker_ratio <= flicker_ratio_ceiling,
+        }
+        reasons = []
+        if not checks['ssim_ok']:
+            reasons.append(f"SSIM {ssim_mean:.3f} < floor {ssim_floor}")
+        if not checks['lab_drift_ok']:
+            reasons.append(f"LAB drift {lab_mean:.2f} > ceiling {lab_drift_ceiling}")
+        if not checks['sharpness_ok']:
+            reasons.append(f"sharpness ratio {sharp_ratio:.3f} < floor {sharpness_ratio_floor}")
+        if not checks['flicker_ok']:
+            reasons.append(f"flicker ratio {flicker_ratio:.3f} > ceiling {flicker_ratio_ceiling}")
+
+        return {
+            'regressed': not all(checks.values()),
+            'reasons': reasons,
+            'checks': checks,
+            'ssim_mean': ssim_mean,
+            'lab_drift_mean': lab_mean,
+            'sharpness_legacy': sharp_l_mean,
+            'sharpness_latent': sharp_t_mean,
+            'sharpness_ratio': sharp_ratio,
+            'flicker_legacy': flicker_legacy,
+            'flicker_latent': flicker_latent,
+            'flicker_ratio': flicker_ratio,
+            'frames_compared': n,
+        }
 
     def benchmark_report(self, comparison_result: dict) -> str:
         # Kept intact for brevity, logic is fine

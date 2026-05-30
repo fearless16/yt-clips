@@ -1039,6 +1039,172 @@ class TestPhysicalGate:
         assert reason == 'energy_geom_extreme'
 
 
+# ═══════════════════════════════════════════════════════════════════
+# Task 3.11 — FAST latent-path drive + subsystem-boundary tests
+#
+# The full pipeline frame loop needs real MediaPipe detection, so it can only
+# run @slow on real video. These tests instead DIRECT-DRIVE `_render_with_latent`
+# on synthetic landmarks so the latent render path engages in the FAST subset.
+# `_render_with_latent` returns None (silent legacy fallback) on ANY guard miss
+# or swallowed exception, so `result is not None` is the LOAD-BEARING guard
+# against the documented "green test hides a broken-runtime fallback" trap that
+# bit this path once before (a GeometryState NameError stayed green at 228).
+# ═══════════════════════════════════════════════════════════════════
+
+# MediaPipe-style 5 alignment anchors and their canonical (256-atlas) positions
+# (face_os/canonical_map.py:30-38). Placing the synthetic anchors ON the
+# canonical positions makes compute_alignment yield a stable ~identity transform
+# and a centered face mask — no real detection required.
+_ANCHOR_IDX = [1, 33, 263, 61, 291]
+_ANCHOR_XY = [(128.0, 145.0), (150.0, 105.0), (106.0, 105.0),
+              (142.0, 185.0), (114.0, 185.0)]
+
+
+def _synthetic_face_landmarks():
+    """478-point Landmarks whose 5 alignment anchors sit on the canonical
+    positions (stable transform, centered mask; no MediaPipe)."""
+    from face_os.types import Landmarks
+    pts = np.full((478, 2), 128.0, dtype=np.float32)
+    for idx, (x, y) in zip(_ANCHOR_IDX, _ANCHOR_XY):
+        pts[idx] = (x, y)
+    return Landmarks(points=pts)
+
+
+def _init_latent_estimator(atlas_size=(256, 256), seed=0):
+    """An IdentityEstimator with an INITIALIZED latent, seeded from a random
+    canonical face via update_latent (no enrollment / real video). Built on a
+    bare mock state so it NEVER reaches a real IdentityState's internals."""
+    from face_os.subsystems.identity_estimator import IdentityEstimator
+    from face_os.types import GeometryState
+
+    class _MockState:  # IdentityEstimator only needs an object handle here
+        pass
+
+    est = IdentityEstimator(_MockState(), atlas_size=atlas_size)
+    geom = GeometryState(
+        pose=(0.0, 0.0, 0.0),
+        canonical_transform=np.eye(3, dtype=np.float32),
+        inverse_transform=np.eye(3, dtype=np.float32),
+    )
+    rng = np.random.RandomState(seed)
+    canonical_face = rng.randint(40, 220, (*atlas_size, 3)).astype(np.uint8)
+    quality = np.ones(atlas_size, dtype=np.float32) * 0.8
+    est.update_latent(canonical_face, geom, quality)
+    assert est.latent().initialized, "latent failed to initialize in test setup"
+    return est
+
+
+def _make_latent_pipeline(crop_size=256):
+    """A pipeline wired to drive _render_with_latent on synthetic input:
+    real FaceRenderer + an initialized IdentityEstimator, render_source='latent'.
+    The source crop is deliberately DIFFERENT from the latent albedo so a real
+    latent render yields a low (non-coincidental) source-pixel-fraction.
+    """
+    from face_os.physical_renderer import PhysicalRenderer
+    from face_os.subsystems.renderer import FaceRenderer
+    from face_os.types import CropPlan
+
+    p = FaceOSPipeline()
+    p.render_source = 'latent'
+    p._face_renderer = FaceRenderer(PhysicalRenderer())
+    p._identity_estimator = _init_latent_estimator(atlas_size=(256, 256))
+
+    landmarks = _synthetic_face_landmarks()
+    crop_plan = CropPlan(src_x=0, src_y=0, src_w=crop_size, src_h=crop_size,
+                         dst_w=crop_size, dst_h=crop_size)
+    yy, xx = np.mgrid[0:crop_size, 0:crop_size].astype(np.float32)
+    grad = ((xx + yy) / (2 * crop_size) * 180 + 40).astype(np.uint8)
+    cropped = np.stack([grad, np.roll(grad, 20, 0), np.roll(grad, 40, 1)], axis=-1)
+    return p, cropped, landmarks, crop_plan
+
+
+class _BoundaryProbe:
+    """Stands in for pipeline.identity_state; RAISES if the latent render path
+    dereferences a forbidden legacy attr (proves subsystem boundary, Req 4.1/7.6)."""
+    FORBIDDEN = ("_anchor_albedo", "_intrinsic_decomposer", "_gate")
+
+    def __init__(self):
+        self.touched = []
+
+    def __getattr__(self, name):
+        # Only invoked for attrs not in __dict__ (so `touched` never recurses).
+        if name in _BoundaryProbe.FORBIDDEN:
+            self.touched.append(name)
+            raise AssertionError(
+                f"latent render path accessed forbidden identity_state.{name}"
+            )
+        return None
+
+
+class TestLatentDrivesRender:
+    """FAST: the latent render path actually drives synthetic-frame pixels and
+    reports latent_primary telemetry — without real video."""
+
+    def test_render_with_latent_engages_not_fallback(self):
+        """LOAD-BEARING: _render_with_latent must RETURN A FRAME, not silently
+        fall back to None. A None here means a guard or swallowed exception
+        killed the latent path (the green-test-hides-broken-runtime trap)."""
+        p, cropped, landmarks, crop_plan = _make_latent_pipeline()
+        out = p._render_with_latent(cropped, landmarks, crop_plan, frame_idx=0)
+        assert out is not None, (
+            "latent path silently fell back to legacy (returned None) — the "
+            "latent did not drive the render"
+        )
+        assert out.shape == cropped.shape
+        assert out.dtype == np.uint8
+
+    def test_render_with_latent_reports_low_source_fraction(self):
+        """Runtime truth: the composited face is NOT the source crop. The leak
+        metric (_last_source_pixel_fraction) is measured by the real path and
+        must drop well below the legacy default of 1.0."""
+        p, cropped, landmarks, crop_plan = _make_latent_pipeline()
+        out = p._render_with_latent(cropped, landmarks, crop_plan, frame_idx=0)
+        assert out is not None
+        frac = p._last_source_pixel_fraction
+        assert 0.0 <= frac < 1.0, frac  # measured, not the 1.0 default
+        assert frac < 0.5, f"source_pixel_fraction {frac} too high — latent not driving"
+
+    def test_latent_primary_telemetry_after_drive(self):
+        """Wiring the real render's measured fraction through _emit_frame_telemetry
+        (exactly as the pipeline's latent branch does, pipeline.py:2100-2106)
+        yields a latent record with latent_primary=True and the measured fraction."""
+        p, cropped, landmarks, crop_plan = _make_latent_pipeline()
+        out = p._render_with_latent(cropped, landmarks, crop_plan, frame_idx=0)
+        assert out is not None
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="latent", intrinsic_used=True,
+            latent_primary=True,
+            source_pixel_fraction=float(p._last_source_pixel_fraction),
+        )
+        rec = p.get_latent_telemetry()[-1]
+        assert rec["latent_primary"] is True
+        assert rec["render_path"] == "latent"
+        assert rec["source_pixel_fraction"] == pytest.approx(p._last_source_pixel_fraction)
+
+
+class TestSubsystemBoundaries:
+    """FAST: the latent render path must not reach into the legacy identity-state
+    internals. It owns identity via the IdentityEstimator subsystem, not the
+    pipeline's IdentityState (_anchor_albedo / _intrinsic_decomposer / _gate)."""
+
+    def test_latent_path_does_not_touch_legacy_identity_internals(self):
+        p, cropped, landmarks, crop_plan = _make_latent_pipeline()
+        probe = _BoundaryProbe()
+        p.identity_state = probe
+        out = p._render_with_latent(cropped, landmarks, crop_plan, frame_idx=0)
+        # A tripped probe raises -> swallowed by _render_with_latent's broad
+        # except -> out is None. So result-is-not-None AND an empty touch-list
+        # both prove the latent path never reached the legacy internals.
+        assert out is not None, (
+            "latent path fell back to None — likely tripped the boundary probe "
+            f"(touched={probe.touched})"
+        )
+        assert probe.touched == [], (
+            f"latent path accessed forbidden identity_state attrs: {probe.touched}"
+        )
+
+
 # Resolve the user-specified test clip; fall back to input/video.mp4 (identical).
 def _shadow_test_clip():
     here = os.path.dirname(__file__)
