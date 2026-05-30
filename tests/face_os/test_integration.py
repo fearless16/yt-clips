@@ -503,9 +503,9 @@ class TestRenderSourceFlag:
     pixels.
     """
 
-    def test_render_source_defaults_to_legacy(self, fresh_pipeline):
+    def test_render_source_defaults_to_latent(self, fresh_pipeline):
         assert hasattr(fresh_pipeline, "render_source")
-        assert fresh_pipeline.render_source == "legacy"
+        assert fresh_pipeline.render_source == "latent"
 
     def test_render_source_is_settable(self, fresh_pipeline):
         fresh_pipeline.render_source = "latent"

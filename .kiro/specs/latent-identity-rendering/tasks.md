@@ -150,8 +150,9 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
 
 - [ ] 4. Phase 3 — Flip default to latent and retire anti-patterns on the default path
 
-  - [ ] 4.1 Flip default render_source to latent
+  - [x] 4.1 Flip default render_source to latent
     - In `face_os/pipeline.py`, default `render_source='latent'` with the hard fallback preserved for low-confidence/uninitialized cases.
+    - **DONE.** Changed `pipeline.py:252` fallback from `'legacy'` to `'latent'`. Config override (`cfg.latent.render_source`) still honored. `_render_core` latent branch has hard fallback to legacy on any failure. Test updated: `test_render_source_defaults_to_latent`. Fast suite: 278 passed, 9 skipped, 0 regressions.
     - _Requirements: 7.3, 7.4_
 
   - [ ] 4.2 Demote BeliefPixel behind USE_LEGACY_RGB_BELIEF
