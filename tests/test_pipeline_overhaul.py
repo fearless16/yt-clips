@@ -378,7 +378,7 @@ class TestFaceDetectionContract:
         """Regression guard: no Haar Cascade implementation anywhere."""
         repo = Path(__file__).resolve().parent.parent
         for py in repo.rglob("*.py"):
-            if "face_os" in str(py) or "test_" in py.name:
+            if "face_os" in str(py) or "test_" in py.name or ".venv" in str(py):
                 continue
             text = py.read_text(encoding="utf-8", errors="ignore")
             assert "haarcascade" not in text.lower(), f"Haar found in {py}"
