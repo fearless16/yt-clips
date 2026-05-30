@@ -37,6 +37,10 @@ from face_os.config import get_config
 
 cfg = get_config()
 
+# D-05 Phase 3: RGB BeliefPixel is diagnostic-only on the default latent path.
+# Set True to re-enable legacy RGB identity updates + query (for LAB telemetry).
+USE_LEGACY_RGB_BELIEF = False
+
 
 # ─── Verification Gate ──────────────────────────────────────────────────────
 
@@ -496,7 +500,7 @@ class IdentityState:
                 return False
 
         h, w = canonical_face.shape[:2]
-        if self.belief is None:
+        if self.belief is None and USE_LEGACY_RGB_BELIEF:
             self.belief = BeliefPixel(h, w, 3)
 
         computed_region_mask = np.ones((h, w), dtype=np.float32)
@@ -512,8 +516,9 @@ class IdentityState:
                 elif name == "forehead": computed_region_mask[y1:y2, x1:x2] = 1.3
 
         final_region_mask = region_mask if region_mask is not None else computed_region_mask
-        low, high = self.freq.decompose(canonical_face)
-        self.belief.update(low, high, quality_map, pose, region_mask=final_region_mask)
+        if USE_LEGACY_RGB_BELIEF and self.belief is not None:
+            low, high = self.freq.decompose(canonical_face)
+            self.belief.update(low, high, quality_map, pose, region_mask=final_region_mask)
 
         canonical_face_rgb = cv2.cvtColor(canonical_face, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         intrinsic_components = self._intrinsic_decomposer.decompose(canonical_face_rgb, mesh_478=mesh_478, warp_M=warp_M)
