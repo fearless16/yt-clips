@@ -81,17 +81,17 @@ def _ensure_shading(shading: np.ndarray, shape_hw: tuple[int, int]) -> np.ndarra
     if arr.ndim != 3:
         raise ValueError(f"Expected shading map (H, W, C), got {arr.shape}")
 
-    # KILL THE 256-CHANNEL BULLSHIT
-    if arr.shape[2] > 3:
-        arr = np.mean(arr, axis=2, keepdims=True)
-        
+    # Contract: shading must be single-channel. Assert, don't silently fix.
+    if arr.shape[2] != 1:
+        raise ValueError(
+            f"Shading must be single-channel (H,W,1), got {arr.shape[2]} channels. "
+            f"Use assert_intrinsic_contract() to catch this upstream."
+        )
+
     if arr.shape[:2] != shape_hw:
         arr = cv2.resize(arr, (shape_hw[1], shape_hw[0]), interpolation=cv2.INTER_LINEAR)
         if arr.ndim == 2: arr = arr[:, :, np.newaxis]
-        
-    if arr.shape[2] == 3:
-        arr = np.mean(arr, axis=2, keepdims=True)
-        
+
     return np.clip(arr, 0.0, 1.0).astype(np.float32)
 
 
