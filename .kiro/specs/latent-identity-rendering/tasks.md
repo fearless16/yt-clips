@@ -188,8 +188,9 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
 
 - [ ] 5. Phase 4 — Cleanup (assertions as the only guard, uncertainty-driven gating, graceful degradation)
 
-  - [ ] 5.1 Remove silent sanitizers
+  - [x] 5.1 Remove silent sanitizers
     - Remove the silent channel sanitizers at `pipeline.py` (~1656), `_render_with_physical_renderer` (~1980-1984), and `physical_renderer.py` `_ensure_shading` (~80-95), leaving `assert_intrinsic_contract` as the only guard on all paths.
+    - **DONE.** `physical_renderer.py:_ensure_shading`: removed silent multi-channel collapse (>3ch and 3ch→1ch); now raises `ValueError` if shading is not single-channel. `pipeline.py:2012-2015`: already gated behind `render_source=='legacy'` (4.3). `pipeline.py:2312-2315`: removed; replaced with comment "Contract assertion is the only guard; no silent sanitizers." `assert_intrinsic_contract` (fatal on latent path, warn on legacy) is now the sole upstream guard. Fast suite: 282 passed, 0 regressions.
     - _Requirements: 9.5, 3.1_
 
   - [x] 5.2 Make render gating read query_uncertainty

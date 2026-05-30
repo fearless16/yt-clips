@@ -2309,10 +2309,7 @@ class FaceOSPipeline:
                         raise
                     self._last_contract_passed = False
 
-                if source_intrinsic.shading.ndim == 3 and source_intrinsic.shading.shape[2] > 3:
-                    source_intrinsic.shading = np.mean(source_intrinsic.shading, axis=2, keepdims=True).astype(np.float32)
-                elif source_intrinsic.shading.ndim == 2:
-                    source_intrinsic.shading = source_intrinsic.shading[:, :, np.newaxis].astype(np.float32)
+                # Contract assertion is the only guard; no silent sanitizers.
             
             # Compute adjusted landmarks and M_inv once (reused for anchor + mask)
             adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
