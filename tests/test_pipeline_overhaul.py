@@ -445,6 +445,7 @@ class TestDryRun:
         assert result["validation"]["transcript_corrected"]
         assert result["validation"]["seo_marker_written"]
         assert result["validation"]["seo_recovered"] >= 1
+        assert result["prompts_ok"], "Prompts module validation failed"
 
     def test_dry_run_validate_config_all_present(self):
         from dry_run import validate_config
