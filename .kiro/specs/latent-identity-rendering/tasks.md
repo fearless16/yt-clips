@@ -155,8 +155,9 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
     - **DONE.** Changed `pipeline.py:252` fallback from `'legacy'` to `'latent'`. Config override (`cfg.latent.render_source`) still honored. `_render_core` latent branch has hard fallback to legacy on any failure. Test updated: `test_render_source_defaults_to_latent`. Fast suite: 278 passed, 9 skipped, 0 regressions.
     - _Requirements: 7.3, 7.4_
 
-  - [ ] 4.2 Demote BeliefPixel behind USE_LEGACY_RGB_BELIEF
+  - [x] 4.2 Demote BeliefPixel behind USE_LEGACY_RGB_BELIEF
     - In `face_os/identity_state.py`, gate the RGB `BeliefPixel` (~233) behind `USE_LEGACY_RGB_BELIEF` (default off) so it is diagnostic-only and never a render input on the default path. Keep it readable for LAB telemetry.
+    - **DONE.** `USE_LEGACY_RGB_BELIEF = False` added at module top. `BeliefPixel` creation gated behind flag (`update` ~503). `belief.update()` gated behind flag (~519). `is_initialized()` returns False when flag is off → `query()` returns neutral fallback. Intrinsic decomposition (used by latent path) still runs unconditionally. BeliefPixel object preserved for LAB telemetry reads. Fast suite: 278 passed, 0 regressions.
     - _Requirements: 9.1, 6.6_
 
   - [ ] 4.3 Retire the 0.4 albedo blend and drift-bucket mean-correction
