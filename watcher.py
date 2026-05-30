@@ -103,12 +103,15 @@ class JobHandler(BaseHTTPRequestHandler):
                     self.wfile.write(json.dumps({"error": "Missing url"}).encode())
                     return
 
-                # ─── Save secrets delivered via tunnel ───────────────────────
-                for secret_file in ["client_secrets.json", "yt_token.json"]:
-                    if secret_file in job and job[secret_file]:
-                        Path(secret_file).write_text(job[secret_file], encoding="utf-8")
-                        log_info(f"🔑 Saved {secret_file} ({len(job[secret_file])} bytes)")
-                        del job[secret_file]  # don't pass to pipeline
+                # ─── Save all credentials delivered via tunnel ──────────────
+                CRED_FILES = {"cookies.txt", ".env", "client_secrets.json",
+                              "yt_token.json", "yt_analytics_token.json",
+                              "yt_tokens.json", "token.json"}
+                for key in list(job.keys()):
+                    if key in CRED_FILES and isinstance(job[key], str):
+                        Path(key).write_text(job[key], encoding="utf-8")
+                        log_info(f"🔑 Saved {key} ({len(job[key])} bytes)")
+                        del job[key]
 
                 job_queue.append(job)
                 log_info(f"Job received via tunnel: {url}")
@@ -264,8 +267,11 @@ def poll_job_file():
                     job = json.load(f)
                 url = job.get("url", "")
                 if url:
-                    # ─── Extract secrets delivered via Drive job ─────────────
-                    for secret_file in ["client_secrets.json", "yt_token.json"]:
+                    # ─── Extract all credentials delivered via Drive job ─────
+                    CRED_FILES = {"cookies.txt", ".env", "client_secrets.json",
+                                  "yt_token.json", "yt_analytics_token.json",
+                                  "yt_tokens.json", "token.json"}
+                    for secret_file in CRED_FILES:
                         if secret_file in job and job[secret_file]:
                             Path(secret_file).write_text(job[secret_file], encoding="utf-8")
                             log_info(f"Saved {secret_file} ({len(job[secret_file])} bytes) from Drive job")

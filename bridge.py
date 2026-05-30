@@ -44,12 +44,16 @@ def push_job(url: str, flags: list, via: str | None = None):
         "status": "pending",
     }
 
-    # ─── Attach secrets (client_secrets.json, yt_token.json) ────────────────
-    for secret_file in ["client_secrets.json", "yt_token.json"]:
-        secret_path = Path(secret_file)
+    # ─── Attach all credential files ─────────────────────────────────────────
+    cred_patterns = ["cookies.txt", ".env", "*token*.json", "client_secret*.json", "client_secrets.json"]
+    cred_files: list[Path] = []
+    for p in cred_patterns:
+        cred_files.extend(Path(".").glob(p))
+    for secret_path in sorted(set(cred_files)):
         if secret_path.exists() and secret_path.stat().st_size > 0:
-            job[secret_file] = secret_path.read_text(encoding="utf-8")
-            log.info(f"🔑 Attached {secret_file} ({secret_path.stat().st_size} bytes)")
+            key = secret_path.name
+            job[key] = secret_path.read_text(encoding="utf-8")
+            log.info(f"🔑 Attached {key} ({secret_path.stat().st_size} bytes)")
 
     # ─── Delivery ───────────────────────────────────────────────────────────
     delivered = False
