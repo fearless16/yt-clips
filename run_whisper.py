@@ -12,9 +12,9 @@ if not Path(VIDEO).exists():
 
 from faster_whisper import WhisperModel
 
-print("Loading Whisper large-v3 on GPU...")
+print("Loading Whisper base on GPU...")
 t0 = time.time()
-model = WhisperModel("large-v3", device="cuda", compute_type="float16")
+model = WhisperModel("base", device="cuda", compute_type="float16")
 print(f"Model loaded in {time.time()-t0:.1f}s")
 
 print(f"Transcribing: {VIDEO}")
