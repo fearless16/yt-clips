@@ -92,12 +92,17 @@ def _fetch_via_api(video_id: str) -> dict | None:
     except ImportError:
         return None
     try:
-        # Pass cookies if available (bypasses Colab IP blocks)
+        # Build a requests session with cookies if available (bypasses Colab IP blocks)
+        import requests
+        session = requests.Session()
         cookie_path = Path("cookies.txt")
         if cookie_path.exists() and cookie_path.stat().st_size > 0:
-            api = YouTubeTranscriptApi(cookies=str(cookie_path))
-        else:
-            api = YouTubeTranscriptApi()
+            # Parse Netscape cookies.txt into a cookie jar
+            from http.cookiejar import MozillaCookieJar
+            jar = MozillaCookieJar(str(cookie_path))
+            jar.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = jar
+        api = YouTubeTranscriptApi(http_client=session)
         transcript_list = api.list(video_id)
 
         # Try English first (manual > generated)
