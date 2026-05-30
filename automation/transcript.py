@@ -80,6 +80,114 @@ def _parse_vtt(text: str) -> list[dict]:
     return segments
 
 
+def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
+    """Fetch transcript via YouTube Data API v3 (captions.list + captions.download).
+
+    This is the official API — no bot detection, no cookies needed.
+    Requires OAuth2 token (yt_token.json).
+    Returns None on failure.
+    """
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+    except ImportError:
+        return None
+
+    token_path = Path("yt_token.json")
+    if not token_path.exists():
+        return None
+
+    try:
+        creds = Credentials.from_authorized_user_file(str(token_path), scopes=[
+            "https://www.googleapis.com/auth/youtube.force-ssl",
+            "https://www.googleapis.com/auth/youtube.readonly",
+        ])
+        youtube = build("youtube", "v3", credentials=creds)
+
+        # List caption tracks
+        captions_response = youtube.captions().list(
+            part="snippet",
+            videoId=video_id
+        ).execute()
+
+        items = captions_response.get("items", [])
+        if not items:
+            return None
+
+        # Prefer: English manual > English auto > any language
+        caption_id = None
+        lang_code = None
+        for pref_lang in ["en", "en-US", "en-GB"]:
+            for item in items:
+                snippet = item["snippet"]
+                if snippet["language"] == pref_lang and snippet.get("trackKind") != "ASR":
+                    caption_id = item["id"]
+                    lang_code = snippet["language"]
+                    break
+            if caption_id:
+                break
+
+        if not caption_id:
+            for pref_lang in ["en", "en-US", "en-GB"]:
+                for item in items:
+                    snippet = item["snippet"]
+                    if snippet["language"] == pref_lang:
+                        caption_id = item["id"]
+                        lang_code = snippet["language"]
+                        break
+                if caption_id:
+                    break
+
+        if not caption_id:
+            item = items[0]
+            caption_id = item["id"]
+            lang_code = item["snippet"]["language"]
+
+        # Download caption track (SRT format)
+        caption_response = youtube.captions().download(
+            id=caption_id,
+            tfmt="srt"
+        ).execute()
+
+        # Parse SRT into segments
+        segments = _parse_srt(caption_response.decode("utf-8") if isinstance(caption_response, bytes) else caption_response)
+        if segments:
+            return {"segments": segments, "language": lang_code, "source": "youtube_api"}
+
+    except Exception:
+        pass
+    return None
+
+
+def _parse_srt(text: str) -> list[dict]:
+    """Parse SRT subtitle text into segment dicts."""
+    import re
+    segments = []
+    blocks = re.split(r'\n\s*\n', text.strip())
+    for block in blocks:
+        lines = block.strip().split('\n')
+        if len(lines) < 3:
+            continue
+        # Parse timestamp line: "00:00:00,000 --> 00:00:05,000"
+        ts_match = re.match(r'(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})', lines[1])
+        if not ts_match:
+            continue
+        start = _srt_timestamp_to_seconds(ts_match.group(1))
+        end = _srt_timestamp_to_seconds(ts_match.group(2))
+        text = ' '.join(lines[2:]).strip()
+        if text:
+            segments.append({"start": start, "end": end, "text": text})
+    return segments
+
+
+def _srt_timestamp_to_seconds(ts: str) -> float:
+    """Convert SRT timestamp (HH:MM:SS,mmm) to seconds."""
+    ts = ts.replace(',', '.')
+    parts = ts.split(":")
+    h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+    return h * 3600 + m * 60 + s
+
+
 def _fetch_via_api(video_id: str) -> dict | None:
     """Fetch transcript via youtube-transcript-api. Returns None on failure.
 
@@ -227,8 +335,7 @@ def format_for_llm(segments: list[dict], max_seconds: float | None = None, max_s
 def fetch(url: str, output_path: str | None = None, video_path: str | None = None) -> dict:
     """Fetch transcript for *url*.
 
-    Tries youtube-transcript-api first, then yt-dlp VTT fallback.
-    If both fail and video_path is provided, falls back to local whisper transcription.
+    Priority: YouTube Data API → youtube-transcript-api → yt-dlp VTT → local Whisper.
     Results cached 1h per video_id.
 
     Args:
@@ -238,7 +345,7 @@ def fetch(url: str, output_path: str | None = None, video_path: str | None = Non
 
     Returns:
         dict with keys: segments, language, source.
-        source is "api", "vtt", "local_whisper", or "unavailable".
+        source is "youtube_api", "api", "vtt", "local_whisper", or "unavailable".
     """
     video_id = _extract_video_id(url)
     if not video_id:
@@ -246,7 +353,12 @@ def fetch(url: str, output_path: str | None = None, video_path: str | None = Non
     cached = TRANSCRIPT_CACHE.get(video_id)
     if cached is not None and not (cached.get("source") == "unavailable" and video_path):
         return cached
-    result = _fetch_via_api(video_id)
+    # Priority 1: YouTube Data API v3 (official, no bot detection)
+    result = _fetch_via_youtube_data_api(video_id)
+    # Priority 2: youtube-transcript-api (with cookies)
+    if result is None:
+        result = _fetch_via_api(video_id)
+    # Priority 3: yt-dlp VTT download
     if result is None:
         result = _fetch_via_ytdlp(video_id)
     if (result is None or result.get("source") == "unavailable") and video_path:
