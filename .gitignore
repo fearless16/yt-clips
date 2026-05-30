@@ -72,3 +72,4 @@ test_frames/
 colab_setup.py
 kaggle_cell.py
 kaggle_monitor.py
+.venv

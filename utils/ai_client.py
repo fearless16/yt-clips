@@ -19,85 +19,122 @@ _cfg = load_config()
 log = get_logger("ai_client", _cfg.get("logging", {}).get("log_file", "logs/pipeline.log"), _cfg.get("logging", {}).get("level", "INFO"))
 
 
+# --- Error classification ---
+
+class ErrorCategory:
+    RATE_LIMIT = "rate_limit"
+    QUOTA_EXHAUSTED = "quota_exhausted"
+    MODEL_NOT_FOUND = "model_not_found"
+    TIMEOUT = "timeout"
+    SERVER_ERROR = "server_error"
+    AUTH_FAILURE = "auth_failure"
+    UNKNOWN = "unknown"
+
+
+def _extract_status(exc: Exception) -> Optional[int]:
+    for attr in ("status_code", "code", "http_status"):
+        val = getattr(exc, attr, None)
+        if isinstance(val, int):
+            return val
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        val = getattr(resp, "status_code", None)
+        if isinstance(val, int):
+            return val
+    return None
+
+
+def _extract_retry_after(exc: Exception) -> Optional[float]:
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None) if resp is not None else None
+    if not headers:
+        return None
+    try:
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+    except Exception:
+        raw = None
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_error(exc: Exception) -> str:
+    status = _extract_status(exc)
+    msg = str(exc).lower()
+    name = type(exc).__name__.lower()
+
+    if status in (401, 403) or ("invalid" in msg and "key" in msg) or "auth" in name:
+        return ErrorCategory.AUTH_FAILURE
+    if status == 429 or "ratelimit" in name or "429" in msg:
+        return ErrorCategory.RATE_LIMIT
+    if any(w in msg for w in ("quota", "billing", "payment", "insufficient", "exceeded")):
+        return ErrorCategory.QUOTA_EXHAUSTED
+    if status == 404 or ("model" in msg and ("not found" in msg or "not available" in msg)):
+        return ErrorCategory.MODEL_NOT_FOUND
+    if status == 504 or "timeout" in name or "timeout" in msg:
+        return ErrorCategory.TIMEOUT
+    if status is not None and 500 <= status < 600:
+        return ErrorCategory.SERVER_ERROR
+    if any(s in name for s in ("internalserver", "serviceunavailable", "connectionerror")):
+        return ErrorCategory.SERVER_ERROR
+    return ErrorCategory.UNKNOWN
+
+
 class AIClient:
-    # Shared state for health and rate limiting across all AIClient instances
     _shared_lock = threading.Lock()
-    _provider_failures = {}        # provider -> count
-    _provider_cooldown_until = {}  # provider -> timestamp
-    _provider_token_buckets = {}   # provider -> dict
+    _provider_failures = {}
+    _provider_cooldown_until = {}
+    _provider_token_buckets = {}
 
     PROVIDER_MODELS = {
+        "opencode": ["mimo-v2.5-pro", "mimo-v2.5", "kimi-k2.5", "kimi-k2.6", "glm-5", "glm-5.1",
+                     "deepseek-v4-flash", "deepseek-v4-pro", "minimax-m2.7", "qwen3.6-plus", "qwen3.7-max"],
         "groq": ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "qwen/qwen3-32b"],
-        "deepseek": ["deepseek-chat"],
         "openrouter": ["deepseek/deepseek-v4-flash", "google/gemini-2.0-flash-001", "qwen/qwen3.5-122b-a10b", "anthropic/claude-sonnet-4"],
         "nvidia": ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1"],
     }
 
-    # Speed-ordered tiers — fastest first (tested latencies).
-    # Tier 1: <1s (Groq models)
-    # Tier 2: 1-3s (NVIDIA, OpenRouter fast models)
-    # Tier 3: >10s (Claude - slower but high quality)
+    # Speed-ordered tiers — fastest first.
+    # Tier 1: OpenCode Go (mimo-v2.5-pro ~3.2s, free with Go sub)
+    # Tier 2: Groq (0.5-1s, fast but quota-limited)
+    # Tier 3: OpenCode Go fallback models
+    # Tier 4: NVIDIA / OpenRouter
+    # Tier 5: qwen3.7-max (slow ~20s, last resort)
     FASTEST_TIERS = [
+        [("opencode", "mimo-v2.5-pro"), ("opencode", "mimo-v2.5")],
         [("groq", "meta-llama/llama-4-scout-17b-16e-instruct"), ("groq", "llama-3.3-70b-versatile"), ("groq", "qwen/qwen3-32b")],
-        [("deepseek", "deepseek-chat"), ("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1"), ("openrouter", "deepseek/deepseek-v4-flash"), ("openrouter", "google/gemini-2.0-flash-001")],
+        [("opencode", "kimi-k2.5"), ("opencode", "kimi-k2.6"), ("opencode", "glm-5.1"), ("opencode", "glm-5")],
+        [("opencode", "deepseek-v4-flash"), ("opencode", "minimax-m2.7"), ("opencode", "qwen3.6-plus")],
+        [("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1"), ("openrouter", "deepseek/deepseek-v4-flash"), ("openrouter", "google/gemini-2.0-flash-001")],
         [("nvidia", "meta/llama-3.3-70b-instruct"), ("openrouter", "qwen/qwen3.5-122b-a10b")],
-        [("openrouter", "anthropic/claude-sonnet-4")],  # Slow but smart
+        [("opencode", "qwen3.7-max")],
     ]
 
     def __init__(self):
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
-        self.openrouter_base_url = os.getenv(
-            "OPENROUTER_BASE_URL",
-            "https://openrouter.ai/api/v1",
-        )
-
+        self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.nvidia_api_key = os.getenv("NVIDIA_API_KEY")
-        self.nvidia_base_url = os.getenv(
-            "NVIDIA_BASE_URL",
-            "https://integrate.api.nvidia.com/v1",
-        )
-
+        self.nvidia_base_url = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
         self.groq_api_key = os.getenv("GROQ_API_KEY")
-        self.groq_base_url = os.getenv(
-            "GROQ_BASE_URL",
-            "https://api.groq.com/openai/v1",
-        )
-
-        self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
-        self.deepseek_base_url = os.getenv(
-            "DEEPSEEK_BASE_URL",
-            "https://api.deepseek.com/v1",
-        )
-
+        self.groq_base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+        self.opencode_api_key = os.getenv("OPENCODE_ZEN_API_KEY")
+        self.opencode_base_url = os.getenv("OPENCODE_ZEN_BASE_URL", "https://opencode.ai/zen/go/v1")
         self.ollama_url = "http://localhost:11434/api/generate"
         ai_cfg = _cfg.get("ai", {})
-        self._provider = ai_cfg.get("provider", "groq")
-        self._model = ai_cfg.get("model", "qwen/qwen3-32b")
+        self._provider = ai_cfg.get("provider", "opencode")
+        self._model = ai_cfg.get("model", "mimo-v2.5-pro")
         self._last_provider = None
         self._last_model = None
 
     @staticmethod
     def _bucket_key(provider: str, model: Optional[str] = None) -> str:
-        """Token-bucket identity.
-
-        Rate limits are enforced PER MODEL by the upstream APIs, not per
-        provider account. So we bucket per ``provider:model`` — racing three
-        Groq models in a tier draws one token from each of three independent
-        buckets instead of draining a single shared provider bucket (Bug 3).
-        When *model* is unknown (e.g. the ``generate_text`` failover loop gates
-        before it has chosen a concrete model) we fall back to a provider-level
-        bucket so behavior stays well-defined.
-        """
         return f"{provider}:{model}" if model else provider
 
     @classmethod
     def _rate_limit_cfg(cls) -> tuple:
-        """(capacity, refill_per_sec) for token buckets — config-overridable.
-
-        Defaults preserve the historical 30-token / 0.5-per-sec burst, but it is
-        now applied per ``provider:model`` (see ``_bucket_key``) so concurrent
-        racing is no longer throttled by a single shared bucket.
-        """
         rl = _cfg.get("ai", {}).get("rate_limit", {})
         capacity = float(rl.get("capacity", 30.0))
         refill = float(rl.get("refill_per_sec", 0.5))
@@ -109,35 +146,21 @@ class AIClient:
         capacity, refill_rate = cls._rate_limit_cfg()
         with cls._shared_lock:
             now = time.time()
-
-            # Circuit-breaker / 429 cooldown is account-wide, so it is keyed by
-            # PROVIDER (not per model). Gate on it first.
             cooldown = cls._provider_cooldown_until.get(provider, 0.0)
             if cooldown > now:
-                log.debug("Token gate: provider %s in cooldown for %.1fs — skip %s",
-                          provider, cooldown - now, key)
+                log.debug("Token gate: provider %s in cooldown for %.1fs", provider, cooldown - now)
                 return False
-
             bucket = cls._provider_token_buckets.get(key)
             if bucket is None:
-                bucket = {
-                    "capacity": capacity,
-                    "tokens": capacity,
-                    "last_update": now,
-                    "refill_rate": refill_rate,
-                }
+                bucket = {"capacity": capacity, "tokens": capacity, "last_update": now, "refill_rate": refill_rate}
                 cls._provider_token_buckets[key] = bucket
-
             elapsed = now - bucket["last_update"]
             bucket["tokens"] = min(bucket["capacity"], bucket["tokens"] + elapsed * bucket["refill_rate"])
             bucket["last_update"] = now
-
             if bucket["tokens"] >= 1.0:
                 bucket["tokens"] -= 1.0
                 return True
-
-            log.debug("Token gate: bucket %s exhausted (%.2f tokens, refill %.2f/s)",
-                      key, bucket["tokens"], bucket["refill_rate"])
+            log.debug("Token gate: bucket %s exhausted (%.2f tokens)", key, bucket["tokens"])
             return False
 
     @classmethod
@@ -152,75 +175,41 @@ class AIClient:
             cls._provider_failures[provider] = cls._provider_failures.get(provider, 0) + 1
             if cls._provider_failures[provider] >= 5:
                 cls._provider_cooldown_until[provider] = time.time() + 300
-                log.warning(f"Provider {provider} hit circuit breaker! Cooldown for 5 minutes.")
-
-    # ── Error classification + rate-limit aware cooldown ────────────────────────
-
-    @staticmethod
-    def _status_code(exc: Exception) -> Optional[int]:
-        """Best-effort HTTP status extraction from openai/requests exceptions."""
-        for attr in ("status_code", "code", "http_status"):
-            val = getattr(exc, attr, None)
-            if isinstance(val, int):
-                return val
-        resp = getattr(exc, "response", None)
-        if resp is not None:
-            val = getattr(resp, "status_code", None)
-            if isinstance(val, int):
-                return val
-        return None
+                log.warning("Provider %s hit circuit breaker! Cooldown for 5 minutes.", provider)
 
     @classmethod
     def _is_rate_limited(cls, exc: Exception) -> bool:
-        if cls._status_code(exc) == 429:
-            return True
-        name = type(exc).__name__.lower()
-        return "ratelimit" in name or "429" in str(exc)
-
-    @classmethod
-    def _is_retryable(cls, exc: Exception) -> bool:
-        """True for transient errors worth backing off on (429 + 5xx + network)."""
-        status = cls._status_code(exc)
-        if status is not None and (status == 429 or 500 <= status < 600):
-            return True
-        name = type(exc).__name__.lower()
-        return any(s in name for s in (
-            "ratelimit", "timeout", "apiconnection", "internalserver",
-            "serviceunavailable", "connectionerror",
-        ))
+        return classify_error(exc) == ErrorCategory.RATE_LIMIT
 
     @staticmethod
-    def _retry_after_seconds(exc: Exception) -> Optional[float]:
-        """Read a Retry-After header (seconds) from the exception, if present."""
-        resp = getattr(exc, "response", None)
-        headers = getattr(resp, "headers", None) if resp is not None else None
-        if not headers:
-            return None
-        try:
-            raw = headers.get("retry-after") or headers.get("Retry-After")
-        except Exception:
-            raw = None
-        if not raw:
-            return None
-        try:
-            return float(raw)
-        except (TypeError, ValueError):
-            return None
+    def _retry_after_seconds(exc: Exception):
+        return _extract_retry_after(exc)
 
     @classmethod
     def _note_provider_error(cls, provider: str, exc: Exception, default_cooldown: float = 30.0):
-        """Record a failure and, for rate-limit errors, set a provider cooldown.
-
-        Honors a server-provided Retry-After when available; otherwise applies a
-        conservative default so the racer/failover skips the provider until it
-        is likely healthy again. Always feeds the circuit breaker.
-        """
-        if cls._is_rate_limited(exc):
-            wait_s = cls._retry_after_seconds(exc) or default_cooldown
+        cat = classify_error(exc)
+        if cat == ErrorCategory.AUTH_FAILURE:
+            with cls._shared_lock:
+                cls._provider_cooldown_until[provider] = time.time() + 3600
+            log.error("Provider %s auth failure - marking unavailable for 1 hour", provider)
+        elif cat == ErrorCategory.QUOTA_EXHAUSTED:
+            with cls._shared_lock:
+                cls._provider_cooldown_until[provider] = time.time() + 3600
+            log.warning("Provider %s quota exhausted - switching to next provider", provider)
+        elif cat == ErrorCategory.RATE_LIMIT:
+            wait_s = _extract_retry_after(exc) or default_cooldown
             with cls._shared_lock:
                 prev = cls._provider_cooldown_until.get(provider, 0.0)
                 cls._provider_cooldown_until[provider] = max(prev, time.time() + wait_s)
-            log.warning("Provider %s rate-limited (429) — cooling down %.0fs", provider, wait_s)
+            log.warning("Provider %s rate-limited (429) - cooling down %.0fs", provider, wait_s)
+        elif cat == ErrorCategory.MODEL_NOT_FOUND:
+            with cls._shared_lock:
+                cls._provider_cooldown_until[provider] = time.time() + 60
+            log.warning("Provider %s model not found - switching to next compatible model", provider)
+        elif cat in (ErrorCategory.TIMEOUT, ErrorCategory.SERVER_ERROR):
+            with cls._shared_lock:
+                cls._provider_cooldown_until[provider] = time.time() + 15
+            log.warning("Provider %s transient error (%s) - short cooldown", provider, cat)
         cls._record_failure(provider)
 
     @classmethod
@@ -229,24 +218,13 @@ class AIClient:
             return cls._provider_cooldown_until.get(provider, 0.0) > time.time()
 
     def _get_failover_chain(self, start_provider: str) -> List[str]:
-        chain = ["groq", "deepseek", "openrouter", "nvidia"]
+        chain = ["opencode", "groq", "openrouter", "nvidia"]
         if start_provider in chain:
             chain.remove(start_provider)
             chain.insert(0, start_provider)
         return chain
 
     def _select_model_for_provider(self, provider: str, prefer_model: Optional[str] = None) -> str:
-        """Pick a concrete model for *provider*.
-
-        Selection precedence (fixes Bug 2 — failover used to always land on a
-        fixed ``models[0]``/``models[1]``):
-          1. *prefer_model* if it belongs to this provider (e.g. the
-             self-learner's current best model).
-          2. The currently-selected ``self._model`` if it is valid for this
-             provider (keeps an explicit/benchmark choice intact).
-          3. A RANDOM model from the provider's list — gives diversity across
-             clips and stops every failover from hammering the same model.
-        """
         models = self.PROVIDER_MODELS.get(provider, [])
         if not models:
             return self._model
@@ -261,19 +239,15 @@ class AIClient:
                        prefer_model: Optional[str] = None) -> str:
         old_provider = self._provider
         old_model = self._model
-
         chosen_model = self._select_model_for_provider(provider, prefer_model=prefer_model)
-        # Temporarily route to the chosen model/provider; ALWAYS restore even on
-        # error so a failed provider can't leave the singleton mis-pointed.
         self._provider = provider
         self._model = chosen_model
-        log.debug("Routing call to %s/%s (failover/single-call path)", provider, chosen_model)
+        log.debug("Routing call to %s/%s", provider, chosen_model)
         try:
-            if provider == "groq":
+            if provider == "opencode":
+                return self.generate_opencode(prompt, system_instruction)
+            elif provider == "groq":
                 return self.generate_groq(prompt, system_instruction)
-            elif provider == "deepseek":
-                self._model = "deepseek-chat"
-                return self.generate_deepseek(prompt, system_instruction)
             elif provider == "openrouter":
                 return self.generate_openrouter(prompt, system_instruction)
             elif provider == "nvidia":
@@ -288,26 +262,29 @@ class AIClient:
         in_tokens = input_chars // 4
         out_tokens = output_chars // 4
         rates = {
+            "opencode": {"in": 0.0, "out": 0.0},
             "groq": {"in": 0.59, "out": 0.79},
-            "deepseek": {"in": 0.14, "out": 0.28},
             "openrouter": {"in": 0.20, "out": 0.40},
             "nvidia": {"in": 0.07, "out": 0.07},
             "ollama": {"in": 0.0, "out": 0.0}
         }
         rate = rates.get(provider, {"in": 0.50, "out": 0.50})
         cost = (in_tokens * rate["in"] + out_tokens * rate["out"]) / 1_000_000
-        log.info(f"LLM request cost: {provider}/{model} -> input_tokens={in_tokens}, output_tokens={out_tokens}, est_cost=${cost:.6f}",
+        log.info("LLM cost: %s/%s input=%d output=%d est=$%.6f",
+                 provider, model, in_tokens, out_tokens, cost,
                  extra={"stage": "llm_cost", "metadata": {"provider": provider, "model": model, "cost": cost}})
 
     def generate_text(self, prompt: str, system_instruction: Optional[str] = None,
                       prefer_model: Optional[str] = None) -> str:
-        """Text generation with rate-limit awareness, circuit breaker, 429-aware
-        cooldown/backoff, failover, and token/cost tracking.
+        """Text generation with error-classified failover.
 
-        *prefer_model* (optional) lets callers (e.g. the SEO escalation path with
-        the self-learner's best model) bias model selection inside each provider;
-        when it doesn't belong to the provider being tried, a random model from
-        that provider is used instead of a fixed one (Bug 2)."""
+        Error handling policy (hardcoded):
+        - 429: respect Retry-After, retry same provider
+        - quota/billing: mark unavailable, next provider
+        - model not found: next compatible model/provider
+        - timeout/server: retry once then fallback
+        - auth: fail fast, no retry
+        """
         ai_cfg = _cfg.get("ai", {})
         base_delay = float(ai_cfg.get("retry_base_delay_seconds", 2.0))
         max_delay = float(ai_cfg.get("retry_max_delay_seconds", 30.0))
@@ -316,9 +293,9 @@ class AIClient:
 
         available_chain = []
         for p in chain:
-            if p == "groq" and self.groq_api_key:
+            if p == "opencode" and self.opencode_api_key:
                 available_chain.append(p)
-            elif p == "deepseek" and self.deepseek_api_key:
+            elif p == "groq" and self.groq_api_key:
                 available_chain.append(p)
             elif p == "openrouter" and self.openrouter_api_key:
                 available_chain.append(p)
@@ -327,6 +304,7 @@ class AIClient:
 
         errors = []
         retryable_seen = False
+        fatal_seen = False
         for provider in available_chain:
             if not self._check_and_consume_token(provider):
                 log.info("Skipping provider %s (rate-limited or circuit-breaker cooldown)", provider)
@@ -340,20 +318,27 @@ class AIClient:
                     log.info("LLM ok via %s/%s (primary round)", provider, self.get_used_model())
                     return res
             except Exception as e:
-                retryable_seen = retryable_seen or self._is_retryable(e)
+                cat = classify_error(e)
+                retryable_seen = retryable_seen or cat in (ErrorCategory.RATE_LIMIT, ErrorCategory.TIMEOUT, ErrorCategory.SERVER_ERROR)
+                if cat == ErrorCategory.AUTH_FAILURE:
+                    fatal_seen = True
+                    log.error("Auth failure on %s — will not retry this provider", provider)
                 self._note_provider_error(provider, e)
-                log.warning("Provider %s failed: %s", provider, e)
-                errors.append(f"{provider}: {e}")
+                log.warning("Provider %s failed (%s): %s", provider, cat, e)
+                errors.append(f"{provider} [{cat}]: {e}")
 
-        # Backoff once before the retry round, but only if failures were transient
-        # (429/5xx/network). Generic errors fail over immediately (no sleep).
+        # If only auth failures occurred, fail fast — no backoff, no retry round
+        if fatal_seen and not retryable_seen:
+            raise RuntimeError(f"Auth failures detected — stopping. Errors: {'; '.join(errors)}")
+
+        # Backoff once before retry round, only if failures were transient
         if retryable_seen:
             delay = min(max_delay, base_delay)
-            log.info("Transient LLM errors — backing off %.1fs before retry round", delay)
+            log.info("Transient LLM errors - backing off %.1fs before retry round", delay)
             time.sleep(delay)
 
-        # Retry round: ignore token bucket but still respect provider cooldowns.
-        for attempt, provider in enumerate(available_chain):
+        # Retry round: ignore token bucket but still respect provider cooldowns
+        for provider in available_chain:
             try:
                 if self._in_cooldown(provider):
                     log.info("Retry round: skipping %s (still in cooldown)", provider)
@@ -365,13 +350,17 @@ class AIClient:
                     log.info("LLM ok via %s/%s (retry round)", provider, self.get_used_model())
                     return res
             except Exception as e:
+                cat = classify_error(e)
+                if cat == ErrorCategory.AUTH_FAILURE:
+                    log.error("Auth failure on %s retry — skipping", provider)
+                    continue
                 self._note_provider_error(provider, e)
-                log.warning("Provider %s failed on retry: %s", provider, e)
-                errors.append(f"{provider} (retry): {e}")
+                log.warning("Provider %s failed on retry (%s): %s", provider, cat, e)
+                errors.append(f"{provider} (retry) [{cat}]: {e}")
 
         # Local fallback
         try:
-            log.info("All primary LLM providers failed or unavailable, attempting Ollama...")
+            log.info("All primary LLM providers failed, attempting Ollama...")
             res = self.generate_ollama(prompt, system_instruction)
             if res:
                 return res
@@ -382,23 +371,10 @@ class AIClient:
 
     def _available_plan(self, prefer_provider: Optional[str] = None,
                         prefer_model: Optional[str] = None) -> List[List[tuple]]:
-        """Return FASTEST_TIERS filtered to available providers, shuffled within
-        each tier for model diversity across calls.
-
-        Boosting (so the self-learner's best choice gets first shot while still
-        racing the rest for resilience):
-          * *prefer_model* — the exact ``(provider, model)`` pair is moved to the
-            very front of the tier it appears in (highest precedence).
-          * *prefer_provider* — all of that provider's models are moved ahead of
-            the others within their tier.
-
-        Within a tier the order is otherwise SHUFFLED, so across many clips
-        different models lead the race (Bug 5: model diversity).
-        """
         import random as _random
         has_key = {
+            "opencode": bool(self.opencode_api_key),
             "groq": bool(self.groq_api_key),
-            "deepseek": bool(self.deepseek_api_key),
             "openrouter": bool(self.openrouter_api_key),
             "nvidia": bool(self.nvidia_api_key),
         }
@@ -407,15 +383,11 @@ class AIClient:
             available = [(p, m) for p, m in tier if has_key.get(p)]
             if not available:
                 continue
-            # Shuffle for diversity: different clips hit different models first
             _random.shuffle(available)
-            # Boost preferred PROVIDER's models to the front of the tier.
             if prefer_provider:
                 preferred = [x for x in available if x[0] == prefer_provider]
                 others = [x for x in available if x[0] != prefer_provider]
                 available = preferred + others
-            # Boost the exact preferred MODEL to the very front (wins over the
-            # provider-level boost above).
             if prefer_model:
                 exact = [x for x in available if x[1] == prefer_model]
                 rest = [x for x in available if x[1] != prefer_model]
@@ -426,28 +398,9 @@ class AIClient:
     def generate_fastest_first(self, prompt: str, system_instruction: Optional[str] = None,
                                prefer_provider: Optional[str] = None,
                                prefer_model: Optional[str] = None) -> str:
-        """Race available models in parallel speed-tiers; return first valid response.
-
-        Health-aware: each candidate is gated by the shared PER-MODEL token bucket
-        + per-provider circuit breaker (providers in cooldown are skipped), and
-        success/failure (incl. 429 Retry-After cooldown) is recorded so the racer
-        cooperates with the rest of the pipeline. Within a tier it keeps
-        collecting completed futures until one returns valid text or a tier
-        deadline elapses — so a slow but valid response is no longer dropped by a
-        short result() timeout.
-
-        Models within each tier are SHUFFLED for diversity (different clips hit
-        different models), with *prefer_provider* boosted to the front of each
-        tier it appears in and *prefer_model* (the learner's exact best model)
-        boosted to the very front — so the learner's best model gets first shot.
-
-        Returns "" only when every available provider/model failed or was in
-        cooldown — callers should ESCALATE (next strategy / queue), never emit a
-        generic fallback.
-        """
         plan = self._available_plan(prefer_provider=prefer_provider, prefer_model=prefer_model)
         if not plan:
-            log.info("Racer: no API-keyed providers available — falling back to local Ollama")
+            log.info("Racer: no API-keyed providers available - falling back to Ollama")
             return self.generate_ollama(prompt, system_instruction)
 
         ai_cfg = _cfg.get("ai", {})
@@ -461,21 +414,14 @@ class AIClient:
             return fn(prompt, system_instruction)
 
         for tier_idx, tier in enumerate(plan):
-            # Gate each candidate through the shared health layer: a PER-MODEL
-            # token bucket (so racing N models in a tier no longer drains one
-            # shared provider bucket — Bug 3) + per-provider circuit-breaker
-            # cooldown. Skip what we shouldn't hit right now.
             runnable = []
             for provider, model in tier:
                 if not self._check_and_consume_token(provider, model):
-                    log.info("Racer skipping %s/%s (rate-limited or in cooldown)", provider, model)
                     continue
                 runnable.append((provider, model))
             if not runnable:
-                log.debug("Racer tier %d: no runnable candidates after health gating", tier_idx)
                 continue
-            log.info("Racer tier %d: racing %s", tier_idx,
-                     ", ".join(f"{p}/{m}" for p, m in runnable))
+            log.info("Racer tier %d: racing %s", tier_idx, ", ".join(f"{p}/{m}" for p, m in runnable))
 
             with ThreadPoolExecutor(max_workers=len(runnable)) as exc:
                 fut_map = {exc.submit(make_call, p, m): (p, m) for p, m in runnable}
@@ -488,7 +434,7 @@ class AIClient:
                         break
                     done, pending = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
                     if not done:
-                        break  # tier deadline hit
+                        break
                     for fut in done:
                         p, m = fut_map[fut]
                         try:
@@ -511,196 +457,124 @@ class AIClient:
                 if winner:
                     return winner
 
-        log.warning("Racer: all available models failed/cooled down — escalating (no generic fallback)")
+        log.warning("Racer: all available models failed/cooled down")
         return ""
 
-    # ---------------- OPENROUTER ----------------
+    # --- OPENCODE GO ---
 
-    def generate_openrouter(
-        self,
-        prompt: str,
-        system_instruction: Optional[str] = None,
-    ) -> str:
-        if not self.openrouter_api_key:
-            raise ValueError("OpenRouter API key missing")
-
-        client = OpenAI(
-            api_key=self.openrouter_api_key,
-            base_url=self.openrouter_base_url,
-        )
-
+    def generate_opencode(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+        """Generate via OpenCode Go (mimo-v2.5-pro primary, $0 with Go subscription)."""
+        if not self.opencode_api_key:
+            raise ValueError("OpenCode Zen API key missing")
+        client = OpenAI(api_key=self.opencode_api_key, base_url=self.opencode_base_url)
         messages = []
         if system_instruction:
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": prompt})
-
-        self._last_provider = "openrouter"
+        self._last_provider = "opencode"
         self._last_model = self._model
-
-        import time
         t0 = time.monotonic()
         response = client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=8192,
+            model=self._model, messages=messages, temperature=0.7, max_tokens=8192,
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
+        log.info("LLM: opencode/%s (%dms, %d tokens)", self._model, duration_ms, tokens,
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms,
+                        "metadata": {"provider": "opencode", "model": self._model, "tokens": tokens}})
+        content = response.choices[0].message.content
+        # Some reasoning models put output in reasoning_content only
+        if not content and hasattr(response.choices[0].message, "reasoning_content"):
+            reasoning = response.choices[0].message.reasoning_content
+            if reasoning:
+                content = reasoning
+        if content is None:
+            raise ValueError(f"OpenCode returned empty (finish_reason={response.choices[0].finish_reason})")
+        return content.strip()
+
+    # --- OPENROUTER ---
+
+    def generate_openrouter(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+        if not self.openrouter_api_key:
+            raise ValueError("OpenRouter API key missing")
+        client = OpenAI(api_key=self.openrouter_api_key, base_url=self.openrouter_base_url)
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+        self._last_provider = "openrouter"
+        self._last_model = self._model
+        t0 = time.monotonic()
+        response = client.chat.completions.create(
+            model=self._model, messages=messages, temperature=0.7, max_tokens=8192,
             extra_headers={"HTTP-Referer": "https://github.com/prajwalbairagi/yt-clips"},
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
         tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
-        log.info(f"LLM request: openrouter/{self._model} ({duration_ms}ms, {tokens} tokens)",
-                 extra={"stage": "llm_generate", "duration_ms": duration_ms, 
+        log.info("LLM: openrouter/%s (%dms, %d tokens)", self._model, duration_ms, tokens,
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms,
                         "metadata": {"provider": "openrouter", "model": self._model, "tokens": tokens}})
-
         content = response.choices[0].message.content
         if content is None:
-            raise ValueError(f"OpenRouter returned empty content (finish_reason={response.choices[0].finish_reason})")
+            raise ValueError(f"OpenRouter returned empty (finish_reason={response.choices[0].finish_reason})")
         return content.strip()
 
-    # ---------------- NVIDIA ----------------
+    # --- NVIDIA ---
 
-    def generate_nvidia(
-        self,
-        prompt: str,
-        system_instruction: Optional[str] = None,
-    ) -> str:
+    def generate_nvidia(self, prompt: str, system_instruction: Optional[str] = None) -> str:
         if not self.nvidia_api_key:
             raise ValueError("NVIDIA API key missing")
-
-        client = OpenAI(
-            api_key=self.nvidia_api_key,
-            base_url=self.nvidia_base_url,
-        )
-
+        client = OpenAI(api_key=self.nvidia_api_key, base_url=self.nvidia_base_url)
         messages = []
-
         if system_instruction:
-            messages.append(
-                {
-                    "role": "system",
-                    "content": system_instruction,
-                }
-            )
-
-        messages.append(
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        )
-
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
         self._last_provider = "nvidia"
         self._last_model = self._model
-
-        import time
         t0 = time.monotonic()
         response = client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=8192,
+            model=self._model, messages=messages, temperature=0.7, max_tokens=8192,
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
         tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
-        log.info(f"LLM request: nvidia/{self._model} ({duration_ms}ms, {tokens} tokens)",
-                 extra={"stage": "llm_generate", "duration_ms": duration_ms, 
+        log.info("LLM: nvidia/%s (%dms, %d tokens)", self._model, duration_ms, tokens,
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms,
                         "metadata": {"provider": "nvidia", "model": self._model, "tokens": tokens}})
-
         content = response.choices[0].message.content
         if content is None:
-            raise ValueError(f"NVIDIA returned empty content (finish_reason={response.choices[0].finish_reason})")
+            raise ValueError(f"NVIDIA returned empty (finish_reason={response.choices[0].finish_reason})")
         return content.strip()
 
-    # ---------------- GROQ ----------------
+    # --- GROQ ---
 
-    def generate_groq(
-        self,
-        prompt: str,
-        system_instruction: Optional[str] = None,
-    ) -> str:
+    def generate_groq(self, prompt: str, system_instruction: Optional[str] = None) -> str:
         if not self.groq_api_key:
             raise ValueError("Groq API key missing")
-
-        # Trim total prompt to stay within API limits
         total = len(system_instruction or "") + len(prompt)
         if total > 28000:
             excess = total - 28000
             prompt = prompt[:max(len(prompt) - excess - 500, 8000)]
             if system_instruction:
                 system_instruction = system_instruction[:2000]
-
-        client = OpenAI(
-            api_key=self.groq_api_key,
-            base_url=self.groq_base_url,
-        )
-
+        client = OpenAI(api_key=self.groq_api_key, base_url=self.groq_base_url)
         messages = []
         if system_instruction:
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": prompt})
-
         self._last_provider = "groq"
         self._last_model = self._model
-
-        import time
         t0 = time.monotonic()
         response = client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=8192,
+            model=self._model, messages=messages, temperature=0.7, max_tokens=8192,
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
         tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
-        log.info(f"LLM request: groq/{self._model} ({duration_ms}ms, {tokens} tokens)",
-                 extra={"stage": "llm_generate", "duration_ms": duration_ms, 
+        log.info("LLM: groq/%s (%dms, %d tokens)", self._model, duration_ms, tokens,
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms,
                         "metadata": {"provider": "groq", "model": self._model, "tokens": tokens}})
-
         content = response.choices[0].message.content
         if content is None:
-            raise ValueError(f"Groq returned empty content (finish_reason={response.choices[0].finish_reason})")
-        return content.strip()
-
-    # ---------------- DEEPSEEK ----------------
-
-    def generate_deepseek(
-        self,
-        prompt: str,
-        system_instruction: Optional[str] = None,
-    ) -> str:
-        if not self.deepseek_api_key:
-            raise ValueError("DeepSeek API key missing")
-
-        client = OpenAI(
-            api_key=self.deepseek_api_key,
-            base_url=self.deepseek_base_url,
-        )
-
-        messages = []
-        if system_instruction:
-            messages.append({"role": "system", "content": system_instruction})
-        messages.append({"role": "user", "content": prompt})
-
-        self._last_provider = "deepseek"
-        self._last_model = "deepseek-chat"
-
-        import time
-        t0 = time.monotonic()
-        response = client.chat.completions.create(
-            model=self._last_model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=8192,
-        )
-        duration_ms = int((time.monotonic() - t0) * 1000)
-        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
-        log.info(f"LLM request: deepseek/{self._last_model} ({duration_ms}ms, {tokens} tokens)",
-                 extra={"stage": "llm_generate", "duration_ms": duration_ms, 
-                        "metadata": {"provider": "deepseek", "model": self._last_model, "tokens": tokens}})
-
-        content = response.choices[0].message.content
-        if content is None:
-            raise ValueError(f"DeepSeek returned empty content (finish_reason={response.choices[0].finish_reason})")
+            raise ValueError(f"Groq returned empty (finish_reason={response.choices[0].finish_reason})")
         return content.strip()
 
     def get_used_provider(self) -> str:
@@ -710,12 +584,11 @@ class AIClient:
         return self._last_model or self._model
 
     def get_available_providers(self) -> Dict:
-        """Return dict of available providers and their candidate models."""
         available = {}
+        if self.opencode_api_key:
+            available["opencode"] = self.PROVIDER_MODELS["opencode"]
         if self.groq_api_key:
             available["groq"] = self.PROVIDER_MODELS["groq"]
-        if self.deepseek_api_key:
-            available["deepseek"] = self.PROVIDER_MODELS["deepseek"]
         if self.openrouter_api_key:
             available["openrouter"] = self.PROVIDER_MODELS["openrouter"]
         if self.nvidia_api_key:
@@ -723,41 +596,22 @@ class AIClient:
         return available
 
     def generate_image(self, prompt: str, output_path: str) -> bool:
-        """Stub: returns False to trigger ffmpeg frame extraction fallback."""
         return False
 
-    # ---------------- OLLAMA ----------------
+    # --- OLLAMA ---
 
-    def generate_ollama(
-        self,
-        prompt: str,
-        system_instruction: Optional[str] = None,
-    ) -> str:
+    def generate_ollama(self, prompt: str, system_instruction: Optional[str] = None) -> str:
         full_prompt = prompt
-
         if system_instruction:
-            full_prompt = (
-                f"System: {system_instruction}\n\n"
-                f"User: {prompt}"
-            )
-
-        payload = {
-            "model": "llama3.2",
-            "prompt": full_prompt,
-            "stream": False,
-        }
-
+            full_prompt = f"System: {system_instruction}\n\nUser: {prompt}"
+        payload = {"model": "llama3.2", "prompt": full_prompt, "stream": False}
         try:
-            response = requests.post(
-                self.ollama_url,
-                json=payload,
-                timeout=120,
-            )
+            response = requests.post(self.ollama_url, json=payload, timeout=120)
             response.raise_for_status()
             data = response.json()
             return data.get("response", "").strip()
         except requests.ConnectionError:
-            raise ConnectionError("Ollama connection refused — is Ollama running?")
+            raise ConnectionError("Ollama connection refused")
         except requests.Timeout:
             raise TimeoutError("Ollama request timed out (>120s)")
         except requests.HTTPError as e:
@@ -765,52 +619,23 @@ class AIClient:
         except Exception as e:
             raise RuntimeError(f"Ollama error: {e}")
 
-    # ---------------- PARALLEL TEST ----------------
+    # --- PARALLEL TEST ---
 
-    def compare_models(
-        self,
-        prompt: str,
-        system_instruction: Optional[str] = None,
-    ) -> Dict:
-
+    def compare_models(self, prompt: str, system_instruction: Optional[str] = None) -> Dict:
         providers = {
-            "nvidia": lambda: self.generate_nvidia(
-                prompt,
-                system_instruction,
-            ),
-            "ollama": lambda: self.generate_ollama(
-                prompt,
-                system_instruction,
-            ),
+            "nvidia": lambda: self.generate_nvidia(prompt, system_instruction),
+            "ollama": lambda: self.generate_ollama(prompt, system_instruction),
         }
-
-
-
         results = {}
-
         with ThreadPoolExecutor(max_workers=len(providers)) as executor:
-            futures = {
-                executor.submit(fn): name
-                for name, fn in providers.items()
-            }
-
+            futures = {executor.submit(fn): name for name, fn in providers.items()}
             for future in as_completed(futures):
                 name = futures[future]
-
                 try:
                     output = future.result()
-
-                    results[name] = {
-                        "success": True,
-                        "response": output,
-                    }
-
+                    results[name] = {"success": True, "response": output}
                 except Exception as e:
-                    results[name] = {
-                        "success": False,
-                        "error": str(e),
-                    }
-
+                    results[name] = {"success": False, "error": str(e)}
         return results
 
 
