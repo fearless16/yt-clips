@@ -509,7 +509,9 @@ def detect_highlights(
             }
             for w in merged[:max(int(h_cfg["max_clips"]) * 2, 10)]  # Send 2x max_clips to AI
         ]
+        log.info("DEBUG ai_candidates[0]: start=%.3f end=%.3f", ai_candidates[0]["start"], ai_candidates[0]["end"])
         merged = _refine_highlights_with_ai(segments, ai_candidates, video_title, h_cfg["max_clips"])
+        log.info("DEBUG after AI merged[0]: start=%.3f end=%.3f type=%s", merged[0]["start"], merged[0]["end"], type(merged[0]).__name__)
         # Re-sort by start time after AI reorder
         merged.sort(key=lambda w: w["start"])
 
@@ -611,7 +613,7 @@ def detect_highlights(
             "score":    w["score"],
             "text":     window_text,
         })
-        log.info("  %s: %s → %s (score=%.3f)", key, _format_ts(w["start"]), _format_ts(w["end"]), w["score"])
+        log.info("  %s: %s → %s (score=%.3f) [raw: start=%.3f end=%.3f]", key, _format_ts(w["start"]), _format_ts(w["end"]), w["score"], w["start"], w["end"])
 
     with open(output_path, "w", encoding="utf-8") as f:
         yaml.dump(yaml_data, f, default_flow_style=False, allow_unicode=True)
