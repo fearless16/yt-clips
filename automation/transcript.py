@@ -65,7 +65,7 @@ def _parse_vtt(text: str) -> list[dict]:
     """
     segments = []
     block_pattern = re.compile(
-        r"(\d{2}:\d{2}(?::\d{2})?\.\d{3})\s+-->\s+(\d{2}:\d{2}(?::\d{2})?\.\d{3})\s*\n(.+?)(?=\n\n|\n\d{2}|\Z)",
+        r"(\d{2}:\d{2}(?::\d{2})?\.\d{3})\s+-->\s+(\d{2}:\d{2}(?::\d{2})?\.\d{3})[^\n]*\n(.+?)(?=\n\n|\n\d{2}|\Z)",
         re.DOTALL,
     )
     for match in block_pattern.finditer(text):
