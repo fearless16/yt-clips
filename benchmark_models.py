@@ -9,10 +9,10 @@ import sys
 
 # API configs
 PROVIDERS = {
-    "DeepSeek V4 Flash": {
-        "url": "https://api.deepseek.com/v1/chat/completions",
-        "key": os.environ.get("DEEPSEEK_API_KEY", ""),
-        "model": "deepseek-v4-flash",
+    "Groq Scout": {
+        "url": "https://api.groq.com/openai/v1/chat/completions",
+        "key": os.environ.get("GROQ_API_KEY", ""),
+        "model": "meta-llama/llama-4-scout-17b-16e-instruct",
     },
     "MiniMax M2.5 Pro": {
         "url": "https://openrouter.ai/api/v1/chat/completions",

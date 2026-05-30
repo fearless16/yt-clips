@@ -66,8 +66,8 @@ def test_recompute_best_model_prefers_real_over_benchmark(tmp_path):
     learner.learned_insights["model_performance"] = {
         "groq/scout": {"count": MIN_CLIPS_FOR_PATTERN, "avg_score": 0.8,
                        "provider": "groq", "model": "scout"},
-        "deepseek/chat": {"count": MIN_CLIPS_FOR_PATTERN, "avg_score": 0.4,
-                          "provider": "deepseek", "model": "chat"},
+        "openrouter/gemini": {"count": MIN_CLIPS_FOR_PATTERN, "avg_score": 0.4,
+                          "provider": "openrouter", "model": "google/gemini-2.0-flash-001"},
     }
     source = learner._recompute_best_model()
     assert source == "real"
@@ -149,8 +149,8 @@ def test_get_best_model_no_reload_when_unchanged(tmp_path):
     reader = SEOLearner()
     reader.performance_db = db
     reader.learned_insights = _empty_insights()
-    reader.learned_insights["current_best_provider"] = "deepseek"
-    reader.learned_insights["current_best_model"] = "deepseek-chat"
+    reader.learned_insights["current_best_provider"] = "groq"
+    reader.learned_insights["current_best_model"] = "meta-llama/llama-4-scout-17b-16e-instruct"
     # File never written; mtime stays 0 -> no reload, in-memory value preserved.
     reader._loaded_mtime = reader._db_mtime()
-    assert reader.get_best_model() == ("deepseek", "deepseek-chat")
+    assert reader.get_best_model() == ("groq", "meta-llama/llama-4-scout-17b-16e-instruct")

@@ -113,8 +113,9 @@ class TestLLMOrchestration:
         from utils.ai_client import AIClient
         self._reset()
         ai = AIClient()
+        ai.opencode_api_key = None
         ai.groq_api_key = "k"
-        ai.deepseek_api_key = ai.openrouter_api_key = ai.nvidia_api_key = None
+        ai.openrouter_api_key = ai.nvidia_api_key = None
 
         class FakeExc(Exception):
             status_code = 429
@@ -128,8 +129,9 @@ class TestLLMOrchestration:
         from utils.ai_client import AIClient
         self._reset()
         ai = AIClient()
+        ai.opencode_api_key = None
         ai.groq_api_key = "k"
-        ai.deepseek_api_key = ai.openrouter_api_key = ai.nvidia_api_key = None
+        ai.openrouter_api_key = ai.nvidia_api_key = None
         with patch.object(AIClient, "generate_groq", return_value="OK"):
             out = ai.generate_fastest_first("p", "s")
         assert out == "OK"
@@ -466,7 +468,6 @@ class TestModelDiversity:
         ai = AIClient()
         ai.groq_api_key = "k"
         ai.openrouter_api_key = "k"
-        ai.deepseek_api_key = "k"
         ai.nvidia_api_key = "k"
         # Run multiple times and check we get different orderings
         orderings = set()
@@ -483,9 +484,8 @@ class TestModelDiversity:
         ai = AIClient()
         ai.groq_api_key = "k"
         ai.openrouter_api_key = "k"
-        ai.deepseek_api_key = "k"
         ai.nvidia_api_key = "k"
-        # Tier 2 has deepseek + nvidia + openrouter mixed
+        # Tier 2 has nvidia + openrouter mixed
         # With prefer_provider="nvidia", nvidia should be first in tier 2
         found_nvidia_first = False
         for _ in range(10):
