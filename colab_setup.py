@@ -59,7 +59,7 @@ print("  Installing deps...")
 run("apt-get install -y -qq aria2 ffmpeg > /dev/null 2>&1")
 run("pip install -q yt-dlp faster-whisper rich PyYAML opencv-python-headless numpy "
     "filterpy scipy google-genai google-generativeai openai python-dotenv "
-    "pyngrok ultralytics torch youtube-transcript-api --extra-index-url https://download.pytorch.org/whl/cu121")
+    "pyngrok ultralytics torch youtube-transcript-api mediapipe --extra-index-url https://download.pytorch.org/whl/cu121")
 
 try:
     import utils.torchvision_compat
