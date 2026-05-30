@@ -19,6 +19,7 @@ Usage::
     text = format_for_llm(data["segments"], max_seconds=120, max_segments=50)
 """
 
+import os
 import re
 import json
 from pathlib import Path
@@ -270,19 +271,26 @@ def _fetch_via_api(video_id: str) -> dict | None:
 def _fetch_via_ytdlp(video_id: str) -> dict | None:
     """Fetch transcript via yt-dlp (VTT download). Returns None on failure."""
     import subprocess
+    import shutil as _shutil
     import tempfile
     try:
         with tempfile.NamedTemporaryFile(suffix=".vtt", delete=False, mode="w") as f:
             tmp_path = f.name
         cmd = [
-            "yt-dlp", "--skip-download", "--write-auto-subs", "--sub-langs", "en",
+            "yt-dlp", "--skip-download", "--write-auto-subs", "--sub-langs", "en,hi",
+            "--remote-components", "ejs:github",
             "-o", tmp_path.replace(".vtt", ""), f"https://www.youtube.com/watch?v={video_id}",
         ]
+        # Add deno to PATH if available
+        env = os.environ.copy()
+        deno_bin = str(Path.home() / ".deno" / "bin")
+        if Path(deno_bin).exists() and deno_bin not in env.get("PATH", ""):
+            env["PATH"] = deno_bin + ":" + env.get("PATH", "")
         # Pass cookies if available (bypasses Colab IP blocks)
         cookie_path = Path("cookies.txt")
         if cookie_path.exists() and cookie_path.stat().st_size > 0:
             cmd.extend(["--cookies", str(cookie_path)])
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
         vtt_files = list(Path(tmp_path).parent.glob(f"{Path(tmp_path).stem}*.vtt"))
         if not vtt_files and not result.returncode:
             vtt_files = list(Path(tmp_path).parent.glob("*.vtt"))
