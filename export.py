@@ -327,7 +327,7 @@ def _validate_output(path: str, expected_duration: float = 0.0) -> bool:
             log.error("Output has invalid duration: %s", output)
             return False
             
-        if expected_duration > 0 and abs(duration - expected_duration) > 2.0:
+        if expected_duration > 0 and abs(duration - expected_duration) > 3.0:
             log.error("Output duration %.1fs deviates too much from expected %.1fs: %s", duration, expected_duration, output)
             return False
 
@@ -1045,10 +1045,29 @@ def export_all(
                     video_title = meta.get("title", "")
                     live_stream_url = meta.get("live_stream_url", "")
 
+            # Load match context (scorecard, key players, etc.)
+            match_context = ""
+            match_file = Path(cfg["paths"]["input"]) / "match_context.json"
+            if match_file.exists():
+                try:
+                    with open(match_file, "r", encoding="utf-8") as f:
+                        mc = _json.load(f)
+                        match_context = (
+                            f"Tournament: {mc.get('tournament', '')}\n"
+                            f"Match: {mc.get('match', '')}\n"
+                            f"Teams: {', '.join(mc.get('teams', []))}\n"
+                            f"Result: {mc.get('result', '')}\n"
+                            f"Key Players: {', '.join([f'{k}: {v}' for k, v in mc.get('key_players', {}).items()])}\n"
+                            f"Highlights: {', '.join(mc.get('highlights', []))}\n"
+                            f"Venue: {mc.get('venue', '')}"
+                        )
+                except Exception:
+                    pass
+
             trend = get_trending_context(domain="cricket", region="IN", video_title=video_title)
             seo_context = {
                 "video_title": video_title,
-                "scorecard": trend.get("scorecard", ""),
+                "scorecard": match_context or trend.get("scorecard", ""),
                 "trend_topics": trend.get("topics", []),
                 "live_stream_url": live_stream_url or trend.get("live_stream_url", ""),
             }

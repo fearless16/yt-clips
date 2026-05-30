@@ -49,6 +49,20 @@ STOP_WORDS = {
     "with","by","about","into","over","under","again","then","here","there","when",
     "where","why","how","all","any","more","most","some","such","no","nor","not",
     "only","very",
+    # Hindi stop words
+    "hai","ho","hain","tha","thi","the","ka","ki","ke","ko","se","me","mein",
+    "pe","par","aur","ya","jo","ye","wo","woh","ise","use","usne","usko",
+    "tum","tumne","tumko","hum","hamne","maine","mujhe","mujko",
+    "kya","kyun","kaise","kab","kahan","kaun","kitna","kitni",
+    "ab","abhi","tab","phir","bhi","nahi","nahin","toh","to",
+    "hai","ho","hain","tha","thi","the","raha","rahi","rahe",
+    "kar","karo","karna","karti","karte","karne","karke",
+    "bol","bolo","bolna","bolti","bolte","bolne","bolke",
+    "de","dekh","dekho","dekha","dekhi","dekhe","dekhna",
+    "le","lekar","liya","liye","liya",
+    "tha","thi","the","ho","hoga","hogi","honge",
+    "aur","ya","lekin","magar","par","toh","to",
+    "jo","wo","woh","ye","yeh","ise","use",
 }
 
 GENERIC_TAGS = {
@@ -93,35 +107,56 @@ _SYSTEM = (
 )
 
 _PROMPT_TMPL = """
-CONTEXT:
+MATCH CONTEXT:
+  {scorecard}
+
+LIVE CONTEXT:
   Match: {video_title}
-  Scorecard (with venue, player stats, match situation): {scorecard}
-  Live Trending / Search Spikes: {trend_topics}
-  Actual YouTube Search Suggestions (what people ACTUALLY type): {yt_suggestions}
+  Trending / Search Spikes: {trend_topics}
+  YouTube Search Suggestions: {yt_suggestions}
   CTA: {live_cta}
 
 CLIP CONTENT:
-  Raw Transcript (may have misspellings): {transcript}
-  Key moments: {local_kw}
+  Transcript (Hindi/Hinglish with cricket commentary): {transcript}
+  Key moments from transcript: {local_kw}
 
-CRITICAL: This clip is one of several highlights from the same match. Each clip
-MUST have a COMPLETELY UNIQUE title describing THIS SPECIFIC MOMENT. Never reuse
-a title. Never reference "Target 234" unless this clip is actually about the chase.
+CRITICAL RULES:
+1. This clip is ONE OF SEVERAL highlights. Each clip MUST have a COMPLETELY UNIQUE title.
+2. Use ONLY player names from the MATCH CONTEXT or transcript.
+3. The transcript is in Hindi/Hinglish — translate the meaning to generate English SEO.
+4. Focus on the SPECIFIC cricket moment in THIS clip (wicket, six, four, run chase, injury, etc.)
+5. Do NOT reuse titles across clips. Each title must describe a DIFFERENT event.
 
-══ STEP 1: GROUND YOUR RESPONSE IN THE TRANSCRIPT ═══════════════════════════
-  BEFORE writing any output, do this:
-  1. Read the Raw Transcript carefully
-  2. List every cricket player name mentioned in the transcript
-  3. List every team name mentioned in the transcript
-  4. Describe in one sentence what happens in this clip based ONLY on the transcript
+══ STEP 1: UNDERSTAND THE CLIP ═══════════════════════════════════════════════
+  1. Read the transcript and understand what cricket event is happening
+  2. Cross-reference with MATCH CONTEXT for correct player names
+  3. Describe in one sentence: what specific cricket moment is this clip about?
 
-  RULES — NEVER VIOLATE THESE:
-  - ONLY use player names that appear in the transcript or scorecard
-  - If a player is NOT mentioned in the transcript, DO NOT put them in the title
-  - If a team is NOT mentioned in the transcript, DO NOT put them in the title
-  - NEVER invent events, controversies, or moments not supported by the transcript
-  - Match teams are from the Scorecard context above — do NOT mention other teams
-  - Only use teams that appear in the Scorecard section
+══ STEP 2: GENERATE UNIQUE TITLE ══════════════════════════════════════════════
+  Title format: "<Tournament>: <Specific Event> | <Teams>"
+  Examples of UNIQUE titles for different clips from same match:
+    - "IPL 2026: Shubman Gill Century! GT vs RR | Qualifier 2"
+    - "IPL 2026: Jadeja INJURED during GT vs RR! 😱"
+    - "IPL 2026: Rashid Khan WICKET! GT vs RR Qualifier 2"
+    - "IPL 2026: GT Chase MASTERCLASS! Shubman Gill 100"
+
+══ STEP 3: GENERATE DESCRIPTION ══════════════════════════════════════════════
+  600-900 chars, Hinglish, describe THIS specific moment.
+  Include: what happened, who did it, match situation, emotional reaction.
+
+══ STEP 4: GENERATE TAGS ══════════════════════════════════════════════════════
+  25-35 search terms focusing on:
+  - Player names from this clip
+  - Specific cricket events (century, wicket, six, catch, injury)
+  - Match context (IPL 2026, Qualifier 2, GT vs RR)
+  - Hindi search patterns
+
+Return ONLY this JSON:
+  "title": "<unique title>",
+  "description": "<description>",
+  "hashtags": ["#tag1", "#tag2", "#tag3", "#Shorts"],
+  "search_terms": ["term1", "term2", ...]
+"""
 
 ══ STEP 2: TRANSCRIPTION CORRECTION ══════════════════════════════════════════
   Fix misspelled cricket names:
@@ -233,7 +268,7 @@ CRICKET_KEYWORDS = {
 }
 
 def _extract_keywords(text: str, limit: int = 14) -> List[str]:
-    words = re.findall(r"[A-Za-z0-9']+", (text or "").lower())
+    words = re.findall(r"[A-Za-z0-9']+|[\u0900-\u097F]+", (text or "").lower())
     kw = [w for w in words if w not in STOP_WORDS and len(w) > 2]
     freq: Dict[str, int] = {}
     for w in kw:
@@ -247,7 +282,10 @@ def _extract_keywords(text: str, limit: int = 14) -> List[str]:
     noise = {"oh", "ah", "ha", "he", "she", "it", "do", "go", "so", "yeah", "hey",
              "come", "get", "got", "let", "put", "say", "see", "use", "way", "like",
              "know", "take", "tell", "make", "think", "give", "will", "would", "could",
-             "should", "can", "may", "might", "shall", "now", "then", "just", "also"}
+             "should", "can", "may", "might", "shall", "now", "then", "just", "also",
+             # Hindi noise words
+             "bhai", "yaar", "dekh", "sun", "bol", "chal", "arre", "abe",
+             "matlab", "scene", "wala", "wali", "wale", "isme", "usme"}
     return [k for k in top if k not in noise][:5]
 
 
@@ -769,6 +807,46 @@ def _parse_json_response(text: str) -> Optional[Dict]:
     return None
 
 
+# ── Hindi → English Translation ──────────────────────────────────────────────
+
+def _translate_hindi_to_english(transcript: str, video_title: str = "") -> str:
+    """Translate Hindi/Hinglish transcript to English with cricket context."""
+    # Check if already mostly English
+    hindi_chars = len(re.findall(r'[\u0900-\u097F]', transcript))
+    total_chars = len(transcript.strip())
+    if total_chars == 0 or (hindi_chars / max(total_chars, 1)) < 0.10:
+        return transcript  # Already English
+
+    prompt = f"""Translate this Hindi/Hinglish cricket commentary to English.
+CRITICAL RULES:
+- Keep ALL cricket terms as-is (six, four, wicket, over, run, etc.)
+- Keep ALL player names exactly (Jadeja, Gill, Rashid Khan, etc.)
+- Keep ALL team names (GT, RR, CSK, MI, etc.)
+- Translate to natural English, NOT word-for-word
+- Preserve the cricket match context and excitement
+- If there are cricket stats mentioned (strike rate, runs, wickets), keep them exact
+
+Match context: {video_title}
+
+Hindi transcript:
+{transcript[:2500]}
+
+Return ONLY the English translation. No explanations."""
+
+    try:
+        response = ai.generate_text(
+            prompt,
+            system_instruction="You are a cricket commentary translator. Translate Hindi/Hinglish to natural English. Keep cricket terminology, player names, and stats unchanged."
+        )
+        if response and len(response) > 30:
+            log.info("Translated Hindi→English (%d→%d chars)", len(transcript), len(response))
+            return response.strip()
+    except Exception as e:
+        log.warning("Translation failed: %s", e)
+
+    return transcript  # Fallback to original
+
+
 # ── Per-clip SEO (one AI call, retries with backoff) ──────────────────────────
 
 def generate_clip_seo(
@@ -788,6 +866,10 @@ def generate_clip_seo(
     provider_override/model_override: allow dynamic model selection for A/B testing.
     """
     _maybe_auto_benchmark()
+
+    # Translate Hindi transcript to English if needed
+    transcript = _translate_hindi_to_english(transcript, video_title)
+
     trend_topics = trend_topics or []
     local_kw_list = _extract_keywords(transcript)
     local_kw = ", ".join(local_kw_list)

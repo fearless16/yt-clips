@@ -160,7 +160,7 @@ def run(url: str, skip_download=False, skip_transcribe=False,
                 result.exported = export_all(
                     highlights_path, video_path,
                     transcript_path=transcript_path,
-                    generate_seo=False,
+                    generate_seo=True,
                 )
                 ph.set(exported=len(result.exported))
         except Exception as e:
