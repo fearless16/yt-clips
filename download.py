@@ -66,17 +66,20 @@ def _cookie_args(dl_cfg: dict) -> list[str]:
 
 
 def _js_runtime_args(dl_cfg: dict) -> list[str]:
+    args: list[str] = []
     runtime = dl_cfg.get("js_runtime", "auto")
     if not runtime or str(runtime).lower() in {"none", "false", "off"}:
-        return []
+        return args
     if str(runtime).lower() != "auto":
-        return ["--js-runtimes", str(runtime)]
-
-    for name in ("deno", "node"):
-        path = shutil.which(name)
-        if path:
-            return ["--js-runtimes", f"{name}:{path}"]
-    return []
+        args.extend(["--js-runtimes", str(runtime)])
+    else:
+        for name in ("deno", "node"):
+            path = shutil.which(name)
+            if path:
+                args.extend(["--js-runtimes", f"{name}:{path}"])
+                break
+    args.extend(["--remote-components", "ejs:github"])
+    return args
 
 
 def _normalise_po_token(raw_token: str, client: str) -> str:
