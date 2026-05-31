@@ -1033,7 +1033,7 @@ def export_all(
     seo_context = {}
     if generate_seo:
         try:
-            from trends import get_trending_context
+            from automation.seo.trends import get_trending_context
             import json as _json
 
             video_title = ""
@@ -1201,7 +1201,7 @@ def export_all(
     if generate_seo and seo_context and seo_queue:
         log.info("🏷  SEO phase: %d clips...", len(seo_queue))
         try:
-            from seo import generate_seo_for_exported_clip
+            from automation.seo.seo import generate_seo_for_exported_clip
             for idx, item in enumerate(seo_queue):
                 # 8s pause between calls (skip before first call)
                 inter_pause = 8.0 if idx > 0 else 0.0

@@ -190,15 +190,20 @@ class SEOLearner:
         PERF_CACHE.set("perf_data", self.learned_insights)
 
     def _dedup_clips(self, new_record: Dict):
-        """Replace existing entry for same clip_id, keeping the newer one."""
+        """Append-only versioned clip storage.
+
+        Never mutates an existing entry (Invariant 1: append-only events).
+        Each unique clip_id gets a monotonically increasing version number.
+        Oldest entries trimmed when count exceeds 100.
+        """
         clips = self.learned_insights["clips"]
         cid = new_record["clip_id"]
-        for i, c in enumerate(clips):
+        version = 1
+        for c in clips:
             if c.get("clip_id") == cid:
-                clips[i] = new_record
-                return
+                version = max(version, c.get("_version", 0) + 1)
+        new_record["_version"] = version
         clips.append(new_record)
-        # Keep max 100 unique clips (trim oldest by timestamp)
         if len(clips) > 100:
             clips.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
             self.learned_insights["clips"] = clips[:100]

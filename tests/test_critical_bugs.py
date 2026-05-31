@@ -167,7 +167,7 @@ class TestSEOLearnerAllScores:
             f"Expected pattern count {len(scores)}, got {total_count}"
 
     def test_dedup_same_clip_id(self):
-        """Same clip_id should replace old entry, not append."""
+        """Same clip_id appends with version bump (Invariant 1: append-only)."""
         from automation.seo.seo_learner import SEOLearner
         learner = SEOLearner()
         learner.learned_insights["clips"] = []
@@ -177,14 +177,16 @@ class TestSEOLearnerAllScores:
             hashtags=["#shorts"], analytics={"viewCount": 100},
         )
         assert len(learner.learned_insights["clips"]) == 1
+        assert learner.learned_insights["clips"][0]["_version"] == 1
 
         learner.record_performance(
             clip_id="abc123", title="Test Video Updated", description="desc2",
             hashtags=["#shorts"], analytics={"viewCount": 200},
         )
-        assert len(learner.learned_insights["clips"]) == 1, \
-            "Same clip_id should dedup, not append"
-        assert learner.learned_insights["clips"][0]["analytics"]["viewCount"] == 200
+        assert len(learner.learned_insights["clips"]) == 2, \
+            "Same clip_id should append (Invariant 1)"
+        assert learner.learned_insights["clips"][1]["_version"] == 2
+        assert learner.learned_insights["clips"][1]["analytics"]["viewCount"] == 200
 
     def test_time_decay_weights(self):
         """Recent clips should have higher weight than old clips."""

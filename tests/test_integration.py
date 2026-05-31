@@ -71,7 +71,7 @@ def test_pipeline_integration_success_flow(tmp_path):
          patch("highlight.detect_highlights", side_effect=mock_detect_highlights), \
          patch("video_analyzer.analyze_video", return_value={"summary": {"face_detection_rate": 80.0, "avg_quality": 0.9}}), \
          patch("export.export_all", side_effect=mock_export_all), \
-         patch("seo.process_all_seo", side_effect=mock_process_all_seo) as mock_seo, \
+         patch("automation.seo.seo.process_all_seo", side_effect=mock_process_all_seo) as mock_seo, \
          patch("thumbnail.process_all_thumbnails") as mock_thumb, \
          patch("sync.sync_to_drive") as mock_sync, \
          patch("upload.upload_video", return_value="uploaded_id_789") as mock_upload:

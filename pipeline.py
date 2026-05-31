@@ -258,7 +258,7 @@ def run(
         if skip_seo:
             log.info("Skipping SEO (--skip-seo)")
         else:
-            from seo import process_all_seo
+            from automation.seo.seo import process_all_seo
             seo_results = [f for f in Path(export_dir).glob("*_metadata.json")]
             if not seo_results:
                 process_all_seo(highlights_path, export_dir)
@@ -352,7 +352,7 @@ def run(
     if auto_upload:
         _banner("PHASE 7 — ANALYTICS & SEO LEARNING")
         try:
-            from analytics import generate_daily_insights
+            from automation.seo.analytics import generate_daily_insights
             generate_daily_insights()
         except FileNotFoundError as e:
             if "yt_analytics_token.json" in str(e) or "client_secrets" in str(e):
