@@ -6,7 +6,7 @@ Face OS is a state-estimation engine, not a face-swap or filter. Its founding be
 
 Today the code does the opposite. The core identity memory is still an RGB pixel buffer (`BeliefPixel`, `identity_state.py:186-265`) updated by RGB EMA (`identity_state.py:233`), which `arch.md` §8/§12 explicitly forbids. The physical render path **re-decomposes the current source crop** and relights *that* (`_render_with_physical_renderer`, `pipeline.py:1937-2143`, decomposition at `pipeline.py:1969`), with the stored identity only nudging it through a mean-correction (`pipeline.py:2010-2017`) and a fixed `0.4` albedo blend (`pipeline.py:1262-1264`, `pipeline.py:1384-1386`). The net effect is **paste-then-relight**, not **synthesize-from-latent**.
 
-This feature promotes a **lighting-invariant identity latent** to be the renderer's **primary input**. The latent stores *reflectance and structure* (albedo + geometry-conditioned appearance + microdetail) plus *uncertainty*, owned entirely behind the Identity subsystem. A new synthesis entry point, `render_from_latent(...)`, warps the stored identity albedo into the current geometry and shades it under the *estimated* lighting, instead of decomposing the source. This is the architectural root for D-05 and is a precondition that unblocks D-07 (state-space runtime: the latent becomes the state the runtime reasons over) and D-10 (factor-graph closure: the latent + uncertainty are the variable nodes). The design is phased so the existing 28 integration tests (`tests/face_os/test_integration.py`) keep passing while telemetry *proves* the latent — not the source crop — drives each rendered pixel.
+This feature promotes a **lighting-invariant identity latent** to be the renderer's **primary input**. The latent stores *reflectance and structure* (albedo + geometry-conditioned appearance + microdetail) plus *uncertainty*, owned entirely behind the Identity subsystem. A new synthesis entry point, `render_from_latent(...)`, warps the stored identity albedo into the current geometry and shades it under the *estimated* lighting, instead of decomposing the source. This is the architectural root for D-05 and is a precondition that unblocks D-07 (state-space runtime: the latent becomes the state the runtime reasons over) and D-10 (factor-graph closure: the latent + uncertainty are the variable nodes). The design is phased so the existing 28 integration tests (`face_os/tests/test_integration.py`) keep passing while telemetry *proves* the latent — not the source crop — drives each rendered pixel.
 
 This document covers both the **High-Level Design** (latent representation, data flow, component/subsystem separation, data models, diagrams) and the **Low-Level Design** (concrete signatures, pseudocode, and the enforced `IntrinsicComponents ↔ renderer` type contract). It also defines the migration/coexistence strategy, correctness properties for property-based testing, and an explicit anti-pattern retirement ledger.
 
@@ -455,7 +455,7 @@ output = multiband_blend(bg=frame_in_output_space, fg=to_uint8_bgr(y_face),
 
 ## Migration / Coexistence Strategy
 
-The goal is to introduce the latent as the primary render input **without breaking the 28 integration tests** (`tests/face_os/test_integration.py`) and without a "green tests hiding broken runtime" situation (an explicit anti-pattern). Truthfulness is enforced by telemetry that *proves* the latent drove the render, not by counters that infer it.
+The goal is to introduce the latent as the primary render input **without breaking the 28 integration tests** (`face_os/tests/test_integration.py`) and without a "green tests hiding broken runtime" situation (an explicit anti-pattern). Truthfulness is enforced by telemetry that *proves* the latent drove the render, not by counters that infer it.
 
 The render path is selected by a feature flag `render_source ∈ {legacy, latent}` with a hard fallback, so legacy behavior is the default until the latent path is proven on real video.
 
@@ -679,7 +679,7 @@ All fallbacks **preserve the frame contract** (shape/dtype/range) per `arch.md` 
 - Properties P1–P8 above, with `hypothesis` strategies for albedos, lightings, poses, geometries, occlusion sequences. Deterministic seeds.
 
 ### Integration testing (must keep all 28 green)
-- Reuse `tests/face_os/test_integration.py` classes: `TestPipelineOutputValidity`, `TestPhysicalRendererBrightness`, `TestFaceDetectionOnOutput`, `TestEnergyConservation`, `TestProcessFrameContract`.
+- Reuse `face_os/tests/test_integration.py` classes: `TestPipelineOutputValidity`, `TestPhysicalRendererBrightness`, `TestFaceDetectionOnOutput`, `TestEnergyConservation`, `TestProcessFrameContract`.
 - Add a `TestLatentDrivesRender` class: on the latent path, assert `LatentRenderTelemetry.latent_primary` and `source_pixel_fraction < 0.02` for ≥90% of physical frames on real video (`input/video.mp4`, slow marker).
 - Add `TestSubsystemBoundaries`: assert the pipeline does not touch identity privates on the latent path (A-6).
 
@@ -724,6 +724,6 @@ Explicit per the request: which anti-patterns this design **removes** vs **defer
 - **Reused unchanged:** `intrinsic_decomposition.py` (`IntrinsicComponents`, `IntrinsicDecomposer`), `physical_renderer.py` (Lambertian + Blinn-Phong math, `render_with_intrinsic`/`render_with_mesh`), `compositor.py` (`multiband_blend`), `canonical_map.py` (alignment), `dense_geometry.py` (mesh normals), `state_evolution.py` (Kalman, for Temporal), `lie_group.py` (SIM(2)), `photometric.py` (LAB lock), `types.py` (existing contracts).
 - **Reactivated:** `identity_manifold.py` (`IdentityManifold`, `ManifoldConfig`, `IdentityPoint`) — currently stranded (`STRANDED_MODULES.md`), used for `appearance_code`.
 - **New:** `IdentityLatent` + `LatentRenderTelemetry` dataclasses (`types.py`); `assert_intrinsic_contract`; `IdentityEstimator.update_latent`/`synthesize_identity`/`query_uncertainty`; `FaceRenderer.render_from_latent`; `estimate_lighting`; `render_source` flag and latent branch in `_render_core`.
-- **Test deps:** `hypothesis` (property-based), existing `pytest` + `dlib` integration harness (`tests/face_os/test_integration.py`).
+- **Test deps:** `hypothesis` (property-based), existing `pytest` + `dlib` integration harness (`face_os/tests/test_integration.py`).
 
 > Doc-vs-code note (A-12): `STRANDED_MODULES.md` marks D-07 "NOT NEEDED" while `STATE.md` tracks D-05/D-07/D-10 as PARTIAL. This design follows the CODE as ground truth and positions the latent as the substrate that *enables* D-07/D-10 without committing to building either here.

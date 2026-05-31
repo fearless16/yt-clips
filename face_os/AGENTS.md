@@ -60,7 +60,7 @@ You are a codebase analysis and execution agent for the Face OS pipeline (`face_
 ## Test Suite
 
 ```bash
-.venv/bin/python -m pytest tests/face_os/ -v
+.venv/bin/python -m pytest face_os/tests/ -v
 ```
 
 ## Goal

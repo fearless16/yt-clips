@@ -482,6 +482,22 @@ class LatentRenderTelemetry:
     hybrid_alpha_mean: float = 1.0         # Phase 2B: mean per-pixel LATENT
     #   authority (1.0 = pure latent; <1 = low-freq observation blended in where
     #   uncertain). Proves the uncertainty hybrid actually engaged.
+    coverage_pose: float = 0.0             # §16.7: |observed pose bins| /
+    #   |total pose bins| in [0,1]. The FIRST real factor of the §16.8 composite
+    #   C_recon = C_obs · Coverage_pose · …. Observable SIGNAL only — NOT yet
+    #   folded into the live gate (the other C_recon factors are still MISSING,
+    #   and §19 fixes the wiring order at Phase 2B).
+    mean_visibility: float = 1.0           # §16.6: mean geometric visibility
+    #   V(u,v,t)=clip(N·view,0,1) of the last latent update (1.0 when no mesh
+    #   self-occlusion evidence). The Visibility factor of the §16.8 composite.
+    #   Observable SIGNAL only — gates latent MEMORY, not the render gate.
+    coverage_light: float = 0.0            # §16.7: |observed lighting bins| /
+    #   |total lighting bins| in [0,1]. The Lighting factor of the §16.8 composite.
+    #   Observable SIGNAL only — same cap as coverage_pose (c·cov).
+    c_recon: float = 0.0                   # §16.8: C_obs · Coverage_pose ·
+    #   Coverage_light · Visibility. The composite trust signal and Phase-2B
+    #   gate input (arch §19). Observable SIGNAL; not yet wired to the live
+    #   gate (that is the Phase-2B default-flip decision).
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -495,4 +511,8 @@ class LatentRenderTelemetry:
             "contract_assertions_passed": self.contract_assertions_passed,
             "gate_state": self.gate_state,
             "hybrid_alpha_mean": self.hybrid_alpha_mean,
+            "coverage_pose": self.coverage_pose,
+            "mean_visibility": self.mean_visibility,
+            "coverage_light": self.coverage_light,
+            "c_recon": self.c_recon,
         }

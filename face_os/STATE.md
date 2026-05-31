@@ -1,6 +1,6 @@
 # Face OS v3.8 — Compact State Reference
 
-**Last updated:** 2026-05-30 | **Tests:** 278 collected in tests/face_os/ (265 fast + 13 slow runtime-truth; 9 skip without input/video.mp4) | **Source:** ~15,200 lines
+**Last updated:** 2026-05-31 | **Tests:** 305 collected in face_os/tests/ (291 fast + 14 slow runtime-truth; some skip without input/video.mp4) | **Source:** ~15,200 lines
 
 This file is the current source of truth for Face OS. Older status files may
 describe historical drift; use this file for current runtime alignment.
@@ -72,11 +72,11 @@ pipeline.py (single orchestration runtime)
 
 ```bash
 # All tests
-.venv/bin/python -m pytest tests/face_os/ -v
+.venv/bin/python -m pytest face_os/tests/ -v
 
 # Fast tests only (no video)
-.venv/bin/python -m pytest tests/face_os/ -v -m "not slow"
+.venv/bin/python -m pytest face_os/tests/ -v -m "not slow"
 
 # Slow tests only (requires input/video.mp4)
-.venv/bin/python -m pytest tests/face_os/ -v -m "slow"
+.venv/bin/python -m pytest face_os/tests/ -v -m "slow"
 ```

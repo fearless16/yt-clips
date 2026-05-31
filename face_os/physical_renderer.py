@@ -333,8 +333,16 @@ class PhysicalRenderer:
         view_direction: Optional[np.ndarray] = None,
         observed: Optional[np.ndarray] = None,
         frame_idx: Optional[int] = None,
+        detail_residual: Optional[np.ndarray] = None,
     ) -> PhysicalRenderOutput:
-        """Render face with a physically-inspired lighting model."""
+        """Render face with a physically-inspired lighting model.
+
+        ``detail_residual`` (latent path only): when provided, the identity HF
+        carried in ``IntrinsicComponents.detail_residual`` is used as the detail
+        band instead of recomputing it from the albedo (design.md:390-401). It
+        defaults to ``None`` so the legacy ``render``/``render_with_mesh`` paths
+        keep their exact behavior.
+        """
 
         start_time = time.perf_counter()
 
@@ -371,26 +379,57 @@ class PhysicalRenderer:
         if shading_3ch.shape[2] == 1:
             shading_3ch = np.repeat(shading_3ch, 3, axis=2)
 
-        # Normalize base_render so shading controls absolute brightness.
-        # base_render has arbitrary energy from lighting params; normalize to unit mean
-        # so that shading alone determines the output energy level.
-        base_mean = float(np.mean(base_render))
-        if base_mean > 1e-8:
-            base_render = base_render / base_mean
-
-        # Modulate: output ≈ albedo-lit-surface × scene-illumination
-        base_render = base_render * shading_3ch
-
-        # Safety-net energy conservation against albedo*shading target
         target_energy = float(np.mean(albedo * shading_3ch))
-        base_render = self._apply_energy_conservation(albedo, base_render, target_energy=target_energy)
 
-        detail = self._compute_detail_component(
-            albedo=albedo,
-            shading=shading,
-            observed=observed,
-            normal_map=normal_map,
-        )
+        if detail_residual is not None:
+            # ── Latent path (arch.md §8 + §16.2 + §18, MEASURED) ───────────────
+            # Render the intrinsic reconstruction model directly:
+            #     Y_base = albedo × shading
+            # On the latent path `shading` is the scene illumination L/A
+            # (pipeline._observation_shading), so albedo × shading reconstructs the
+            # real scene luminance. This is INDEPENDENT of the normal map and the
+            # estimated light direction, so a mesh↔face_prior normal-source flip
+            # cannot move the rendered exposure (the measured 50× flicker spike).
+            # The Lambertian ambient+diffuse(N·L)+specular shaping is deliberately
+            # NOT applied here: on the latent path it relit over a FABRICATED
+            # generic-sphere normal prior, double-counting illumination already in
+            # shading and injecting a false, normal-source-dependent shape. albedo
+            # and shading are both in [0,1] so the product never exceeds 1 → no
+            # clip energy loss → exposure == mean(albedo × shading) exactly.
+            base_render = albedo * shading_3ch
+        else:
+            # ── Legacy / physical path (byte-for-byte unchanged) ───────────────
+            # Normalize base_render so shading controls absolute brightness.
+            # base_render has arbitrary energy from lighting params; normalize to
+            # unit mean so that shading alone determines the output energy level.
+            base_mean = float(np.mean(base_render))
+            if base_mean > 1e-8:
+                base_render = base_render / base_mean
+            # Modulate: output ≈ albedo-lit-surface × scene-illumination
+            base_render = base_render * shading_3ch
+            # Safety-net energy conservation against albedo*shading target
+            base_render = self._apply_energy_conservation(albedo, base_render, target_energy=target_energy)
+
+        if detail_residual is not None:
+            # Latent path (design.md:390): use the carried identity HF
+            # (best-observation microdetail warped into geometry) directly,
+            # rather than recomputing detail from the already-smoothed warped
+            # albedo (whose own high-pass is ~0). NOT source HF.
+            detail = np.asarray(detail_residual, dtype=np.float32)
+            if detail.shape[:2] != albedo.shape[:2]:
+                detail = cv2.resize(detail, (albedo.shape[1], albedo.shape[0]), interpolation=cv2.INTER_LINEAR)
+            if detail.ndim == 2:
+                detail = detail[:, :, np.newaxis]
+            if detail.shape[2] == 1:
+                detail = np.repeat(detail, 3, axis=2)
+        else:
+            # Legacy path: recompute detail from albedo (+ optional source HF).
+            detail = self._compute_detail_component(
+                albedo=albedo,
+                shading=shading,
+                observed=observed,
+                normal_map=normal_map,
+            )
 
         if self.config.use_detail_residual:
             detail_mask = self._compute_detail_mask(albedo, normal_map) if self.config.preserve_edges else 1.0
@@ -538,6 +577,7 @@ class PhysicalRenderer:
             view_direction=view_direction,
             observed=observed,
             frame_idx=frame_idx,
+            detail_residual=getattr(intrinsic_components, "detail_residual", None),
         )
 
     def compute_rendering_error(self, observed: np.ndarray, rendered: np.ndarray) -> float:
