@@ -494,6 +494,10 @@ class LatentRenderTelemetry:
     coverage_light: float = 0.0            # §16.7: |observed lighting bins| /
     #   |total lighting bins| in [0,1]. The Lighting factor of the §16.8 composite.
     #   Observable SIGNAL only — same cap as coverage_pose (c·cov).
+    c_recon: float = 0.0                   # §16.8: C_obs · Coverage_pose ·
+    #   Coverage_light · Visibility. The composite trust signal and Phase-2B
+    #   gate input (arch §19). Observable SIGNAL; not yet wired to the live
+    #   gate (that is the Phase-2B default-flip decision).
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -510,4 +514,5 @@ class LatentRenderTelemetry:
             "coverage_pose": self.coverage_pose,
             "mean_visibility": self.mean_visibility,
             "coverage_light": self.coverage_light,
+            "c_recon": self.c_recon,
         }
