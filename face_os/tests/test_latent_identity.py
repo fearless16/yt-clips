@@ -238,6 +238,7 @@ def test_latent_render_telemetry_to_dict_has_full_schema():
         "frame_idx", "render_path", "latent_primary", "source_pixel_fraction",
         "latent_confidence", "albedo_drift_from_anchor", "uncertainty_mean",
         "contract_assertions_passed", "gate_state", "hybrid_alpha_mean",
+        "coverage_pose",
     }
     assert set(d.keys()) == expected_keys
     assert d["frame_idx"] == 7
@@ -523,13 +524,15 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
         contract_assertions_passed=True,
         gate_state="engaged",
         hybrid_alpha_mean=0.74,
+        coverage_pose=0.027,
     )
     d = telem.to_dict()
-    # exactly the 10 schema keys
+    # exactly the 11 schema keys
     assert set(d.keys()) == {
         "frame_idx", "render_path", "latent_primary", "source_pixel_fraction",
         "latent_confidence", "albedo_drift_from_anchor", "uncertainty_mean",
         "contract_assertions_passed", "gate_state", "hybrid_alpha_mean",
+        "coverage_pose",
     }
     # values round-trip
     assert d["frame_idx"] == 42
@@ -542,6 +545,7 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
     assert d["contract_assertions_passed"] is True
     assert d["gate_state"] == "engaged"
     assert d["hybrid_alpha_mean"] == 0.74
+    assert d["coverage_pose"] == 0.027
     # types
     assert isinstance(d["frame_idx"], int)
     assert isinstance(d["render_path"], str)
@@ -549,6 +553,7 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
     assert isinstance(d["contract_assertions_passed"], bool)
     assert isinstance(d["gate_state"], str)
     assert isinstance(d["hybrid_alpha_mean"], float)
+    assert isinstance(d["coverage_pose"], float)
 
 
 def test_latent_render_telemetry_defaults_document_legacy_truth():
