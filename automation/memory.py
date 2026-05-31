@@ -16,17 +16,13 @@ Usage::
 """
 
 import time
+import logging
 from threading import Lock
 from collections import deque
 
 from ._cache import MEMORY_CACHE
 
-_log_prefix = "[memory]"
-
-
-def _log(msg: str):
-    import sys
-    print(f"{_log_prefix} {msg}", file=sys.stderr, flush=True)
+log = logging.getLogger("memory")
 
 
 def _read_meminfo() -> tuple:
@@ -123,7 +119,7 @@ def ensure_free(gb: float = 2.0, poll_interval: float = 2.0, timeout: float = 12
         if total > 0 and free >= gb:
             return True
         if time.monotonic() - start > timeout:
-            _log(f"ensure_free({gb}GB) timed out after {timeout}s")
+            log.warning("ensure_free(%sGB) timed out after %ss", gb, timeout)
             return False
         time.sleep(poll_interval)
 

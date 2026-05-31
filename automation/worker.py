@@ -15,17 +15,13 @@ Usage::
 """
 
 import time
+import logging
 import threading
 from concurrent.futures import Future
 
 from .memory import ensure_free, memory_report
 
-_log_prefix = "[worker]"
-
-
-def _log(msg: str):
-    import sys
-    print(f"{_log_prefix} {msg}", file=sys.stderr, flush=True)
+log = logging.getLogger("worker")
 
 
 class _ControlledFuture:
