@@ -211,6 +211,7 @@ class IntrinsicDecomposer:
         image: np.ndarray,
         mesh_478: Optional[np.ndarray] = None,
         warp_M: Optional[np.ndarray] = None,
+        mask: Optional[np.ndarray] = None,
     ) -> IntrinsicComponents:
         if image.ndim != 3 or image.shape[2] != 3:
             raise ValueError(f"Expected (H, W, 3) image, got {image.shape}")
@@ -218,9 +219,22 @@ class IntrinsicDecomposer:
         start_time = time.perf_counter()
         image_lin = _ensure_linear_image(image)
 
-        shading = self._estimate_shading(image_lin)
-        albedo, low_freq_albedo, detail_residual = self._extract_albedo(image_lin, shading)
-        specular = self._compute_specular(image_lin, albedo, shading)
+        # arch.md §16.9 — Background Invariance (∂I/∂Background = 0).
+        # When a geometry-derived face mask is supplied, replace background
+        # pixels with the interior statistic BEFORE any low-pass filtering, so
+        # background luminance cannot bleed across the mask boundary into
+        # shading/albedo (the "poster brightness" leak, arch.md §18). With
+        # mask=None this is a no-op, so the legacy decomposition is byte-for-byte
+        # unchanged.
+        image_proc = (
+            self._prefill_background(image_lin, mask)
+            if mask is not None
+            else image_lin
+        )
+
+        shading = self._estimate_shading(image_proc)
+        albedo, low_freq_albedo, detail_residual = self._extract_albedo(image_proc, shading)
+        specular = self._compute_specular(image_proc, albedo, shading)
 
         if (
             self.use_mesh_normals
@@ -271,6 +285,37 @@ class IntrinsicDecomposer:
             low_frequency_albedo=low_freq_albedo.astype(np.float32) if low_freq_albedo is not None else None,
             normal_source=normal_source,
         )
+
+    def _prefill_background(self, image_lin: np.ndarray, mask: np.ndarray) -> np.ndarray:
+        """Replace background (outside the face mask) with the interior statistic.
+
+        arch.md §16.9 (Background Invariance): the downstream shading/albedo
+        low-pass filters have a spatial footprint that reaches across the mask
+        boundary. If the real background is left in place, its luminance bleeds
+        into the masked interior and modulates the estimate frame-to-frame (the
+        "poster brightness" flicker, arch.md §18). Filling the out-of-mask region
+        with the per-channel interior median makes the background a constant that
+        is independent of the real scene, so the masked-interior decomposition is
+        invariant to whatever is actually behind the face. Mirrors the pipeline's
+        existing shading anti-bleed (pipeline.py: fill-then-blur).
+        """
+        h, w = image_lin.shape[:2]
+        m = np.asarray(mask, dtype=np.float32)
+        if m.ndim == 3:
+            m = m[:, :, 0]
+        if m.shape[:2] != (h, w):
+            m = cv2.resize(m, (w, h), interpolation=cv2.INTER_LINEAR)
+        interior = m > 0.5
+        if not np.any(interior):
+            return image_lin  # no face region — nothing to protect
+
+        fill = np.array(
+            [float(np.median(image_lin[:, :, c][interior])) for c in range(3)],
+            dtype=np.float32,
+        )
+        out = image_lin.copy()
+        out[~interior] = fill
+        return out.astype(np.float32)
 
     def _estimate_normals_from_mesh(self, mesh_478: np.ndarray, warp_M: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
         mesh_478 = np.asarray(mesh_478, dtype=np.float32)

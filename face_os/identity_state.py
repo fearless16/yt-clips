@@ -493,7 +493,7 @@ class IdentityState:
                 best_snapshot = snapshot
         return best_snapshot
 
-    def update(self, canonical_face: np.ndarray, quality_map: np.ndarray, pose: Optional[Tuple[float, float, float]] = None, expression: Optional[str] = None, lighting: Optional[str] = None, region_mask: Optional[np.ndarray] = None, face_bbox: Optional[Tuple[int, int, int, int]] = None, landmarks_pts: Optional[np.ndarray] = None, embedding: Optional[np.ndarray] = None, mesh_478: Optional[np.ndarray] = None, warp_M: Optional[np.ndarray] = None) -> bool:
+    def update(self, canonical_face: np.ndarray, quality_map: np.ndarray, pose: Optional[Tuple[float, float, float]] = None, expression: Optional[str] = None, lighting: Optional[str] = None, region_mask: Optional[np.ndarray] = None, face_bbox: Optional[Tuple[int, int, int, int]] = None, landmarks_pts: Optional[np.ndarray] = None, embedding: Optional[np.ndarray] = None, mesh_478: Optional[np.ndarray] = None, warp_M: Optional[np.ndarray] = None, face_mask: Optional[np.ndarray] = None) -> bool:
         if face_bbox is not None or landmarks_pts is not None:
             ok, _ = self._gate.verify(canonical_face, face_bbox, landmarks_pts, embedding)
             if not ok:
@@ -521,7 +521,7 @@ class IdentityState:
             self.belief.update(low, high, quality_map, pose, region_mask=final_region_mask)
 
         canonical_face_rgb = cv2.cvtColor(canonical_face, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        intrinsic_components = self._intrinsic_decomposer.decompose(canonical_face_rgb, mesh_478=mesh_478, warp_M=warp_M)
+        intrinsic_components = self._intrinsic_decomposer.decompose(canonical_face_rgb, mesh_478=mesh_478, warp_M=warp_M, mask=face_mask)
         self._intrinsic_components = intrinsic_components
         self._normal_source = self._intrinsic_decomposer._normal_source
 

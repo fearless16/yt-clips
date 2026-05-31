@@ -1346,6 +1346,7 @@ class FaceOSPipeline:
                     embedding=embedding,
                     mesh_478=mesh_478,
                     warp_M=M[:2] if M is not None else None,
+                    face_mask=canonical_face_mask,
                 )
 
                 # D-05 Task 2.6: SHADOW-MODE latent update.
