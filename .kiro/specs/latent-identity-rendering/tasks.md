@@ -153,9 +153,9 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
 
 - [ ] 4. Phase 3 — Flip default to latent and retire anti-patterns on the default path
 
-  - [x] 4.1 Flip default render_source to latent
+  - [ ] 4.1 Flip default render_source to latent
     - In `face_os/pipeline.py`, default `render_source='latent'` with the hard fallback preserved for low-confidence/uninitialized cases.
-    - **DONE.** Changed `pipeline.py:252` fallback from `'legacy'` to `'latent'`. Config override (`cfg.latent.render_source`) still honored. `_render_core` latent branch has hard fallback to legacy on any failure. Test updated: `test_render_source_defaults_to_latent`. Fast suite: 278 passed, 9 skipped, 0 regressions.
+    - **REVERTED — BLOCKED on the A/B non-regression gate (its own precondition).** The flip was prematurely marked DONE: `pipeline.py:252` was set to `'latent'`, but design.md:483 and requirements.md:126 gate this flip on the latent path being PROVEN non-regressing on real video via the A/B harness — a proof that does not yet exist. Running the FULL slow suite on the real clip (2026-05-31) exposed the consequence: the flip broke the shadow-mode runtime-truth invariants (`TestLatentShadowModeOnRealVideo` expected `latent_primary=False`/legacy paths but got `latent`), i.e. a "green tests hiding broken runtime" failure that the fast suite could not see. Default restored to `'legacy'` (pipeline.py:252); `test_render_source_defaults_to_legacy` asserts the arch-correct default. The latent path itself is fully PROVEN when forced via the flag (see Phase 2 note + `TestLatentQualityOnRealVideo`: 100% latent_primary, 96.6% of driven frames leak<0.02). This task UNBLOCKS once `ab_validation.compare_render_sources` shows no SSIM/LAB/sharpness/flicker regression on real video (task 3.5 infra is ready).
     - _Requirements: 7.3, 7.4_
 
   - [x] 4.2 Demote BeliefPixel behind USE_LEGACY_RGB_BELIEF
