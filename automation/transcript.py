@@ -168,7 +168,6 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
 
 def _parse_srt(text: str) -> list[dict]:
     """Parse SRT subtitle text into segment dicts."""
-    import re
     segments = []
     blocks = re.split(r'\n\s*\n', text.strip())
     for block in blocks:

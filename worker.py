@@ -31,7 +31,7 @@ def run_analytics_cycle():
     log.info("🔄 Worker: Analytics cycle starting...")
 
     try:
-        from analytics import generate_daily_insights
+        from automation.seo.analytics import generate_daily_insights
         result = generate_daily_insights()
         if result:
             log.info(f"✅ Analytics cycle complete: {result}")
@@ -47,7 +47,7 @@ def run_analytics_cycle():
 def print_learnings():
     """Print current SEO learnings from the learner."""
     try:
-        from seo_learner import SEOLearner
+        from automation.seo.seo_learner import SEOLearner
         learner = SEOLearner()
         suggestions = learner.get_seo_improvement_suggestions()
         prefs = learner.get_learned_title_preferences()

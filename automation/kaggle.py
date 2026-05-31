@@ -4,19 +4,12 @@ Minimal module: detects Kaggle, creates directories, installs deps,
 and starts the watcher (reused from watcher.py).
 """
 
-import os
 import sys
 import subprocess
 from pathlib import Path
 
+from .env import is_kaggle  # noqa: F401
 from .watcher import start_watcher, kill_watcher  # noqa: F401
-
-
-def is_kaggle() -> bool:
-    """Return True if running inside a Kaggle kernel."""
-    if os.environ.get("KAGGLE_KERNEL_RUN_TYPE"):
-        return True
-    return Path("/kaggle").exists() and Path("/kaggle").is_dir()
 
 
 def setup() -> dict:

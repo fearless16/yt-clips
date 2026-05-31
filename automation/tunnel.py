@@ -110,15 +110,14 @@ class TunnelKeeper:
 
     def _connect(self):
         self._kill_proc()
-        import os
         ngrok_token = os.environ.get("NGROK_AUTH_TOKEN")
         
         # If token exists, ONLY try ngrok to avoid unstable fallbacks
         if ngrok_token:
-            url = _tunnel_ngrok(self._port)
-            if url:
+            url, proc = _tunnel_ngrok(self._port)
+            if url and proc:
                 with self._lock:
-                    self._proc = _tunnel_proc
+                    self._proc = proc
                     self._url = url
                     self._start_time = time.monotonic()
                     self._fail_count = 0
@@ -128,10 +127,10 @@ class TunnelKeeper:
 
         # Fallback if no token or ngrok failed
         for method in [_tunnel_serveo, _tunnel_localhost_run, _tunnel_localtunnel]:
-            url = method(self._port)
-            if url:
+            url, proc = method(self._port)
+            if url and proc:
                 with self._lock:
-                    self._proc = _tunnel_proc
+                    self._proc = proc
                     self._url = url
                     self._start_time = time.monotonic()
                     self._fail_count = 0
@@ -224,106 +223,93 @@ def kill_tunnel():
 
 # ── Tunnel method implementations ─────────────────────────────────────────
 
-_tunnel_proc: subprocess.Popen | None = None
 
-
-def _tunnel_ngrok(port: int) -> str | None:
+def _tunnel_ngrok(port: int) -> tuple[str | None, subprocess.Popen | None]:
     """Create tunnel via ngrok using AUTH_TOKEN."""
-    global _tunnel_proc
-    import os
     token = os.environ.get("NGROK_AUTH_TOKEN")
     if not token:
-        return None
+        return None, None
     try:
-        # Ensure we are in /content/ to avoid Drive path issues with binary execution
-        # Use fixed ngrok download path
         bin_path = "/content/ngrok"
         if not os.path.exists(bin_path):
             subprocess.run(["curl", "-s", "https://bin.equinox.io/c/b34edqS6yS8/ngrok", "-o", bin_path], check=True)
             subprocess.run(["chmod", "+x", bin_path], check=True)
         
-        # Auth
         subprocess.run([bin_path, "config", "add-authtoken", token], check=True)
         
-        # Start tunnel
-        _tunnel_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             [bin_path, "http", str(port)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         
-        # Poll API for the URL
         for _ in range(30):
             try:
-                import json
                 with urllib.request.urlopen("http://localhost:4040/api/tunnels", timeout=2) as r:
                     data = json.loads(r.read().decode())
                     tunnels = data.get("tunnels", [])
                     if tunnels:
-                        return tunnels[0]["public_url"]
+                        return tunnels[0]["public_url"], proc
             except Exception as e:
                 log.warning("ngrok tunnel API poll failed: %s", e)
             time.sleep(1)
     except Exception as e:
         log.warning("ngrok tunnel failed on port %d: %s", port, e)
-    return None
+    return None, None
 
-def _tunnel_serveo(port: int) -> str | None:
+def _tunnel_serveo(port: int) -> tuple[str | None, subprocess.Popen | None]:
     """Create tunnel via serveo.net SSH reverse proxy."""
-    global _tunnel_proc
     try:
-        _tunnel_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ServerAliveInterval=30",
              "-R", f"80:localhost:{port}", "serveo.net"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         for _ in range(25):
-            line = _tunnel_proc.stdout.readline() if _tunnel_proc.stdout else ""
+            line = proc.stdout.readline() if proc.stdout else ""
             m = re.search(r"(https?://[a-zA-Z0-9.-]+\.serveo\.net)", line)
             if m:
-                return m.group(1)
+                return m.group(1), proc
             time.sleep(1)
     except Exception as e:
         log.warning("serveo.net tunnel failed on port %d: %s", port, e)
-    return None
+    return None, None
 
 
-def _tunnel_localhost_run(port: int) -> str | None:
+def _tunnel_localhost_run(port: int) -> tuple[str | None, subprocess.Popen | None]:
     """Create tunnel via localhost.run SSH reverse proxy."""
-    global _tunnel_proc
     try:
-        _tunnel_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "ServerAliveInterval=30",
              "-R", f"80:localhost:{port}", "nokey@localhost.run"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         for _ in range(25):
-            line = _tunnel_proc.stdout.readline() if _tunnel_proc.stdout else ""
+            line = proc.stdout.readline() if proc.stdout else ""
             m = re.search(
                 r"(https?://[a-zA-Z0-9.-]+\.lhr\.life|https?://[a-zA-Z0-9.-]+\.localhost\.run)",
                 line,
             )
             if m:
-                return m.group(1)
+                return m.group(1), proc
             time.sleep(1)
     except Exception as e:
         log.warning("localhost.run tunnel failed on port %d: %s", port, e)
-    return None
+    return None, None
 
 
-def _tunnel_localtunnel(port: int) -> str | None:
+def _tunnel_localtunnel(port: int) -> tuple[str | None, subprocess.Popen | None]:
     """Create tunnel via localtunnel (npx)."""
-    global _tunnel_proc
     try:
-        _tunnel_proc = subprocess.Popen(
+        proc = subprocess.Popen(
             ["npx", "localtunnel", "--port", str(port)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         for _ in range(25):
-            line = _tunnel_proc.stdout.readline() if _tunnel_proc.stdout else ""
+            line = proc.stdout.readline() if proc.stdout else ""
             m = re.search(r"(https?://[a-zA-Z0-9.-]+\.loca\.lt)", line)
             if m:
-                return m.group(1)
+                return m.group(1), proc
             time.sleep(1)
     except Exception as e:
         log.warning("localtunnel failed on port %d: %s", port, e)
-    return None
+    return None, None
