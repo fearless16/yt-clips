@@ -20,6 +20,8 @@ from face_os.ab_validation import (
     compute_sharpness,
     compute_ssim,
     compute_lab_drift,
+    compute_albedo_chroma_stability,
+    compute_albedo_chroma_match,
 )
 
 
@@ -333,3 +335,90 @@ class TestCompareRenderSources:
         # Identical frames: SSIM≈1.0, LAB≈0, ratio≈1.0, flicker_ratio≈1.0
         assert result['ssim_mean'] >= 0.9999
         assert result['lab_drift_mean'] <= 0.001
+
+
+# ─── Identity-space metric (arch §16.1 / §19.1) ─────────────────────────────────
+
+def _chroma_albedo(seed=0, size=64):
+    """Synthetic RGB float[0,1] albedo with real (a,b) chroma STRUCTURE so a
+    structural corruption (flip/roll) actually changes the chroma field."""
+    h = w = size
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    r = 0.3 + 0.5 * (xx / w)               # red ramps left->right
+    g = 0.4 + 0.2 * np.sin(yy / 8.0)
+    b = 0.3 + 0.5 * (yy / h)               # blue ramps top->bottom
+    alb = np.stack([r, g, b], axis=2)
+    rng = np.random.default_rng(seed)
+    alb = alb + rng.normal(0, 0.01, alb.shape).astype(np.float32)
+    return np.clip(alb, 0, 1).astype(np.float32)
+
+
+def _structural_corrupt(alb):
+    """The negative control proven on real video: vertical flip + spatial roll —
+    survives white-balance, breaks feature correspondence => a WRONG identity."""
+    w = np.flipud(alb)
+    w = np.roll(w, shift=alb.shape[0] // 3, axis=0)
+    w = np.roll(w, shift=alb.shape[1] // 4, axis=1)
+    return np.clip(w, 0, 1).astype(np.float32)
+
+
+class TestIdentityConsistencyMetric:
+    """Locks the identity-space metric math against silent vacuity (§19.1).
+
+    The metric is only meaningful if the MATCH term discriminates the correct
+    enrolled identity from a STRUCTURALLY corrupted one. The real-video probe
+    proved this (correct ΔE≈23.0 vs corrupted≈30.8); these tests enforce the
+    same property deterministically on synthetic albedo so a future refactor
+    cannot quietly turn the metric into a constant-texture rubber stamp.
+    """
+
+    def test_match_discriminates_wrong_identity(self):
+        """NON-VACUITY: a structurally-corrupted reference must score WORSE
+        (higher chroma ΔE) than the correct enrolled albedo."""
+        ref = _chroma_albedo(seed=1)
+        renders = [_chroma_albedo(seed=10 + i) for i in range(5)]  # ~the enrolled identity
+        masks = [np.ones((64, 64), dtype=bool) for _ in renders]
+
+        correct = compute_albedo_chroma_match(renders, masks, ref)
+        wrong = compute_albedo_chroma_match(renders, masks, _structural_corrupt(ref))
+        assert wrong > correct, f"metric is VACUOUS: wrong={wrong:.2f} !> correct={correct:.2f}"
+        assert wrong > correct * 1.1  # meaningful separation, not float noise
+
+    def test_stability_measures_temporal_variation(self):
+        """A constant render sequence is maximally stable (≈0); an identity that
+        jitters frame-to-frame scores higher."""
+        masks = [np.ones((64, 64), dtype=bool) for _ in range(5)]
+        const = [_chroma_albedo(seed=3) for _ in range(5)]            # identical frames
+        const = [const[0].copy() for _ in range(5)]
+        jitter = [_structural_corrupt(_chroma_albedo(seed=20 + i)) if i % 2 else _chroma_albedo(seed=20 + i)
+                  for i in range(5)]                                   # alternating structure
+
+        stable = compute_albedo_chroma_stability(const, masks)
+        unstable = compute_albedo_chroma_stability(jitter, masks)
+        assert stable < 1.0
+        assert unstable > stable
+
+    def test_stability_nan_on_single_frame(self):
+        """<2 frames cannot define temporal std."""
+        alb = [_chroma_albedo()]
+        masks = [np.ones((64, 64), dtype=bool)]
+        assert np.isnan(compute_albedo_chroma_stability(alb, masks))
+
+    def test_match_nan_when_mask_empty(self):
+        """No masked pixels => NaN (not a silent 0)."""
+        ref = _chroma_albedo()
+        renders = [_chroma_albedo(seed=5)]
+        masks = [np.zeros((64, 64), dtype=bool)]
+        assert np.isnan(compute_albedo_chroma_match(renders, masks, ref))
+
+    def test_evaluate_identity_consistency_unavailable_on_stub(self):
+        """Boundary: a stub lacking identity estimator returns available=False,
+        never crashes and never fabricates a verdict."""
+        pipeline = _make_stub_pipeline([_solid_frame()], [_solid_frame()])
+        # MagicMock auto-creates attrs; force the guard to trip explicitly.
+        pipeline._identity_estimator = None
+        ab = ABComparator()
+        out = ab.evaluate_identity_consistency(pipeline, 'fake.mp4', max_frames=3)
+        assert out['available'] is False
+        assert 'recovers_identity' not in out
+
