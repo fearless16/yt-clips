@@ -205,24 +205,14 @@ learner:
 
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
-  provider: "nvidia"            # nvidia | blueminds (groq/openrouter/deepseek broken)
-  model: "meta/llama-3.3-70b-instruct"     # reliable, free
-  # Benchmark results (16 May 2026, verified live):
-  # Provider  Model                                        Score  Latency  Cost
-  # ──────────────────────────────────────────────────────────────────────────────
-  # OpenRouter deepseek/deepseek-v4-flash (284B MoE)       60     3.7s     ~$0.14/M  ← SELECTED
-  # OpenRouter google/gemini-2.0-flash-001                 60     2.4s     ~$0.10/M
-  # Groq      llama-4-scout-17b-16e-instruct               58     0.5s     $0.11/M
-  # Groq      llama-3.1-8b-instant                         55     0.7s     $0.05/M
-  # DeepSeek  deepseek-v4-flash (direct, own key)          60     1.8s     $0.14/M  ← needs balance
-  # Groq      llama-3.3-70b-versatile                      50     1.0s     $0.59/M
-  # OpenRouter anthropic/claude-3.5-haiku                  50     4.3s     $0.80/M
-  # NVIDIA    meta/llama-3.3-70b-instruct                  45     7.4s     ~$0.50/M
-  # DeepSeek  deepseek-v4-pro (1.6T params)                65     3.1s     $1.74/M
-  #
-  # Free tier: OpenRouter deepseek/deepseek-v4-flash:free (queue-throttled, ~30s+)
-  # Speed path: set provider=groq model=llama-4-scout-17b-16e-instruct (0.5s)
-  # Auto-benchmark: seo_learner.py can dynamically test and select best model
+  provider: "opencode"          # opencode (Go) | groq | nvidia | openrouter
+  model: "mimo-v2.5-pro"        # primary: OpenCode Go mimo-v2.5-pro (~3.2s, $0)
+  # Provider chain priority:
+  # 1. OpenCode Go: mimo-v2.5-pro (3.2s), mimo-v2.5 (2.6s) — $0 with Go sub
+  # 2. Groq: llama-4-scout (0.5s), llama-3.3-70b (0.8s) — fast, quota-limited
+  # 3. OpenCode Go fallback: kimi-k2.5, glm-5.1, deepseek-v4-flash
+  # 4. NVIDIA / OpenRouter
+  # 5. OpenCode Go: qwen3.7-max (20s, last resort)
   auto_benchmark: false                 # Set true to auto-discover best model on startup
   # ── LLM orchestration resilience (feat/llm-orchestration) ──────────────────
   retry_base_delay_seconds: 2.0         # Backoff before the failover retry round (transient/429/5xx only)
