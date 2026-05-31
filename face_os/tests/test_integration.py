@@ -815,6 +815,60 @@ class TestObservationShading:
         shading = fresh_pipeline._observation_shading(observed, albedo, mask)
         assert np.all(np.isfinite(shading)), "shading has NaN/inf on zero albedo"
 
+    def test_render_matches_observed_exposure(self, fresh_pipeline):
+        """EXPOSURE ANCHOR (measured fix). The render forms 709-luma(albedo * S),
+        and ``S`` used the simple channel-mean albedo; the low-pass of ``L / A``
+        does NOT preserve the masked mean when the warped ENROLLED albedo's
+        structure / 709-weighting differ from the observation. Measured on real
+        video, the latent render therefore landed ~1.17-1.20x too bright vs the
+        observed face. The anchor rescales ``S`` by one per-frame scalar so the
+        masked-mean render luminance equals the masked-mean OBSERVED luminance —
+        ground-truth-anchored, not a magic constant, and flicker-safe (the
+        observed mean is temporally smooth).
+        """
+        h = w = 64
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        # Irregular (circular) mask — runtime-faithful: exercises the prefill +
+        # mask-boundary low-pass the all-ones fixtures above do not.
+        mask = (((xx - 32) ** 2 + (yy - 32) ** 2) < 26 ** 2).astype(np.float32)
+        m = mask > 0.5
+        # Structured warm enrolled albedo (bright top -> dark bottom).
+        vert = 0.55 + 0.40 * (1.0 - yy / h)
+        albedo = np.clip(
+            np.stack([0.80 * vert, 0.88 * vert, 0.93 * vert], axis=2), 0, 1
+        ).astype(np.float32)
+        # Observed scene ANTI-correlated (bright bottom) so the raw lowpass(L/A)
+        # cancellation breaks and absolute exposure drifts.
+        ill = 0.18 + 0.34 * (yy / h)
+        skin = np.array([0.42, 0.52, 0.74], np.float32)
+        observed = np.clip(ill[:, :, None] * skin, 0, 1).astype(np.float32)
+        observed_u8 = (observed * 255).astype(np.uint8)
+
+        def luma709(x):
+            return 0.2126 * x[..., 2] + 0.7152 * x[..., 1] + 0.0722 * x[..., 0]
+
+        obs_mean = float(luma709(observed)[m].mean())
+        shading = fresh_pipeline._observation_shading(observed_u8, albedo, mask)
+        alb709 = luma709(albedo)
+        render_mean = float((alb709 * shading)[m].mean())
+        rel_err = abs(render_mean - obs_mean) / obs_mean
+        assert rel_err < 0.02, (
+            f"anchored render masked-mean {render_mean:.4f} must reconstruct the "
+            f"observed masked-mean {obs_mean:.4f} (rel err {rel_err:.1%}); the "
+            f"exposure anchor is inactive — latent render would be mis-exposed"
+        )
+
+        # NON-VACUOUS GUARD: the un-anchored lowpass(L / mean_channel(A)) field
+        # (the pre-fix behaviour) must be STRICTLY worse at reproducing the
+        # observed exposure, proving the anchor is doing real work.
+        naive = luma709(observed) / np.maximum(np.mean(albedo, axis=2), 1e-3)
+        naive = cv2.GaussianBlur(naive, (0, 0), max(4.0, h / 12.0))
+        naive_err = abs(float((alb709 * naive)[m].mean()) - obs_mean) / obs_mean
+        assert naive_err > rel_err, (
+            f"anchor did not improve exposure match over raw lowpass(L/A) "
+            f"(anchored {rel_err:.1%} vs un-anchored {naive_err:.1%})"
+        )
+
 
 class TestLatentGate:
     """Phase 2B production gate — decides PER FRAME whether the latent is

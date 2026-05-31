@@ -368,7 +368,20 @@ class ABComparator:
         """
         if hasattr(pipeline, '_reset_state'):
             pipeline._reset_state()
-        if hasattr(pipeline, 'enroll') and pipeline.tracker is None:
+        # A/B FAIRNESS (confound fix): _reset_state DELIBERATELY preserves
+        # identity belief state (pipeline.py:3208 — "identity state is NOT reset")
+        # so a single clip keeps its enrolled anchor across frames. But running
+        # legacy THEN latent on the SAME pipeline then feeds the latent arm an
+        # identity already mutated by the ENTIRE legacy pass (enroll + N legacy
+        # frames of accumulated observations), while legacy saw only the freshly
+        # enrolled identity. That asymmetry — not the render path — was inflating
+        # the SSIM/LAB delta (measured: SSIM 0.80 unfair vs 0.92 fair). It is also
+        # non-production: production runs enroll->render, never legacy-first.
+        # Re-enroll before EACH arm so both start from the IDENTICAL post-enroll
+        # identity; this isolates the pure render-path delta the gate must judge.
+        # enroll() rebuilds identity_state fresh (pipeline.py:727), so it is an
+        # idempotent reset to the canonical enrolled state.
+        if hasattr(pipeline, 'enroll'):
             pipeline.enroll()
 
         original_source = getattr(pipeline, 'render_source', 'legacy')
