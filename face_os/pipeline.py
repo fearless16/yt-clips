@@ -265,6 +265,13 @@ class FaceOSPipeline:
         self._prev_latent_confidence: float = 0.0
         self._latent_confidence_floor: float = 0.0
 
+        # Phase-2B: C_recon composite tracking (§16.8).
+        # The gate now reads C_recon = C_obs · Coverage_pose · Coverage_light ·
+        # Visibility instead of raw C_obs. Floor set at enrollment.
+        self._last_c_recon: float = 0.0
+        self._prev_c_recon: float = 0.0
+        self._c_recon_floor: float = 0.0
+
         # D-05 Phase 2B per-pixel uncertainty HYBRID. blend_max CAPS how much of
         # the (low-frequency) observation may cross where the latent is fully
         # uncertain. 0.5 keeps the latent's synthesized identity at >=50%
@@ -779,7 +786,13 @@ class FaceOSPipeline:
                     # first frame's spike check sees no artificial drop.
                     self._latent_confidence_floor = self._last_latent_confidence
                     self._prev_latent_confidence = self._last_latent_confidence
-                    print(f"  Latent anchor seeded (confidence: {self._last_latent_confidence:.3f})")
+                    # Phase-2B: C_recon floor. At enrollment, coverage factors
+                    # are near zero (no frames observed yet), so c_recon ≈ 0.
+                    # The floor is set to the enrollment-seed c_recon.
+                    self._last_c_recon = self._compute_c_recon()
+                    self._c_recon_floor = self._last_c_recon
+                    self._prev_c_recon = self._last_c_recon
+                    print(f"  Latent anchor seeded (confidence: {self._last_latent_confidence:.3f}, c_recon: {self._last_c_recon:.6f})")
 
                 # Pre-populate identity state with MULTIPLE reference observations
                 # This gives the identity state a strong starting point
@@ -1404,6 +1417,10 @@ class FaceOSPipeline:
                                 self.patch_memory.record_lighting(lighting)
                             except Exception:
                                 pass
+                        # §16.8 Phase-2B: compute C_recon AFTER the latent
+                        # update (where C_obs, coverage, visibility are all
+                        # freshly set). This is the composite the gate reads.
+                        self._last_c_recon = self._compute_c_recon()
                     except Exception as exc:  # noqa: BLE001 — shadow never crashes
                         self._log_event("latent_shadow_update_failed", error=str(exc))
 
@@ -2132,16 +2149,22 @@ class FaceOSPipeline:
             and self._identity_estimator is not None
         ):
             _latent = self._identity_estimator.latent()
+            # Phase-2B: ensure c_recon is fresh for this frame. The shadow
+            # update (above) sets _last_c_recon when it runs, but if the
+            # shadow path was skipped we recompute here so the gate always
+            # reads the current-frame composite.
+            if _latent.initialized:
+                self._last_c_recon = self._compute_c_recon()
             gate_engage, gate_state = self._evaluate_latent_gate(
                 initialized=_latent.initialized,
-                confidence=self._last_latent_confidence,
-                confidence_prev=self._prev_latent_confidence,
-                confidence_floor=self._latent_confidence_floor,
+                c_recon=self._last_c_recon,
+                c_recon_prev=self._prev_c_recon,
+                c_recon_floor=self._c_recon_floor,
             )
             self._last_gate_state = gate_state
-            # Track this frame's confidence for the NEXT frame's spike check,
+            # Track this frame's c_recon for the NEXT frame's spike check,
             # regardless of the decision, so the trajectory stays honest.
-            self._prev_latent_confidence = self._last_latent_confidence
+            self._prev_c_recon = self._last_c_recon
             latent_result = (
                 self._render_with_latent(
                     cropped, landmarks, crop_plan, frame_idx, geom_state=geom_state,
@@ -2560,33 +2583,72 @@ class FaceOSPipeline:
         shading = (0.2126 * r + 0.7152 * g + 0.0722 * b).astype(np.float32)
         return fit_lighting_from_shading_normals(shading, normal_map, mask=mask)
 
+    def _compute_c_recon(self) -> float:
+        """Compute §16.8 C_recon = C_obs · Coverage_pose · Coverage_light · Visibility.
+
+        Called after the shadow update (where C_obs, coverage, visibility are
+        freshly set) and BEFORE the gate evaluation. Returns the composite
+        trust signal the Phase-2B gate consumes.
+        """
+        from face_os.reconstruction_confidence import compute_reconstruction_confidence
+
+        coverage_pose = 0.0
+        if self.patch_memory is not None:
+            try:
+                coverage_pose = float(self.patch_memory.coverage_pose())
+            except Exception:
+                pass
+
+        coverage_light = 0.0
+        if self.patch_memory is not None:
+            try:
+                coverage_light = float(self.patch_memory.coverage_light())
+            except Exception:
+                pass
+
+        mean_visibility = 1.0
+        if self._identity_estimator is not None:
+            try:
+                mean_visibility = float(self._identity_estimator.last_mean_visibility)
+            except Exception:
+                pass
+
+        return compute_reconstruction_confidence(
+            self._last_latent_confidence, coverage_pose,
+            coverage_light, mean_visibility,
+        )
+
     @staticmethod
     def _evaluate_latent_gate(
         initialized: bool,
-        confidence: float,
-        confidence_prev: float,
-        confidence_floor: float,
-        margin: float = 0.01,
+        c_recon: float,
+        c_recon_prev: float,
+        c_recon_floor: float,
+        margin: float = 0.0,
         spike_drop: float = 0.05,
     ) -> tuple:
         """D-05 Phase 2B PRODUCTION GATE: should the latent DRIVE this frame?
 
-        RELATIVE-TO-FLOOR by design (measured runtime truth). On real video the
-        latent confidence (= 1 - mean(albedo_uncertainty)) lives in a tiny band
-        — seed ~0.2335 at enrollment, rising ~0.006/frame for a few frames, then
-        flat at the Kalman fixed point ~0.2567. An ABSOLUTE threshold (e.g. 0.5)
-        would never fire, so the latent could never engage. The gate therefore
-        measures confidence RELATIVE to the enrollment floor and watches the
+        Consumes the §16.8 composite ``C_recon`` (NOT raw ``C_obs``). The gate
+        measures C_recon RELATIVE to the enrollment-seed floor and watches the
         per-frame change for instability.
+
+        ``C_recon = C_obs · Coverage_pose · Coverage_light · Visibility``
+
+        At enrollment, coverage factors are near zero so C_recon ≈ 0 and the
+        floor is set near zero. As the latent accumulates pose and lighting
+        coverage over frames, C_recon rises. When it exceeds ``floor + margin``,
+        the gate engages — the latent has earned enough evidence to drive the
+        render.
 
         Decision (first matching rule wins; refusals carry a specific reason so
         D-08 telemetry never has to infer branch truth):
           1. ``not initialized``                      -> (False, 'uninitialized')
-          2. spike: ``confidence_prev - confidence >= spike_drop``
+          2. spike: ``c_recon_prev - c_recon >= spike_drop``
                                                        -> (False, 'confidence_spike')
              (instability THIS frame; checked before the floor so a sharp drop
              is labelled as a spike even when it also lands below the floor)
-          3. floor: ``confidence < confidence_floor + margin``
+          3. floor: ``c_recon < c_recon_floor + margin``
                                                        -> (False, 'below_floor')
              (no evidence earned beyond the enrollment seed)
           4. otherwise                                 -> (True, 'engaged')
@@ -2594,26 +2656,32 @@ class FaceOSPipeline:
         The PLATEAU (dC/dt = 0, above floor) ENGAGES — it is the measured steady
         state, the whole point of the relative-to-floor formulation. ``dC/dt >=
         0`` is NOT required: only a *sharp* drop (>= spike_drop) refuses; normal
-        jitter (real |delta| <= ~0.006) stays engaged.
+        jitter stays engaged.
+
+        Margin defaults to 0.0 because C_recon is a multiplicative composite
+        (C_obs · Coverage_pose · Coverage_light · Visibility) whose absolute
+        scale is much smaller than raw C_obs. The floor itself is the threshold;
+        any c_recon above the floor is earned evidence.
 
         Args:
             initialized: latent has absorbed at least the enrollment observation.
-            confidence: this frame's ``latent.mean_confidence()`` in [0, 1].
-            confidence_prev: previous frame's confidence (spike detection).
-            confidence_floor: enrollment-seed confidence (the relative baseline).
-            margin: how far above the floor confidence must sit to count as
-                real earned evidence (default 0.01).
-            spike_drop: per-frame confidence drop that signals instability
-                (default 0.05, ~8x a normal step).
+            c_recon: this frame's §16.8 composite ``C_recon`` in [0, 1].
+            c_recon_prev: previous frame's C_recon (spike detection).
+            c_recon_floor: enrollment-seed C_recon (the relative baseline).
+            margin: how far above the floor C_recon must sit to count as
+                real earned evidence (default 0.0 — the floor IS the threshold
+                because C_recon's absolute scale is small by construction).
+            spike_drop: per-frame C_recon drop that signals instability
+                (default 0.05).
 
         Returns:
             (engage: bool, gate_state: str) — gate_state is the telemetry label.
         """
         if not initialized:
             return False, "uninitialized"
-        if (confidence_prev - confidence) >= spike_drop:
+        if (c_recon_prev - c_recon) >= spike_drop:
             return False, "confidence_spike"
-        if confidence < (confidence_floor + margin):
+        if c_recon < (c_recon_floor + margin):
             return False, "below_floor"
         return True, "engaged"
 
