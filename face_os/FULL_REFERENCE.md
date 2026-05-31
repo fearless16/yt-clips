@@ -456,7 +456,7 @@ GeometryState    IdentityState    TemporalState    Output Frame
 | test_region_confidence.py | 4 | ✅ | Region confidence |
 | test_renderer_mode.py | 21 | ✅ | RendererMode state machine |
 | test_adversarial.py | 31 | ✅ | Adversarial robustness |
-| test_visibility_calibration.py | 16 | ✅ | Metric calibration |
+| test_visibility.py | 12 | ✅ | §16.6 V(u,v,t) geometric self-occlusion |
 | test_identity_manifold.py | 26 | ✅ | Identity manifold topology |
 | test_mathematical_foundation.py | 25 | ✅ | State evolution, energy scaling, optimizer |
 | test_long_horizon.py | 9 | ✅ | 1000+ frame stability |
@@ -752,7 +752,7 @@ face_os/
 ├── dense_geometry.py           # IMPLEMENTED, NOT INTEGRATED
 ├── lie_group.py                # IMPLEMENTED, INTEGRATED, ACTIVE
 ├── renderer_mode.py            # IMPLEMENTED, INTEGRATED, ACTIVE
-├── visibility_calibration.py   # IMPLEMENTED, NOT INTEGRATED
+├── visibility.py               # §16.6 V(u,v,t) — IMPLEMENTED, INTEGRATED (latent memory gate)
 ├── identity_manifold.py        # IMPLEMENTED, NOT INTEGRATED
 ├── state_space.py              # Phase 2A — LatentState, Kalman filter
 ├── optimizer.py                # Phase 2B — GaussNewton, LevenbergMarquardt
@@ -767,7 +767,7 @@ face_os/
     ├── temporal_estimator.py
     └── renderer.py
 ```
-tests/face_os/
+face_os/tests/
 ├── test_phase0_contract.py     # 28 tests
 ├── test_phase1_energy.py       # 36 tests
 ├── test_phase1_hardening.py    # 37 tests
@@ -822,22 +822,22 @@ output/face_os/
 
 ```bash
 # Full test suite (773 tests)
-.venv/bin/python -m pytest tests/face_os/ -v
+.venv/bin/python -m pytest face_os/tests/ -v
 
 # V3 modules only (98 tests)
-.venv/bin/python -m pytest tests/face_os/test_phase3*.py -v
+.venv/bin/python -m pytest face_os/tests/test_phase3*.py -v
 
 # Phase 3A: Intrinsic Decomposition (26 tests)
-.venv/bin/python -m pytest tests/face_os/test_phase3a_intrinsic.py -v
+.venv/bin/python -m pytest face_os/tests/test_phase3a_intrinsic.py -v
 
 # Phase 3B: Physical Renderer (26 tests)
-.venv/bin/python -m pytest tests/face_os/test_phase3b_physical_renderer.py -v
+.venv/bin/python -m pytest face_os/tests/test_phase3b_physical_renderer.py -v
 
 # Phase 3C: Dense Geometry (23 tests)
-.venv/bin/python -m pytest tests/face_os/test_phase3c_dense_geometry.py -v
+.venv/bin/python -m pytest face_os/tests/test_phase3c_dense_geometry.py -v
 
 # Phase 3D: Lie-Group Transforms (23 tests)
-.venv/bin/python -m pytest tests/face_os/test_phase3d_lie_group.py -v
+.venv/bin/python -m pytest face_os/tests/test_phase3d_lie_group.py -v
 ```
 
 ---

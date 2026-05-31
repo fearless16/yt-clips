@@ -1346,6 +1346,7 @@ class FaceOSPipeline:
                     embedding=embedding,
                     mesh_478=mesh_478,
                     warp_M=M[:2] if M is not None else None,
+                    face_mask=canonical_face_mask,
                 )
 
                 # D-05 Task 2.6: SHADOW-MODE latent update.
@@ -1388,6 +1389,21 @@ class FaceOSPipeline:
                         self._last_latent_confidence = float(
                             latent.mean_confidence()
                         )
+                        # §16.7: record lighting observation for coverage_light.
+                        # normal_map is on the intrinsic_components already
+                        # decomposed by identity_state.update(); canonical_face
+                        # is the observation in canonical space (spatially
+                        # aligned with normal_map).
+                        if self.patch_memory is not None:
+                            try:
+                                nmap = self.identity_state._intrinsic_components.normal_map
+                                lighting = self.estimate_lighting(
+                                    canonical_face, nmap,
+                                    mask=canonical_face_mask,
+                                )
+                                self.patch_memory.record_lighting(lighting)
+                            except Exception:
+                                pass
                     except Exception as exc:  # noqa: BLE001 — shadow never crashes
                         self._log_event("latent_shadow_update_failed", error=str(exc))
 
@@ -1806,6 +1822,39 @@ class FaceOSPipeline:
                         au_arr = np.asarray(au, dtype=np.float32)
                         if au_arr.size > 0:
                             uncertainty_mean = float(np.mean(au_arr))
+                # coverage_pose (§16.7): |observed pose bins| / |total|, the
+                # first real factor of the §16.8 composite. Observable signal
+                # only; never let a failure here drop the record.
+                coverage_pose = 0.0
+                if self.patch_memory is not None:
+                    try:
+                        coverage_pose = float(self.patch_memory.coverage_pose())
+                    except Exception:
+                        coverage_pose = 0.0
+                # mean_visibility (§16.6): mean geometric visibility of the last
+                # latent update (1.0 when no estimator / no mesh evidence).
+                mean_visibility = 1.0
+                if self._identity_estimator is not None:
+                    try:
+                        mean_visibility = float(self._identity_estimator.last_mean_visibility)
+                    except Exception:
+                        mean_visibility = 1.0
+                # coverage_light (§16.7): lighting coverage ratio (observable
+                # signal, not folded into the gate yet).
+                coverage_light = 0.0
+                if self.patch_memory is not None:
+                    try:
+                        coverage_light = float(self.patch_memory.coverage_light())
+                    except Exception:
+                        coverage_light = 0.0
+                # c_recon (§16.8): composite = C_obs · Coverage_pose ·
+                # Coverage_light · Visibility. Observable signal and Phase-2B
+                # gate input.
+                from face_os.reconstruction_confidence import compute_reconstruction_confidence
+                c_recon = compute_reconstruction_confidence(
+                    self._last_latent_confidence, coverage_pose,
+                    coverage_light, mean_visibility,
+                )
                 latent_render = LatentRenderTelemetry(
                     frame_idx=frame_idx,
                     render_path=render_path,
@@ -1817,6 +1866,10 @@ class FaceOSPipeline:
                     contract_assertions_passed=bool(contract_assertions_passed),
                     gate_state=str(self._last_gate_state),
                     hybrid_alpha_mean=float(self._last_hybrid_alpha_mean),
+                    coverage_pose=coverage_pose,
+                    mean_visibility=mean_visibility,
+                    coverage_light=coverage_light,
+                    c_recon=c_recon,
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1835,6 +1888,10 @@ class FaceOSPipeline:
                     "contract_assertions_passed": bool(contract_assertions_passed),
                     "gate_state": str(self._last_gate_state),
                     "hybrid_alpha_mean": float(self._last_hybrid_alpha_mean),
+                    "coverage_pose": 0.0,
+                    "mean_visibility": 1.0,
+                    "coverage_light": 0.0,
+                    "c_recon": 0.0,
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)
@@ -2800,7 +2857,34 @@ class FaceOSPipeline:
         # leak) while preserving the local mean (scene exposure unchanged).
         sigma = max(4.0, min(shading.shape[:2]) / 12.0)
         shading = cv2.GaussianBlur(shading, (0, 0), sigma)
-        return np.clip(shading, 0.0, None).astype(np.float32)
+        shading = np.clip(shading, 0.0, None).astype(np.float32)
+
+        # EXPOSURE ANCHOR (measured fix). The contract above is "A·S = L", i.e.
+        # the render must reconstruct the OBSERVED scene luminance. But the render
+        # forms 709-luma(albedo·S) = albedo_709 · S, whereas S used the simple
+        # channel-mean albedo, and the low-pass of L/A does not preserve the
+        # masked mean when the warped ENROLLED albedo's structure/weighting
+        # differs from the observation. Measured consequence: the latent render
+        # lands ~1.17–1.20× too bright vs the observed face. We therefore rescale
+        # S by a single per-frame scalar so the masked-mean render luminance
+        # equals the masked-mean observed luminance EXACTLY. This is anchored to
+        # ground truth (the observation), not a magic constant; the observed mean
+        # is temporally smooth, so the scalar cannot introduce flicker. Identity
+        # (albedo) is untouched — only the scene-exposure field is corrected.
+        alb709 = (0.2126 * alb[..., 2] + 0.7152 * alb[..., 1] + 0.0722 * alb[..., 0]
+                  if alb.ndim == 3 and alb.shape[2] == 3 else alb_lum)
+        if alb709.shape != shading.shape:
+            alb709 = cv2.resize(alb709, (shading.shape[1], shading.shape[0]))
+        render_luma = alb709 * shading
+        if mask is not None and mi.any():
+            obs_mean = float(lum[mi].mean())
+            ren_mean = float(render_luma[mi].mean())
+        else:
+            obs_mean = float(lum.mean())
+            ren_mean = float(render_luma.mean())
+        if ren_mean > eps:
+            shading = shading * (obs_mean / ren_mean)
+        return shading.astype(np.float32)
 
     def _render_with_latent(
         self,
@@ -2892,6 +2976,13 @@ class FaceOSPipeline:
             lighting = self.estimate_lighting(
                 cropped, components.normal_map, mask=crop_mask > 0.3
             )
+            # Record observed lighting for §16.7 coverage_light (observable
+            # signal; never lets a failure drop the render).
+            if self.patch_memory is not None:
+                try:
+                    self.patch_memory.record_lighting(lighting)
+                except Exception:
+                    pass
 
             # ── Render: latent albedo shaded under estimated lighting (no crop) ─
             rendered = self._face_renderer.render_from_latent(

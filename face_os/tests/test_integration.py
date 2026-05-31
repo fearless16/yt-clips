@@ -277,6 +277,10 @@ LATENT_TELEMETRY_KEYS = {
     "contract_assertions_passed",
     "gate_state",
     "hybrid_alpha_mean",
+    "coverage_pose",
+    "mean_visibility",
+    "coverage_light",
+    "c_recon",
 }
 
 FRAME_TELEMETRY_KEYS = {
@@ -366,6 +370,101 @@ class TestLatentTelemetryHonesty:
         rec = p.get_frame_telemetry()[-1]
         assert rec["render_path"] == "alpha"
         assert rec["intrinsic_used"] is False
+
+    def test_coverage_pose_zero_without_patch_memory(self, fresh_pipeline):
+        """§16.7: a fresh pipeline has no patch_memory yet (created at enroll),
+        so coverage_pose reports 0.0 rather than crashing."""
+        p = fresh_pipeline
+        assert p.patch_memory is None
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="alpha", intrinsic_used=False,
+        )
+        assert p.get_latent_telemetry()[-1]["coverage_pose"] == 0.0
+
+    def test_coverage_pose_reflects_live_patch_memory(self, fresh_pipeline):
+        """§16.7: coverage_pose in telemetry == patch_memory.coverage_pose().
+
+        Populate two distinct directional bins (F + R20) and assert the emitted
+        signal is the real 2/37 union ratio, not a stale or hardcoded value.
+        """
+        import numpy as np
+        from face_os.patch_memory import PatchMemory
+
+        p = fresh_pipeline
+        pm = PatchMemory()
+        face = np.ones((64, 64, 3), dtype=np.float32) * 0.5
+        pm.initialize(face, np.full((64, 64), 0.3, dtype=np.float32))
+        pm.update(face, np.full((64, 64), 0.6, dtype=np.float32), pose=(0.0, 0.0, 0.0))
+        pm.update(face, np.full((64, 64), 0.8, dtype=np.float32), pose=(20.0, 0.0, 0.0))
+        p.patch_memory = pm
+
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="latent", intrinsic_used=True,
+        )
+        rec = p.get_latent_telemetry()[-1]
+        assert rec["coverage_pose"] == pytest.approx(2.0 / 37.0, abs=1e-9)
+        assert rec["coverage_pose"] == pytest.approx(pm.coverage_pose(), abs=1e-12)
+
+    def test_mean_visibility_defaults_one_without_estimator(self, fresh_pipeline):
+        """§16.6: a fresh pipeline has no _identity_estimator (created at enroll),
+        so mean_visibility reports 1.0 (no occlusion evidence ⇒ no penalty)."""
+        p = fresh_pipeline
+        assert p._identity_estimator is None
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="alpha", intrinsic_used=False,
+        )
+        assert p.get_latent_telemetry()[-1]["mean_visibility"] == 1.0
+
+    def test_mean_visibility_reflects_live_estimator(self, fresh_pipeline):
+        """§16.6: mean_visibility in telemetry == estimator.last_mean_visibility,
+        the geometric visibility recorded by the latent's last update."""
+        p = fresh_pipeline
+
+        class _Est:
+            last_mean_visibility = 0.42
+
+        p._identity_estimator = _Est()
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="latent", intrinsic_used=True,
+        )
+        assert p.get_latent_telemetry()[-1]["mean_visibility"] == pytest.approx(0.42, abs=1e-9)
+
+    def test_coverage_light_zero_without_patch_memory(self, fresh_pipeline):
+        """§16.7: a fresh pipeline has no patch_memory yet (created at enroll),
+        so coverage_light reports 0.0 rather than crashing."""
+        p = fresh_pipeline
+        assert p.patch_memory is None
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="alpha", intrinsic_used=False,
+        )
+        assert p.get_latent_telemetry()[-1]["coverage_light"] == 0.0
+
+    def test_coverage_light_reflects_live_patch_memory(self, fresh_pipeline):
+        """§16.7: coverage_light in telemetry == patch_memory.coverage_light(),
+        the lighting coverage ratio recorded by the live memory."""
+        import numpy as np
+        from face_os.patch_memory import PatchMemory
+        from face_os.physical_renderer import LightingModel
+
+        p = fresh_pipeline
+        pm = PatchMemory()
+        face = np.ones((64, 64, 3), dtype=np.float32) * 0.5
+        pm.initialize(face, np.full((64, 64), 0.3, dtype=np.float32))
+        pm.record_lighting(LightingModel(ambient=0.05, diffuse_direction=np.array([0, 0, 1.0])))
+        pm.record_lighting(LightingModel(ambient=0.5, diffuse_direction=np.array([-1, 0, 0.0])))
+        p.patch_memory = pm
+
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="latent", intrinsic_used=True,
+        )
+        rec = p.get_latent_telemetry()[-1]
+        assert rec["coverage_light"] == pytest.approx(pm.coverage_light(), abs=1e-12)
 
     def test_enhancement_path_reports_intrinsic_not_used(self, fresh_pipeline):
         """An enhancement-path frame reports intrinsic_used=False."""
@@ -814,6 +913,60 @@ class TestObservationShading:
         mask = np.ones((h, w), np.float32)
         shading = fresh_pipeline._observation_shading(observed, albedo, mask)
         assert np.all(np.isfinite(shading)), "shading has NaN/inf on zero albedo"
+
+    def test_render_matches_observed_exposure(self, fresh_pipeline):
+        """EXPOSURE ANCHOR (measured fix). The render forms 709-luma(albedo * S),
+        and ``S`` used the simple channel-mean albedo; the low-pass of ``L / A``
+        does NOT preserve the masked mean when the warped ENROLLED albedo's
+        structure / 709-weighting differ from the observation. Measured on real
+        video, the latent render therefore landed ~1.17-1.20x too bright vs the
+        observed face. The anchor rescales ``S`` by one per-frame scalar so the
+        masked-mean render luminance equals the masked-mean OBSERVED luminance —
+        ground-truth-anchored, not a magic constant, and flicker-safe (the
+        observed mean is temporally smooth).
+        """
+        h = w = 64
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        # Irregular (circular) mask — runtime-faithful: exercises the prefill +
+        # mask-boundary low-pass the all-ones fixtures above do not.
+        mask = (((xx - 32) ** 2 + (yy - 32) ** 2) < 26 ** 2).astype(np.float32)
+        m = mask > 0.5
+        # Structured warm enrolled albedo (bright top -> dark bottom).
+        vert = 0.55 + 0.40 * (1.0 - yy / h)
+        albedo = np.clip(
+            np.stack([0.80 * vert, 0.88 * vert, 0.93 * vert], axis=2), 0, 1
+        ).astype(np.float32)
+        # Observed scene ANTI-correlated (bright bottom) so the raw lowpass(L/A)
+        # cancellation breaks and absolute exposure drifts.
+        ill = 0.18 + 0.34 * (yy / h)
+        skin = np.array([0.42, 0.52, 0.74], np.float32)
+        observed = np.clip(ill[:, :, None] * skin, 0, 1).astype(np.float32)
+        observed_u8 = (observed * 255).astype(np.uint8)
+
+        def luma709(x):
+            return 0.2126 * x[..., 2] + 0.7152 * x[..., 1] + 0.0722 * x[..., 0]
+
+        obs_mean = float(luma709(observed)[m].mean())
+        shading = fresh_pipeline._observation_shading(observed_u8, albedo, mask)
+        alb709 = luma709(albedo)
+        render_mean = float((alb709 * shading)[m].mean())
+        rel_err = abs(render_mean - obs_mean) / obs_mean
+        assert rel_err < 0.02, (
+            f"anchored render masked-mean {render_mean:.4f} must reconstruct the "
+            f"observed masked-mean {obs_mean:.4f} (rel err {rel_err:.1%}); the "
+            f"exposure anchor is inactive — latent render would be mis-exposed"
+        )
+
+        # NON-VACUOUS GUARD: the un-anchored lowpass(L / mean_channel(A)) field
+        # (the pre-fix behaviour) must be STRICTLY worse at reproducing the
+        # observed exposure, proving the anchor is doing real work.
+        naive = luma709(observed) / np.maximum(np.mean(albedo, axis=2), 1e-3)
+        naive = cv2.GaussianBlur(naive, (0, 0), max(4.0, h / 12.0))
+        naive_err = abs(float((alb709 * naive)[m].mean()) - obs_mean) / obs_mean
+        assert naive_err > rel_err, (
+            f"anchor did not improve exposure match over raw lowpass(L/A) "
+            f"(anchored {rel_err:.1%} vs un-anchored {naive_err:.1%})"
+        )
 
 
 class TestLatentGate:
@@ -1292,6 +1445,18 @@ class TestLatentShadowModeOnRealVideo:
         for r in latent_log:
             assert r["latent_primary"] is False, f"unexpected latent_primary in {r}"
             assert r["source_pixel_fraction"] == 1.0, f"unexpected source fraction in {r}"
+
+    def test_coverage_light_grows_in_shadow_mode(self, shadow_run):
+        """§16.7 e2e: coverage_light must be >0 after processing real video,
+        proving that estimate_lighting → record_lighting is actually wired
+        into process_frame. If someone deletes the pipeline call site, this
+        test FAILS (coverage_light stays 0.0)."""
+        latent_log = shadow_run.get_latent_telemetry()
+        coverages = [r["coverage_light"] for r in latent_log]
+        assert max(coverages) > 0.0, (
+            "coverage_light stayed 0.0 across all frames — "
+            "record_lighting() is not wired into process_frame()"
+        )
 
     def test_existing_render_paths_unchanged(self, shadow_run):
         """The legacy render still produces frames (no regression from wiring)."""

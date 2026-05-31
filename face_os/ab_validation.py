@@ -232,6 +232,72 @@ def compute_temporal_smoothness(frames: List[np.ndarray]) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Identity-Space Metric (D-05 Phase 3 — promotion SIGNAL, arch §16.1 / §19.1)
+# ═══════════════════════════════════════════════════════════════════════════════
+# §19.1 proved NO pixel-wise reference (legacy/source/expectation) can validate
+# an identity render. The valid signal lives in identity space: arch §16.1 says
+# identity I_t is SLOW-VARYING and the observation O_t = R(I_t, p_t, l_t) carries
+# pose+lighting. So re-decompose the RENDER back to albedo and check it (a) is
+# temporally stable and (b) matches the ENROLLED albedo — both in CHROMA only,
+# since luminance is lighting (the §19.1 confound), not identity.
+#
+# NON-VACUITY: stability alone is circular (a constant pasted texture is trivially
+# stable). The discriminator is the MATCH term under a negative control — a
+# STRUCTURALLY corrupted enrolled identity must score WORSE. Empirically proven on
+# test_clip.mp4 (30f): correct match ΔE≈23.0/stab≈4.03 vs corrupted ≈30.8/≈8.52.
+# TestIdentityConsistencyMetric locks the metric math against silent vacuity.
+
+def _albedo_to_lab(albedo: np.ndarray) -> np.ndarray:
+    """RGB float[0,1] albedo (H,W,3) -> LAB float32 (H,W,3)."""
+    a8 = (np.clip(albedo, 0.0, 1.0) * 255.0).astype(np.uint8)
+    bgr = cv2.cvtColor(a8, cv2.COLOR_RGB2BGR)
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+
+
+def compute_albedo_chroma_stability(albedos: List[np.ndarray], masks: List[np.ndarray]) -> float:
+    """Mean per-pixel temporal std of recovered-albedo CHROMA (LAB a,b) over the
+    region masked in ALL frames. Lower = identity more slow-varying (arch §16.1);
+    L is excluded because lighting, not identity, drives it (§19.1)."""
+    if len(albedos) < 2:
+        return float('nan')
+    h = min(a.shape[0] for a in albedos)
+    w = min(a.shape[1] for a in albedos)
+    labs, msks = [], []
+    for a, m in zip(albedos, masks):
+        labs.append(_albedo_to_lab(a)[:h, :w])
+        mm = m
+        if mm.shape[:2] != (h, w):
+            mm = cv2.resize(mm.astype(np.uint8), (w, h)) > 0
+        msks.append((mm[:h, :w] > 0))
+    stack = np.stack(labs, 0)            # (T,h,w,3)
+    msk = np.all(np.stack(msks, 0), 0)   # (h,w) masked in every frame
+    if int(msk.sum()) < 50:
+        return float('nan')
+    std_t = stack.std(axis=0)            # (h,w,3)
+    return float(std_t[msk][:, 1:].mean())  # a,b only
+
+
+def compute_albedo_chroma_match(albedos: List[np.ndarray], masks: List[np.ndarray],
+                                reference_albedo: np.ndarray) -> float:
+    """Mean CHROMA ΔE (LAB a,b) between each recovered albedo and the ENROLLED
+    reference albedo over the mask. Lower = render preserves enrolled identity.
+    This is the NON-VACUOUS discriminator (wrong identity -> higher)."""
+    ref_lab = _albedo_to_lab(reference_albedo)
+    deltas = []
+    for a, m in zip(albedos, masks):
+        lab = _albedo_to_lab(a)
+        ref = cv2.resize(ref_lab, (lab.shape[1], lab.shape[0]))
+        d = np.sqrt(((lab[:, :, 1:] - ref[:, :, 1:]) ** 2).sum(axis=2))
+        mm = m
+        if mm.shape[:2] != d.shape:
+            mm = cv2.resize(mm.astype(np.uint8), (d.shape[1], d.shape[0])) > 0
+        mm = (mm > 0)
+        if int(mm.sum()) > 50:
+            deltas.append(float(d[mm].mean()))
+    return float(np.mean(deltas)) if deltas else float('nan')
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # A/B Comparison Functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -368,7 +434,20 @@ class ABComparator:
         """
         if hasattr(pipeline, '_reset_state'):
             pipeline._reset_state()
-        if hasattr(pipeline, 'enroll') and pipeline.tracker is None:
+        # A/B FAIRNESS (confound fix): _reset_state DELIBERATELY preserves
+        # identity belief state (pipeline.py:3208 — "identity state is NOT reset")
+        # so a single clip keeps its enrolled anchor across frames. But running
+        # legacy THEN latent on the SAME pipeline then feeds the latent arm an
+        # identity already mutated by the ENTIRE legacy pass (enroll + N legacy
+        # frames of accumulated observations), while legacy saw only the freshly
+        # enrolled identity. That asymmetry — not the render path — was inflating
+        # the SSIM/LAB delta (measured: SSIM 0.80 unfair vs 0.92 fair). It is also
+        # non-production: production runs enroll->render, never legacy-first.
+        # Re-enroll before EACH arm so both start from the IDENTICAL post-enroll
+        # identity; this isolates the pure render-path delta the gate must judge.
+        # enroll() rebuilds identity_state fresh (pipeline.py:727), so it is an
+        # idempotent reset to the canonical enrolled state.
+        if hasattr(pipeline, 'enroll'):
             pipeline.enroll()
 
         original_source = getattr(pipeline, 'render_source', 'legacy')
@@ -496,7 +575,99 @@ class ABComparator:
             'frames_compared': n,
         }
 
+    def evaluate_identity_consistency(self, pipeline, video_path: str, max_frames: int = 30) -> dict:
+        """D-05 Phase-3 promotion SIGNAL (arch §16.1 / §19.1) — NOT a tripwire.
+
+        Re-decomposes the latent RENDER back to albedo and measures, in CHROMA
+        only, (a) temporal stability and (b) match to the ENROLLED albedo, vs the
+        OBSERVATION (source_crop) baseline. Per §19.1 this is the identity-space
+        signal the pixel gates cannot provide; it is reported alongside the
+        regression tripwire, never folded into ``regressed``.
+
+        Returns identity metrics + a ``recovers_identity`` verdict (render is
+        more identity-stable AND closer to enrolled identity than the observation).
+        Requires a real pipeline (latent debug capture); returns ``available=False``
+        if the latent path / debug hooks are absent.
+        """
+        if hasattr(pipeline, '_reset_state'):
+            pipeline._reset_state()
+        if hasattr(pipeline, 'enroll'):
+            pipeline.enroll()  # creates identity_state + _identity_estimator + enrolled identity
+
+        # Guard AFTER enroll: identity_state and _identity_estimator are both
+        # constructed inside enroll() (pipeline.py:730), so neither exists on a
+        # fresh/stub pipeline beforehand.
+        est = getattr(pipeline, '_identity_estimator', None)
+        ident_state = getattr(pipeline, 'identity_state', None)
+        decomposer = getattr(ident_state, '_intrinsic_decomposer', None) if ident_state is not None else None
+        if est is None or decomposer is None:
+            return {'available': False, 'reason': 'pipeline lacks identity estimator/decomposer'}
+
+        try:
+            enrolled_albedo = est.latent().albedo.copy()
+        except Exception:
+            return {'available': False, 'reason': 'enrolled albedo unavailable'}
+
+        prev_capture = getattr(pipeline, '_capture_latent_debug', False)
+        prev_source = getattr(pipeline, 'render_source', 'legacy')
+        pipeline._capture_latent_debug = True
+        pipeline.render_source = 'latent'
+
+        render_albedos, obs_albedos, masks = [], [], []
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            pipeline._capture_latent_debug = prev_capture
+            pipeline.render_source = prev_source
+            return {'available': False, 'reason': 'video not readable'}
+        idx = 0
+        try:
+            while len(render_albedos) < max_frames:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                try:
+                    pipeline.process_frame(frame, frame_idx=idx)
+                    dbg = getattr(pipeline, '_last_latent_debug', None)
+                    if dbg and dbg.get('rendered_face') is not None and dbg.get('crop_mask') is not None:
+                        ren = cv2.cvtColor(dbg['rendered_face'], cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                        render_albedos.append(decomposer.decompose(ren).albedo)
+                        masks.append(dbg['crop_mask'] > 0.5)
+                        if dbg.get('source_crop') is not None:
+                            src = cv2.cvtColor(dbg['source_crop'], cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                            obs_albedos.append(decomposer.decompose(src).albedo)
+                except Exception as e:
+                    _logger.warning('identity-consistency frame %d error: %s', idx, e)
+                idx += 1
+        finally:
+            cap.release()
+            pipeline._capture_latent_debug = prev_capture
+            pipeline.render_source = prev_source
+
+        if len(render_albedos) < 2:
+            return {'available': False, 'reason': f'insufficient latent frames ({len(render_albedos)})'}
+
+        render_stability = compute_albedo_chroma_stability(render_albedos, masks)
+        render_match = compute_albedo_chroma_match(render_albedos, masks, enrolled_albedo)
+        obs_stability = (compute_albedo_chroma_stability(obs_albedos, masks)
+                         if len(obs_albedos) >= 2 else float('nan'))
+        obs_match = (compute_albedo_chroma_match(obs_albedos, masks, enrolled_albedo)
+                     if obs_albedos else float('nan'))
+
+        more_stable = bool(np.isnan(obs_stability) or render_stability <= obs_stability)
+        closer = bool(np.isnan(obs_match) or render_match <= obs_match)
+        return {
+            'available': True,
+            'frames': len(render_albedos),
+            'render_chroma_stability': render_stability,
+            'render_chroma_match': render_match,
+            'observation_chroma_stability': obs_stability,
+            'observation_chroma_match': obs_match,
+            'recovers_identity': bool(more_stable and closer),
+            'note': 'promotion SIGNAL only (arch §19.1); not part of regression tripwire',
+        }
+
     def benchmark_report(self, comparison_result: dict) -> str:
+
         # Kept intact for brevity, logic is fine
         comp = comparison_result.get("comparison", {})
         m_phys = comparison_result.get("metrics_physical", {})

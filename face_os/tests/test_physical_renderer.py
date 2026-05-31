@@ -10,6 +10,7 @@ Mathematical invariants:
   - Detail residual: zero-mean HF band
   - Output: linear-light float32 in [0, 1]
 """
+import cv2
 import numpy as np
 import pytest
 
@@ -20,6 +21,14 @@ from face_os.physical_renderer import (
     LightingModel,
     RenderReport,
 )
+from face_os.intrinsic_decomposition import IntrinsicComponents
+
+
+def _unit(v):
+    """Normalize a 3-vector (test helper for light directions)."""
+    v = np.asarray(v, np.float64)
+    n = float(np.linalg.norm(v))
+    return v / n if n > 1e-9 else v
 
 
 @pytest.fixture
@@ -252,3 +261,211 @@ class TestRenderMetrics:
         d = report.to_dict()
         assert 'rendering_error' in d
         assert 'mean_diffuse' in d
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Latent-path identity microdetail (design.md:388-401)
+# ═══════════════════════════════════════════════════════════════════
+
+class TestIntrinsicDetailResidual:
+    """`render_with_intrinsic` is the latent render path (renderer.py:141).
+
+    design.md:390-401 mandates the render core consume the carried identity HF:
+        detail  <- components.detail_residual   // identity HF (NOT source HF)
+        Y_face  <- base + detail_strength * detail
+
+    The latent albedo arrives bilinearly warped from canonical UV, so its own
+    high-pass is near-zero; the stored best-observation `microdetail` (carried in
+    `detail_residual`) is the ONLY identity HF source on this path. If the render
+    core ignores it, the output is blurry (the measured 4.3x sharpness loss).
+    """
+
+    @staticmethod
+    def _smooth_albedo(h=128, w=128, seed=0):
+        rng = np.random.default_rng(seed)
+        base = rng.uniform(0.4, 0.7, (h, w, 3)).astype(np.float32)
+        # Emulate the HF-smoothing of a bilinear canonical->crop warp.
+        return cv2.GaussianBlur(base, (0, 0), 6.0).astype(np.float32)
+
+    @staticmethod
+    def _components(albedo, detail):
+        h, w = albedo.shape[:2]
+        normal = np.zeros((h, w, 3), np.float32)
+        normal[..., 2] = 1.0
+        return IntrinsicComponents(
+            albedo=albedo,
+            shading=np.ones((h, w, 1), np.float32),
+            specular=np.zeros((h, w, 3), np.float32),
+            normal_map=normal,
+            confidence=np.ones((h, w, 1), np.float32),
+            reconstruction_error=0.0,
+            detail_residual=detail,
+        )
+
+    @staticmethod
+    def _lapvar(img):
+        gray = img.mean(axis=2).astype(np.float32)
+        return float(np.var(cv2.Laplacian(gray, cv2.CV_32F, ksize=3)))
+
+    def test_detail_residual_changes_output(self, renderer):
+        """Stored identity microdetail MUST reach the render output (design.md:390)."""
+        albedo = self._smooth_albedo()
+        rng = np.random.default_rng(1)
+        hf = (rng.standard_normal(albedo.shape).astype(np.float32) * 0.08)
+        hf -= hf.mean(axis=(0, 1), keepdims=True)
+
+        out_zero = renderer.render_with_intrinsic(
+            self._components(albedo, np.zeros_like(albedo))
+        ).rendered
+        out_hf = renderer.render_with_intrinsic(
+            self._components(albedo, hf)
+        ).rendered
+
+        delta = float(np.max(np.abs(out_hf - out_zero)))
+        assert delta > 1e-3, (
+            "render_with_intrinsic ignores components.detail_residual: identity "
+            f"microdetail has zero effect on output (max delta={delta:.2e}). "
+            "Latent-path HF is dropped (drift from design.md:390-401)."
+        )
+
+    def test_detail_residual_increases_sharpness(self, renderer):
+        """Carrying identity HF raises rendered HF energy vs. a zero residual."""
+        albedo = self._smooth_albedo(seed=2)
+        rng = np.random.default_rng(3)
+        hf = (rng.standard_normal(albedo.shape).astype(np.float32) * 0.08)
+        hf -= hf.mean(axis=(0, 1), keepdims=True)
+
+        out_zero = renderer.render_with_intrinsic(
+            self._components(albedo, np.zeros_like(albedo))
+        ).rendered
+        out_hf = renderer.render_with_intrinsic(
+            self._components(albedo, hf)
+        ).rendered
+
+        assert self._lapvar(out_hf) > self._lapvar(out_zero) * 1.5, (
+            "Identity microdetail must measurably sharpen the latent render."
+        )
+
+
+class TestLatentExposureStability:
+    """arch.md §16.2 + §18 (MEASURED): on the latent path, rendered EXPOSURE must
+    not float with the normal source.
+
+    Measured flicker root cause: when mesh normals are unavailable the renderer
+    falls back to the generic `face_prior` hemisphere and `estimate_lighting`
+    fits a different (oblique) light. With mesh normals (frontal N≈(0,0,1),
+    light≈(0,0,1)) N·L≈1 → bright render (~85); with the sphere + oblique light
+    half the face clamps at N·L≤0 and `clip` removes peak energy → ~30% darker
+    (~60). The identity did not change — only the GEOMETRY SOURCE did — so this is
+    a Principle-4 / §16.2 violation: a 50× flicker spike at each mesh↔face_prior
+    flip.
+
+    Invariant (the renderer's own stated intent, physical_renderer.py:382-394):
+    'shading controls absolute brightness'. On the latent path the rendered mean
+    exposure MUST equal mean(albedo × shading) — which is lighting-invariant and
+    temporally continuous — regardless of normal map or light direction.
+    """
+
+    @staticmethod
+    def _albedo(h=128, w=128, seed=7):
+        rng = np.random.default_rng(seed)
+        return rng.uniform(0.55, 0.80, (h, w, 3)).astype(np.float32)
+
+    @staticmethod
+    def _shading(h=128, w=128):
+        # BRIGHT shading (mean ~0.85). This is the regime where the measured bug
+        # lives: the peaky face_prior+oblique render lands in the energy-
+        # conservation DEAD ZONE (ratio ∈ [0.5, 0.95], left uncorrected), so its
+        # exposure floats below the mesh render. Dim shading (≤0.42) clamps both
+        # to ratio 0.95 and hides the bug — verified empirically.
+        Y, X = np.mgrid[0:h, 0:w].astype(np.float32)
+        s = 0.78 + 0.15 * (X / w)
+        return s[:, :, np.newaxis].astype(np.float32)
+
+    @staticmethod
+    def _frontal_normals(h=128, w=128):
+        n = np.zeros((h, w, 3), np.float32)
+        n[..., 2] = 1.0
+        return n
+
+    @staticmethod
+    def _sphere_normals(h=128, w=128):
+        # The exact generic face-prior hemisphere the renderer falls back to.
+        from face_os.intrinsic_decomposition import IntrinsicDecomposer
+        return IntrinsicDecomposer._get_cached_face_prior(h, w)
+
+    @staticmethod
+    def _components(albedo, normals, shading, detail):
+        h, w = albedo.shape[:2]
+        return IntrinsicComponents(
+            albedo=albedo,
+            shading=shading,
+            specular=np.zeros((h, w, 3), np.float32),
+            normal_map=normals,
+            confidence=np.ones((h, w, 1), np.float32),
+            reconstruction_error=0.0,
+            detail_residual=detail,  # not None => latent path
+        )
+
+    def test_exposure_invariant_to_normal_source(self, renderer):
+        """A mesh↔face_prior normal-source switch must NOT move rendered exposure."""
+        albedo = self._albedo()
+        shading = self._shading()
+        detail = np.zeros_like(albedo)  # isolate exposure (no HF contribution)
+
+        frontal = LightingModel(
+            ambient=0.10,
+            diffuse_direction=np.array([0.0, 0.0, 1.0], np.float64),
+            diffuse_intensity=0.80,
+            specular_intensity=0.0,
+        )
+        oblique = LightingModel(
+            ambient=0.10,
+            diffuse_direction=_unit(np.array([0.22, -0.82, 0.53], np.float64)),
+            diffuse_intensity=0.80,
+            specular_intensity=0.0,
+        )
+
+        out_mesh = renderer.render_with_intrinsic(
+            self._components(albedo, self._frontal_normals(), shading, detail),
+            lighting=frontal,
+        ).rendered
+        out_prior = renderer.render_with_intrinsic(
+            self._components(albedo, self._sphere_normals(), shading, detail),
+            lighting=oblique,
+        ).rendered
+
+        mean_mesh = float(np.mean(out_mesh))
+        mean_prior = float(np.mean(out_prior))
+        rel = abs(mean_mesh - mean_prior) / max(mean_mesh, 1e-6)
+        assert rel < 0.05, (
+            f"Latent render exposure floats with normal source: mesh mean="
+            f"{mean_mesh:.4f} vs face_prior mean={mean_prior:.4f} "
+            f"(relative step={rel:.1%} ≥ 5%). This is the measured flicker spike."
+        )
+
+    def test_latent_exposure_matches_albedo_shading_target(self, renderer):
+        """Latent render mean exposure ≈ mean(albedo × shading) (design intent)."""
+        albedo = self._albedo(seed=11)
+        shading = self._shading()
+        detail = np.zeros_like(albedo)
+        target = float(np.mean(albedo * np.repeat(shading, 3, axis=2)))
+
+        oblique = LightingModel(
+            ambient=0.10,
+            diffuse_direction=_unit(np.array([0.22, -0.82, 0.53], np.float64)),
+            diffuse_intensity=0.80,
+            specular_intensity=0.0,
+        )
+        out = renderer.render_with_intrinsic(
+            self._components(albedo, self._sphere_normals(), shading, detail),
+            lighting=oblique,
+        ).rendered
+
+        mean_out = float(np.mean(out))
+        rel = abs(mean_out - target) / max(target, 1e-6)
+        assert rel < 0.08, (
+            f"Latent render exposure {mean_out:.4f} does not match the "
+            f"albedo×shading target {target:.4f} (off by {rel:.1%}); shading must "
+            f"control absolute brightness on the latent path."
+        )

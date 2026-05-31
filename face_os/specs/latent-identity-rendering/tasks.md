@@ -5,9 +5,9 @@
 This plan promotes a lighting-invariant identity latent to be the renderer's primary input, replacing the paste-then-relight render path. It follows the design's phased migration so the 28 existing integration tests stay green while telemetry proves the latent — not the source crop — drove each face pixel.
 
 - Language: Python. Test runner: `pytest`. Property-based testing: `hypothesis`.
-- Run the fast subset after every task: `.venv/bin/python -m pytest tests/face_os/ -v -m "not slow"`
-- Run slow/runtime-truth tests (needs `input/video.mp4`): `.venv/bin/python -m pytest tests/face_os/ -v`
-- New tests live in `tests/face_os/test_latent_identity.py` (unit + hypothesis properties) and extensions to `tests/face_os/test_integration.py`. Reuse existing `conftest.py` fixtures.
+- Run the fast subset after every task: `.venv/bin/python -m pytest face_os/tests/ -v -m "not slow"`
+- Run slow/runtime-truth tests (needs `input/video.mp4`): `.venv/bin/python -m pytest face_os/tests/ -v`
+- New tests live in `face_os/tests/test_latent_identity.py` (unit + hypothesis properties) and extensions to `face_os/tests/test_integration.py`. Reuse existing `conftest.py` fixtures.
 - Build on existing modules; do not reinvent. Each phase ends with a verification checkpoint.
 
 ## Tasks
@@ -15,7 +15,7 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
 - [ ] 1. Phase 0 — Contracts and telemetry (additive, no behavior change)
 
   - [x] 1.1 Scaffold test file and add core dataclasses + warn-only contract
-    - Create `tests/face_os/test_latent_identity.py` with `hypothesis` strategies: `albedos()`, `lightings()`, `poses()`, `geometries()`, `occlusion_sequences()`, reusing `conftest.py` fixtures (`synthetic_albedo`, `synthetic_shading`, `synthetic_normals`, `canonical_face`, `mock_face`). Add a couple of placeholder smoke tests so the file collects.
+    - Create `face_os/tests/test_latent_identity.py` with `hypothesis` strategies: `albedos()`, `lightings()`, `poses()`, `geometries()`, `occlusion_sequences()`, reusing `conftest.py` fixtures (`synthetic_albedo`, `synthetic_shading`, `synthetic_normals`, `canonical_face`, `mock_face`). Add a couple of placeholder smoke tests so the file collects.
     - Add `IdentityLatent` and `LatentRenderTelemetry` dataclasses to `face_os/types.py` (fields per design Data Models, including `IdentityLatent.mean_confidence()`).
     - Add `ContractViolation` exception and `assert_intrinsic_contract(c, expect_hw, mode='warn')` (warn-only logs + clamps; fatal raises) to `face_os/intrinsic_decomposition.py`.
     - _Requirements: 1.3, 1.4, 3.4_
@@ -34,11 +34,11 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
     - _Requirements: 3.4, 3.5, 7.2, 8.1, 8.2, 8.3, 8.4, 9.5_
 
   - [ ]* 1.5 Write tests for legacy-frame telemetry honesty
-    - Extend `tests/face_os/test_integration.py` to assert each per-frame record carries the full schema, legacy frames report `latent_primary=False`, alpha/enhancement paths report `intrinsic_used=False`, and `energy_terms` reflect the current frame.
+    - Extend `face_os/tests/test_integration.py` to assert each per-frame record carries the full schema, legacy frames report `latent_primary=False`, alpha/enhancement paths report `intrinsic_used=False`, and `energy_terms` reflect the current frame.
     - _Requirements: 7.1, 7.2, 8.1, 8.2, 8.3, 8.4_
 
   - [x] 1.6 Checkpoint — verify Phase 0
-    - Run `.venv/bin/python -m pytest tests/face_os/ -v -m "not slow"`. Confirm the 28 integration tests stay green and new contract/telemetry tests pass. Ensure all tests pass, ask the user if questions arise.
+    - Run `.venv/bin/python -m pytest face_os/tests/ -v -m "not slow"`. Confirm the 28 integration tests stay green and new contract/telemetry tests pass. Ensure all tests pass, ask the user if questions arise.
     - **VERIFIED.** 282 passed, 9 skipped, 14 slow deselected. All integration tests green.
 
 - [ ] 2. Phase 1 — Build the latent behind the Identity subsystem (dormant/shadow mode)
@@ -86,7 +86,7 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
     - _Requirements: 1.6, 2.5, 7.2_
 
   - [x] 2.11 Checkpoint — verify Phase 1
-    - Run `.venv/bin/python -m pytest tests/face_os/ -v -m "not slow"`. Confirm integration suite still green and latent property/unit tests pass. Ensure all tests pass, ask the user if questions arise.
+    - Run `.venv/bin/python -m pytest face_os/tests/ -v -m "not slow"`. Confirm integration suite still green and latent property/unit tests pass. Ensure all tests pass, ask the user if questions arise.
     - **PASSED.** Fast suite: 214 passed, 4 slow deselected, 0 regressions (baseline 200; +14 new). Slow runtime-truth `TestLatentShadowModeOnRealVideo` 4/4 on `clips_test/test_clip.mp4`. Hardening tests added (real fusion code, no mocks): P1 lighting-invariance, P4 uncertainty-monotonicity (+ explicit occlusion), P7 WB-convergence, synthesize_identity provenance (signature forbids source arg; output tracks stored latent; uninitialized→neutral). Two correctness/efficiency improvements during wiring: (a) `update_latent(intrinsic=...)` REUSES the decomposition `identity_state.update()` already computed this frame — no redundant second decompose (~4 ms/frame total, micro-benchmarked + pipeline-traced); (b) the latent only fuses when the verification gate ACCEPTS the frame (`identity_updated`) — a gate-rejected (non-identity) observation never pollutes the latent. Added `_latent_shadow_enabled` kill-switch (cfg.latent.shadow_enabled). NOTE: Task 2.5 (manifold appearance_code) deferred — no encoder exists; does not block Phase 1.
     - **RESOLVED (uncertainty model):** shadow telemetry initially showed `latent_confidence` *collapsing* across a clip (enroll 0.234 → ~0.006 by frame 2). Root cause was NOT background dilution but a **running-max ratchet** in `update_latent` (the `improving = quality >= best_quality` gate at identity_estimator.py:373 + `quality_deficit` inflation + albedo freeze) — machinery that appears NOWHERE in design.md's fusion algorithm (design.md:354-361). Per the doc (algorithm block is source of truth), uncertainty fusion is a **pure Kalman shrink** `unc <- (1-gain)*unc`; the ONLY inflation source is the temporal predict step (`drift_score`). Stripped the ratchet (kept `_best_quality` for the microdetail best-observation rule, its only legitimate use); removed dead `_K_OCCLUSION_INFLATE`. Rewrote P4 to the doc's honest semantics (TDD: P4b RED against ratchet → GREEN after fix): **P4b** shrink-under-information, **P4a** occlusion floor (hold at quality→0), **P4c** temporal-drift inflation. Also fixed design.md's self-contradictory P4 pseudocode to match its own algorithm block. Real-clip confirmation: confidence now 0.234 → 0.240 → 0.246 → 0.251 → **0.257 plateau** (rises with evidence, settles at the fixed point where `stored_unc ≈ obs_unc`). The plateau LEVEL is now honestly governed by the decomposer's `albedo_uncertainty` — the correct lever for Phase 2 gate calibration, not a fusion hack. Fast suite 215 passed; slow `TestLatentShadowModeOnRealVideo` 4/4.
 
@@ -143,12 +143,12 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
     - **Validates: Requirements 3.2**
 
   - [x]* 3.11 Add TestLatentDrivesRender and TestSubsystemBoundaries (fast subset)
-    - Extend `tests/face_os/test_integration.py` with `TestLatentDrivesRender` (latent path emits `latent_primary=True` and low `source_pixel_fraction` on synthetic frames) and `TestSubsystemBoundaries` (latent path does not access `_anchor_albedo`/`_intrinsic_decomposer`/`_gate`). Keep these in the non-slow subset; the real-video runtime-truth test is added in Phase 3.
+    - Extend `face_os/tests/test_integration.py` with `TestLatentDrivesRender` (latent path emits `latent_primary=True` and low `source_pixel_fraction` on synthetic frames) and `TestSubsystemBoundaries` (latent path does not access `_anchor_albedo`/`_intrinsic_decomposer`/`_gate`). Keep these in the non-slow subset; the real-video runtime-truth test is added in Phase 3.
     - **DONE (2026-05-30).** Both classes added to `test_integration.py`, fast subset (no `@pytest.mark.slow`, no real video). Key design constraint resolved by recon: the full `process_frame` loop needs real MediaPipe detection, so a synthetic frame cannot engage it — instead both classes **direct-drive `_render_with_latent`** on synthetic 478-pt landmarks whose 5 alignment anchors sit on the canonical positions (`canonical_map.py:30-38`), giving a stable centered transform with NO detection. Latent is initialized via `IdentityEstimator.update_latent` on a bare mock state (never reaches a real `IdentityState`), real `FaceRenderer(PhysicalRenderer())` injected. **`TestLatentDrivesRender` (3 tests):** the LOAD-BEARING guard is `result is not None` — `_render_with_latent` silently returns None on any guard-miss/swallowed-exception (the documented green-test-hides-broken-runtime trap that bit this path at 228), so a None would be the failure; plus measured `source_pixel_fraction < 0.5` (composite genuinely differs from the deliberately-distinct source crop) and a `latent_primary=True`/`render_path='latent'` telemetry record wired through `_emit_frame_telemetry` exactly as the pipeline branch does (pipeline.py:2100-2106). **`TestSubsystemBoundaries` (1 test):** installs a `_BoundaryProbe` as `p.identity_state` that RAISES on access to any of the three legacy attrs — double-guarded (`out is not None` AND `probe.touched == []`), because a tripped probe raises → swallowed → None, so both conditions must hold. Recon confirmed `_render_with_latent` + full callee tree (`synthesize_identity`, `_observation_shading`, `estimate_lighting`, `render_from_latent`, `query_uncertainty`, hybrid) never dereference those attrs (they live on `IdentityState`, read only by enroll + the LEGACY physical path at pipeline.py:2286-2291). Fast suite **260 passed** (was 256, +4), 0 regressions.
     - _Requirements: 4.1, 7.6_
 
   - [x] 3.12 Checkpoint — verify Phase 2
-    - Run `.venv/bin/python -m pytest tests/face_os/ -v -m "not slow"`. Confirm legacy default keeps the integration suite green and all latent-path property/integration tests pass. Ensure all tests pass, ask the user if questions arise.
+    - Run `.venv/bin/python -m pytest face_os/tests/ -v -m "not slow"`. Confirm legacy default keeps the integration suite green and all latent-path property/integration tests pass. Ensure all tests pass, ask the user if questions arise.
     - **VERIFIED.** 282 passed, 9 skipped, 14 slow deselected. ABComparator wiring (3.5) + latent-vs-legacy gate infrastructure complete.
 
 - [ ] 4. Phase 3 — Flip default to latent and retire anti-patterns on the default path
@@ -174,22 +174,22 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
     - _Requirements: 6.4, 6.5_
 
   - [x]* 4.5 Add runtime-truth slow test on real video
-    - Extend `tests/face_os/test_integration.py` with a `@pytest.mark.slow` test on `input/video.mp4` asserting `latent_primary=True` and `source_pixel_fraction < 0.02` for ≥90% of physical frames, plus the audited identity-quality targets (LAB drift from anchor < 10, LAB vs expectation < 20, embedding distance < 0.45).
+    - Extend `face_os/tests/test_integration.py` with a `@pytest.mark.slow` test on `input/video.mp4` asserting `latent_primary=True` and `source_pixel_fraction < 0.02` for ≥90% of physical frames, plus the audited identity-quality targets (LAB drift from anchor < 10, LAB vs expectation < 20, embedding distance < 0.45).
     - **DONE.** `TestLatentQualityOnRealVideo` added to `test_integration.py`. Asserts `latent_primary=True` on ≥90% of frames and mean `source_pixel_fraction < 0.02`. Uses full path to main dir video (`/Users/prajwalbairagi/projects/yt-clips/input/video.mp4`). Properly `@pytest.mark.slow` — deselected in fast suite (14 slow deselected). Requires real video to run.
     - _Requirements: 6.1, 6.2, 6.3, 7.3, 7.6_
 
   - [x]* 4.6 Add architectural no-private-access test
-    - Extend `tests/face_os/test_integration.py` with a test asserting the pipeline does not access `_anchor_albedo`/`_intrinsic_decomposer`/`_gate` on the latent path (attribute-access tracing or lint on `pipeline.py`).
+    - Extend `face_os/tests/test_integration.py` with a test asserting the pipeline does not access `_anchor_albedo`/`_intrinsic_decomposer`/`_gate` on the latent path (attribute-access tracing or lint on `pipeline.py`).
     - **DONE (3.11).** `TestSubsystemBoundaries` in `test_integration.py` installs a `_BoundaryProbe` as `p.identity_state` that RAISES on access to `_anchor_albedo`/`_intrinsic_decomposer`/`_gate`. Double-guarded: `out is not None` AND `probe.touched == []`.
     - _Requirements: 4.1, 7.6, 1.8_
 
   - [x]* 4.7 Write tests for color-cast compensation
-    - Add unit/property tests in `tests/face_os/test_latent_identity.py` asserting the teal/green cast is removed, channel-std color invariance improves beyond the 0.04–0.10 measured range, and a compensation that fails either condition is rejected.
+    - Add unit/property tests in `face_os/tests/test_latent_identity.py` asserting the teal/green cast is removed, channel-std color invariance improves beyond the 0.04–0.10 measured range, and a compensation that fails either condition is rejected.
     - **DONE (4.4).** 4 tests in `test_color_cast.py`: teal removal, rejection path, EMA stability, gray-world fallback.
     - _Requirements: 6.4, 6.5_
 
   - [x] 4.8 Checkpoint — verify Phase 3
-    - Run `.venv/bin/python -m pytest tests/face_os/ -v` (including slow). Confirm the full suite is green with the latent default and runtime-truth/architectural tests pass. Ensure all tests pass, ask the user if questions arise.
+    - Run `.venv/bin/python -m pytest face_os/tests/ -v` (including slow). Confirm the full suite is green with the latent default and runtime-truth/architectural tests pass. Ensure all tests pass, ask the user if questions arise.
     - **VERIFIED.** Fast suite: 282 passed, 9 skipped, 14 slow deselected. Default is now `latent`. BeliefPixel demoted. 0.4 blend retired. Color-cast compensation with rejection guard. Silent sanitizers removed.
 
 - [ ] 5. Phase 4 — Cleanup (assertions as the only guard, uncertainty-driven gating, graceful degradation)
@@ -216,19 +216,19 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
     - **PER-PIXEL HYBRID (10.4) LANDED & PROVEN (2026-05-30).** The "blend latent with observation by uncertainty" clause is done: `_render_with_latent` now calls `_hybrid_face(rendered, observation, query_uncertainty(render_geom), solid_interior, blend_max=0.5)` — per-pixel `alpha = 1 − U·blend_max` (latent keeps ≥50% authority everywhere), blending TOWARD `lowpass(observation)` only so no source HF leaks. **Root cause of a wired-path leak regression PROVEN by measurement (not dialed):** the naive full-mask blend tripped the leak guard (0.022 > 0.02); the offline estimate (0.009) had skipped the `multiband_blend` composite, and a wired diagnostic proved 100% of the induced leak lived in the FEATHER TRANSITION BAND (where the composite already mixes source) — lowering blend_max barely moved it. FIX is architectural: RESTRICT the hybrid to the SOLID interior (`feathered_mask>0.99`), where `|latent−source| ≫ tol` so leak == pure-latent (<0.01) even at full blend_max=0.5 (`erode099` measured identical to pure-latent on all frames). Real-video `hybrid_alpha_mean` ~0.62–0.77. New `hybrid_alpha_mean` telemetry (10th field). 10 RED→GREEN helper unit tests + slow `test_hybrid_blend_engages_and_respects_cap`; `test_latent_render_reduces_source_fraction` auto-covers leak<0.02 on the hybrid composite. Pure-latent debug preserved so exposure/flatness guards stay un-diluted. The uninitialized-neutral / missing-geometry-skip / degenerate-lighting-clamp clauses were satisfied in Phases 1–2A and re-verified above. Task 5.2 (the magic `E_geom`/`E_photometric` gate) is now also LANDED (see 5.2).
 
   - [x]* 5.4 Write tests for degradation and uncertainty-driven gating
-    - Add tests in `tests/face_os/test_latent_identity.py` (and extend `test_integration.py` as needed) for uninitialized-latent neutral fallback, missing-geometry skip, degenerate-lighting clamp, low-confidence hybrid gating, and frame-contract preservation on every fallback path.
+    - Add tests in `face_os/tests/test_latent_identity.py` (and extend `test_integration.py` as needed) for uninitialized-latent neutral fallback, missing-geometry skip, degenerate-lighting clamp, low-confidence hybrid gating, and frame-contract preservation on every fallback path.
     - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5_
     - **DONE (2026-05-30).** The 5.3 audit found ONE real test gap (the rest already covered — see 5.3) and closed it: `test_fit_lighting_degenerate_inputs_return_safe_floor` previously asserted only `ambient >= 0.0`, which a regression lowering the floor to e.g. 1e-4 would silently pass — violating Req 10.3's "documented minimum ambient value". STRENGTHENED to assert `ambient >= _MIN_AMBIENT` (imported from `physical_renderer`, so the test tracks the documented constant, not a hardcoded copy) on both the zero-shading and constant-shading cases. Lock proven TIGHT by measurement: the degenerate fit returns ambient == exactly 0.0300 == `_MIN_AMBIENT`, so the assertion bites a real regression rather than being decorative. Other clauses' tests (10.1 uninitialized-neutral, 10.2 canonical_face-None skip, 10.4 hybrid gating, 10.5 frame-contract) were found ALREADY COVERED in the audit; redundant integration duplicates were DELIBERATELY NOT added (they would inflate the count without adding a real guard). Uncertainty-driven gating coverage is the `TestPhysicalGate` (10) + `TestLatentGate` (8) suites from 5.2/2B.
 
   - [x] 5.5 Final checkpoint — verify Phase 4
-    - Run `.venv/bin/python -m pytest tests/face_os/ -v` (including slow). Confirm the full suite is green, contracts are the only guard, and gating is uncertainty-driven. Ensure all tests pass, ask the user if questions arise.
+    - Run `.venv/bin/python -m pytest face_os/tests/ -v` (including slow). Confirm the full suite is green, contracts are the only guard, and gating is uncertainty-driven. Ensure all tests pass, ask the user if questions arise.
     - **CHECKPOINT PASSED (2026-05-30):** full suite **278 collected, 0 failed**; slow real-video class explicitly **13 passed**. (During the run `input/video.mp4` was briefly absent — an in-progress `yt-dlp` download — causing 9 `input/video.mp4`-hardcoded tests to skip; the file has since re-merged, and the skips were ENVIRONMENT, never a code regression. The slow latent class uses the intact `clips_test/test_clip.mp4` fallback and stayed green throughout.) Gating is uncertainty-driven on both gates (`_evaluate_latent_gate` confidence-floor + `_evaluate_physical_gate` energy + latent-uncertainty read input). **Standing HTML A/B gate: PASSED** (re-run after RAM recovered to 48% and the download finished) — 5 latent_primary frames, mask-interior lat_mean 93.69 ≈ src 92.77, std 41.18 ≈ 40.59, render_vs_src 42.95: byte-identical to every prior run this session, confirming 5.2 is inert at the measured operating point and 5.4 is test-only. Phase 4/5 of latent-identity-rendering COMPLETE; default remains `legacy` pending the Phase 3 ABComparator non-regression flip.
 
 ## Notes
 
 - Tasks marked with `*` are optional test sub-tasks and can be skipped for a faster MVP, but they encode the design's correctness contract (Properties P1–P8) and the runtime-truth proof; skipping them weakens traceability.
 - Each task references specific requirement clauses (and the design Property it implements where relevant) for traceability.
-- Early phases are strictly additive: `.venv/bin/python -m pytest tests/face_os/ -v -m "not slow"` must stay green through Phases 0–2. The latent default flips only in Phase 3 after A/B is non-regressing.
+- Early phases are strictly additive: `.venv/bin/python -m pytest face_os/tests/ -v -m "not slow"` must stay green through Phases 0–2. The latent default flips only in Phase 3 after A/B is non-regressing.
 - Property tests use `hypothesis` with deterministic seeds (`arch.md` §3); reuse `conftest.py` fixtures and add strategies for albedos/lightings/poses/geometries/occlusion sequences.
 - Checkpoint sub-tasks (1.6, 2.11, 3.12, 4.8, 5.5) are verification gates and are excluded from the dependency graph below.
 
