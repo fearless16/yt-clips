@@ -1314,3 +1314,24 @@ def test_fit_lighting_accepts_hw1_shading_and_mask():
     light = fit_lighting_from_shading_normals(shading, normals, mask=mask)
     assert isinstance(light, LightingModel)
     assert light.diffuse_intensity >= 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Property 8: Frame contract — render_from_latent output
+# ═══════════════════════════════════════════════════════════════════
+
+
+def test_p8_render_from_latent_frame_contract():
+    """Property 8: render_from_latent output is float32, bounded [0,1],
+    free of NaN/Inf, and shaped to the geometry render size."""
+    renderer = _make_face_renderer()
+    geometry = _make_geometry()
+    components = _make_components(hw=(32, 32))
+    result = renderer.render_from_latent(components, geometry, LightingModel())
+    assert result is not None
+    assert result.dtype == np.float32
+    assert result.shape == (32, 32, 3), f"Expected (32,32,3), got {result.shape}"
+    assert np.all(result >= 0.0), "Output below 0"
+    assert np.all(result <= 1.0), "Output above 1"
+    assert not np.any(np.isnan(result)), "Output contains NaN"
+    assert not np.any(np.isinf(result)), "Output contains Inf"
