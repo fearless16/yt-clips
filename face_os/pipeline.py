@@ -249,7 +249,7 @@ class FaceOSPipeline:
         # behavior is untouched until a caller opts in (A/B). Honors
         # cfg.latent.render_source when present.
         render_source = getattr(latent_cfg, 'render_source', None) if latent_cfg else None
-        self.render_source: str = render_source if render_source in ('legacy', 'latent') else 'latent'
+        self.render_source: str = render_source if render_source in ('legacy', 'latent') else 'legacy'
         # Fraction of the rendered crop still driven by source pixels (1.0 =
         # fully source/legacy). The latent render path lowers this to its face
         # coverage complement; read into per-frame telemetry.
