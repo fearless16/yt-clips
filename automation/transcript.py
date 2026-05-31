@@ -22,9 +22,12 @@ Usage::
 import os
 import re
 import json
+import logging
 from pathlib import Path
 
 from ._cache import TRANSCRIPT_CACHE
+
+log = logging.getLogger("transcript")
 
 
 def _extract_video_id(url: str) -> str | None:
@@ -93,23 +96,24 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
         from google.auth.transport.requests import Request
         from googleapiclient.discovery import build
     except ImportError:
+        log.warning("YouTube Data API libraries not available")
         return None
 
     token_path = Path("yt_token.json")
     if not token_path.exists():
+        log.warning("YouTube Data API token not found at %s", token_path)
         return None
 
     try:
-        # Use the scopes the token was actually created with
         creds = Credentials.from_authorized_user_file(str(token_path))
         if not creds.valid and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         if not creds.valid:
+            log.warning("YouTube Data API credentials not valid")
             return None
 
         youtube = build("youtube", "v3", credentials=creds)
 
-        # List caption tracks
         captions_response = youtube.captions().list(
             part="snippet",
             videoId=video_id
@@ -117,9 +121,9 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
 
         items = captions_response.get("items", [])
         if not items:
+            log.warning("No caption tracks found for video %s via YouTube Data API", video_id)
             return None
 
-        # Prefer: English manual > English auto > any language
         caption_id = None
         lang_code = None
         for pref_lang in ["en", "en-US", "en-GB"]:
@@ -148,19 +152,17 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
             caption_id = item["id"]
             lang_code = item["snippet"]["language"]
 
-        # Download caption track (SRT format)
         caption_response = youtube.captions().download(
             id=caption_id,
             tfmt="srt"
         ).execute()
 
-        # Parse SRT into segments
         segments = _parse_srt(caption_response.decode("utf-8") if isinstance(caption_response, bytes) else caption_response)
         if segments:
             return {"segments": segments, "language": lang_code, "source": "youtube_api"}
 
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("YouTube Data API transcript fetch failed for %s: %s", video_id, e)
     return None
 
 
@@ -203,6 +205,7 @@ def _fetch_via_api(video_id: str) -> dict | None:
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError:
+        log.warning("youtube-transcript-api not installed")
         return None
     try:
         # Build a requests session with cookies if available (bypasses Colab IP blocks)
@@ -264,7 +267,8 @@ def _fetch_via_api(video_id: str) -> dict | None:
                 "text": text
             })
         return {"segments": segments, "language": transcript.language_code, "source": "api"}
-    except Exception:
+    except Exception as e:
+        log.warning("youtube-transcript-api fetch failed for %s: %s", video_id, e)
         return None
 
 
@@ -308,8 +312,10 @@ def _fetch_via_ytdlp(video_id: str) -> dict | None:
                 p.unlink()
             except OSError:
                 pass
+        log.warning("yt-dlp produced no VTT files for %s", video_id)
         return None
-    except Exception:
+    except Exception as e:
+        log.warning("yt-dlp transcript fetch failed for %s: %s", video_id, e)
         return None
 
 

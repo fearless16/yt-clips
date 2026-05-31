@@ -124,7 +124,7 @@ def main():
 
     r = memory_report()
     if r.get("free_gb", 0) < 2.0:
-        log.warning(f"Low mem: {r['free_gb']}GB free")
+        log.warning("Low mem: %sGB free", r.get("free_gb"))
         ensure_free(2.0, timeout=30.0)
 
     result = run(

@@ -12,12 +12,15 @@ import os
 import re
 import time
 import json
+import logging
 import subprocess
 import threading
 import urllib.request
 from pathlib import Path
 
 from .watcher import WATCHER_PORT
+
+log = logging.getLogger("tunnel")
 
 TUNNEL_URL_FILE = Path("/content/colab_url.txt")
 
@@ -142,8 +145,8 @@ class TunnelKeeper:
             if r.status == 200:
                 self._fail_count = 0
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Tunnel heartbeat failed on port %d: %s", self._port, e)
         self._fail_count += 1
         if self._fail_count >= 3:
             self._kill_proc()
@@ -257,11 +260,11 @@ def _tunnel_ngrok(port: int) -> str | None:
                     tunnels = data.get("tunnels", [])
                     if tunnels:
                         return tunnels[0]["public_url"]
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("ngrok tunnel API poll failed: %s", e)
             time.sleep(1)
     except Exception as e:
-        print(f"Ngrok Error: {e}")
+        log.warning("ngrok tunnel failed on port %d: %s", port, e)
     return None
 
 def _tunnel_serveo(port: int) -> str | None:
@@ -279,8 +282,8 @@ def _tunnel_serveo(port: int) -> str | None:
             if m:
                 return m.group(1)
             time.sleep(1)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("serveo.net tunnel failed on port %d: %s", port, e)
     return None
 
 
@@ -302,8 +305,8 @@ def _tunnel_localhost_run(port: int) -> str | None:
             if m:
                 return m.group(1)
             time.sleep(1)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("localhost.run tunnel failed on port %d: %s", port, e)
     return None
 
 
@@ -321,6 +324,6 @@ def _tunnel_localtunnel(port: int) -> str | None:
             if m:
                 return m.group(1)
             time.sleep(1)
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("localtunnel failed on port %d: %s", port, e)
     return None
