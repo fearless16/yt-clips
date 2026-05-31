@@ -279,6 +279,7 @@ LATENT_TELEMETRY_KEYS = {
     "hybrid_alpha_mean",
     "coverage_pose",
     "mean_visibility",
+    "coverage_light",
 }
 
 FRAME_TELEMETRY_KEYS = {
@@ -430,6 +431,39 @@ class TestLatentTelemetryHonesty:
             render_path="latent", intrinsic_used=True,
         )
         assert p.get_latent_telemetry()[-1]["mean_visibility"] == pytest.approx(0.42, abs=1e-9)
+
+    def test_coverage_light_zero_without_patch_memory(self, fresh_pipeline):
+        """§16.7: a fresh pipeline has no patch_memory yet (created at enroll),
+        so coverage_light reports 0.0 rather than crashing."""
+        p = fresh_pipeline
+        assert p.patch_memory is None
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="alpha", intrinsic_used=False,
+        )
+        assert p.get_latent_telemetry()[-1]["coverage_light"] == 0.0
+
+    def test_coverage_light_reflects_live_patch_memory(self, fresh_pipeline):
+        """§16.7: coverage_light in telemetry == patch_memory.coverage_light(),
+        the lighting coverage ratio recorded by the live memory."""
+        import numpy as np
+        from face_os.patch_memory import PatchMemory
+        from face_os.physical_renderer import LightingModel
+
+        p = fresh_pipeline
+        pm = PatchMemory()
+        face = np.ones((64, 64, 3), dtype=np.float32) * 0.5
+        pm.initialize(face, np.full((64, 64), 0.3, dtype=np.float32))
+        pm.record_lighting(LightingModel(ambient=0.05, diffuse_direction=np.array([0, 0, 1.0])))
+        pm.record_lighting(LightingModel(ambient=0.5, diffuse_direction=np.array([-1, 0, 0.0])))
+        p.patch_memory = pm
+
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="latent", intrinsic_used=True,
+        )
+        rec = p.get_latent_telemetry()[-1]
+        assert rec["coverage_light"] == pytest.approx(pm.coverage_light(), abs=1e-12)
 
     def test_enhancement_path_reports_intrinsic_not_used(self, fresh_pipeline):
         """An enhancement-path frame reports intrinsic_used=False."""
@@ -1410,6 +1444,18 @@ class TestLatentShadowModeOnRealVideo:
         for r in latent_log:
             assert r["latent_primary"] is False, f"unexpected latent_primary in {r}"
             assert r["source_pixel_fraction"] == 1.0, f"unexpected source fraction in {r}"
+
+    def test_coverage_light_grows_in_shadow_mode(self, shadow_run):
+        """§16.7 e2e: coverage_light must be >0 after processing real video,
+        proving that estimate_lighting → record_lighting is actually wired
+        into process_frame. If someone deletes the pipeline call site, this
+        test FAILS (coverage_light stays 0.0)."""
+        latent_log = shadow_run.get_latent_telemetry()
+        coverages = [r["coverage_light"] for r in latent_log]
+        assert max(coverages) > 0.0, (
+            "coverage_light stayed 0.0 across all frames — "
+            "record_lighting() is not wired into process_frame()"
+        )
 
     def test_existing_render_paths_unchanged(self, shadow_run):
         """The legacy render still produces frames (no regression from wiring)."""

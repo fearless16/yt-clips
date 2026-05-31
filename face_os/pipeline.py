@@ -1389,6 +1389,21 @@ class FaceOSPipeline:
                         self._last_latent_confidence = float(
                             latent.mean_confidence()
                         )
+                        # §16.7: record lighting observation for coverage_light.
+                        # normal_map is on the intrinsic_components already
+                        # decomposed by identity_state.update(); canonical_face
+                        # is the observation in canonical space (spatially
+                        # aligned with normal_map).
+                        if self.patch_memory is not None:
+                            try:
+                                nmap = self.identity_state._intrinsic_components.normal_map
+                                lighting = self.estimate_lighting(
+                                    canonical_face, nmap,
+                                    mask=canonical_face_mask,
+                                )
+                                self.patch_memory.record_lighting(lighting)
+                            except Exception:
+                                pass
                     except Exception as exc:  # noqa: BLE001 — shadow never crashes
                         self._log_event("latent_shadow_update_failed", error=str(exc))
 
@@ -1824,6 +1839,14 @@ class FaceOSPipeline:
                         mean_visibility = float(self._identity_estimator.last_mean_visibility)
                     except Exception:
                         mean_visibility = 1.0
+                # coverage_light (§16.7): lighting coverage ratio (observable
+                # signal, not folded into the gate yet).
+                coverage_light = 0.0
+                if self.patch_memory is not None:
+                    try:
+                        coverage_light = float(self.patch_memory.coverage_light())
+                    except Exception:
+                        coverage_light = 0.0
                 latent_render = LatentRenderTelemetry(
                     frame_idx=frame_idx,
                     render_path=render_path,
@@ -1837,6 +1860,7 @@ class FaceOSPipeline:
                     hybrid_alpha_mean=float(self._last_hybrid_alpha_mean),
                     coverage_pose=coverage_pose,
                     mean_visibility=mean_visibility,
+                    coverage_light=coverage_light,
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1857,6 +1881,7 @@ class FaceOSPipeline:
                     "hybrid_alpha_mean": float(self._last_hybrid_alpha_mean),
                     "coverage_pose": 0.0,
                     "mean_visibility": 1.0,
+                    "coverage_light": 0.0,
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)
@@ -2941,6 +2966,13 @@ class FaceOSPipeline:
             lighting = self.estimate_lighting(
                 cropped, components.normal_map, mask=crop_mask > 0.3
             )
+            # Record observed lighting for §16.7 coverage_light (observable
+            # signal; never lets a failure drop the render).
+            if self.patch_memory is not None:
+                try:
+                    self.patch_memory.record_lighting(lighting)
+                except Exception:
+                    pass
 
             # ── Render: latent albedo shaded under estimated lighting (no crop) ─
             rendered = self._face_renderer.render_from_latent(

@@ -141,6 +141,106 @@ def apply_pose_coverage(confidence: float, coverage_pose: float) -> float:
     return c * cov
 
 
+# ─── §16.7 Lighting Coverage ──────────────────────────────────────────────────
+# Coverage_light = |observed lighting states| / |total lighting states|.
+# The lighting signal is the per-frame LightingModel (ambient, diffuse_direction)
+# estimated from the observation by estimate_lighting each frame. The binning
+# function quantizes it into discrete states the same way _pose_bin quantizes
+# pose, and the canonical set is DERIVED from the binning function (not a magic
+# constant), so the denominator can never silently drift away from the cascade.
+#
+# Binning scheme: direction octant (6: ±X, ±Y, ±Z via largest |component|)
+#   × ambient band (3: dim [0.03,0.1), normal [0.1,0.3), bright [0.3+])
+#   = 18 total bins. Operational ambient range [0.03, 1.0] (_MIN_AMBIENT=0.03).
+#   Diffuse_intensity is NOT binned (direction + ambient is already orthogonal;
+#   intensity would add a third axis and explode the count for little signal).
+
+_AMBIENT_BANDS = (
+    (0.03, 0.10, 'A0'),  # dim
+    (0.10, 0.30, 'A1'),  # normal
+    (0.30, 1.01, 'A2'),  # bright
+)
+
+_DIRECTION_OCTANTS = (
+    (( 0,  0,  1), 'Zp'),
+    (( 0,  0, -1), 'Zm'),
+    (( 1,  0,  0), 'Xp'),
+    ((-1,  0,  0), 'Xm'),
+    (( 0,  1,  0), 'Yp'),
+    (( 0, -1,  0), 'Ym'),
+)
+
+
+def _lighting_bin(lighting) -> str:
+    """Quantize a LightingModel to a short bin label (§16.7).
+
+    Bins the light direction by which principal axis it is closest to (largest
+    |component| of the unit direction vector → ±X, ±Y, ±Z = 6 octants) and
+    ambient by band (dim/normal/bright = 3 bands). Combined: 18 directional
+    lighting states.
+
+    When diffuse_intensity is zero (a degenerate / pure-ambient fit) the
+    direction is meaningless, so only the ambient band is encoded. This is a
+    single-axis label (e.g. 'A1') rather than a combined label, and lands
+    outside the 18 canonical bins by design — degenerate illumination carries
+    no directional coverage evidence, same stance as V≡1 for face-prior frames.
+    """
+    if lighting is None:
+        return 'any'
+
+    ambient = float(getattr(lighting, 'ambient', 0.10))
+    diffuse = float(getattr(lighting, 'diffuse_intensity', 0.0))
+    direction = getattr(lighting, 'diffuse_direction', np.array([0, 0, 1.0], dtype=np.float64))
+    direction = np.asarray(direction, dtype=np.float64)
+    dnorm = float(np.linalg.norm(direction))
+    if dnorm > 1e-8:
+        direction = direction / dnorm
+
+    # Ambient band
+    amb_label = 'A1'  # fallback (normal range)
+    for lo, hi, label in _AMBIENT_BANDS:
+        if lo <= ambient < hi:
+            amb_label = label
+            break
+
+    # Pure-ambient (degenerate): no direction signal, ambient band only.
+    if diffuse < 1e-6 or dnorm < 1e-8:
+        return amb_label
+
+    # Direction octant: axis with the largest absolute component.
+    abs_d = np.abs(direction)
+    idx = int(np.argmax(abs_d))
+    axis_labels = ('X', 'Y', 'Z')
+    sign = 'p' if direction[idx] >= 0 else 'm'
+    dir_label = f'{axis_labels[idx]}{sign}'
+
+    return f'{dir_label}_{amb_label}'
+
+
+def _build_canonical_lighting_bins() -> frozenset:
+    """Build the canonical set by sweeping _lighting_bin over the operational
+    LightingModel space. Direction octants (6 signed-axis directions) × ambient
+    bands (3 band centers) = 18 bins."""
+    bins = set()
+    for _, dir_label in _DIRECTION_OCTANTS:
+        for _, _, amb_label in _AMBIENT_BANDS:
+            bins.add(f'{dir_label}_{amb_label}')
+    return frozenset(bins)
+
+
+_CANONICAL_LIGHTING_BINS: frozenset = _build_canonical_lighting_bins()
+
+
+def canonical_lighting_bins() -> set:
+    """The canonical set of lighting bins (|total lighting states|, §16.7).
+
+    Returns a fresh mutable copy each call so callers cannot corrupt the shared
+    denominator. Derived from `_lighting_bin`'s axis/band structure, so editing
+    the binning cascade and not updating this set fails the drift-guard test.
+    """
+    return set(_CANONICAL_LIGHTING_BINS)
+
+
 class RegionPatch:
     """Memory for a single face region."""
 
@@ -266,6 +366,10 @@ class PatchMemory:
     def __init__(self):
         self.regions: Dict[str, RegionPatch] = {}
         self._initialized = False
+        # §16.7 Lighting Coverage: set of observed lighting-bin labels.
+        # Updated via record_lighting() (called per frame from the pipeline
+        # when a LightingModel is available). coverage_light() reads this set.
+        self._lighting_bins_seen: set = set()
 
     def initialize(self, canonical_face: np.ndarray, quality_map: np.ndarray) -> None:
         for name, rdef in REGION_DEFS.items():
@@ -338,6 +442,35 @@ class PatchMemory:
         observed_in_range = self.observed_pose_bins() & canonical
         return len(observed_in_range) / len(canonical)
 
+    def record_lighting(self, lighting) -> None:
+        """Record a LightingModel observation for §16.7 lighting coverage.
+
+        Called per frame from the pipeline when a LightingModel is available.
+        The lighting is quantized via ``_lighting_bin`` and the label is added
+        to the seen set. No-op when lighting is None (no evidence to record).
+        """
+        if lighting is None:
+            return
+        label = _lighting_bin(lighting)
+        if label != 'any':
+            self._lighting_bins_seen.add(label)
+
+    def observed_lighting_bins(self) -> set:
+        """Set of lighting-bin labels observed so far (§16.7)."""
+        return set(self._lighting_bins_seen)
+
+    def coverage_light(self) -> float:
+        """Coverage_light = |observed ∩ canonical| / |total| (§16.7), in [0, 1].
+
+        Zero when no lighting has been observed (e.g. uninitialized memory).
+        Degenerate lighting bins that don't match any canonical entry are
+        excluded so the ratio never exceeds 1.
+        """
+        canonical = _CANONICAL_LIGHTING_BINS
+        observed_in_range = self._lighting_bins_seen & canonical
+        return len(observed_in_range) / len(canonical)
+
     def reset(self) -> None:
         self.regions.clear()
         self._initialized = False
+        self._lighting_bins_seen = set()

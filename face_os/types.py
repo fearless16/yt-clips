@@ -491,6 +491,9 @@ class LatentRenderTelemetry:
     #   V(u,v,t)=clip(N·view,0,1) of the last latent update (1.0 when no mesh
     #   self-occlusion evidence). The Visibility factor of the §16.8 composite.
     #   Observable SIGNAL only — gates latent MEMORY, not the render gate.
+    coverage_light: float = 0.0            # §16.7: |observed lighting bins| /
+    #   |total lighting bins| in [0,1]. The Lighting factor of the §16.8 composite.
+    #   Observable SIGNAL only — same cap as coverage_pose (c·cov).
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -506,4 +509,5 @@ class LatentRenderTelemetry:
             "hybrid_alpha_mean": self.hybrid_alpha_mean,
             "coverage_pose": self.coverage_pose,
             "mean_visibility": self.mean_visibility,
+            "coverage_light": self.coverage_light,
         }
