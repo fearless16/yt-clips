@@ -17,7 +17,12 @@ import argparse
 import sys
 import logging
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
 log = logging.getLogger("cli")
 
 
@@ -46,6 +51,8 @@ def main():
     p.add_argument("--skip-tests", action="store_true")
     p.add_argument("--sample-minutes", type=int)
     p.add_argument("--sync-from-drive", action="store_true")
+    p.add_argument("--learn-only", action="store_true",
+                   help="Skip all stages except self-learning")
     p.add_argument("--mode", choices=["face_mapper", "ref_grade"], default=None,
                    help='Enhancement mode: "face_mapper" or "ref_grade"')
     args = p.parse_args()
@@ -135,7 +142,8 @@ def main():
         skip_tests=args.skip_tests,
         auto_sync=args.sync, auto_upload=args.upload,
         auto_schedule=args.schedule, sample_minutes=args.sample_minutes,
-        sync_from_drive=args.sync_from_drive, mode=args.mode,
+        sync_from_drive=args.sync_from_drive, learn_only=args.learn_only,
+        mode=args.mode,
     )
     print(f"Done: exported={len(result.exported)} uploaded={result.uploaded_count}"
           f" failures={len(result.failures)} in {result.total_seconds:.1f}s"

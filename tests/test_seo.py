@@ -39,8 +39,8 @@ def test_standard_seo_generation():
         
         _, kwargs = mock_generate.call_args
         system_instruction = kwargs.get("system_instruction", "")
-        # The standard system instructions says "You are an elite YouTube Shorts SEO expert..." but is for long-form structure
-        assert "shorts" in system_instruction.lower()
+        # The standard system instructions says "desi YouTube SEO expert" for long-form structure
+        assert "desi" in system_instruction.lower()
 
 
 

@@ -61,6 +61,7 @@ REQUIRED_CONFIG_KEYS = [
 EXPECTED_PHASE_STAGES = [
     "transcript_fetch", "download", "transcribe", "highlight", "export",
     "enhancement", "seo", "thumbnails", "sync", "upload", "analytics",
+    "automation_learner", "provider_health", "event_store_validation",
 ]
 
 # Prompts module must be importable and all templates must format cleanly.
@@ -365,6 +366,10 @@ def dry_run(url: str,
              skip_sync, skip_seo, auto_sync, auto_upload, auto_schedule, mode)
     log.info("=" * 64)
 
+    from automation import decision_store
+    decision_store.clear()
+    event_count_before = 0
+
     validation = {
         "transcript_phase_ran": False,
         "transcript_corrected": False,
@@ -556,6 +561,57 @@ def dry_run(url: str,
         except Exception as e:
             result.failures.append("phase8: %s" % e)
 
+    # ── Phase 9: Automation Learner + Provider Health + Event validation ─────
+    event_count_before = decision_store.count()
+
+    if auto_upload or auto_schedule:
+        try:
+            with run_phase(plog, "phase 9a Automation Learner", "automation_learner", run_id=rid):
+                from automation import policy_updater, preference_engine, replay_engine
+                policy_updater.update_from_events(decision_store.get_all_events())
+                if not replay_engine.verify():
+                    replay_engine.replay()
+                prefs = preference_engine.compute_preferences()
+                plog.info("[automation_learner] processed %d events, prefs=%s",
+                          decision_store.count(), prefs)
+        except Exception as e:
+            result.failures.append("phase9a: %s" % e)
+
+        try:
+            with run_phase(plog, "phase 9b Provider Health", "provider_health", run_id=rid):
+                from automation import provider_health
+                for provider_name in ("transcript", "download", "transcriber", "llm",
+                                      "export", "enhancement", "drive", "youtube"):
+                    stats = provider_health.get_stats(provider_name)
+                    if stats["total_calls"]:
+                        plog.info("[provider_health] %s: status=%s calls=%d ok=%d fail=%d",
+                                  provider_name, stats["status"].value,
+                                  stats["total_calls"], stats["successes"], stats["failures"])
+        except Exception as e:
+            result.failures.append("phase9b: %s" % e)
+
+    # Validate event emission directly by calling emit_event and checking the store.
+    try:
+        with run_phase(plog, "phase 9c Event Store Validation", "event_store_validation", run_id=rid):
+            from automation import emit_event, emit_infra_failed, decision_store as _ds
+            from automation.memory.event_models import EventType
+            emitted = 0
+            e1 = emit_event("dry/clip1", EventType.candidate_created, {"text": "test"})
+            emitted += 1
+            e2 = emit_event("dry/clip1", EventType.candidate_scored, {"score": 0.8})
+            emitted += 1
+            e3 = emit_infra_failed("dry/clip1", "simulated error", "dry_test")
+            emitted += 1
+            total = _ds.count()
+            plog.info("[event_store] emitted %d events, store has %d total", emitted, total)
+            if total >= event_count_before + emitted:
+                plog.info("[event_store] event emission + storage: PASS")
+            else:
+                plog.warning("[event_store] expected %d events, got %d",
+                             event_count_before + emitted, total)
+    except Exception as e:
+        result.failures.append("phase9c: %s" % e)
+
     result.total_seconds = time.monotonic() - start
     status = "partial" if result.failures else "ok"
     log.info("[EXIT] run_id=%s exported=%d uploaded=%d selected=%d seo=%d "
@@ -589,6 +645,8 @@ def dry_run(url: str,
         prompts_ok = False
         log.warning("Prompts module import failed: %s", e)
 
+    event_count_new = decision_store.count() - event_count_before
+
     return {
         "run_id": rid,
         "exported": [str(p) for p in result.exported],
@@ -604,6 +662,7 @@ def dry_run(url: str,
         "logged_stages": logged_stages,
         "validation": validation,
         "prompts_ok": prompts_ok,
+        "event_count": event_count_new,
     }
 
 
@@ -688,6 +747,14 @@ def _print_validation_report(result: dict):
     print(f"        expected stages present: {sorted(expected_stages & logged)}")
     if missing:
         print(f"        not run (flag-dependent):{sorted(missing)}")
+    print()
+    print("  [7] Event store (automation.decision_store):")
+    event_count = result.get("event_count", 0)
+    print(f"        events emitted:             {event_count}")
+    if event_count:
+        from automation import decision_store as _ds
+        event_types = sorted({e.event_type.value for e in _ds.get_all_events()})
+        print(f"        event types:               {event_types}")
     print()
     if result["failures"]:
         print("  Failures detail:")

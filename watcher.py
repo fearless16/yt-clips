@@ -2,6 +2,7 @@
 watcher.py — Colab Worker: Listens for pipeline jobs via HTTP tunnel + file poll.
 """
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -10,6 +11,14 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
+
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+log = logging.getLogger("watcher")
 
 PORT = int(os.environ.get("PORT", "5000"))
 JOB_FILE = "remote_job.json"
@@ -20,17 +29,6 @@ JOB_TIMEOUT = int(os.environ.get("JOB_TIMEOUT", "7200"))  # 2 hours default
 job_queue = []
 processing_lock = threading.Lock()
 currently_processing = False
-
-
-def _ts() -> str:
-    """Return current timestamp string."""
-    import datetime
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def log_info(msg: str):
-    """Print timestamped log message."""
-    print(f"[{_ts()}] {msg}")
 
 
 def write_status(status: str, url: str = "", message: str = ""):
@@ -110,11 +108,11 @@ class JobHandler(BaseHTTPRequestHandler):
                 for key in list(job.keys()):
                     if key in CRED_FILES and isinstance(job[key], str):
                         Path(key).write_text(job[key], encoding="utf-8")
-                        log_info(f"🔑 Saved {key} ({len(job[key])} bytes)")
+                        log.info(f"🔑 Saved {key} ({len(job[key])} bytes)")
                         del job[key]
 
                 job_queue.append(job)
-                log_info(f"Job received via tunnel: {url}")
+                log.info(f"Job received via tunnel: {url}")
 
                 with processing_lock:
                     if not currently_processing:
@@ -206,11 +204,11 @@ def process_queue():
 
         cmd = [sys.executable, "-m", "automation.cli", url] + flags
 
-        log_info(f"{'='*55}")
-        log_info(f"  PROCESSING: {url}")
-        log_info(f"{'='*55}")
-        log_info(f"  Command: {' '.join(cmd[-3:])} ...")
-        log_info(f"  Timeout: {JOB_TIMEOUT}s")
+        log.info(f"{'='*55}")
+        log.info(f"  PROCESSING: {url}")
+        log.info(f"{'='*55}")
+        log.info(f"  Command: {' '.join(cmd[-3:])} ...")
+        log.info(f"  Timeout: {JOB_TIMEOUT}s")
         write_status("running", url, "Pipeline executing...")
         t_start = time.time()
         result = None
@@ -219,7 +217,7 @@ def process_queue():
             elapsed = time.time() - t_start
         except subprocess.TimeoutExpired:
             elapsed = time.time() - t_start
-            log_info(f"Job timed out after {JOB_TIMEOUT}s ({elapsed:.0f}s elapsed): {url}")
+            log.info(f"Job timed out after {JOB_TIMEOUT}s ({elapsed:.0f}s elapsed): {url}")
             write_status("failed", url, f"Timed out after {JOB_TIMEOUT}s")
             with open(RESULT_FILE, "w") as f:
                 json.dump({
@@ -230,7 +228,7 @@ def process_queue():
                 }, f, indent=2)
             continue
         except KeyboardInterrupt:
-            log_info("Job interrupted by user")
+            log.info("Job interrupted by user")
             write_status("interrupted", url, "KeyboardInterrupt")
             with open(RESULT_FILE, "w") as f:
                 json.dump({
@@ -251,7 +249,7 @@ def process_queue():
 
         status_label = "OK" if result.returncode == 0 else "FAILED"
         write_status(status, url, f"Exit code {result.returncode} ({elapsed:.0f}s)")
-        log_info(f"[EXIT] Job {status_label} url={url} exit={result.returncode} elapsed={elapsed:.0f}s\n")
+        log.info(f"[EXIT] Job {status_label} url={url} exit={result.returncode} elapsed={elapsed:.0f}s\n")
 
 
 def poll_job_file():
@@ -274,45 +272,45 @@ def poll_job_file():
                     for secret_file in CRED_FILES:
                         if secret_file in job and job[secret_file]:
                             Path(secret_file).write_text(job[secret_file], encoding="utf-8")
-                            log_info(f"Saved {secret_file} ({len(job[secret_file])} bytes) from Drive job")
+                            log.info(f"Saved {secret_file} ({len(job[secret_file])} bytes) from Drive job")
                             del job[secret_file]
-                    log_info(f"Queued: {url}")
+                    log.info(f"Queued: {url}")
                     write_status("queued", url, "Job detected on Drive, queued for processing")
                     with processing_lock:
                         job_queue.append(job)
                     threading.Thread(target=process_queue, daemon=True).start()
                 else:
-                    log_info("Skipping job file: missing 'url' field")
+                    log.info("Skipping job file: missing 'url' field")
                 job_path.unlink(missing_ok=True)
             except json.JSONDecodeError as e:
-                log_info(f"Invalid JSON in job file: {e}")
+                log.info(f"Invalid JSON in job file: {e}")
                 job_path.unlink(missing_ok=True)
             except Exception as e:
-                log_info(f"File poll error: {e}")
+                log.info(f"File poll error: {e}")
                 job_path.unlink(missing_ok=True)
         time.sleep(10)
 
 
 if __name__ == "__main__":
-    log_info(f"Starting watcher on port {PORT}...")
-    log_info(f"Job timeout: {JOB_TIMEOUT}s (set JOB_TIMEOUT env to change)")
-    log_info(f"Polling: {JOB_FILE} every 10s")
-    log_info(f"Status file: {STATUS_FILE}")
+    log.info(f"Starting watcher on port {PORT}...")
+    log.info(f"Job timeout: {JOB_TIMEOUT}s (set JOB_TIMEOUT env to change)")
+    log.info(f"Polling: {JOB_FILE} every 10s")
+    log.info(f"Status file: {STATUS_FILE}")
     write_status("idle", "", "Watcher started")
 
     poller = threading.Thread(target=poll_job_file, daemon=True)
     poller.start()
 
     server = HTTPServer(("0.0.0.0", PORT), JobHandler)
-    log_info(f"HTTP server: http://0.0.0.0:{PORT}")
-    log_info(f"POST /job to submit a pipeline job")
-    log_info(f"GET /health to check status")
-    log_info(f"GET /files to list working files")
-    log_info(f"Watcher ready")
+    log.info(f"HTTP server: http://0.0.0.0:{PORT}")
+    log.info(f"POST /job to submit a pipeline job")
+    log.info(f"GET /health to check status")
+    log.info(f"GET /files to list working files")
+    log.info(f"Watcher ready")
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        log_info("Shutting down...")
+        log.info("Shutting down...")
         write_status("stopped", "", "Watcher shutting down")
         server.shutdown()

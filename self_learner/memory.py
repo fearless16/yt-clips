@@ -5,6 +5,7 @@ Thread-safe via SQLite's default isolation. Survives restarts.
 """
 
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 
-_MEMORY_DB = "self_learner.db"
+_MEMORY_DB = os.environ.get("SELF_LEARNER_DB", "self_learner.db")
 _MEMORY_TABLE = """
 CREATE TABLE IF NOT EXISTS memories (
     key TEXT PRIMARY KEY,

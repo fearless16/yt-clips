@@ -12,15 +12,15 @@ import os
 import re
 import time
 import json
-import logging
 import subprocess
 import threading
 import urllib.request
 from pathlib import Path
 
 from .watcher import WATCHER_PORT
+from utils.logger import get_logger
 
-log = logging.getLogger("tunnel")
+log = get_logger("tunnel")
 
 TUNNEL_URL_FILE = Path("/content/colab_url.txt")
 
