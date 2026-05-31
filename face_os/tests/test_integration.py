@@ -996,8 +996,8 @@ class TestLatentGate:
 
     def test_uninitialized_never_engages(self):
         engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=False, confidence=0.30, confidence_prev=0.30,
-            confidence_floor=0.2335,
+            initialized=False, c_recon=0.30, c_recon_prev=0.30,
+            c_recon_floor=0.2335,
         )
         assert engage is False
         assert state == "uninitialized"
@@ -1006,37 +1006,39 @@ class TestLatentGate:
         """THE critical case: the measured real-video steady state (flat at the
         Kalman fixed point, above the floor) MUST drive the render."""
         engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.2567, confidence_prev=0.2567,
-            confidence_floor=0.2335,
+            initialized=True, c_recon=0.2567, c_recon_prev=0.2567,
+            c_recon_floor=0.2335,
         )
         assert engage is True, "plateau (dC/dt=0, above floor) must engage"
         assert state == "engaged"
 
     def test_rising_confidence_engages(self):
         engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.2458, confidence_prev=0.2401,
-            confidence_floor=0.2335,
+            initialized=True, c_recon=0.2458, c_recon_prev=0.2401,
+            c_recon_floor=0.2335,
         )
         assert engage is True
         assert state == "engaged"
 
-    def test_at_floor_does_not_engage(self):
-        """Confidence stuck at the enrollment seed = no real-video evidence
-        absorbed; the latent has earned nothing, so fall back."""
+    def test_at_floor_engages_with_zero_margin(self):
+        """With margin=0.0 (the Phase-2B default for C_recon), being AT the
+        floor means you've earned it — c_recon >= floor is sufficient. This is
+        correct because C_recon's absolute scale is small (≈0.001) and any
+        c_recon above the enrollment seed is real evidence."""
         engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.2335, confidence_prev=0.2335,
-            confidence_floor=0.2335,
+            initialized=True, c_recon=0.2335, c_recon_prev=0.2335,
+            c_recon_floor=0.2335,
         )
-        assert engage is False
-        assert state == "below_floor"
+        assert engage is True
+        assert state == "engaged"
 
     def test_below_floor_does_not_engage(self):
         """Stable (no spike) but below floor+margin -> below_floor fallback.
         Floor set artificially high to isolate the floor check from the spike
         check."""
         engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.30, confidence_prev=0.30,
-            confidence_floor=0.40,
+            initialized=True, c_recon=0.30, c_recon_prev=0.30,
+            c_recon_floor=0.40,
         )
         assert engage is False
         assert state == "below_floor"
@@ -1046,8 +1048,8 @@ class TestLatentGate:
         -> fall back, EVEN IF the post-drop value is still above the floor (so
         the spike check is independent of the floor check)."""
         engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.30, confidence_prev=0.40,
-            confidence_floor=0.2335,
+            initialized=True, c_recon=0.30, c_recon_prev=0.40,
+            c_recon_floor=0.2335,
         )
         assert engage is False
         assert state == "confidence_spike"
@@ -1056,8 +1058,8 @@ class TestLatentGate:
         """When a drop is BOTH a spike and lands below the floor, the more
         specific instability signal wins the telemetry label."""
         engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.15, confidence_prev=0.2567,
-            confidence_floor=0.2335,
+            initialized=True, c_recon=0.15, c_recon_prev=0.2567,
+            c_recon_floor=0.2335,
         )
         assert engage is False
         assert state == "confidence_spike"
@@ -1066,11 +1068,62 @@ class TestLatentGate:
         """Normal per-frame jitter (real deltas <= ~0.006) is far below
         spike_drop, so a tiny dip while above floor still engages."""
         engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.2520, confidence_prev=0.2567,
-            confidence_floor=0.2335,
+            initialized=True, c_recon=0.2520, c_recon_prev=0.2567,
+            c_recon_floor=0.2335,
         )
         assert engage is True
         assert state == "engaged"
+
+    # ── Phase-2B: gate consumes C_recon (§16.8 composite) ──────────
+
+    def test_gate_accepts_c_recon_keyword(self):
+        """Phase-2B: the gate MUST accept c_recon (not confidence) — the §16.8
+        composite is the single number the gate reads."""
+        engage, state = FaceOSPipeline._evaluate_latent_gate(
+            initialized=True, c_recon=0.25, c_recon_prev=0.25,
+            c_recon_floor=0.23,
+        )
+        assert engage is True
+        assert state == "engaged"
+
+    def test_low_coverage_keeps_gate_disengaged(self):
+        """Phase-2B: when coverage factors are near zero (early frames), c_recon
+        is near zero but STILL above the floor (which is also near zero from
+        enrollment). The gate engages once any real evidence accumulates.
+        However, c_recon BELOW the floor (e.g. due to a visibility drop) stays
+        disengaged."""
+        # Floor set at enrollment when c_recon ≈ 0.0001
+        # Frame with c_recon = 0.00005 (below floor due to visibility drop)
+        engage, state = FaceOSPipeline._evaluate_latent_gate(
+            initialized=True, c_recon=0.00005, c_recon_prev=0.0001,
+            c_recon_floor=0.0001,
+        )
+        assert engage is False
+        assert state == "below_floor"
+
+    def test_coverage_growth_eventually_engages(self):
+        """Phase-2B: as coverage grows over many frames, c_recon rises above
+        the floor and the gate engages — the latent has earned trust."""
+        # Simulate: floor set at enrollment when c_recon ≈ 0.0001
+        # After many frames, coverage_pose=0.5, coverage_light=0.3, mv=0.90
+        # c_recon = C_obs(0.25) * 0.5 * 0.3 * 0.90 = 0.03375
+        # 0.03375 >= 0.0001 → engages
+        engage, state = FaceOSPipeline._evaluate_latent_gate(
+            initialized=True, c_recon=0.03375, c_recon_prev=0.030,
+            c_recon_floor=0.0001,
+        )
+        assert engage is True
+        assert state == "engaged"
+
+    def test_c_recon_spike_triggers_fallback(self):
+        """Phase-2B: a sharp drop in c_recon (not just C_obs) triggers the
+        spike fallback — instability in any factor destabilizes the composite."""
+        engage, state = FaceOSPipeline._evaluate_latent_gate(
+            initialized=True, c_recon=0.01, c_recon_prev=0.10,
+            c_recon_floor=0.0001,
+        )
+        assert engage is False
+        assert state == "confidence_spike"
 
 
 class TestPhysicalGate:
@@ -1647,6 +1700,30 @@ class TestLatentRenderModeOnRealVideo:
             f"{[r['gate_state'] for r in log]}, confidences="
             f"{[round(r['latent_confidence'], 4) for r in log]}"
         )
+
+    def test_gate_consumes_c_recon_not_c_obs(self, latent_run):
+        """Phase-2B: the gate MUST consume c_recon (§16.8 composite), NOT raw
+        C_obs. On real video the gate decision must correlate with c_recon:
+        engaged frames have c_recon >= floor, refused frames have
+        c_recon < floor (or spike)."""
+        p, _, _ = latent_run
+        log = p.get_latent_telemetry()
+        assert log, "no telemetry"
+        # The gate floor is c_recon_floor (set at enrollment when c_recon ≈ 0).
+        floor = p._c_recon_floor
+        for r in log:
+            gs = r["gate_state"]
+            cr = r["c_recon"]
+            if gs == "engaged":
+                assert cr >= floor - 1e-6, (
+                    f"frame {r['frame_idx']} gate ENGAGED but c_recon {cr:.6f} "
+                    f"< floor {floor:.6f}"
+                )
+            elif gs == "below_floor":
+                assert cr < floor + 1e-6, (
+                    f"frame {r['frame_idx']} gate BELOW_FLOOR but c_recon "
+                    f"{cr:.6f} >= floor {floor:.6f}"
+                )
 
     def test_hybrid_blend_engages_and_respects_cap(self, latent_run):
         """RUNTIME TRUTH (Phase 2B per-pixel hybrid): on real video the latent is
