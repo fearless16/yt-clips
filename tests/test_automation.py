@@ -471,3 +471,17 @@ class TestOrchestratorExitLogging:
         assert "uploaded=5" in output
         assert "failures=1" in output
         assert "elapsed=42.5" in output
+
+
+# ─── Logging: memory.py and worker.py must use logging, not print() ──────────
+
+def test_memory_uses_logging_not_print():
+    import automation.memory as mem_mod
+    assert not hasattr(mem_mod, "_log") or not callable(getattr(mem_mod, "_log")), \
+        "_log() with print() must be removed from memory.py"
+
+
+def test_worker_uses_logging_not_print():
+    import automation.worker as wk_mod
+    assert not hasattr(wk_mod, "_log") or not callable(getattr(wk_mod, "_log")), \
+        "_log() with print() must be removed from worker.py"
