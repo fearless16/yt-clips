@@ -2801,7 +2801,34 @@ class FaceOSPipeline:
         # leak) while preserving the local mean (scene exposure unchanged).
         sigma = max(4.0, min(shading.shape[:2]) / 12.0)
         shading = cv2.GaussianBlur(shading, (0, 0), sigma)
-        return np.clip(shading, 0.0, None).astype(np.float32)
+        shading = np.clip(shading, 0.0, None).astype(np.float32)
+
+        # EXPOSURE ANCHOR (measured fix). The contract above is "A·S = L", i.e.
+        # the render must reconstruct the OBSERVED scene luminance. But the render
+        # forms 709-luma(albedo·S) = albedo_709 · S, whereas S used the simple
+        # channel-mean albedo, and the low-pass of L/A does not preserve the
+        # masked mean when the warped ENROLLED albedo's structure/weighting
+        # differs from the observation. Measured consequence: the latent render
+        # lands ~1.17–1.20× too bright vs the observed face. We therefore rescale
+        # S by a single per-frame scalar so the masked-mean render luminance
+        # equals the masked-mean observed luminance EXACTLY. This is anchored to
+        # ground truth (the observation), not a magic constant; the observed mean
+        # is temporally smooth, so the scalar cannot introduce flicker. Identity
+        # (albedo) is untouched — only the scene-exposure field is corrected.
+        alb709 = (0.2126 * alb[..., 2] + 0.7152 * alb[..., 1] + 0.0722 * alb[..., 0]
+                  if alb.ndim == 3 and alb.shape[2] == 3 else alb_lum)
+        if alb709.shape != shading.shape:
+            alb709 = cv2.resize(alb709, (shading.shape[1], shading.shape[0]))
+        render_luma = alb709 * shading
+        if mask is not None and mi.any():
+            obs_mean = float(lum[mi].mean())
+            ren_mean = float(render_luma[mi].mean())
+        else:
+            obs_mean = float(lum.mean())
+            ren_mean = float(render_luma.mean())
+        if ren_mean > eps:
+            shading = shading * (obs_mean / ren_mean)
+        return shading.astype(np.float32)
 
     def _render_with_latent(
         self,

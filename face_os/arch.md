@@ -958,3 +958,60 @@ rule. (Maps to "Option 2".)
 
 Order is mandatory: 2A proves pixels → 2B calibrated production gate → 2C
 graceful fallback.
+
+### 19.1 A/B Reference Validity (MEASURED decision record)
+
+The Phase-3 promotion A/B (`ab_validation.compare_render_sources`) compares the
+latent render to the **legacy** render with pixel-wise metrics: SSIM + CIELAB ΔE
+(latent-vs-legacy) and Laplacian-variance sharpness. Two findings from measured
+runtime truth (test_clip.mp4, 30-frame fair window) change how this gate must be
+read:
+
+**(1) Two of the original three failures were HARNESS artifacts, not render
+defects.** `compare_render_sources` reused ONE pipeline and `_reset_state`
+DELIBERATELY preserves identity (`pipeline.py:3208`), while the re-enroll guard
+`if pipeline.tracker is None` never re-fired — so the latent arm was measured
+against an identity already mutated by a full legacy pass. Re-enrolling each arm
+(identical post-enroll identity, production-faithful order) lifted SSIM
+0.802→0.905. The 10-frame window also captured the post-enroll identity
+CONVERGENCE transient (per-window flicker swung 0.74–1.69 on the same render);
+a representative 30-frame window settled flicker_ratio to ≈1.0. Both are
+correctness fixes to the MEASUREMENT, not the renderer.
+
+**(2) No single pixel-wise reference can validate an identity render.** After the
+harness fix, the residual LAB drift (≈18.5 vs legacy) is **89% luminance
+STRUCTURE, not a global offset** (measured: global-offset 11.2% of ΔL energy,
+residual spatial structure 88.8%). This is inherent and correct: the latent
+renders the ENROLLED IDENTITY warped into geometry, while legacy re-decomposes
+the observed crop and reinjects source HF — they are SUPPOSED to differ
+spatially. Re-referencing the gate to the SOURCE observation is measured-WORSE
+(latent-vs-source ΔE ≈ 35 > latent-vs-legacy 18.5), because the latent
+legitimately differs from the observed face too. Both legacy and latent sit
+≈56 ΔE from `expectation.png`, which also carries a pose/lighting confound. So
+legacy, source, AND expectation are each invalid as a pixel-wise truth reference
+for identity rendering.
+
+Corollary: the Laplacian-variance sharpness gate is luminance-coupled — a render
+corrected to the *correct* (darker) absolute exposure scores as "less sharp"
+(sharpness_ratio 0.850→0.799) without any loss of detail. Absolute-amplitude
+metrics cannot be trusted across an exposure change.
+
+**Decision.** The pixel-wise latent-vs-legacy gate is RETAINED as a regression
+TRIPWIRE (it still catches gross failures and is now measured fairly), but it is
+NOT a valid PROMOTION gate for the default flip: SSIM/flicker/sharpness pass
+fairly, while LAB-vs-legacy cannot pass without the latent abandoning identity
+rendering to mimic legacy. A valid promotion gate requires a **perceptual /
+identity-space fidelity metric** (pose-and-lighting-aware comparison in the
+appearance manifold, §16.10) rather than pixel ΔE against any single render.
+That is the unimplemented Phase-C endgame (§16.10 is MISSING per §17); building
+it is a scoped DESIGN task, not a renderer fix, and is the true blocker for the
+Phase-3 default flip. Until then the default stays `legacy` and the latent path
+is exercised under the explicit `render_source='latent'` flag.
+
+Verified-correct renderer state at this decision (independent of the gate):
+- Exposure anchored to the observation — latent composited/source luma = 1.001
+  (was ≈1.17 over-bright); `_observation_shading` now enforces its own `A·S = L`
+  contract via a per-frame, flicker-safe masked-mean scalar (§16.2 at render
+  level). Test: `TestObservationShading::test_render_matches_observed_exposure`.
+- Flicker 50× normal-source spikes eliminated (§16.2/§18); background invariance
+  enforced on both paths (§16.9).
