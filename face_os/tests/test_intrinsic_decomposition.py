@@ -10,6 +10,7 @@ Mathematical invariants:
   - Specular sparsity: >75% near-zero
   - Normal map unit vectors: ‖n‖ ≈ 1
 """
+import cv2
 import numpy as np
 import pytest
 
@@ -187,3 +188,108 @@ class TestDecompositionQuality:
         """Albedo should have spatial variation (not a flat constant)."""
         albedo_std = float(np.std(components.albedo))
         assert albedo_std > 0.01, f"Albedo is flat: std={albedo_std}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# arch.md §16.9 — Background Invariance:  ∂I / ∂Background = 0
+# ═══════════════════════════════════════════════════════════════════
+
+class TestBackgroundInvariance:
+    """Identity (albedo, shading) must be independent of the background.
+
+    arch.md §16.9 (LOCKED): no background pixel may influence albedo/shading.
+    Decomposition must operate inside the geometry-derived face mask.
+
+    Invariant: decomposing the SAME face on two different backgrounds yields
+    albedo and shading that are invariant inside the face mask. This is the
+    "poster brightness" leak guard called out in arch.md §18 as a flicker cause.
+    """
+
+    @staticmethod
+    def _face_and_mask(h=256, w=256):
+        """A skin-tone face ellipse + its mask. Face content only (no bg)."""
+        Y, X = np.mgrid[0:h, 0:w].astype(np.float32)
+        cx, cy = w / 2.0, h / 2.0
+        r = 185 + 15 * np.sin(X / 40.0)
+        g = 150 + 10 * np.cos(Y / 35.0)
+        b = 120 + 8 * np.sin((X + Y) / 50.0)
+        illum = 0.5 + 0.5 * (X / w)          # left-lit gradient (real shading)
+        face = np.stack([b * illum, g * illum, r * illum], axis=-1)
+        dist = ((X - cx) / 90.0) ** 2 + ((Y - cy) / 110.0) ** 2
+        mask = (dist < 1.0).astype(np.float32)
+        return face.astype(np.float32), mask
+
+    @staticmethod
+    def _compose(face, mask, bg_value):
+        """Composite identical face content onto a flat background."""
+        m3 = mask[:, :, np.newaxis]
+        img = face * m3 + float(bg_value) * (1.0 - m3)
+        return np.clip(img, 0, 255).astype(np.uint8)
+
+    def _interior(self, mask, erode_px=3):
+        """Mask eroded slightly to avoid the hard mask edge itself."""
+        k = np.ones((2 * erode_px + 1, 2 * erode_px + 1), np.uint8)
+        return cv2.erode((mask > 0.5).astype(np.uint8), k) > 0
+
+    def test_albedo_invariant_to_background(self):
+        """Albedo inside the mask is invariant to background (∂A/∂bg ≈ 0)."""
+        face, mask = self._face_and_mask()
+        img_dark = self._compose(face, mask, 30)     # dark background
+        img_bright = self._compose(face, mask, 220)   # bright background
+        interior = self._interior(mask)
+
+        dec = IntrinsicDecomposer()
+        a_dark = dec.decompose(img_dark, mask=mask).albedo
+        a_bright = dec.decompose(img_bright, mask=mask).albedo
+
+        diff = np.abs(a_dark - a_bright)[interior]
+        mean_diff = float(np.mean(diff))
+        assert mean_diff < 0.02, (
+            f"Albedo leaked background: mean|Δalbedo|={mean_diff:.4f} ≥ 0.02 "
+            f"inside mask (∂A/∂bg must be ≈ 0)"
+        )
+
+    def test_shading_invariant_to_background(self):
+        """Shading inside the mask is invariant to background (∂S/∂bg ≈ 0)."""
+        face, mask = self._face_and_mask()
+        img_dark = self._compose(face, mask, 30)
+        img_bright = self._compose(face, mask, 220)
+        interior = self._interior(mask)
+
+        dec = IntrinsicDecomposer()
+        s_dark = dec.decompose(img_dark, mask=mask).shading[:, :, 0]
+        s_bright = dec.decompose(img_bright, mask=mask).shading[:, :, 0]
+
+        diff = np.abs(s_dark - s_bright)[interior]
+        mean_diff = float(np.mean(diff))
+        assert mean_diff < 0.02, (
+            f"Shading leaked background: mean|Δshading|={mean_diff:.4f} ≥ 0.02 "
+            f"inside mask (∂S/∂bg must be ≈ 0)"
+        )
+
+    def test_masking_strictly_reduces_background_leak(self):
+        """Mask-aware decompose must be strictly better than mask-free.
+
+        Guards against a vacuous pass: proves the mask is what removes the leak,
+        not that the synthetic image happens to be background-insensitive.
+        """
+        face, mask = self._face_and_mask()
+        img_dark = self._compose(face, mask, 30)
+        img_bright = self._compose(face, mask, 220)
+        interior = self._interior(mask)
+
+        dec = IntrinsicDecomposer()
+        # Mask-free (legacy behavior) — background WILL leak near the boundary.
+        leak_unmasked = float(np.mean(np.abs(
+            dec.decompose(img_dark).albedo - dec.decompose(img_bright).albedo
+        )[interior]))
+        # Mask-aware — leak must shrink.
+        leak_masked = float(np.mean(np.abs(
+            dec.decompose(img_dark, mask=mask).albedo
+            - dec.decompose(img_bright, mask=mask).albedo
+        )[interior]))
+
+        assert leak_masked < leak_unmasked, (
+            f"Mask did not reduce background leak: masked={leak_masked:.4f} "
+            f"not < unmasked={leak_unmasked:.4f}"
+        )
