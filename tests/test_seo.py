@@ -214,3 +214,23 @@ def test_retry_failed_seo_keeps_marker_on_repeated_failure(tmp_path):
 
 def test_retry_failed_seo_noop_when_empty(tmp_path):
     assert retry_failed_seo(str(tmp_path)) == {"retried": 0, "recovered": 0, "still_failed": 0}
+
+
+# ─── Root seo.py stub must be clean re-export (no generic fallback drift) ─────
+
+def test_root_seo_stub_is_clean_re_export():
+    """Root seo.py must NOT contain generic fallback logic (Invariant 3+4).
+    It must be a pure re-export from automation.seo.seo."""
+    import seo as root_seo
+    # Should NOT have the forbidden functions from the old implementation
+    forbidden = ["_generate_template_seo", "_translate_hindi_to_english", "_salvaged"]
+    for name in forbidden:
+        assert not hasattr(root_seo, name), \
+            "root seo.py must not contain %s — generic fallback drift" % name
+    # Should HAVE the canon functions via re-export
+    assert hasattr(root_seo, "SEOGenerationError")
+    assert hasattr(root_seo, "process_all_seo")
+    assert hasattr(root_seo, "generate_seo_for_exported_clip")
+    # The canon _enforce_limits must NOT have safe_defaults padding
+    assert "safe_defaults" not in root_seo.__dict__, \
+        "root seo.py must not define safe_defaults — would be generic tag padding"
