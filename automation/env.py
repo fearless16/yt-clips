@@ -88,7 +88,10 @@ def setup() -> dict:
     Creates data/output/logs directories. Returns status dict with:
     status, gpu info, list of completed steps.
     """
+    import logging
+    log = logging.getLogger("env.setup")
     status = {"status": "ok", "gpu": gpu_info(), "steps": []}
+    log.info("Installing system packages (ffmpeg, git) ...")
     try:
         subprocess.run(["apt-get", "update", "-qq"], capture_output=True, timeout=120)
         subprocess.run(
@@ -96,8 +99,10 @@ def setup() -> dict:
             capture_output=True, timeout=120,
         )
         status["steps"].append("apt")
-    except Exception:
-        pass
+        log.info("System packages installed")
+    except Exception as e:
+        log.warning("apt install skipped/errored: %s", e)
+    log.info("Installing Python packages ...")
     try:
         subprocess.run(
             [sys.executable, "-m", "pip", "install", "-q",
@@ -105,9 +110,11 @@ def setup() -> dict:
             capture_output=True, timeout=120,
         )
         status["steps"].append("pip")
-    except Exception:
-        pass
+        log.info("Python packages installed")
+    except Exception as e:
+        log.warning("pip install skipped/errored: %s", e)
     for d in ["/content/data", "/content/output", "/content/logs"]:
         Path(d).mkdir(parents=True, exist_ok=True)
     status["steps"].append("dirs")
+    log.info("Setup complete: steps=%s gpu=%s", status["steps"], status["gpu"])
     return status

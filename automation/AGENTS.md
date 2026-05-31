@@ -6,6 +6,60 @@
 
 ## Architecture
 
+```text
+automation/
+├── AGENTS.md         ← YOU ARE HERE (single source of truth)
+├── README.md         User-facing docs
+├── __init__.py       Package exports, version (3.0.0)
+├── _cache.py         TTLCache class + 6 core infra singletons (LRU + TTL, thread-safe)
+├── config.py         YAML config (cached, dot-notation)
+├── env.py            Colab/Kaggle detection, nvidia-smi GPU queries
+├── transcript.py     YouTube transcript fetcher + LLM formatter
+├── watcher.py        Watcher subprocess lifecycle
+├── tunnel.py         TunnelKeeper daemon, auto-reconnect, 3 fallback methods
+├── worker.py         ParallelPool (Semaphore-throttled, batch_run, shutdown)
+├── dashboard.py      Graphical memory dashboard (Colab/Kaggle/terminal)
+├── orchestrator.py   9-stage pipeline runner
+├── cli.py            Entry point: local, remote, sync, tunnel, memory, gpu
+├── colab.py          (backward-compat re-exports → env + watcher + tunnel)
+├── kaggle.py         Kaggle setup, reuses watcher
+│
+├── memory/           Event store + learned state + RAM tracking
+│   ├── __init__.py   Re-exports from all submodules
+│   ├── decision_store.py   Append-only ClipEvent store + LearnedStateStore
+│   ├── event_models.py     EventType enum, ClipEvent, LearnedStateEntry
+│   ├── feedback_schema.py  FeedbackPayload validation + error categorization
+│   ├── memtrack.py         /proc/meminfo tracker, ring buffer, sparkline, backpressure
+│   └── migrations/
+│       └── __init__.py
+│
+├── learner/          Feedback processing, policy updates, preference engine, replay
+│   ├── __init__.py   Re-exports: Learner, PolicyUpdater, PreferenceEngine, ReplayEngine
+│   ├── learner.py          Process feedback + manual overrides → learned state
+│   ├── policy_updater.py   Route ClipEvents to Learner via update_from_event
+│   ├── preference_engine.py Derive duration/pacing preferences from learned weights
+│   └── replay.py           Rebuild learned state from event store (verify/recover)
+│
+├── providers/        Provider routing, health tracking, fallback
+│   ├── __init__.py
+│   ├── router.py           Classify provider responses → SUCCESS/RETRIABLE/DEFERRED/INFRA_FAILED/HARD_FAIL
+│   ├── fallback_policy.py  Ordered fallback with retry counting and health checks
+│   └── provider_health.py  Thread-safe success/failure recording, HEALTHY/DEGRADED/DOWN states
+│
+├── scoring/          Clip scoring + feature extraction + ranking + LLM evaluation
+│   ├── __init__.py
+│   ├── scoring.py          ClipScorer: score clips by hook words, payoff, profanity, length
+│   ├── feature_extractor.py Extract hook_words, payoff_indicators, profanity, length_category
+│   ├── ranker.py           ClipRanker: rank by score, top_k, select_best
+│   └── llm_scoring.py      score_seo_output, format_score_table, score_latency_penalty
+│
+└── seo/              SEO subpackage
+    ├── __init__.py   Re-exports: process_all_seo, SEOLearner, generate_daily_insights, trends
+    ├── seo.py        SEO generation + SUGGEST_CACHE + TREND_CACHE
+    ├── seo_learner.py Auto-benchmark, LLM perf tracking + PERF_CACHE
+    ├── analytics.py  YouTube API analytics + YT_API_CACHE + ANALYTICS_CACHE
+    ├── analytics_report.py  Standalone HTML report generator (run via python -m)
+    └── trends.py     Cricket/YouTube trend fetching
 ```
 automation/
 ├── AGENTS.md         ← YOU ARE HERE (single source of truth)

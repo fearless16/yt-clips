@@ -99,38 +99,38 @@ GENERIC_TAGS = {
 # ── Viral Hooks & CTAs ──────────────────────────────────────────────────────────
 
 VIRAL_HOOKS = [
+    "Kya shot tha ye bhai! 🔥",
     "Arey yeh kya ho raha hai?! 😱",
-    "Ye toh shot of the tournament! 🔥",
-    "Full drama! Dekho takraar mein aatma",
-    "Insaan ban ke dekhna ye moment! 🏏",
-    "Isse zyada close match nahi hota!",
-    "Brutal finish - sab ne socha tha nahi hoga!",
-    "Ye catch Pakka nahi tha, kya?! 🤯",
-    "Match winner ya match loser?! 😈",
-    "Hat-trick ka matlab - khaali haath jaana!",
-    "Last over dhamaal - full tension! 🔥",
+    "Maza aa gaya na? 😱",
+    "Aise kaise out ho sakta hai?! 🤯",
+    "Buddhe bowlers ki pitai kar raha hai ladka! 🔥",
+    "Isse zyada kalesh nahi dekha! 🤬",
+    "Rona shuru karo fans! 😭",
+    "Umpire ka decision? 🤬👑",
+    "Saste mein out hone ka thekedaar! 😱",
+    "Drawing room mein bhi aag lag gayi! 🔥🍻",
 ]
 
 ENGAGING_CTAS = [
-    "Aaj ke match ka full recap dekho aur like share karo!",
-    "Agar ye video pasand aaya toh LIKE + SUBSCRIBE zaroor karo!",
-    "Next match ke liye bell icon dabana na bhoolna! 🔔",
-    "Live matches ke liye channel ko subscribe karo aur notification on karo!",
-    "Ye highlight miss kaise karo? LIKE + SHARE + SUBSCRIBE!",
-    "Tension free match dekhne ke liye channel join karo now!",
-    "Aapke liye poora match ready hai - full video dekho!",
-    "Cricket ke har ek moment ke liye stay tuned!",
+    "Peg bana ke baith ja, aaj aag lagne wali hai! LIKE KAR BHAI! 🔥",
+    "Agar ye pasand aaya toh LIKE + SUBSCRIBE kar warna pachtayega! 🤬",
+    "Chapri mat ban, subscribe kar aur notification on kar! 🔔",
+    "Filter hata ke cricket dekhne ka! Channel join kar! 👑",
+    "Kya dekh raha hai? LIKE kar pehle! 🍻",
+    "Aisi bakchodi aur chahiye toh SUBSCRIBE kar! 🔥",
+    "Cricket pasand hai toh LIKE KAR! 😈",
+    "Kalesh dekhne ke liye stay tuned aur LIKE DABANA MAT BHOOLNA!",
 ]
 
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
 _SYSTEM = (
-    "You are an elite YouTube Shorts SEO expert for Indian cricket. "
-    "Your goal: Maximize CTR (Click-Through Rate) and watch time. "
-    "CRITICAL: Generate title, description, and tags matching the EXACT format requested. "
-    "Only use player names, teams, and events that appear in the transcript or scorecard. "
-    "NEVER invent or hallucinate player names or match events. "
-    "Return ONLY valid JSON — no markdown, no explanation."
+    "You are a desi YouTube SEO expert for Indian/Pakistani cricket content. "
+    "Your goal: Maximize CTR and watch time with full-on Hinglish/Urdu baap-style content. "
+    "Generate titles, descriptions, and tags with emojis, bakchodi, and desi cricket kalesh energy. "
+    "CRITICAL: Match the EXACT format requested. "
+    "Only use player names, teams, and events from the transcript or scorecard. "
+    "NEVER hallucinate. Return ONLY valid JSON — no markdown, no explanation."
 )
 
 _PROMPT_TMPL = """
@@ -148,7 +148,7 @@ CLIP CONTENT:
 ══ REQUIRED JSON FORMAT ═════════════════════════════════════════════════════
 Return a JSON object with these EXACT keys:
 {{
-  "title": "<LIVE Team1 vs Team2 Score | Team1 vs Team2 Tournament Match No | Aaj Ka Match Hindi Commentary>",
+  "title": "<LIVE Team1 vs Team2 Score | Team1 vs Team2 Tournament Match No | Aaj Ka Kalesh Hindi Commentary>",
   "description": "<entire finished description string matching the format rules below>",
   "search_terms": [
     "<term1>",
@@ -163,47 +163,53 @@ Return a JSON object with these EXACT keys:
 
 ══ TITLE RULES ══════════════════════════════════════════════════════════════
 - Always start with "LIVE "
-- Format: "LIVE <Team1 short> vs <Team2 short> <Score> | <Team1 city/full> vs <Team2 city/full> <Tournament> Match <MatchNo> | Aaj Ka Match Hindi Commentary"
-- Example: "LIVE GT vs CSK 189/1 | Gujarat vs Chennai IPL 2026 Match 66 | Aaj Ka Match Hindi Commentary"
-- Never use 🔴 in the title.
-- If score is not available, use current match situation/runs/wickets from transcript.
+- Format: "LIVE <Team1 short> vs <Team2 short> <Score> | <Team1 city/full> vs <Team2 city/full> <Tournament> Match <MatchNo> | Aaj Ka Kalesh Hindi Commentary"
+- Example: "LIVE GT vs RR Kalesh 🤬 | GT vs RR IPL 2026 Qualifier 2 | Aaj Ka Kalesh Reaction"
+- Never use 🔴 in the title. Use 🤬, 🔥, 😱, 💥 instead.
+- If score is not available, use match situation from transcript.
 
 ══ DESCRIPTION FORMAT RULES ═════════════════════════════════════════════════
-Inside the "description" JSON string, you must generate the entire text matching this EXACT layout (use actual newlines `\\n` inside the JSON string value):
+Inside the "description" JSON string, generate the ENTIRE text matching this EXACT layout (use `\\n` for newlines). THIS IS THE STYLE YOU MUST FOLLOW:
 
-LIVE: <Team1 full> vs <Team2 full> – <Tournament> Match <MatchNo>, <Venue>
-<Toss winner> won toss and chose to <bowl/bat> first
-Current: <Team short> <Score> (<Overs>) – <Batsman1> <runs>(<balls>) <wicket details if any>, <Batsman2> <runs>*, ...
+Bhai log, swagat hai <Tournament> ke sabse bade do-or-die kalesh mein! <Team1> vs <Team2> <MatchType>! Aaj jo jeetega wo <NextStage> mein jayega, aur jo harega uske fans kal se Twitter pe r*ndi-rona shuru kar denge.
 
+Aaj ka scene kya hai?
+🔥 <Key moment 1 — player injured/out, big hitting, etc.>
+🔥 <Key moment 2 — bold statement about player performance>
+🔥 <Key moment 3 — captaincy/umpire controversy or hot take>
+
+<Channel style description — "Yahan koi boring tactical analysis nahi hoga. Yahan hogi drawing room wali bakchodi, umpires ko gaaliyan, aur live reaction! Agar tu India ya Pakistan se hai, toh peg bana le!">
+
+👑 Aaj Ke Sitaare (Jinke bhade mein gaaliyan padengi):
+• <Player 1> (<hot take about them>)
+• <Player 2> (<hot take about them>)
+• <Player 3> (<hot take about them>)
+• <Player 4> (<hot take about them>)
+• <Player 5> (<hot take about them>)
+
+🍻 Broad Cast:
 🇮🇳 India: JioHotstar, Star Sports
-🇵🇰 Pakistan: Yupp TV
+🇵🇰 Pakistan: Yupp TV / Tapmad
 
-<Engaging Hinglish/Hindi flavor sentence about the match situation, commentary, pitch/dew factor, etc.>
+Live score update:
+<Team1> <Score> (<Overs>) — <top scorer mention>, <Team2> <Score> (<Overs>) — <top scorer mention>
 
-CHAPTERS
-00:00 Live Start & Toss
-02:15 <Moment 1 description>
-12:20 <Moment 2 description>
-17:00 <Moment 3 description>
-20:00 <Moment 4 description>
+Tags: <Full comma-separated list of ALL search_terms here, covering every possible search pattern>
 
-Search: <comma-separated list of 7 key search terms from your search_terms field>
+<Space-separated list of hashtags from your hashtags field — use 10-15 hashtags>
 
-#<Space-separated list of hashtags from your hashtags field>
-
-Disclaimer: Live score updates and commentary only. For official broadcast watch JioHotstar (India) or Yupp TV (Pakistan).
-
-══ EXAMPLE DESCRIPTION VALUE ════════════════════════════════════════════════
-"LIVE: Gujarat Titans vs Chennai Super Kings – IPL 2026 Match 66, Narendra Modi Stadium Ahmedabad\\nCSK won toss and chose to bowl first\\nCurrent: GT 189/1 (17.2) – Shubman Gill 64(37) c Dube b Johnson, Sai Sudharsan 68*, Jos Buttler 34*\\n\\n🇮🇳 India: JioHotstar, Star Sports\\n🇵🇰 Pakistan: Yupp TV\\n\\nAaj ka match live score, Hindi commentary, ball by ball updates. Dew factor active in Ahmedabad second innings.\\n\\nCHAPTERS\\n00:00 Live Start & Toss\\n02:15 GT Powerplay 62/0\\n12:20 WICKET – Gill 64\\n17:00 Buttler Acceleration\\n20:00 CSK Chase Starts\\n\\nSearch: gt vs csk live, csk vs gt live score today, ipl 2026 live hindi, aaj ka match live, live cricket match today online, ipl live kaise dekhe, ipl live pakistan\\n\\n#GTvsCSK #IPL2026Live #LiveCricket #AajKaMatch #CSKvsGT #IPLPakistan #HindiCommentary\\n\\nDisclaimer: Live score updates and commentary only. For official broadcast watch JioHotstar (India) or Yupp TV (Pakistan)."
+══ EXAMPLE DESCRIPTION VALUE (use this exact STYLE) ════════════════════════
+"Bhai log, swagat hai IPL 2026 ke sabse bade do-or-die kalesh mein! GT vs RR Qualifier 2! Aaj jo jeetega wo Final mein jayega, aur jo harega uske fans kal se Twitter pe rona shuru kar denge.\\n\\nAaj ka scene kya hai?\\n🔥 Ravindra Jadeja retired hurt ho gaya hai, RR ki aadhi jaan nikal chuki hai!\\n🔥 18 saal ka Vaibhav Sooryavanshi GT ke Siraj aur Rabada jaise buddhe bowlers ki pitai kar raha hai!\\n🔥 Shubman Gill ki captaincy dekh ke lag raha hai banda neend mein decision le raha hai.\\n\\nYahan koi boring tactical analysis nahi hoga. Yahan hogi drawing room wali bakchodi, umpires ko gaaliyan, aur live reaction! Agar tu India ya Pakistan se hai, toh peg bana le, kyunki aaj Mullanpur mein aag lagne wali hai.\\n\\n👑 Aaj Ke Sitaare (Jinke bhade mein gaaliyan padengi):\\n• Vaibhav Sooryavanshi (Aaj ka naya Baap)\\n• Shubman Gill (Captain ya Statue?)\\n• Rashid Khan (Bhai ka jadoo khatam?)\\n• Mohammed Siraj (Line-length bhool gaya kya?)\\n• Yashasvi Jaiswal (Saste mein out hone ka thekedaar)\\n• Riyan Parag (Attitude King)\\n• Jos Buttler (Bhai hai kahan? Bench pe?)\\n• Kagiso Rabada (Aaj RR ne dhobi patak de diya)\\n\\n🍻 Broad Cast:\\n🇮🇳 India: JioHotstar, Star Sports\\n🇵🇰 Pakistan: Yupp TV\\n\\nGT 198/4 (18.2) — Vaibhav 87(34) ne aag laga di | RR 120/6 (14) — Jaiswal 34(22) out\\n\\nTags: GT vs RR Live, RR vs GT Live, IPL Watchalong Hindi, IPL Match Analysis, Vaibhav Sooryavanshi Live, Shubman Gill Live, Cricket News Hindi, rr vs gt, gt vs rr live, rr vs gt live, live cricket match today, cricket live, live ipl match today, ipl live, live score, ipl match live, live match, match live, today match live, live cricket match, ipl live match today, live ipl, today ipl match live, ipl live match, cricket live match, ipl live streaming, ipl match, gt vs rr\\n\\n#GTvsRR #RRvsGT #IPL2026 #IPLPlayoffs #VaibhavSooryavanshi #ShubmanGill #CricketLive #Watchalong #HindiCricket #UrduCricket #CricketKalesh #IPL2026Live #RavindraJadeja #GujaratTitans #RajasthanRoyals"
 
 Return ONLY valid JSON.
 """
 
 _SYSTEM_SHORTS = (
-    "You are an elite YouTube Shorts SEO expert specializing in viral cricket shorts for Indian and Pakistani audiences. "
-    "Your goal: Maximize click-through rate (CTR), engagement, and viral potential. "
-    "Use highly engaging, emotional, and catchy titles (under 60 characters) with emojis and relevant hashtags. "
-    "Only use players and events that appear in the transcript or scorecard. Do NOT invent events. "
+    "You are a desi YouTube Shorts SEO expert for viral cricket content targeting Indian and Pakistani audiences. "
+    "Your goal: Maximize CTR, engagement, and viral potential with Hinglish/Urdu style. "
+    "Use highly engaging, emotional, provocative titles (under 60 chars) with emojis (🤬, 🔥, 😱, 💥, 👑). "
+    "Descriptions in Hinglish/Urdu with bakchodi and full desi cricket kalesh energy. "
+    "Only use players and events from the transcript or scorecard. Do NOT invent. "
     "Return ONLY valid JSON — no markdown, no explanation."
 )
 
@@ -222,8 +228,8 @@ CLIP CONTENT:
 ══ REQUIRED JSON FORMAT ═════════════════════════════════════════════════════
 Return a JSON object with these EXACT keys:
 {{
-  "title": "<Catchy clickbait title under 60 characters with emojis and #Shorts>",
-  "description": "<Short viral description under 400 characters, targeting Indian/Pakistani viewers, with engaging hook, CTA to subscribe, and key search terms/hashtags>",
+  "title": "<Punchy provocative title under 60 chars with emojis, kalesh energy, and #Shorts>",
+  "description": "<Short viral description under 400 characters in Hinglish/Urdu with desi bakchodi style, emojis, CTA, and key search terms>",
   "search_terms": [
     "<term1>",
     "<term2>",
@@ -237,16 +243,18 @@ Return a JSON object with these EXACT keys:
 }}
 
 ══ SHORTS TITLE RULES ═══════════════════════════════════════════════════════
-- Keep it under 60 characters. Must be extremely punchy, capitalizing key words.
-- Always include 1-2 relevant emojis (e.g. 😱, 🔥, 💥, 🤯) and #Shorts.
-- Target Indian/Pakistani emotions (e.g. "KOHLI DESTROYS PAKISTAN! 😱🔥 #Shorts" or "BABAR AZAM CLASS CLASS CLASS! 🤯🔥 #Shorts").
+- Keep it under 60 characters. Punchy, provocative, capitalizing key words.
+- Must use 1-2 emojis (🤬, 🔥, 😱, 💥, 👑, 🍻) and #Shorts.
+- Target Indian/Pakistani emotions with kalesh energy (e.g. "VAIBHAV NE SABKI LE LI! 🤬🔥 #Shorts" or "GILL CAPTAINCY YA STATUE? 😱 #Shorts").
+- NO boring English titles. Must feel like drawing room bakchodi.
 
 ══ SHORTS DESCRIPTION RULES ═════════════════════════════════════════════════
-- Keep it short and sweet (under 400 characters).
-- Start with a viral hook in Hindi/Hinglish (e.g., "Kohli ne phir se kar dikhaya!").
-- Include a CTA to like/subscribe (e.g., "Subscribe and like for more IPL updates!").
-- Embed hashtags and a few top search terms naturally at the end.
-- Target audience context: subcontinent viewers (India/Pakistan).
+- Keep it under 400 characters.
+- Start with a viral hook in Hinglish/Urdu (e.g., "Kya shot tha ye bhai! 🔥").
+- Use desi cricket kalesh style — no boring tactical analysis.
+- Include CTA to like/subscribe in Hinglish (e.g., "Peg bana ke baith ja, aaj aag lagne wali hai! LIKE KAR BHAI!").
+- Embed hashtags and top search terms at the end.
+- Target audience: subcontinent desi viewers (India/Pakistan).
 
 Return ONLY valid JSON.
 """
