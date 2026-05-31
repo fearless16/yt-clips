@@ -1847,6 +1847,14 @@ class FaceOSPipeline:
                         coverage_light = float(self.patch_memory.coverage_light())
                     except Exception:
                         coverage_light = 0.0
+                # c_recon (§16.8): composite = C_obs · Coverage_pose ·
+                # Coverage_light · Visibility. Observable signal and Phase-2B
+                # gate input.
+                from face_os.reconstruction_confidence import compute_reconstruction_confidence
+                c_recon = compute_reconstruction_confidence(
+                    self._last_latent_confidence, coverage_pose,
+                    coverage_light, mean_visibility,
+                )
                 latent_render = LatentRenderTelemetry(
                     frame_idx=frame_idx,
                     render_path=render_path,
@@ -1861,6 +1869,7 @@ class FaceOSPipeline:
                     coverage_pose=coverage_pose,
                     mean_visibility=mean_visibility,
                     coverage_light=coverage_light,
+                    c_recon=c_recon,
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1882,6 +1891,7 @@ class FaceOSPipeline:
                     "coverage_pose": 0.0,
                     "mean_visibility": 1.0,
                     "coverage_light": 0.0,
+                    "c_recon": 0.0,
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)

@@ -280,6 +280,7 @@ LATENT_TELEMETRY_KEYS = {
     "coverage_pose",
     "mean_visibility",
     "coverage_light",
+    "c_recon",
 }
 
 FRAME_TELEMETRY_KEYS = {
