@@ -183,8 +183,9 @@ This plan promotes a lighting-invariant identity latent to be the renderer's pri
     - **DONE (3.11).** `TestSubsystemBoundaries` in `test_integration.py` installs a `_BoundaryProbe` as `p.identity_state` that RAISES on access to `_anchor_albedo`/`_intrinsic_decomposer`/`_gate`. Double-guarded: `out is not None` AND `probe.touched == []`.
     - _Requirements: 4.1, 7.6, 1.8_
 
-  - [ ]* 4.7 Write tests for color-cast compensation
+  - [x]* 4.7 Write tests for color-cast compensation
     - Add unit/property tests in `tests/face_os/test_latent_identity.py` asserting the teal/green cast is removed, channel-std color invariance improves beyond the 0.04–0.10 measured range, and a compensation that fails either condition is rejected.
+    - **DONE (4.4).** 4 tests in `test_color_cast.py`: teal removal, rejection path, EMA stability, gray-world fallback.
     - _Requirements: 6.4, 6.5_
 
   - [x] 4.8 Checkpoint — verify Phase 3
