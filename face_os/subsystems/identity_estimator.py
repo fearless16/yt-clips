@@ -83,6 +83,9 @@ class IdentityEstimator:
         # owned alongside the sole-owned latent). Drives best-observation-only
         # microdetail and honest (monotonic) uncertainty under occlusion.
         self._best_quality: Optional[np.ndarray] = None
+        # §16.6: mean geometric visibility of the LAST update (1.0 when no mesh
+        # self-occlusion evidence was available). Observable telemetry signal.
+        self.last_mean_visibility: float = 1.0
 
     def latent(self) -> IdentityLatent:
         """Public accessor for the sole-owned identity latent.
@@ -312,6 +315,30 @@ class IdentityEstimator:
 
         # ── 2. Quality map -> atlas, clamped [0,1] ─────────────────────────────
         quality = self._quality_to_atlas(quality_map)
+
+        # ── 2b. §16.6 Visibility gate: q_t -> q_t · V(u,v,t) ───────────────────
+        # Geometry-derived self-occlusion. ONLY mesh normals carry occlusion
+        # evidence; the face-prior dome does not, so a non-mesh frame leaves
+        # V≡1 (no penalty, legacy behaviour). When V=0 the gain below is 0, so
+        # the stored albedo / uncertainty / count are byte-identical — the
+        # §16.6 invariant (C_new = C_old + q·V).
+        self.last_mean_visibility = 1.0
+        if getattr(intrinsic, "normal_source", "face_prior") == "mesh":
+            nmap = getattr(intrinsic, "normal_map", None)
+            if nmap is not None:
+                try:
+                    from face_os.visibility import compute_visibility
+
+                    V = compute_visibility(np.asarray(nmap, dtype=np.float32))
+                    if V.shape != quality.shape:
+                        V = cv2.resize(
+                            V, (quality.shape[1], quality.shape[0]),
+                            interpolation=cv2.INTER_LINEAR,
+                        )
+                    quality = (quality * V).astype(np.float32)
+                    self.last_mean_visibility = float(np.mean(V))
+                except Exception:  # noqa: BLE001 — visibility must never crash fusion
+                    self.last_mean_visibility = 1.0
 
         # First observation: seed the latent and return
         if not self._latent.initialized:
