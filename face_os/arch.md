@@ -834,7 +834,7 @@ PARTIAL = weaker/disconnected form; MISSING = absent.
 | 16.3 | Drift energy E_drift=Σ‖I−A‖ | MISSING | only instantaneous `get_anchor_distance` `identity_state.py:442`; λ from current-frame drift `pipeline.py:2343` | No time accumulation; λ≠f(E_drift) |
 | 16.4 | Identity entropy H(I) | PARTIAL | real covariance `pipeline.py:165`+per-pixel uncertainty `types.py:441`; but exposed `identity_uncertainty=1−conf` `identity_estimator.py:814` | No −Σ p log p over hypotheses / no ½logdetΣ |
 | 16.5 | Information value Novelty×Quality | MISSING | updates gate on quality only `identity_state.py:213`, `patch_memory.py:153` | Novelty never computed; frame #200 not devalued |
-| 16.6 | Visibility field V(u,v,t) | MISSING | per-pixel quality proxy `pipeline.py:3066`, global `pose_weight` `canonical_map.py:170` | No geometry self-occlusion gating; `visibility_calibration.py` stranded |
+| 16.6 | Visibility field V(u,v,t) | PARTIAL | `compute_visibility` `visibility.py` = `clip(N·view,0,1)` on canonical normal map; gates latent memory in `identity_estimator.py:_update_latent_impl` (mesh-only: `quality·V`, so V=0 ⇒ albedo/count byte-identical — the §16.6 invariant, tested `test_visibility.py`); surfaced as telemetry `mean_visibility`. E2E test_clip 60f: V∈[0.85,0.90] every frame | Gates latent MEMORY only, not yet the render/trust gate (Phase 2B, §19 order); face-prior frames carry no occlusion evidence so V≡1 there; no depth/z-buffer (normal-facing proxy only) |
 | 16.7 | Pose prior P(θ) + coverage | PARTIAL | `Coverage_pose` now real: `PatchMemory.coverage_pose` `patch_memory.py` = `|observed∩canonical|/|total|`, denominator `canonical_pose_bins()` DERIVED from `_pose_bin` (=37, drift-guarded by test); cap `apply_pose_coverage` (= §16.8 pose factor, `C·cov`, monotone, ≤C); surfaced as telemetry `coverage_pose` (`types.py` `LatentRenderTelemetry`, wired `pipeline.py:_emit_frame_telemetry`). Similarity kernel `identity_state.py:351` | Coverage ratio + cap exist as a tested SIGNAL but NOT yet applied to production confidence/gate (Phase 2B, §19 order); pose PRIOR P(θ) still absent (no maintained distribution, no likelihood×prior retrieval) |
 | 16.7 | Lighting coverage | MISSING | no lighting-state enumeration anywhere | Confidence not capped for single-lighting |
 | 16.8 | Composite C_recon | MISSING | gate reads bare `_last_latent_confidence` `pipeline.py:772,2078` | No coverage/visibility factors in trust decision |
@@ -845,8 +845,9 @@ PARTIAL = weaker/disconnected form; MISSING = absent.
 | §16 | Patch confidence memory | PRESENT | region×pose patches `patch_memory.py:87`, `identity_state.py:765` | per-(patch×pose) confidence not stored (minor) |
 
 Dormant modules (ZERO runtime imports — delete unless promoted to a §16.10/16.11
-implementation task): `identity_manifold.py`, `optimizer_architecture.py`,
-`visibility_calibration.py`.
+implementation task): `identity_manifold.py`, `optimizer_architecture.py`.
+(`visibility_calibration.py` was DELETED when §16.6 was realized — it was an
+unrelated scalar metric-calibration tool with no per-UV / geometric content.)
 
 ---
 

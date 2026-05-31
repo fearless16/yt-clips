@@ -456,7 +456,7 @@ GeometryState    IdentityState    TemporalState    Output Frame
 | test_region_confidence.py | 4 | ✅ | Region confidence |
 | test_renderer_mode.py | 21 | ✅ | RendererMode state machine |
 | test_adversarial.py | 31 | ✅ | Adversarial robustness |
-| test_visibility_calibration.py | 16 | ✅ | Metric calibration |
+| test_visibility.py | 12 | ✅ | §16.6 V(u,v,t) geometric self-occlusion |
 | test_identity_manifold.py | 26 | ✅ | Identity manifold topology |
 | test_mathematical_foundation.py | 25 | ✅ | State evolution, energy scaling, optimizer |
 | test_long_horizon.py | 9 | ✅ | 1000+ frame stability |
@@ -752,7 +752,7 @@ face_os/
 ├── dense_geometry.py           # IMPLEMENTED, NOT INTEGRATED
 ├── lie_group.py                # IMPLEMENTED, INTEGRATED, ACTIVE
 ├── renderer_mode.py            # IMPLEMENTED, INTEGRATED, ACTIVE
-├── visibility_calibration.py   # IMPLEMENTED, NOT INTEGRATED
+├── visibility.py               # §16.6 V(u,v,t) — IMPLEMENTED, INTEGRATED (latent memory gate)
 ├── identity_manifold.py        # IMPLEMENTED, NOT INTEGRATED
 ├── state_space.py              # Phase 2A — LatentState, Kalman filter
 ├── optimizer.py                # Phase 2B — GaussNewton, LevenbergMarquardt

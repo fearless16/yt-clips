@@ -487,6 +487,10 @@ class LatentRenderTelemetry:
     #   C_recon = C_obs · Coverage_pose · …. Observable SIGNAL only — NOT yet
     #   folded into the live gate (the other C_recon factors are still MISSING,
     #   and §19 fixes the wiring order at Phase 2B).
+    mean_visibility: float = 1.0           # §16.6: mean geometric visibility
+    #   V(u,v,t)=clip(N·view,0,1) of the last latent update (1.0 when no mesh
+    #   self-occlusion evidence). The Visibility factor of the §16.8 composite.
+    #   Observable SIGNAL only — gates latent MEMORY, not the render gate.
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -501,4 +505,5 @@ class LatentRenderTelemetry:
             "gate_state": self.gate_state,
             "hybrid_alpha_mean": self.hybrid_alpha_mean,
             "coverage_pose": self.coverage_pose,
+            "mean_visibility": self.mean_visibility,
         }

@@ -278,6 +278,7 @@ LATENT_TELEMETRY_KEYS = {
     "gate_state",
     "hybrid_alpha_mean",
     "coverage_pose",
+    "mean_visibility",
 }
 
 FRAME_TELEMETRY_KEYS = {
@@ -403,6 +404,32 @@ class TestLatentTelemetryHonesty:
         rec = p.get_latent_telemetry()[-1]
         assert rec["coverage_pose"] == pytest.approx(2.0 / 37.0, abs=1e-9)
         assert rec["coverage_pose"] == pytest.approx(pm.coverage_pose(), abs=1e-12)
+
+    def test_mean_visibility_defaults_one_without_estimator(self, fresh_pipeline):
+        """§16.6: a fresh pipeline has no _identity_estimator (created at enroll),
+        so mean_visibility reports 1.0 (no occlusion evidence ⇒ no penalty)."""
+        p = fresh_pipeline
+        assert p._identity_estimator is None
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="alpha", intrinsic_used=False,
+        )
+        assert p.get_latent_telemetry()[-1]["mean_visibility"] == 1.0
+
+    def test_mean_visibility_reflects_live_estimator(self, fresh_pipeline):
+        """§16.6: mean_visibility in telemetry == estimator.last_mean_visibility,
+        the geometric visibility recorded by the latent's last update."""
+        p = fresh_pipeline
+
+        class _Est:
+            last_mean_visibility = 0.42
+
+        p._identity_estimator = _Est()
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="latent", intrinsic_used=True,
+        )
+        assert p.get_latent_telemetry()[-1]["mean_visibility"] == pytest.approx(0.42, abs=1e-9)
 
     def test_enhancement_path_reports_intrinsic_not_used(self, fresh_pipeline):
         """An enhancement-path frame reports intrinsic_used=False."""

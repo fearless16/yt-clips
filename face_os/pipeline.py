@@ -1816,6 +1816,14 @@ class FaceOSPipeline:
                         coverage_pose = float(self.patch_memory.coverage_pose())
                     except Exception:
                         coverage_pose = 0.0
+                # mean_visibility (§16.6): mean geometric visibility of the last
+                # latent update (1.0 when no estimator / no mesh evidence).
+                mean_visibility = 1.0
+                if self._identity_estimator is not None:
+                    try:
+                        mean_visibility = float(self._identity_estimator.last_mean_visibility)
+                    except Exception:
+                        mean_visibility = 1.0
                 latent_render = LatentRenderTelemetry(
                     frame_idx=frame_idx,
                     render_path=render_path,
@@ -1828,6 +1836,7 @@ class FaceOSPipeline:
                     gate_state=str(self._last_gate_state),
                     hybrid_alpha_mean=float(self._last_hybrid_alpha_mean),
                     coverage_pose=coverage_pose,
+                    mean_visibility=mean_visibility,
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1847,6 +1856,7 @@ class FaceOSPipeline:
                     "gate_state": str(self._last_gate_state),
                     "hybrid_alpha_mean": float(self._last_hybrid_alpha_mean),
                     "coverage_pose": 0.0,
+                    "mean_visibility": 1.0,
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)
