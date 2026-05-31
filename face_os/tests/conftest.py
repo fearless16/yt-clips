@@ -2,8 +2,20 @@
 
 Provides synthetic data fixtures (fast, deterministic) and real-video
 fixtures (slower, requires input/video.mp4).
+
+Self-contained: bootstraps the project root onto sys.path so `import face_os`
+works when this suite is run in isolation (`pytest face_os/tests/`), without
+depending on a root-level conftest.py.
 """
 import os
+import sys
+from pathlib import Path
+
+# Project root is three levels up: face_os/tests/conftest.py -> <root>
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 import pytest
 import cv2
 import numpy as np

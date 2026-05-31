@@ -767,7 +767,7 @@ face_os/
     ├── temporal_estimator.py
     └── renderer.py
 ```
-tests/face_os/
+face_os/tests/
 ├── test_phase0_contract.py     # 28 tests
 ├── test_phase1_energy.py       # 36 tests
 ├── test_phase1_hardening.py    # 37 tests
@@ -822,22 +822,22 @@ output/face_os/
 
 ```bash
 # Full test suite (773 tests)
-.venv/bin/python -m pytest tests/face_os/ -v
+.venv/bin/python -m pytest face_os/tests/ -v
 
 # V3 modules only (98 tests)
-.venv/bin/python -m pytest tests/face_os/test_phase3*.py -v
+.venv/bin/python -m pytest face_os/tests/test_phase3*.py -v
 
 # Phase 3A: Intrinsic Decomposition (26 tests)
-.venv/bin/python -m pytest tests/face_os/test_phase3a_intrinsic.py -v
+.venv/bin/python -m pytest face_os/tests/test_phase3a_intrinsic.py -v
 
 # Phase 3B: Physical Renderer (26 tests)
-.venv/bin/python -m pytest tests/face_os/test_phase3b_physical_renderer.py -v
+.venv/bin/python -m pytest face_os/tests/test_phase3b_physical_renderer.py -v
 
 # Phase 3C: Dense Geometry (23 tests)
-.venv/bin/python -m pytest tests/face_os/test_phase3c_dense_geometry.py -v
+.venv/bin/python -m pytest face_os/tests/test_phase3c_dense_geometry.py -v
 
 # Phase 3D: Lie-Group Transforms (23 tests)
-.venv/bin/python -m pytest tests/face_os/test_phase3d_lie_group.py -v
+.venv/bin/python -m pytest face_os/tests/test_phase3d_lie_group.py -v
 ```
 
 ---
