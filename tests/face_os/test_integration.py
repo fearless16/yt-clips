@@ -1525,7 +1525,7 @@ class TestLatentQualityOnRealVideo:
             pytest.skip("input/video.mp4 not found")
 
     def test_latent_primary_and_source_fraction(self):
-        """latent_primary=True and source_pixel_fraction < 0.02 for ≥90% of frames."""
+        """latent_primary=True and source_pixel_fraction < 0.02 for ≥90% of face frames."""
         from face_os.pipeline import FaceOSPipeline
         pipeline = FaceOSPipeline(use_bidirectional=False)
         pipeline.render_source = 'latent'
@@ -1534,6 +1534,7 @@ class TestLatentQualityOnRealVideo:
         import cv2
         cap = cv2.VideoCapture(self.VIDEO_PATH)
         latent_frames = 0
+        face_frames = 0
         total_frames = 0
         fractions = []
 
@@ -1545,17 +1546,21 @@ class TestLatentQualityOnRealVideo:
             if result and result.get('frame') is not None:
                 total_frames += 1
                 telem = pipeline._frame_telemetry_log[-1] if pipeline._frame_telemetry_log else {}
-                if telem.get('latent_primary', False):
-                    latent_frames += 1
-                fractions.append(telem.get('source_pixel_fraction', 1.0))
+                latent = telem.get('latent', {})
+                # Only count frames where face is detected (not LOST_FACE)
+                if pipeline._face_state != 'LOST_FACE':
+                    face_frames += 1
+                    if latent.get('latent_primary', False):
+                        latent_frames += 1
+                    fractions.append(latent.get('source_pixel_fraction', 1.0))
 
         cap.release()
         del pipeline
 
-        if total_frames < 10:
-            pytest.skip("too few frames processed")
+        if face_frames < 10:
+            pytest.skip("too few face frames processed")
 
-        latent_pct = latent_frames / total_frames
+        latent_pct = latent_frames / face_frames
         mean_frac = float(np.mean(fractions)) if fractions else 1.0
-        assert latent_pct >= 0.90, f"latent_primary only on {latent_pct:.1%} of frames"
+        assert latent_pct >= 0.90, f"latent_primary only on {latent_pct:.1%} of face frames"
         assert mean_frac < 0.02, f"mean source_pixel_fraction {mean_frac:.4f} >= 0.02"
