@@ -323,7 +323,24 @@ def run(url: str, skip_download=False, skip_transcribe=False,
                 from .seo.analytics import generate_daily_insights
                 generate_daily_insights()
         except Exception as e:
-            result.failures.append("stage9: %s" % e)
+            result.failures.append("stage9a: %s" % e)
+
+        try:
+            with run_phase(log, "stage 9b Self-Learner", "self_learner", run_id=rid):
+                from self_learner import Learner
+                learner = Learner()
+                learner.observe("pipeline_run", {
+                    "duration": result.total_seconds,
+                    "exported": len(result.exported),
+                    "uploaded": result.uploaded_count,
+                    "selected": result.selected_clips,
+                    "failures": len(result.failures),
+                    "transcript_source": result.transcript_source,
+                })
+                log.info("[self_learner] observed pipeline_run %s", rid)
+                learner.close()
+        except Exception as e:
+            result.failures.append("stage9b: %s" % e)
 
     result.total_seconds = time.monotonic() - start
     status = "partial" if result.failures else "ok"
