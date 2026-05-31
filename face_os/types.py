@@ -482,6 +482,11 @@ class LatentRenderTelemetry:
     hybrid_alpha_mean: float = 1.0         # Phase 2B: mean per-pixel LATENT
     #   authority (1.0 = pure latent; <1 = low-freq observation blended in where
     #   uncertain). Proves the uncertainty hybrid actually engaged.
+    coverage_pose: float = 0.0             # §16.7: |observed pose bins| /
+    #   |total pose bins| in [0,1]. The FIRST real factor of the §16.8 composite
+    #   C_recon = C_obs · Coverage_pose · …. Observable SIGNAL only — NOT yet
+    #   folded into the live gate (the other C_recon factors are still MISSING,
+    #   and §19 fixes the wiring order at Phase 2B).
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -495,4 +500,5 @@ class LatentRenderTelemetry:
             "contract_assertions_passed": self.contract_assertions_passed,
             "gate_state": self.gate_state,
             "hybrid_alpha_mean": self.hybrid_alpha_mean,
+            "coverage_pose": self.coverage_pose,
         }

@@ -277,6 +277,7 @@ LATENT_TELEMETRY_KEYS = {
     "contract_assertions_passed",
     "gate_state",
     "hybrid_alpha_mean",
+    "coverage_pose",
 }
 
 FRAME_TELEMETRY_KEYS = {
@@ -366,6 +367,42 @@ class TestLatentTelemetryHonesty:
         rec = p.get_frame_telemetry()[-1]
         assert rec["render_path"] == "alpha"
         assert rec["intrinsic_used"] is False
+
+    def test_coverage_pose_zero_without_patch_memory(self, fresh_pipeline):
+        """§16.7: a fresh pipeline has no patch_memory yet (created at enroll),
+        so coverage_pose reports 0.0 rather than crashing."""
+        p = fresh_pipeline
+        assert p.patch_memory is None
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="alpha", intrinsic_used=False,
+        )
+        assert p.get_latent_telemetry()[-1]["coverage_pose"] == 0.0
+
+    def test_coverage_pose_reflects_live_patch_memory(self, fresh_pipeline):
+        """§16.7: coverage_pose in telemetry == patch_memory.coverage_pose().
+
+        Populate two distinct directional bins (F + R20) and assert the emitted
+        signal is the real 2/37 union ratio, not a stale or hardcoded value.
+        """
+        import numpy as np
+        from face_os.patch_memory import PatchMemory
+
+        p = fresh_pipeline
+        pm = PatchMemory()
+        face = np.ones((64, 64, 3), dtype=np.float32) * 0.5
+        pm.initialize(face, np.full((64, 64), 0.3, dtype=np.float32))
+        pm.update(face, np.full((64, 64), 0.6, dtype=np.float32), pose=(0.0, 0.0, 0.0))
+        pm.update(face, np.full((64, 64), 0.8, dtype=np.float32), pose=(20.0, 0.0, 0.0))
+        p.patch_memory = pm
+
+        p._emit_frame_telemetry(
+            0, None, None, {"E_temporal": 0.0}, 0, 0,
+            render_path="latent", intrinsic_used=True,
+        )
+        rec = p.get_latent_telemetry()[-1]
+        assert rec["coverage_pose"] == pytest.approx(2.0 / 37.0, abs=1e-9)
+        assert rec["coverage_pose"] == pytest.approx(pm.coverage_pose(), abs=1e-12)
 
     def test_enhancement_path_reports_intrinsic_not_used(self, fresh_pipeline):
         """An enhancement-path frame reports intrinsic_used=False."""

@@ -84,6 +84,63 @@ def _pose_bin(pose: Tuple[float, float, float]) -> str:
     return 'F'
 
 
+# ─── §16.7 Pose Coverage ─────────────────────────────────────────────────────
+# Coverage_pose = |observed pose bins| / |total pose bins|. The DENOMINATOR is
+# derived from `_pose_bin` itself (swept over the operational ±90° head-pose
+# range) rather than hard-coded, so it can never silently drift away from the
+# binning cascade above. The 'any' label is the no-pose sentinel (pose is None,
+# patch_memory.py:159 only stores a bin when pose is not None) and is NOT a
+# directional bin, so it is excluded.
+
+# Operational head-pose range for enumerating reachable directional bins:
+# 10°-quantized bands from ±10° up to ±90° (yaw drives L*/R*, pitch drives
+# U*/D*), plus frontal 'F'. Band centers land squarely inside each band.
+_POSE_BAND_CENTERS = tuple(range(15, 100, 10))  # 15,25,...,95 -> bands 10..90
+
+
+def _build_canonical_pose_bins() -> frozenset:
+    bins = {_pose_bin((0.0, 0.0, 0.0))}  # frontal 'F'
+    for c in _POSE_BAND_CENTERS:
+        bins.add(_pose_bin((float(c), 0.0, 0.0)))    # R*
+        bins.add(_pose_bin((float(-c), 0.0, 0.0)))   # L*
+        bins.add(_pose_bin((0.0, float(c), 0.0)))    # U*
+        bins.add(_pose_bin((0.0, float(-c), 0.0)))   # D*
+    bins.discard('any')  # defensive: the no-pose sentinel is never directional
+    return frozenset(bins)
+
+
+_CANONICAL_POSE_BINS: frozenset = _build_canonical_pose_bins()
+
+
+def canonical_pose_bins() -> set:
+    """The canonical set of directional pose bins (|total pose bins|, §16.7).
+
+    Returns a fresh mutable copy each call so callers cannot corrupt the shared
+    denominator. Derived from `_pose_bin`, so editing the binning cascade and
+    not updating this set fails the drift-guard test rather than silently
+    skewing coverage.
+    """
+    return set(_CANONICAL_POSE_BINS)
+
+
+def apply_pose_coverage(confidence: float, coverage_pose: float) -> float:
+    """§16.7 cap — the pose factor of the §16.8 composite ``C_recon``.
+
+    ``C_recon = C_obs · Coverage_pose · Coverage_light · Visibility``; this is
+    the ``C_obs · Coverage_pose`` slice (the other factors multiply in once
+    §16.6 / lighting coverage exist). Properties (all tested):
+      - monotonic non-decreasing in ``coverage_pose``
+      - ``coverage_pose == 1`` leaves ``confidence`` unchanged
+      - result ``<= confidence`` always (the §16.8 invariant: coverage can only
+        REDUCE trust, never add it)
+    Inputs are clamped to [0, 1] so an out-of-range coverage never inflates or
+    explodes the reported confidence.
+    """
+    c = min(max(float(confidence), 0.0), 1.0)
+    cov = min(max(float(coverage_pose), 0.0), 1.0)
+    return c * cov
+
+
 class RegionPatch:
     """Memory for a single face region."""
 
@@ -255,6 +312,31 @@ class PatchMemory:
             name: region.current_confidence
             for name, region in self.regions.items()
         }
+
+    def observed_pose_bins(self) -> set:
+        """Union of pose-bin labels observed across ALL regions (§16.7).
+
+        A bin is "observed" if any region stored a patch for it (each region may
+        capture a different pose), so coverage is the union, not a per-region
+        count. May include labels outside the canonical range (e.g. 'R100' from
+        an extreme yaw); ``coverage_pose`` intersects with the canonical set so
+        those cannot inflate the ratio.
+        """
+        observed: set = set()
+        for region in self.regions.values():
+            observed.update(region.pose_patches.keys())
+        return observed
+
+    def coverage_pose(self) -> float:
+        """Coverage_pose = |observed ∩ canonical| / |total| (§16.7), in [0, 1].
+
+        Zero when no directional pose has been observed (e.g. uninitialized
+        memory). Out-of-range observed bins are excluded so the ratio never
+        exceeds 1.
+        """
+        canonical = _CANONICAL_POSE_BINS
+        observed_in_range = self.observed_pose_bins() & canonical
+        return len(observed_in_range) / len(canonical)
 
     def reset(self) -> None:
         self.regions.clear()

@@ -1807,6 +1807,15 @@ class FaceOSPipeline:
                         au_arr = np.asarray(au, dtype=np.float32)
                         if au_arr.size > 0:
                             uncertainty_mean = float(np.mean(au_arr))
+                # coverage_pose (§16.7): |observed pose bins| / |total|, the
+                # first real factor of the §16.8 composite. Observable signal
+                # only; never let a failure here drop the record.
+                coverage_pose = 0.0
+                if self.patch_memory is not None:
+                    try:
+                        coverage_pose = float(self.patch_memory.coverage_pose())
+                    except Exception:
+                        coverage_pose = 0.0
                 latent_render = LatentRenderTelemetry(
                     frame_idx=frame_idx,
                     render_path=render_path,
@@ -1818,6 +1827,7 @@ class FaceOSPipeline:
                     contract_assertions_passed=bool(contract_assertions_passed),
                     gate_state=str(self._last_gate_state),
                     hybrid_alpha_mean=float(self._last_hybrid_alpha_mean),
+                    coverage_pose=coverage_pose,
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1836,6 +1846,7 @@ class FaceOSPipeline:
                     "contract_assertions_passed": bool(contract_assertions_passed),
                     "gate_state": str(self._last_gate_state),
                     "hybrid_alpha_mean": float(self._last_hybrid_alpha_mean),
+                    "coverage_pose": 0.0,
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)
