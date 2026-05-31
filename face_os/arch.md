@@ -1015,3 +1015,47 @@ Verified-correct renderer state at this decision (independent of the gate):
   level). Test: `TestObservationShading::test_render_matches_observed_exposure`.
 - Flicker 50× normal-source spikes eliminated (§16.2/§18); background invariance
   enforced on both paths (§16.9).
+
+**Update — identity-space promotion SIGNAL realized (`evaluate_identity_consistency`).**
+The decision above named the missing piece: a metric that scores identity in
+identity space rather than pixels against any single render. A pragmatic proxy
+now exists, grounded in §16.1 (`O_t = R(I_t, p_t, l_t)`; identity `I_t` is
+SLOW-VARYING, the observation carries pose+lighting). It re-decomposes the latent
+RENDER back to albedo and measures, in **CHROMA only** (LAB a,b — luminance is the
+§19.1 lighting confound, excluded):
+- **stability** — per-pixel temporal std of recovered-albedo chroma (lower ⇒ more
+  slow-varying, i.e. more identity-like), and
+- **match** — chroma ΔE between recovered albedo and the ENROLLED albedo (lower ⇒
+  the render preserves the enrolled identity),
+each compared to the OBSERVATION (`source_crop`) baseline in the SAME crop+mask.
+
+Measured (test_clip.mp4, 30 frames): latent render stability **4.03** vs
+observation **4.40**, match **23.0** vs observation **26.5** → `recovers_identity =
+true` (render is both more stable and closer to the enrolled identity than the raw
+observation).
+
+**Non-vacuity is enforced, not assumed.** Stability alone is circular (a constant
+pasted texture is trivially stable), so the load-bearing term is MATCH-to-enrolled
+under a NEGATIVE CONTROL: a *structurally* corrupted enrolled identity (vertical
+flip + spatial roll — survives white-balance, breaks feature correspondence) must
+score WORSE. It does (match ΔE 23.0 correct vs **30.8** corrupted; stability 4.03
+vs **8.52**). Two weaker controls (horizontal mirror, global channel-swap) were
+measured FIRST and FAILED to discriminate — a near-symmetric face barely changes
+under mirroring and `decompose()` re-white-balances away a global recolor — which
+is exactly why the structural control is the valid one. The discriminating
+property is locked by `TestIdentityConsistencyMetric` so the metric cannot
+silently rot back into a constant-texture rubber stamp.
+
+**Status and limits.** This is a SIGNAL reported alongside the regression
+tripwire, NEVER folded into `regressed` (so the pixel tripwire keeps catching
+gross failures unchanged). It is a proxy on the albedo decomposition, NOT the full
+§16.10 appearance-manifold `F(z,θ,e,l)` with a disentangled identity encoder —
+that remains MISSING. Caveats for whoever sets the promotion bar: (a) the
+stability margin vs observation is thin (~8%); the robust discriminator is the
+match term. (b) As a strict latent-vs-legacy gate it carries a mild structural
+bias (latent renders the enrolled identity by construction), so the defensible
+framing is "render recovers identity vs the observation, with a negative-control
+guard," used as a POSITIVE promotion signal next to the tripwires — not a single
+magic pass/fail. Promoting the default to `latent` on the strength of this signal
+(plus passing tripwires) is now a bounded judgement call rather than a blocked-on-
+unimplemented-§16.10 dead end.
