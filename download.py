@@ -425,7 +425,7 @@ def download(url: str, output_path: Optional[str] = None, sample_minutes: Option
                 )
         if not _js_runtime_args(dl_cfg):
             log.error("No Deno/Node JS runtime was found. In Colab, install Deno or Node before running.")
-        sys.exit(1)
+        raise RuntimeError("yt-dlp download failed — see errors above")
 
     # yt-dlp may produce video.mp4 or video.webm → normalise to dest
     produced = dest.parent / f"{stem}.mp4"
@@ -434,7 +434,7 @@ def download(url: str, output_path: Optional[str] = None, sample_minutes: Option
         candidates = [c for c in candidates if not c.suffix.endswith(".part")]
         if not candidates:
             log.error("Download completed but output file not found in %s", dest.parent)
-            sys.exit(1)
+            raise FileNotFoundError("Download output file not found in %s" % dest.parent)
         produced = candidates[0]
 
     # Rename to exactly the configured filename if needed
