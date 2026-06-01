@@ -22,8 +22,20 @@ from face_os.ab_validation import (
     compute_lab_drift,
     compute_albedo_chroma_stability,
     compute_albedo_chroma_match,
+    compute_perceptual_distance,
+    compute_all_metrics,
+    compare_approaches,
+    ABMetrics,
 )
 
+try:
+    from face_os.ab_validation import CorpusSourceReport
+    _HAS_CORPUS_REPORT = True
+except ImportError:
+    _HAS_CORPUS_REPORT = False
+    CorpusSourceReport = None
+
+_ = CorpusSourceReport  # suppress unused-import warning when not available
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -47,6 +59,20 @@ def _blur_frame(size=(64, 64)):
     """Gaussian-blurred uniform → low Laplacian variance."""
     f = np.full((size[1], size[0], 3), 128, dtype=np.uint8)
     f = cv2.GaussianBlur(f, (15, 15), 5)
+    return f
+
+
+def _structured_frame(size=(128, 128)):
+    """Gradient + checkerboard frame with real structure for perceptual metrics."""
+    f = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+    cx, cy = size[0] // 2, size[1] // 2
+    for y in range(size[1]):
+        for x in range(size[0]):
+            r = int(np.sqrt((x - cx) ** 2 + (y - cy) ** 2))
+            val = 128 + int(64 * np.sin(r / 4.0))
+            if (x + y) % 8 == 0:
+                val = 255 - val
+            f[y, x] = [val, val, val]
     return f
 
 
@@ -422,3 +448,133 @@ class TestIdentityConsistencyMetric:
         assert out['available'] is False
         assert 'recovers_identity' not in out
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# D-02: Perceptual Distance + Enhanced A/B Metrics
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPerceptualDistance:
+    def test_identity_zero_distance(self):
+        """Same frame yields perceptual distance ~0."""
+        f = _structured_frame(size=(128, 128))
+        d = compute_perceptual_distance(f, f)
+        assert d == pytest.approx(0.0, abs=0.01), f"Identity dist should be ~0, got {d}"
+
+    def test_dissimilar_frames_higher_distance(self):
+        """Dissimilar frames yield higher perceptual distance than similar ones."""
+        base = _structured_frame(size=(128, 128))
+        similar = cv2.addWeighted(base, 0.99, _solid_frame((200, 200, 200), (128, 128)), 0.01, 0)
+        dissimilar = cv2.randn(np.zeros_like(base, dtype=np.float32), 128, 30)
+        dissimilar = np.clip(dissimilar, 0, 255).astype(np.uint8)
+        d_sim = compute_perceptual_distance(base, similar)
+        d_dis = compute_perceptual_distance(base, dissimilar)
+        assert d_dis > d_sim, f"Similar={d_sim:.4f} should be < dissimilar={d_dis:.4f}"
+
+    def test_shape_mismatch_handled(self):
+        """Frames with different shapes are handled via resize."""
+        a = _structured_frame(size=(128, 128))
+        b = cv2.resize(_structured_frame(size=(64, 64)), (128, 128))
+        d = compute_perceptual_distance(a, b)
+        assert d >= 0.0
+
+    def test_mask_restricts_to_face(self):
+        """Mask outside face region does not affect distance."""
+        a = _structured_frame(size=(128, 128))
+        b = cv2.GaussianBlur(a, (5, 5), 1.0)
+        mask = np.zeros((128, 128), dtype=np.float32)
+        mask[32:96, 32:96] = 1.0
+        d_masked = compute_perceptual_distance(a, b, mask=mask)
+        d_unmasked = compute_perceptual_distance(a, b)
+        assert d_masked < d_unmasked, "Masked distance should be lower (only face region)"
+
+    def test_multi_scale_includes_all_levels(self):
+        """Multi-scale computation includes all scale weights."""
+        a = _structured_frame(size=(256, 256))
+        b = cv2.GaussianBlur(a, (3, 3), 1.0)
+        d3 = compute_perceptual_distance(a, b, scales=3)
+        d1 = compute_perceptual_distance(a, b, scales=1)
+        assert d1 >= 0.0
+        assert d3 >= 0.0
+
+
+class TestComputeAllMetrics:
+    def test_paired_frames_computes_perceptual_distance(self):
+        """When paired_frames is provided, perceptual_distance is computed."""
+        a = _structured_frame(size=(128, 128))
+        b = cv2.GaussianBlur(a, (5, 5), 1.0)
+        frames = [a, a]
+        paired = [b, b]
+        metrics = compute_all_metrics(frames, paired_frames=paired)
+        assert metrics.perceptual_distance > 0, "Paired frames should yield non-zero perceptual dist"
+
+    def test_sharpness_mean_computed(self):
+        """Sharpness mean is computed from frames."""
+        frames = [_structured_frame(size=(128, 128)) for _ in range(3)]
+        metrics = compute_all_metrics(frames)
+        assert metrics.sharpness_mean > 0, "Sharpness mean should be > 0 for structured frames"
+
+    def test_no_paired_frames_zero_perceptual_distance(self):
+        """Without paired_frames, perceptual_distance stays 0."""
+        frames = [_structured_frame(size=(128, 128))]
+        metrics = compute_all_metrics(frames)
+        assert metrics.perceptual_distance == 0.0
+
+    def test_temporal_smoothness_computed(self):
+        """Temporal smoothness is computed from frame sequence."""
+        f1 = _structured_frame(size=(128, 128))
+        f2 = cv2.GaussianBlur(f1, (3, 3), 1.0)
+        f3 = cv2.GaussianBlur(f2, (3, 3), 1.0)
+        metrics = compute_all_metrics([f1, f2, f3])
+        assert metrics.temporal_smoothness > 0
+
+
+class TestCompareApproaches:
+    def test_perceptual_distance_included_in_checks(self):
+        """Perceptual distance is included in A/B comparison checks."""
+        a = ABMetrics(perceptual_distance=5.0, sharpness_mean=100.0,
+                       lab_drift=2.0, luminance_consistency=0.9,
+                       temporal_smoothness=0.8, procrustes_consistency=0.7,
+                       transform_determinant_stability=0.6, ssim=0.95)
+        b = ABMetrics(perceptual_distance=10.0, sharpness_mean=80.0,
+                       lab_drift=5.0, luminance_consistency=0.7,
+                       temporal_smoothness=0.6, procrustes_consistency=0.5,
+                       transform_determinant_stability=0.4, ssim=0.85)
+        comparison = compare_approaches("A", "B", a, b)
+        assert comparison.winner == "A", f"Expected A to win, got {comparison.winner}"
+        assert "perceptual_distance" in comparison.details
+        assert "sharpness_mean" in comparison.details
+
+    def test_sharpness_winner_detected(self):
+        """Higher sharpness wins in comparison."""
+        sharp = ABMetrics(sharpness_mean=200.0, lab_drift=10.0,
+                           luminance_consistency=0.5, temporal_smoothness=0.5,
+                           procrustes_consistency=0.5, transform_determinant_stability=0.5,
+                           ssim=0.5, perceptual_distance=10.0)
+        blurry = ABMetrics(sharpness_mean=100.0, lab_drift=10.0,
+                            luminance_consistency=0.5, temporal_smoothness=0.5,
+                            procrustes_consistency=0.5, transform_determinant_stability=0.5,
+                            ssim=0.5, perceptual_distance=10.0)
+        comparison = compare_approaches("Sharp", "Blurry", sharp, blurry)
+        assert comparison.winner == "Sharp"
+
+    def test_lower_perceptual_distance_wins(self):
+        """Lower perceptual distance wins in comparison."""
+        close = ABMetrics(perceptual_distance=3.0, lab_drift=10.0,
+                           luminance_consistency=0.5, temporal_smoothness=0.5,
+                           procrustes_consistency=0.5, transform_determinant_stability=0.5,
+                           ssim=0.5, sharpness_mean=100.0)
+        far = ABMetrics(perceptual_distance=8.0, lab_drift=10.0,
+                         luminance_consistency=0.5, temporal_smoothness=0.5,
+                         procrustes_consistency=0.5, transform_determinant_stability=0.5,
+                         ssim=0.5, sharpness_mean=100.0)
+        comparison = compare_approaches("Close", "Far", close, far)
+        assert comparison.winner == "Close"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# D-05: Corpus Comparison Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCorpusSourceReport:

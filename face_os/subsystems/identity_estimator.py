@@ -31,18 +31,43 @@ from face_os.types import IdentityEstimatorState, IdentityLatent
 logger = logging.getLogger(__name__)
 
 # ── Fusion tuning constants (named, justified — NOT magic EMA rates) ──────────
-# Numerical floor for uncertainty-weighted gains.
 _EPS = 1e-6
-# How strongly a temporal drift_score inflates stored uncertainty before fusion
-# (Kalman "predict" step). Larger drift -> more willing to accept new evidence.
-# This is the ONLY source of uncertainty inflation (design.md:349-351); fusion
-# itself is a pure Kalman shrink (design.md:361), so accumulating evidence can
-# only tighten the posterior. No "failed-to-beat-best-seen" ratchet exists.
 _K_TEMPORAL_INFLATE = 0.5
-# Bound on the per-channel white-balance scale so reference normalization can
-# never blow albedo up pathologically (keeps the latent color-stable — Req 5).
 _WB_SCALE_MIN = 0.5
 _WB_SCALE_MAX = 2.0
+
+# ── Appearance encoder constants (Task 2.5 — manifold wiring) ─────────────────
+_APPEARANCE_DIM = 16
+_PROJECTION_SEED = 42
+_PROJECTION_INPUT_DIM = 478 * 3
+_MAX_APPEARANCE_DISTANCE = 10.0
+_MAX_MANIFOLD_OBSERVATIONS = 64
+_APPEARANCE_OBS_NOISE_SIGMA_SQ = 0.1
+_K_EXPRESSION_GAIN = 2.0
+_PINV_RIDGE_LAMBDA = 0.01
+_GEODESIC_OUTLIER_STD = 3.0
+_GEODESIC_OUTLIER_MIN_HISTORY = 10
+
+
+def _build_projection_matrix() -> np.ndarray:
+    """Johnson-Lindenstrauss projection: (16, 1434) random matrix.
+
+    Preserves pairwise distances in the deformation field with high probability,
+    no training data required. Fixed seed for deterministic reproducibility.
+    """
+    rng = np.random.RandomState(_PROJECTION_SEED)
+    return rng.randn(_APPEARANCE_DIM, _PROJECTION_INPUT_DIM).astype(np.float32) / np.sqrt(_PROJECTION_INPUT_DIM)
+
+
+def _build_projection_pinv(P: np.ndarray) -> np.ndarray:
+    """Moore-Penrose pseudoinverse of the JL projection matrix.
+
+    P^T @ (P @ P^T)^{-1} — reconstructs approximate deformation field from
+    the 16-D appearance_code. The reconstruction captures the principal
+    expression deformation; residual high-frequency detail is lost in the
+    JL compression (which is by design).
+    """
+    return np.linalg.pinv(P).astype(np.float32)
 
 
 class IdentityEstimator:
@@ -75,27 +100,184 @@ class IdentityEstimator:
         self._state = identity_state
         self._manifold = manifold
         self._atlas_size = atlas_size
-        # Sole-owned latent — empty/uninitialized until set_anchor / update_latent.
         self._latent = IdentityLatent(atlas_size=atlas_size)
-        # Provenance of the last synthesized normal_map ('mesh' | 'face_prior').
         self._last_normal_source = "face_prior"
-        # Per-pixel best-seen observation quality (estimator-internal bookkeeping,
-        # owned alongside the sole-owned latent). Drives best-observation-only
-        # microdetail and honest (monotonic) uncertainty under occlusion.
         self._best_quality: Optional[np.ndarray] = None
         # §16.6: mean geometric visibility of the LAST update (1.0 when no mesh
         # self-occlusion evidence was available). Observable telemetry signal.
         self.last_mean_visibility: float = 1.0
+        self._enrollment_mesh: Optional[np.ndarray] = None
+        self._canonical_lm_2d: Optional[np.ndarray] = None
+        self._projection_matrix: np.ndarray = _build_projection_matrix()
+        self._projection_pinv: np.ndarray = _build_projection_pinv(self._projection_matrix)
+        self._observation_points: list = []
+        self._observation_weights: list = []
+        self._geodesic_distances: list = []
+        self._smoothed_appearance: Optional[np.ndarray] = None
+        self._last_deform_max: float = 0.0
+        self._last_deform_mean: float = 0.0
+        if self._manifold is None:
+            from face_os.identity_manifold import IdentityManifold, ManifoldConfig
+            self._manifold = IdentityManifold(ManifoldConfig(dimension=self._appearance_dim(), max_geodesic_distance=_MAX_APPEARANCE_DISTANCE))
 
     def latent(self) -> IdentityLatent:
-        """Public accessor for the sole-owned identity latent.
-
-        The pipeline must only touch the latent through this accessor and the
-        public mutation methods — never by reaching into private fields.
-        """
         return self._latent
 
-    def set_anchor(self, reference_face_bgr: np.ndarray) -> None:
+    def store_enrollment_mesh(self, mesh: np.ndarray) -> None:
+        """Store the enrollment reference mesh for appearance encoding.
+
+        The enrollment mesh defines the "neutral expression" origin on the
+        appearance manifold. Per-frame deformation is measured relative to
+        this reference and projected to 16-D appearance_code.
+
+        Args:
+            mesh: (478, 3) float32 landmark positions from the enrollment frame.
+        """
+        mesh_arr = np.asarray(mesh, dtype=np.float32)
+        if mesh_arr.ndim != 2 or mesh_arr.shape[0] < 468 or mesh_arr.shape[1] < 3:
+            logger.warning(
+                "store_enrollment_mesh: invalid shape %s; appearance encoding disabled.",
+                mesh_arr.shape,
+            )
+            self._enrollment_mesh = None
+            return
+        self._enrollment_mesh = mesh_arr
+        lm_xy = mesh_arr[:, :2].astype(np.float32)
+        x_min, x_max = lm_xy[:, 0].min(), lm_xy[:, 0].max()
+        y_min, y_max = lm_xy[:, 1].min(), lm_xy[:, 1].max()
+        scale = max(x_max - x_min, y_max - y_min, 1.0)
+        lm_uv_x = (lm_xy[:, 0] - x_min) / scale * 200.0 + 28.0
+        lm_uv_y = (lm_xy[:, 1] - y_min) / scale * 200.0 + 28.0
+        self._canonical_lm_2d = np.stack([lm_uv_x, lm_uv_y], axis=-1).astype(np.float32)
+        self._invalidate_appearance_code()
+
+    def _encode_appearance(self, mesh: np.ndarray) -> Optional[np.ndarray]:
+        """Encode landmark deformation → 16-D appearance_code.
+
+        Computes the deformation field between the current mesh and the stored
+        enrollment mesh, then projects to 16-D via a fixed Johnson-Lindenstrauss
+        random projection. Scale-invariant (normalizes by face bounding box).
+
+        Args:
+            mesh: (N, 3+) float32 current frame landmarks.
+
+        Returns:
+            (16,) float32 appearance_code, or None if enrollment not available.
+        """
+        if self._enrollment_mesh is None:
+            return None
+        mesh_arr = np.asarray(mesh, dtype=np.float32)
+        if mesh_arr.ndim != 2 or mesh_arr.shape[0] < 468 or mesh_arr.shape[1] < 3:
+            return None
+        if mesh_arr.shape != self._enrollment_mesh.shape:
+            return None
+        deformation = (mesh_arr - self._enrollment_mesh).flatten().astype(np.float32)
+        bbox_size = float(
+            max(
+                mesh_arr[:, 0].max() - mesh_arr[:, 0].min(),
+                mesh_arr[:, 1].max() - mesh_arr[:, 1].min(),
+                1.0,
+            )
+        )
+        deformation = deformation / bbox_size
+        code = self._projection_matrix @ deformation
+        return code.astype(np.float32)
+
+    def _invalidate_appearance_code(self) -> None:
+        """Reset appearance_code to neutral (zeros) and uncertainty to 0.0.
+
+        Called when enrollment mesh changes so stale codes don't leak.
+        """
+        if self._latent.initialized:
+            self._latent.appearance_code = np.zeros(
+                self._appearance_dim(), dtype=np.float32
+            )
+            self._latent.appearance_uncertainty = 0.0
+            self._smoothed_appearance = None
+
+    def _get_regularized_pinv(self) -> np.ndarray:
+        """Return ridge-regularized pseudoinverse of the JL projection.
+
+        P_reg^+ = P^T (P P^T + λ I)^{-1}  via Woodbury identity.
+
+        Tikhonov regularization penalizes large deformation magnitudes,
+        pulling the reconstruction toward the enrollment mesh. This stabilises
+        the deformation map in landmark-poor regions where the JL nullspace
+        otherwise allows arbitrary large excursions.
+
+        Returns:
+            (1434, 16) float32 regularized pseudoinverse matrix.
+        """
+        P = self._projection_matrix
+        M = P @ P.T  # (16, 16)
+        M_reg = M + _PINV_RIDGE_LAMBDA * np.eye(_APPEARANCE_DIM, dtype=np.float32)
+        return (P.T @ np.linalg.inv(M_reg)).astype(np.float32)
+
+    def _compute_deformation_map(self, atlas_h: int, atlas_w: int) -> np.ndarray:
+        """Reconstruct expression deformation from smoothed appearance_code.
+
+        Inverts the JL projection to recover the principal (478, 3) deformation
+        field, then interpolates its magnitude onto the atlas grid via Delaunay
+        triangulation of the canonical 2D landmark positions.
+
+        Uses ridge-regularized pseudoinverse (Tikhonov λ=0.01) to prevent
+        large unphysical deformations in landmark-poor atlas regions.
+
+        Returns:
+            (atlas_h, atlas_w) float32 scalar deformation magnitude map, or zeros
+            if appearance code / canonical landmarks are unavailable.
+        """
+        if self._smoothed_appearance is None or self._canonical_lm_2d is None:
+            return np.zeros((atlas_h, atlas_w), dtype=np.float32)
+
+        code = np.asarray(self._smoothed_appearance, dtype=np.float32)
+        pinv = self._get_regularized_pinv()
+        deform = pinv @ code
+        deform = deform.reshape(-1, 3)
+        n_lm = deform.shape[0]
+        if n_lm != self._canonical_lm_2d.shape[0]:
+            return np.zeros((atlas_h, atlas_w), dtype=np.float32)
+
+        deform_mag = np.linalg.norm(deform[:, :2], axis=-1)
+
+        try:
+            from scipy.interpolate import griddata
+            grid_x, grid_y = np.meshgrid(
+                np.arange(atlas_w, dtype=np.float32),
+                np.arange(atlas_h, dtype=np.float32),
+            )
+            deform_map = griddata(
+                self._canonical_lm_2d.astype(np.float64),
+                deform_mag.astype(np.float64),
+                (grid_x.astype(np.float64), grid_y.astype(np.float64)),
+                method="linear",
+                fill_value=0.0,
+            )
+            return np.clip(deform_map, 0.0, None).astype(np.float32)
+        except Exception:
+            return np.zeros((atlas_h, atlas_w), dtype=np.float32)
+
+    def _riemannian_gain(self, metric: np.ndarray, innovation: np.ndarray) -> np.ndarray:
+        """Apply metric-aware Kalman gain to an innovation vector.
+
+        Eigendecomposes the learned manifold metric tensor, then applies per-direction
+        gain ``λ_i / (λ_i + σ²)``. Directions with high observed variance (large λ_i)
+        are familiar — gain ≈ 1, trust the observation. Directions with only the
+        regularization floor (λ_i ≈ ε) are novel — gain ≈ 0, stick with current state.
+
+        Returns the gain-weighted innovation vector in the original basis.
+        """
+        vals, vecs = np.linalg.eigh(metric)
+        vals = np.clip(vals, 1e-6, None)
+        gains = vals / (vals + _APPEARANCE_OBS_NOISE_SIGMA_SQ)
+        innovation_basis = vecs.T @ innovation
+        return vecs @ (gains * innovation_basis)
+
+    def set_anchor(
+        self,
+        reference_face_bgr: np.ndarray,
+        enrollment_mesh: Optional[np.ndarray] = None,
+    ) -> None:
         """Initialize the latent from an enrollment reference frame.
 
         The reference is decomposed into intrinsic components; its albedo is
@@ -109,6 +291,8 @@ class IdentityEstimator:
 
         Args:
             reference_face_bgr: (H, W, 3) uint8 BGR enrollment crop.
+            enrollment_mesh: Optional (478, 3) float32 landmarks for appearance
+                encoding (Task 2.5 — manifold wiring).
         """
         # ── 0. Guard the input — never raise on a degenerate reference ──────────
         ref = np.asarray(reference_face_bgr) if reference_face_bgr is not None else None
@@ -128,9 +312,12 @@ class IdentityEstimator:
                 "leaving latent uninitialized.",
                 exc,
             )
-            # Reset to a clean, uninitialized latent so partial state never leaks.
             self._latent = IdentityLatent(atlas_size=self._atlas_size)
             return
+
+        # ── Store enrollment mesh for appearance encoding (Task 2.5) ─────────
+        if enrollment_mesh is not None:
+            self.store_enrollment_mesh(enrollment_mesh)
 
         # ── Keep the legacy anchor consistent during shadow mode (best-effort) ──
         try:
@@ -197,6 +384,11 @@ class IdentityEstimator:
 
         # ── 7. Appearance code: zero-vector placeholder (Task 2.5 wires manifold) ──
         appearance_code = np.zeros(self._appearance_dim(), dtype=np.float32)
+
+        self._manifold.add_point("enrollment", appearance_code, confidence=1.0)
+        self._observation_points = []
+        self._observation_weights = []
+        self._geodesic_distances = []
 
         # ── 8. Populate and store the latent ──
         self._latent = IdentityLatent(
@@ -281,6 +473,8 @@ class IdentityEstimator:
     ) -> IdentityLatent:
         """Core fusion on a validated BGR observation (see ``update_latent``)."""
         atlas_h, atlas_w = self._atlas_size
+
+        from face_os.identity_manifold import IdentityPoint
 
         # ── 1. Decompose the OBSERVATION (source is telemetry, not memory) ─────
         # Reuse a caller-provided decomposition when present (avoids a redundant
@@ -389,6 +583,16 @@ class IdentityEstimator:
         gain = (stored_unc_b / (stored_unc_b + obs_unc_b + _EPS)) * quality_b
         gain = np.clip(gain, 0.0, 1.0).astype(np.float32)
 
+        deform_map = self._compute_deformation_map(atlas_h, atlas_w)
+        self._last_deform_max = float(np.max(deform_map))
+        self._last_deform_mean = float(np.mean(deform_map))
+        if np.any(deform_map > 0):
+            deform_gain = np.clip(
+                1.0 + deform_map[:, :, np.newaxis] * _K_EXPRESSION_GAIN, 1.0, 3.0
+            ).astype(np.float32)
+            gain = gain * deform_gain
+            gain = np.clip(gain, 0.0, 1.0).astype(np.float32)
+
         # Albedo fuses unconditionally (design.md:360). The quality-scaled gain
         # already self-suppresses motion as quality → 0, so an occluded frame
         # barely moves the stored albedo without any explicit "freeze" gate.
@@ -424,6 +628,68 @@ class IdentityEstimator:
         latent.microdetail = new_detail
         latent.microdetail_uncertainty = new_md_unc
         latent.observation_count = new_count
+
+        # ── 7. Encode appearance from current geometry (Task 2.5) ───────────
+        mesh = getattr(geometry, "mesh", None)
+        if mesh is not None:
+            code = self._encode_appearance(mesh)
+            if code is not None:
+                enrollment = self._manifold.get_point("enrollment")
+                # ── Geodesic outlier detection ──────────────────────────
+                # Extreme expressions (yawning, grimacing) can inject outlier
+                # observations that corrupt the metric tensor and drift the
+                # smoothed code.  We detect these by checking whether the raw
+                # code's geodesic distance from the smoothed trajectory is
+                # more than K standard deviations above the rolling mean.
+                outlier = False
+                if self._smoothed_appearance is not None and enrollment is not None:
+                    code_dist = float(np.linalg.norm(code - self._smoothed_appearance))
+                    self._geodesic_distances.append(code_dist)
+                    if len(self._geodesic_distances) > _MAX_MANIFOLD_OBSERVATIONS:
+                        self._geodesic_distances = self._geodesic_distances[-_MAX_MANIFOLD_OBSERVATIONS:]
+                    if len(self._geodesic_distances) >= _GEODESIC_OUTLIER_MIN_HISTORY:
+                        dists = np.array(self._geodesic_distances, dtype=np.float64)
+                        mean_d = float(np.mean(dists))
+                        std_d = float(np.std(dists))
+                        if std_d > 1e-8 and code_dist > mean_d + _GEODESIC_OUTLIER_STD * std_d:
+                            outlier = True
+
+                if not outlier:
+                    self._observation_points.append(code.copy())
+                    frame_weight = float(np.mean(quality).item())
+                    self._observation_weights.append(max(frame_weight, 1e-6))
+                    if len(self._observation_points) > _MAX_MANIFOLD_OBSERVATIONS:
+                        self._observation_points = self._observation_points[-_MAX_MANIFOLD_OBSERVATIONS:]
+                        self._observation_weights = self._observation_weights[-_MAX_MANIFOLD_OBSERVATIONS:]
+
+                if enrollment is not None:
+                    if len(self._observation_points) >= 3:
+                        neighbors = [IdentityPoint(coordinates=p) for p in self._observation_points]
+                        w_arr = np.array(self._observation_weights, dtype=np.float64)
+                        metric = self._manifold.compute_metric_tensor(enrollment, neighbors, weights=w_arr)
+                        enrollment.metric_tensor = metric
+                    if not outlier and self._smoothed_appearance is not None and getattr(enrollment, "metric_tensor", None) is not None:
+                        innovation = code - self._smoothed_appearance
+                        weighted = self._riemannian_gain(enrollment.metric_tensor, innovation)
+                        self._smoothed_appearance = self._smoothed_appearance + weighted
+                    elif not outlier and self._smoothed_appearance is None:
+                        self._smoothed_appearance = code.copy()
+                    smoothed_code = self._smoothed_appearance if self._smoothed_appearance is not None else code
+                else:
+                    smoothed_code = code
+
+                latent.appearance_code = smoothed_code.astype(np.float32)
+                current = IdentityPoint(coordinates=smoothed_code)
+                if enrollment is not None:
+                    distance = self._manifold.geodesic_distance(enrollment, current)
+                    latent.appearance_uncertainty = float(min(
+                        distance / self._manifold.config.max_geodesic_distance, 1.0
+                    ))
+                else:
+                    latent.appearance_uncertainty = float(np.clip(
+                        np.linalg.norm(smoothed_code) / _MAX_APPEARANCE_DISTANCE, 0.0, 1.0
+                    ))
+
         return latent
 
     # ── Task 2.3 — synthesize_identity (latent is the PRIMARY render input) ────
@@ -471,6 +737,9 @@ class IdentityEstimator:
         detail = self._warp_from_canonical(
             np.asarray(latent.microdetail, dtype=np.float32), geometry, render_hw, channels=3
         ).astype(np.float32)
+
+        appear_conf = 1.0 - float(latent.appearance_uncertainty)
+        detail = detail * appear_conf
 
         # Normals: geometry mesh if available, else face-prior ellipsoid.
         normal_map = self._normals_for(geometry, h, w)
