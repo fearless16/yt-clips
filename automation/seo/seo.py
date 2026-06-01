@@ -516,8 +516,8 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
     """
     try:
         response = ai.generate_fastest_first(
-            [{"role": "system", "content": _SYSTEM},
-             {"role": "user", "content": user_prompt}],
+            prompt=user_prompt,
+            system_instruction=_SYSTEM,
         )
         if not response or not response.strip():
             log.warning("[%s] AI returned empty response", clip_id)
@@ -553,8 +553,8 @@ def _escalation_seo(clip_id: str, user_prompt: str,
     )
     try:
         response = ai.generate_text(
-            system_content="You are a YouTube SEO expert. Return ONLY valid JSON.",
-            user_content=salvage_prompt,
+            prompt=salvage_prompt,
+            system_instruction="You are a YouTube SEO expert. Return ONLY valid JSON.",
         )
         if not response:
             return None
