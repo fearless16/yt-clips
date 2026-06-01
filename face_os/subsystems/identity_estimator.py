@@ -45,6 +45,8 @@ _MAX_MANIFOLD_OBSERVATIONS = 64
 _APPEARANCE_OBS_NOISE_SIGMA_SQ = 0.1
 _K_EXPRESSION_GAIN = 2.0
 _PINV_RIDGE_LAMBDA = 0.01
+_GEODESIC_OUTLIER_STD = 3.0
+_GEODESIC_OUTLIER_MIN_HISTORY = 10
 
 
 def _build_projection_matrix() -> np.ndarray:
@@ -107,6 +109,7 @@ class IdentityEstimator:
         self._projection_pinv: np.ndarray = _build_projection_pinv(self._projection_matrix)
         self._observation_points: list = []
         self._observation_weights: list = []
+        self._geodesic_distances: list = []
         self._smoothed_appearance: Optional[np.ndarray] = None
         self._last_deform_max: float = 0.0
         self._last_deform_mean: float = 0.0
@@ -382,6 +385,7 @@ class IdentityEstimator:
         self._manifold.add_point("enrollment", appearance_code, confidence=1.0)
         self._observation_points = []
         self._observation_weights = []
+        self._geodesic_distances = []
 
         # ── 8. Populate and store the latent ──
         self._latent = IdentityLatent(
@@ -603,27 +607,47 @@ class IdentityEstimator:
         if mesh is not None:
             code = self._encode_appearance(mesh)
             if code is not None:
-                self._observation_points.append(code.copy())
-                frame_weight = float(np.mean(quality).item())
-                self._observation_weights.append(max(frame_weight, 1e-6))
-                if len(self._observation_points) > _MAX_MANIFOLD_OBSERVATIONS:
-                    self._observation_points = self._observation_points[-_MAX_MANIFOLD_OBSERVATIONS:]
-                    self._observation_weights = self._observation_weights[-_MAX_MANIFOLD_OBSERVATIONS:]
-
                 enrollment = self._manifold.get_point("enrollment")
+                # ── Geodesic outlier detection ──────────────────────────
+                # Extreme expressions (yawning, grimacing) can inject outlier
+                # observations that corrupt the metric tensor and drift the
+                # smoothed code.  We detect these by checking whether the raw
+                # code's geodesic distance from the smoothed trajectory is
+                # more than K standard deviations above the rolling mean.
+                outlier = False
+                if self._smoothed_appearance is not None and enrollment is not None:
+                    code_dist = float(np.linalg.norm(code - self._smoothed_appearance))
+                    self._geodesic_distances.append(code_dist)
+                    if len(self._geodesic_distances) > _MAX_MANIFOLD_OBSERVATIONS:
+                        self._geodesic_distances = self._geodesic_distances[-_MAX_MANIFOLD_OBSERVATIONS:]
+                    if len(self._geodesic_distances) >= _GEODESIC_OUTLIER_MIN_HISTORY:
+                        dists = np.array(self._geodesic_distances, dtype=np.float64)
+                        mean_d = float(np.mean(dists))
+                        std_d = float(np.std(dists))
+                        if std_d > 1e-8 and code_dist > mean_d + _GEODESIC_OUTLIER_STD * std_d:
+                            outlier = True
+
+                if not outlier:
+                    self._observation_points.append(code.copy())
+                    frame_weight = float(np.mean(quality).item())
+                    self._observation_weights.append(max(frame_weight, 1e-6))
+                    if len(self._observation_points) > _MAX_MANIFOLD_OBSERVATIONS:
+                        self._observation_points = self._observation_points[-_MAX_MANIFOLD_OBSERVATIONS:]
+                        self._observation_weights = self._observation_weights[-_MAX_MANIFOLD_OBSERVATIONS:]
+
                 if enrollment is not None:
                     if len(self._observation_points) >= 3:
                         neighbors = [IdentityPoint(coordinates=p) for p in self._observation_points]
                         w_arr = np.array(self._observation_weights, dtype=np.float64)
                         metric = self._manifold.compute_metric_tensor(enrollment, neighbors, weights=w_arr)
                         enrollment.metric_tensor = metric
-                    if self._smoothed_appearance is not None and getattr(enrollment, "metric_tensor", None) is not None:
+                    if not outlier and self._smoothed_appearance is not None and getattr(enrollment, "metric_tensor", None) is not None:
                         innovation = code - self._smoothed_appearance
                         weighted = self._riemannian_gain(enrollment.metric_tensor, innovation)
                         self._smoothed_appearance = self._smoothed_appearance + weighted
-                    else:
+                    elif not outlier and self._smoothed_appearance is None:
                         self._smoothed_appearance = code.copy()
-                    smoothed_code = self._smoothed_appearance
+                    smoothed_code = self._smoothed_appearance if self._smoothed_appearance is not None else code
                 else:
                     smoothed_code = code
 
