@@ -26,6 +26,14 @@ from face_os.ab_validation import (
     ABMetrics,
 )
 
+try:
+    from face_os.ab_validation import CorpusSourceReport
+    _HAS_CORPUS_REPORT = True
+except ImportError:
+    _HAS_CORPUS_REPORT = False
+    CorpusSourceReport = None
+
+_ = CorpusSourceReport  # suppress unused-import warning when not available
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -474,3 +482,347 @@ class TestCompareApproaches:
                         ssim=0.5, sharpness_mean=100.0)
         comparison = compare_approaches("Close", "Far", close, far)
         assert comparison.winner == "Close"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# D-05: Corpus Comparison Tests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCorpusSourceReport:
+    def test_report_creation(self):
+        """CorpusSourceReport dataclass can be instantiated."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+        report = CorpusSourceReport()
+        assert report.total_clips == 0
+        assert report.passed == 0
+        assert report.regressed == 0
+
+    def test_to_dict(self):
+        """to_dict serializes all fields."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+        report = CorpusSourceReport(
+            total_clips=3, passed=2, regressed=1,
+            ssim_mean_overall=0.90,
+            clips=[
+                {'clip': 'a', 'regressed': False, 'ssim_mean': 0.95},
+                {'clip': 'b', 'regressed': False, 'ssim_mean': 0.88},
+                {'clip': 'c', 'regressed': True, 'ssim_mean': 0.72},
+            ]
+        )
+        d = report.to_dict()
+        assert d['total_clips'] == 3
+        assert d['passed'] == 2
+        assert len(d['clips']) == 3
+
+    def test_summary_ready_when_no_regressions(self):
+        """summary reports READY when zero regressions and clips > 0."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+        report = CorpusSourceReport(
+            total_clips=2, passed=2, regressed=0,
+            clips=[
+                {'clip': 'a', 'regressed': False, 'ssim_mean': 0.92},
+                {'clip': 'b', 'regressed': False, 'ssim_mean': 0.89},
+            ]
+        )
+        summary = report.summary()
+        assert "READY" in summary
+        assert "BLOCKED" not in summary
+
+    def test_summary_blocked_when_regressions(self):
+        """summary reports BLOCKED when any clip regressed."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+        report = CorpusSourceReport(
+            total_clips=3, passed=2, regressed=1,
+            clips=[
+                {'clip': 'a', 'regressed': False, 'ssim_mean': 0.92},
+                {'clip': 'b', 'regressed': True, 'ssim_mean': 0.72},
+                {'clip': 'c', 'regressed': False, 'ssim_mean': 0.89},
+            ]
+        )
+        summary = report.summary()
+        assert "BLOCKED" in summary
+
+    def test_summary_blocked_when_zero_clips(self):
+        """summary reports BLOCKED when no clips processed."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+        report = CorpusSourceReport(total_clips=0, passed=0, regressed=0)
+        summary = report.summary()
+        assert "BLOCKED" in summary
+
+
+class TestCorpusCompareSources:
+    def _make_stub_pipeline(self, frames_legacy, frames_latent):
+        """Create a pipeline stub that returns known frames for latency testing.
+
+        The stub tracks what render_source was requested and returns the
+        corresponding frames via process_frame() calls.
+        """
+        pipeline = MagicMock()
+        pipeline.render_source = 'legacy'
+        pipeline.render_mode_override = None
+
+        source_frames = {'legacy': frames_legacy, 'latent': frames_latent}
+        _idx = {'legacy': 0, 'latent': 0}
+
+        def _process_frame(frame, frame_idx=0):
+            source = pipeline.render_source
+            idx = _idx[source]
+            frames = source_frames[source]
+            if idx < len(frames):
+                result = {'frame': frames[idx], 'landmarks': None, 'transform': None}
+                _idx[source] = idx + 1
+                return result
+            return None
+
+        def _reset_state():
+            _idx['legacy'] = 0
+            _idx['latent'] = 0
+
+        pipeline.process_frame = _process_frame
+        pipeline._reset_state = _reset_state
+
+        return pipeline
+
+    def _fake_video_capture(self, frames, monkeypatch):
+        """Monkeypatch cv2.VideoCapture to return frames from a list."""
+        class FakeCap:
+            def __init__(self, path):
+                self._frames = list(frames)
+                self._idx = 0
+                self._opened = True
+
+            def isOpened(self):
+                return self._opened
+
+            def read(self):
+                if self._idx < len(self._frames):
+                    f = self._frames[self._idx]
+                    self._idx += 1
+                    return True, f
+                return False, None
+
+            def release(self):
+                pass
+
+        monkeypatch.setattr(cv2, 'VideoCapture', FakeCap)
+
+    def test_corpus_all_pass(self, monkeypatch):
+        """When all clips pass the gate, report shows passed=3, regressed=0."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+
+        frames = [_structured_frame(size=(128, 128)) for _ in range(10)]
+        self._fake_video_capture(frames, monkeypatch)
+
+        pipeline = self._make_stub_pipeline(frames, frames)
+
+        comparator = ABComparator()
+        corpus = [
+            ('clip_a', '/fake/a.mp4'),
+            ('clip_b', '/fake/b.mp4'),
+            ('clip_c', '/fake/c.mp4'),
+        ]
+        report = comparator.corpus_compare_sources(pipeline, corpus, max_frames=5)
+
+        assert report.total_clips == 3
+        assert report.passed == 3, f"Expected 3 passed, got {report.passed}; clips={report.clips}"
+        assert report.regressed == 0
+        assert report.ssim_mean_overall >= 0.99
+
+    def test_corpus_some_regress(self, monkeypatch):
+        """When some clips regress, report tracks passed vs regressed correctly."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+
+        good = [_structured_frame(size=(128, 128)) for _ in range(10)]
+        bad_legacy = [_solid_frame(bgr=(128, 128, 128), size=(128, 128)) for _ in range(10)]
+        bad_latent = [_solid_frame(bgr=(0, 0, 0), size=(128, 128)) for _ in range(10)]
+
+        self._fake_video_capture(good, monkeypatch)
+
+        pipeline = self._make_stub_pipeline(good, good)
+
+        call_count = [0]
+
+        def _process_frame(frame, frame_idx=0):
+            call_count[0] += 1
+            source = pipeline.render_source
+            clip_idx = (call_count[0] - 1) // (2 * 5)
+            if clip_idx >= 2 and source == 'latent':
+                return {'frame': bad_latent[call_count[0] % 10], 'landmarks': None, 'transform': None}
+            return {'frame': good[call_count[0] % 10], 'landmarks': None, 'transform': None}
+
+        pipeline.process_frame = _process_frame
+
+        def _reset_state():
+            pass
+
+        pipeline._reset_state = _reset_state
+
+        comparator = ABComparator()
+        corpus = [
+            ('clip_a', '/fake/a.mp4'),
+            ('clip_b', '/fake/b.mp4'),
+            ('clip_c', '/fake/c.mp4'),
+        ]
+        report = comparator.corpus_compare_sources(pipeline, corpus, max_frames=5)
+
+        assert report.total_clips == 3
+        assert report.passed == 2, f"Expected 2 passed, got {report.passed}; clips={report.clips}"
+        assert report.regressed == 1, f"Expected 1 regressed, got {report.regressed}; clips={report.clips}"
+
+    def test_corpus_exception_handling(self, monkeypatch):
+        """Corpus clips that fail with exceptions are marked as regressed."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+
+        frames = [_structured_frame(size=(128, 128)) for _ in range(10)]
+        self._fake_video_capture(frames, monkeypatch)
+
+        pipeline = self._make_stub_pipeline(frames, frames)
+        original_compare = ABComparator.compare_render_sources
+
+        call_idx = [0]
+
+        def _failing_compare(self_arg, pipeline_arg, video_path, max_frames=100, **kwargs):
+            call_idx[0] += 1
+            if call_idx[0] == 2:
+                raise RuntimeError("Simulated pipeline failure")
+            return original_compare(self_arg, pipeline_arg, video_path, max_frames=max_frames, **kwargs)
+
+        monkeypatch.setattr(ABComparator, 'compare_render_sources', _failing_compare)
+
+        comparator = ABComparator()
+        corpus = [
+            ('clip_a', '/fake/a.mp4'),
+            ('clip_b', '/fake/b.mp4'),
+            ('clip_c', '/fake/c.mp4'),
+        ]
+        report = comparator.corpus_compare_sources(pipeline, corpus, max_frames=5)
+
+        assert report.total_clips == 3, f"Expected 3 total, got {report.total_clips}"
+        assert report.regressed >= 1, f"Expected at least 1 regressed (the exception), got {report.regressed}"
+        regressed_clips = [c for c in report.clips if c.get('regressed', False)]
+        assert len(regressed_clips) >= 1
+
+    def test_corpus_aggregates_metrics(self, monkeypatch):
+        """Overall means aggregate correctly across all clips."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+
+        frames = [_structured_frame(size=(128, 128)) for _ in range(10)]
+        self._fake_video_capture(frames, monkeypatch)
+
+        pipeline = self._make_stub_pipeline(frames, frames)
+
+        comparator = ABComparator()
+        corpus = [
+            ('clip_a', '/fake/a.mp4'),
+            ('clip_b', '/fake/b.mp4'),
+        ]
+        report = comparator.corpus_compare_sources(pipeline, corpus, max_frames=5)
+
+        assert report.total_clips == 2
+        assert report.ssim_mean_overall > 0.5
+        assert report.lab_drift_mean_overall >= 0.0
+        assert report.sharpness_ratio_mean_overall > 0.5
+        assert report.flicker_ratio_mean_overall >= 0.0
+
+    def test_corpus_gate_kwargs_passthrough(self, monkeypatch):
+        """Gate kwargs (ssim_floor etc.) are passed through to compare_render_sources."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+
+        frames = [_structured_frame(size=(128, 128)) for _ in range(10)]
+        self._fake_video_capture(frames, monkeypatch)
+
+        pipeline = self._make_stub_pipeline(frames, frames)
+
+        comparator = ABComparator()
+        corpus = [('clip_a', '/fake/a.mp4')]
+        report = comparator.corpus_compare_sources(
+            pipeline, corpus, max_frames=5, ssim_floor=2.0
+        )
+
+        assert report.total_clips == 1
+        assert report.regressed == 1, f"Expected regressed with ssim_floor=2.0, got regressed={report.regressed}"
+
+    def test_corpus_empty(self):
+        """Empty corpus produces empty report with no crashes."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+
+        pipeline = self._make_stub_pipeline([], [])
+        comparator = ABComparator()
+        report = comparator.corpus_compare_sources(pipeline, [], max_frames=5)
+
+        assert report.total_clips == 0
+        assert report.passed == 0
+        assert report.regressed == 0
+        assert report.clips == []
+
+
+class TestD05Readiness:
+    """Phase 3 default-flip gate readiness checks."""
+
+    def test_compare_render_sources_exists(self):
+        """compare_render_sources is available on ABComparator."""
+        comp = ABComparator()
+        assert hasattr(comp, 'compare_render_sources')
+        assert callable(comp.compare_render_sources)
+
+    def test_corpus_compare_sources_exists(self):
+        """corpus_compare_sources is available on ABComparator."""
+        if not _HAS_CORPUS_REPORT:
+            pytest.skip("CorpusSourceReport not available")
+        comp = ABComparator()
+        assert hasattr(comp, 'corpus_compare_sources')
+        assert callable(comp.corpus_compare_sources)
+
+    def test_regression_gate_has_named_thresholds(self):
+        """All four gate thresholds are named parameters."""
+        comp = ABComparator()
+        import inspect
+        sig = inspect.signature(comp.compare_render_sources)
+        params = list(sig.parameters.keys())
+        assert 'ssim_floor' in params
+        assert 'lab_drift_ceiling' in params
+        assert 'sharpness_ratio_floor' in params
+        assert 'flicker_ratio_ceiling' in params
+
+    def test_regression_identical_frames_pass(self, monkeypatch):
+        """Identical latent and legacy frames pass all gates (regressed=False)."""
+        frames = [_structured_frame(size=(128, 128)) for _ in range(10)]
+
+        class FakeCap:
+            def __init__(self, path):
+                self._frames = list(frames)
+                self._idx = 0
+                self._opened = True
+
+            def isOpened(self):
+                return self._opened
+
+            def read(self):
+                if self._idx < len(self._frames):
+                    f = self._frames[self._idx]
+                    self._idx += 1
+                    return True, f
+                return False, None
+
+            def release(self):
+                pass
+
+        monkeypatch.setattr(cv2, 'VideoCapture', FakeCap)
+
+        pipeline = _make_stub_pipeline(frames, frames)
+
+        comp = ABComparator()
+        result = comp.compare_render_sources(pipeline, '/fake/a.mp4', max_frames=5)
+        assert result['regressed'] is False, f"Identical frames should not regress: {result.get('reasons')}"
