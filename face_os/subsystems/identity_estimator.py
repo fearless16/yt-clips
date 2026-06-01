@@ -41,6 +41,7 @@ _APPEARANCE_DIM = 16
 _PROJECTION_SEED = 42
 _PROJECTION_INPUT_DIM = 478 * 3
 _MAX_APPEARANCE_DISTANCE = 10.0
+_MAX_MANIFOLD_OBSERVATIONS = 64
 
 
 def _build_projection_matrix() -> np.ndarray:
@@ -86,9 +87,12 @@ class IdentityEstimator:
         self._latent = IdentityLatent(atlas_size=atlas_size)
         self._last_normal_source = "face_prior"
         self._best_quality: Optional[np.ndarray] = None
-        # ── Task 2.5: appearance encoder state ──────────────────────────────
         self._enrollment_mesh: Optional[np.ndarray] = None
         self._projection_matrix: np.ndarray = _build_projection_matrix()
+        self._observation_points: list = []
+        if self._manifold is None:
+            from face_os.identity_manifold import IdentityManifold, ManifoldConfig
+            self._manifold = IdentityManifold(ManifoldConfig(dimension=self._appearance_dim(), max_geodesic_distance=_MAX_APPEARANCE_DISTANCE))
 
     def latent(self) -> IdentityLatent:
         return self._latent
@@ -268,6 +272,9 @@ class IdentityEstimator:
 
         # ── 7. Appearance code: zero-vector placeholder (Task 2.5 wires manifold) ──
         appearance_code = np.zeros(self._appearance_dim(), dtype=np.float32)
+
+        self._manifold.add_point("enrollment", appearance_code, confidence=1.0)
+        self._observation_points = []
 
         # ── 8. Populate and store the latent ──
         self._latent = IdentityLatent(
@@ -478,9 +485,25 @@ class IdentityEstimator:
             code = self._encode_appearance(mesh)
             if code is not None:
                 latent.appearance_code = code
-                latent.appearance_uncertainty = float(np.clip(
-                    np.linalg.norm(code) / _MAX_APPEARANCE_DISTANCE, 0.0, 1.0
-                ))
+                enrollment = self._manifold.get_point("enrollment")
+                if enrollment is not None:
+                    self._observation_points.append(code.copy())
+                    if len(self._observation_points) > _MAX_MANIFOLD_OBSERVATIONS:
+                        self._observation_points = self._observation_points[-_MAX_MANIFOLD_OBSERVATIONS:]
+                    if len(self._observation_points) >= 3:
+                        from face_os.identity_manifold import IdentityPoint
+                        neighbors = [IdentityPoint(coordinates=p) for p in self._observation_points]
+                        metric = self._manifold.compute_metric_tensor(enrollment, neighbors)
+                        enrollment.metric_tensor = metric
+                    current = IdentityPoint(coordinates=code)
+                    distance = self._manifold.geodesic_distance(enrollment, current)
+                    latent.appearance_uncertainty = float(min(
+                        distance / self._manifold.config.max_geodesic_distance, 1.0
+                    ))
+                else:
+                    latent.appearance_uncertainty = float(np.clip(
+                        np.linalg.norm(code) / _MAX_APPEARANCE_DISTANCE, 0.0, 1.0
+                    ))
 
         return latent
 
