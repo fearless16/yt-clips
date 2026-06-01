@@ -27,6 +27,8 @@ class ABMetrics:
     transform_determinant_stability: float = 0.0
     ssim: float = 0.0
     temporal_smoothness: float = 0.0
+    perceptual_distance: float = 0.0
+    sharpness_mean: float = 0.0
 
     def to_dict(self) -> dict:
         return self.__dict__.copy()
@@ -222,6 +224,66 @@ def compute_sharpness(frame: np.ndarray, mask: Optional[np.ndarray] = None) -> f
     return float(np.var(lap))
 
 
+def compute_perceptual_distance(
+    frame_a: np.ndarray,
+    frame_b: np.ndarray,
+    mask: Optional[np.ndarray] = None,
+    scales: int = 3,
+) -> float:
+    """Multi-scale gradient-based perceptual distance (D-02 LPIPS proxy).
+
+    Combines gradient-magnitude correlation with multi-scale Laplacian
+    pyramid MSE to capture both edge alignment and structural similarity
+    at multiple spatial frequencies. Lower = more perceptually similar.
+
+    No external deep-learning deps — pure OpenCV/numpy.
+    """
+    if frame_a.shape != frame_b.shape:
+        frame_b = cv2.resize(frame_b, (frame_a.shape[1], frame_a.shape[0]))
+
+    if mask is not None and mask.max() > 0.01:
+        m = cv2.resize(mask.astype(np.float32), (frame_a.shape[1], frame_a.shape[0]))
+        m = (m > 0.5).astype(np.float32)
+        m_3ch = np.stack([m] * 3, axis=2) if m.ndim == 2 else m
+    else:
+        m_3ch = np.ones_like(frame_a, dtype=np.float32)
+
+    weight_sum = 0.0
+    total_dist = 0.0
+    pa, pb = frame_a.copy(), frame_b.copy()
+
+    for scale in range(scales):
+        h, w = pa.shape[0], pa.shape[1]
+        mk = cv2.resize(m_3ch, (w, h)) if m_3ch.shape[:2] != pa.shape[:2] else m_3ch
+
+        ga_k = pa.astype(np.float32)
+        gb_k = pb.astype(np.float32)
+
+        gx_a = cv2.Sobel(ga_k, cv2.CV_32F, 1, 0, ksize=3)
+        gy_a = cv2.Sobel(ga_k, cv2.CV_32F, 0, 1, ksize=3)
+        gm_a = np.sqrt(gx_a**2 + gy_a**2) * mk
+
+        gx_b = cv2.Sobel(gb_k, cv2.CV_32F, 1, 0, ksize=3)
+        gy_b = cv2.Sobel(gb_k, cv2.CV_32F, 0, 1, ksize=3)
+        gm_b = np.sqrt(gx_b**2 + gy_b**2) * mk
+
+        mag_dist = float(np.mean((gm_a - gm_b) ** 2))
+
+        lap_a = cv2.Laplacian(ga_k, cv2.CV_32F, ksize=3) * mk
+        lap_b = cv2.Laplacian(gb_k, cv2.CV_32F, ksize=3) * mk
+        lap_dist = float(np.mean((lap_a - lap_b) ** 2))
+
+        scale_weight = 1.0 / (2 ** scale)
+        total_dist += (mag_dist * 0.5 + lap_dist * 0.5) * scale_weight
+        weight_sum += scale_weight
+
+        if scale < scales - 1:
+            pa = cv2.pyrDown(pa)
+            pb = cv2.pyrDown(pb)
+
+    return float(np.sqrt(total_dist / max(weight_sum, 1e-8)))
+
+
 def compute_temporal_smoothness(frames: List[np.ndarray]) -> float:
     if len(frames) < 2: return 1.0
     changes = [np.mean(np.abs(frames[i].astype(np.float32) - frames[i - 1].astype(np.float32))) for i in range(1, len(frames))]
@@ -241,15 +303,25 @@ def compute_all_metrics(
     landmarks_list: Optional[list] = None,
     transforms: Optional[list] = None,
     masks: Optional[List[np.ndarray]] = None,
+    paired_frames: Optional[List[np.ndarray]] = None,
 ) -> ABMetrics:
     metrics = ABMetrics()
     if frames:
         metrics.luminance_consistency = compute_luminance_consistency(frames)
         metrics.temporal_brightness_stability = compute_temporal_brightness_stability(frames)
         metrics.temporal_smoothness = compute_temporal_smoothness(frames)
+        metrics.sharpness_mean = float(np.mean([compute_sharpness(f) for f in frames]))
         if reference is not None:
             mask = masks[0] if masks else None
             metrics.lab_drift = compute_lab_drift(frames[0], reference, mask=mask)
+        if paired_frames:
+            n = min(len(frames), len(paired_frames))
+            mask_list = masks[:n] if masks and len(masks) >= n else [None] * n
+            pdist_scores = [
+                compute_perceptual_distance(frames[i], paired_frames[i], mask=mask_list[i])
+                for i in range(n)
+            ]
+            metrics.perceptual_distance = float(np.mean(pdist_scores))
     if landmarks_list:
         metrics.procrustes_consistency = compute_procrustes_consistency(landmarks_list)
         metrics.landmark_coherence = compute_landmark_coherence(landmarks_list)
@@ -269,16 +341,23 @@ def compare_approaches(approach_a: str, approach_b: str, metrics_a: ABMetrics, m
         ("procrustes_consistency", metrics_a.procrustes_consistency, metrics_b.procrustes_consistency, "higher"),
         ("transform_determinant_stability", metrics_a.transform_determinant_stability, metrics_b.transform_determinant_stability, "higher"),
         ("ssim", metrics_a.ssim, metrics_b.ssim, "higher"),
+        ("perceptual_distance", metrics_a.perceptual_distance, metrics_b.perceptual_distance, "lower"),
+        ("sharpness_mean", metrics_a.sharpness_mean, metrics_b.sharpness_mean, "higher"),
     ]
 
     for name, val_a, val_b, direction in checks:
         if direction == "lower":
-            if val_a < val_b: score_a += 1
-            else: score_b += 1
+            if val_a < val_b:
+                score_a += 1
+            elif val_b < val_a:
+                score_b += 1
             details[name] = abs(val_a - val_b)
         else:
-            if val_a > val_b: score_a += 1
-            else: score_b += 1
+            if val_a > val_b:
+                score_a += 1
+            elif val_b > val_a:
+                score_b += 1
+            details[name] = abs(val_a - val_b)
 
     if score_a > score_b:
         comparison.winner, comparison.improvement_pct = approach_a, (score_a - score_b) / len(checks) * 100
@@ -300,8 +379,14 @@ class ABComparator:
         frames_p, lm_p, tf_p = self._run_pipeline(pipeline, video_path, max_frames, use_physical=True)
         frames_a, lm_a, tf_a = self._run_pipeline(pipeline, video_path, max_frames, use_physical=False)
 
-        metrics_p = compute_all_metrics(frames_p, landmarks_list=lm_p, transforms=tf_p)
-        metrics_a = compute_all_metrics(frames_a, landmarks_list=lm_a, transforms=tf_a)
+        metrics_p = compute_all_metrics(
+            frames_p, landmarks_list=lm_p, transforms=tf_p,
+            paired_frames=frames_a,
+        )
+        metrics_a = compute_all_metrics(
+            frames_a, landmarks_list=lm_a, transforms=tf_a,
+            paired_frames=frames_p,
+        )
 
         if frames_p and frames_a:
             ssim_scores = [compute_ssim(fa, fb) for fa, fb in zip(frames_p, frames_a)]
@@ -310,9 +395,12 @@ class ABComparator:
         comparison = compare_approaches("PhysicalRenderer", "AlphaCompositing", metrics_p, metrics_a)
 
         return {
-            "comparison": comparison.to_dict(), "metrics_physical": metrics_p.to_dict(),
-            "metrics_alpha": metrics_a.to_dict(), "frames_processed": len(frames_p),
-            "winner": comparison.winner, "improvement_pct": comparison.improvement_pct,
+            "comparison": comparison.to_dict(),
+            "metrics_physical": metrics_p.to_dict(),
+            "metrics_alpha": metrics_a.to_dict(),
+            "frames_processed": len(frames_p),
+            "winner": comparison.winner,
+            "improvement_pct": comparison.improvement_pct,
         }
 
     def _run_pipeline(self, pipeline, video_path: str, max_frames: int, use_physical: bool) -> tuple:
@@ -514,7 +602,8 @@ class ABComparator:
         
         metrics_map = [
             ("LAB Drift", "lab_drift", "lower"), ("Luminance", "luminance_consistency", "higher"),
-            ("Smoothness", "temporal_smoothness", "higher"), ("SSIM", "ssim", "higher"),
+            ("Temporal Smoothness", "temporal_smoothness", "higher"), ("SSIM", "ssim", "higher"),
+            ("Perceptual Dist", "perceptual_distance", "lower"), ("Sharpness", "sharpness_mean", "higher"),
             ("Procrustes", "procrustes_consistency", "higher"), ("Transform", "transform_determinant_stability", "higher")
         ]
         
