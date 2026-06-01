@@ -279,6 +279,8 @@ LATENT_TELEMETRY_KEYS = {
     "hybrid_alpha_mean",
     "effective_blend_max",
     "appearance_uncertainty",
+    "deform_max",
+    "deform_mean",
 }
 
 FRAME_TELEMETRY_KEYS = {

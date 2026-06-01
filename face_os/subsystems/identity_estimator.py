@@ -107,6 +107,8 @@ class IdentityEstimator:
         self._observation_points: list = []
         self._observation_weights: list = []
         self._smoothed_appearance: Optional[np.ndarray] = None
+        self._last_deform_max: float = 0.0
+        self._last_deform_mean: float = 0.0
         if self._manifold is None:
             from face_os.identity_manifold import IdentityManifold, ManifoldConfig
             self._manifold = IdentityManifold(ManifoldConfig(dimension=self._appearance_dim(), max_geodesic_distance=_MAX_APPEARANCE_DISTANCE))
@@ -527,6 +529,8 @@ class IdentityEstimator:
         gain = np.clip(gain, 0.0, 1.0).astype(np.float32)
 
         deform_map = self._compute_deformation_map(atlas_h, atlas_w)
+        self._last_deform_max = float(np.max(deform_map))
+        self._last_deform_mean = float(np.mean(deform_map))
         if np.any(deform_map > 0):
             deform_gain = np.clip(
                 1.0 + deform_map[:, :, np.newaxis] * _K_EXPRESSION_GAIN, 1.0, 3.0
