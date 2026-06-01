@@ -277,6 +277,8 @@ LATENT_TELEMETRY_KEYS = {
     "contract_assertions_passed",
     "gate_state",
     "hybrid_alpha_mean",
+    "effective_blend_max",
+    "appearance_uncertainty",
 }
 
 FRAME_TELEMETRY_KEYS = {
@@ -1486,20 +1488,20 @@ class TestLatentRenderModeOnRealVideo:
     def test_hybrid_blend_engages_and_respects_cap(self, latent_run):
         """RUNTIME TRUTH (Phase 2B per-pixel hybrid): on real video the latent is
         broadly uncertain (measured interior U_mean ~0.65), so the uncertainty
-        hybrid MUST actually engage — and it MUST respect the blend_max cap so
-        the latent never loses majority authority.
+        hybrid MUST actually engage — and it MUST respect the effective blend_max
+        cap (which now includes Task 2.5 expression-aware modulation) so the
+        latent never loses majority authority.
 
         Per engaged latent-primary frame, hybrid_alpha_mean (mean per-pixel
-        LATENT weight) must satisfy ``1-blend_max <= alpha_mean < 1.0``:
-          - ``>= 1-blend_max`` proves the CAP held (latent kept >=50% everywhere;
-            the source-leak metric stays bounded — pinned separately by
-            test_latent_render_reduces_source_fraction on the same composite).
+        LATENT weight) must satisfy ``1-effective_blend_max <= alpha_mean < 1.0``:
+          - ``>= 1-effective_blend_max`` proves the CAP held (latent kept majority
+            everywhere; effective_blend_max already accounts for appearance
+            divergence when expression differs from enrollment).
           - ``< 1.0`` proves the hybrid is NOT a no-op (observation crossed where
             uncertain).
         At least one frame must show CLEAR blending (alpha_mean < 0.9) so a
         single near-confident pixel can't masquerade as engagement."""
         p, _, _ = latent_run
-        floor = 1.0 - p._hybrid_blend_max
         log = p.get_latent_telemetry()
         engaged = [r for r in log if r["gate_state"] == "engaged"]
         assert engaged, "no engaged frames — cannot check hybrid"
@@ -1507,10 +1509,12 @@ class TestLatentRenderModeOnRealVideo:
         for r in engaged:
             a = r["hybrid_alpha_mean"]
             alphas.append(a)
+            effective_bm = r.get("effective_blend_max", p._hybrid_blend_max)
+            floor = 1.0 - effective_bm
             assert floor - 1e-6 <= a < 1.0, (
                 f"frame {r['frame_idx']} hybrid_alpha_mean {a:.4f} outside "
-                f"[{floor:.2f}, 1.0): cap breached (latent lost majority) or "
-                f"hybrid was a no-op"
+                f"[{floor:.4f}, 1.0): effective_blend_max={effective_bm:.4f}, "
+                f"cap breached (latent lost majority) or hybrid was a no-op"
             )
         assert min(alphas) < 0.9, (
             f"hybrid never meaningfully engaged on real video (min alpha_mean "
