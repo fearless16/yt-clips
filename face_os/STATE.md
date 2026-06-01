@@ -1,6 +1,6 @@
 # Face OS v3.8 — Compact State Reference
 
-**Last updated:** 2026-06-01 | **Tests:** 479 collected in face_os/tests/ (479 passing, 3 skipped) | **Source:** ~15,700 lines
+**Last updated:** 2026-06-02 | **Tests:** 479 collected in face_os/tests/ (479 passing, 3 skipped) | **Source:** ~15,700 lines
 
 This file is the current source of truth for Face OS. Older status files may
 describe historical drift; use this file for current runtime alignment.
@@ -38,12 +38,12 @@ pipeline.py (single orchestration runtime)
 | D-04 | Dense geometry integration | **ALIGNED** | Physical path calls DenseGeometryEstimator.estimate() with anatomical anchor-based landmark mapping (fixed H-07). Face-prior normal map + normal-variance edge protection (`edge_protection` param) wired into all 4 render paths via `_postprocess_rendered_crop`. |
 | D-05 | Identity decoupling | **LATENT PATH PROVEN (explicit flag); default stays `legacy` — Phase 3 default-flip BLOCKED on A/B non-regression proof** | The latent render path works end-to-end on real video and is the architectural retirement of paste-then-relight: with `render_source='latent'` the latent DRIVES the face via `synthesize_identity` → `estimate_lighting` (closed-form Lambertian inverse from the OBSERVATION) → `render_from_latent` (`observed=None`, fatal contract), composited as a PEER branch in `_render_core` skipping the source-HF tail (retires A-2/A-3/A-5). **Runtime truth (real clip `clips_test/test_clip.mp4`, render_source='latent' forced):** `TestLatentRenderModeOnRealVideo` 10/10 + `TestLatentQualityOnRealVideo`: **100% of face frames latent_primary=True**, and **96.6% of driven frames have source_pixel_fraction < 0.02** (mean 0.0129, median 0.0115, p90 0.0193, max 0.0220) — spec Requirement 7.3 (≥90% of physical frames < 0.02) HONESTLY met for the first time. The earlier lighting-collapse/flat-render (mesh-normal hypothesis REFUTED) is fixed: shading carries scene exposure via `_observation_shading = lowpass(observed_luminance / latent_albedo)`. Relative-to-floor production gate (`_evaluate_latent_gate`) + per-pixel uncertainty hybrid (`_hybrid_face`) both PROVEN engaging. BeliefPixel demoted (`USE_LEGACY_RGB_BELIEF=False`), 0.4 blend + drift-bucket retired on the latent path, silent sanitizers removed (`assert_intrinsic_contract` sole guard). **Default = `legacy` (pipeline.py:252).** Per design.md:483 / requirements.md:126 the default flips to latent ONLY once A/B is proven non-regressing on real video; that A/B proof is NOT yet established, so the prior "flip to latent / Phase 3 complete" was premature and is reverted. **3 runtime-truth bugs found & fixed (2026-05-31)** by running the FULL slow suite on the real clip (docs had claimed green without it — the "green tests hiding broken runtime" trap): (1) premature default flip broke shadow-mode invariants; (2) `test_render_path_is_valid` allow-list predated `latent`; (3) `TestLatentQualityOnRealVideo` used the wrong statistic (mean, dominated by legacy `=1.0` frames) instead of the spec's frame-count criterion, and hardcoded the 1.2 GB master video. Fast 282, slow 14, 0 failures.
 | D-06 | Predictive temporal belief | **ALIGNED MECHANISM** | SIM(2) velocity prediction computed and used for 1-2 frame occlusion recovery (fixed H-02). True SE(2)/SIM(2) Lie algebra exp/log (fixed H-04). |
-| D-07 | State-space runtime brain | **PARTIAL** | Energy scaling now gates rendering decisions (fixed H-03). Runtime remains procedural. optimizer_architecture.py is stranded. |
+| D-07 | State-space runtime brain | **NOT NEEDED (v3.x)** | Current Kalman filter (state_evolution.py) + SIM(2) velocity prediction + energy_scaling is architecturally sufficient for temporal consistency and occlusion recovery. optimizer_architecture.py (32 tests passing, zero runtime integration) is a Phase C scheduled module — no integration planned for v3.x. |
 | D-08 | Per-frame truthful telemetry | **ALIGNED** | `_emit_frame_telemetry()` accepts explicit branch truth. All paths emit explicit telemetry including energy gating reasons. |
 | D-09 | Visual regression validation | **ALIGNED** | Integration tests validate sharpness, contrast ratio, flicker, NaN/Inf, telemetry schema on real video. |
-| D-10 | Probabilistic architectural closure | **PARTIAL / PHASE C** | Subsystem wrappers are real delegates. Factor graph not implemented. |
+| D-10 | Probabilistic architectural closure | **NOT NEEDED (v3.x)** | Subsystem wrappers (IdentityEstimator, TemporalEstimator, GeometryEstimator, FaceRenderer) are real runtime delegates. Factor-graph inference, uncertainty propagation, MAP runtime, and Bayesian temporal inference are explicitly deferred to Phase C. STRANDED_MODULES.md:2630 confirms D-10 is "NOT NEEDED" for current architecture. |
 
-**Current honest summary:** 5 aligned mechanisms/areas, 5 partial architectural areas.
+**Current honest summary:** 7 aligned mechanisms/areas, 3 Phase C deferred, 0 broken.
 
 ## Key Entry Points
 
@@ -72,11 +72,11 @@ pipeline.py (single orchestration runtime)
 
 ```bash
 # All tests
-.venv/bin/python -m pytest face_os/tests/ -v
+.venv/bin/python -m pytest tests/face_os/ -v
 
 # Fast tests only (no video)
-.venv/bin/python -m pytest face_os/tests/ -v -m "not slow"
+.venv/bin/python -m pytest tests/face_os/ -v -m "not slow"
 
 # Slow tests only (requires input/video.mp4)
-.venv/bin/python -m pytest face_os/tests/ -v -m "slow"
+.venv/bin/python -m pytest tests/face_os/ -v -m "slow"
 ```
