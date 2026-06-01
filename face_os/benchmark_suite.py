@@ -164,6 +164,78 @@ class SyntheticClipGenerator:
             frames.append(frame)
         return frames
 
+    def generate_overexposure_clip(self, num_frames: int = 90) -> List[np.ndarray]:
+        frames = []
+        third = num_frames // 3
+        for i in range(num_frames):
+            frame = self._create_base_frame()
+            if i < third:
+                factor = 1.0
+            elif i < 2 * third:
+                factor = 2.5 + 0.5 * np.sin(np.pi * (i - third) / third)
+            else:
+                factor = 1.0
+            frame = self._apply_brightness(frame, factor)
+            frames.append(frame)
+        return frames
+
+    def generate_webcam_noise_clip(self, num_frames: int = 90) -> List[np.ndarray]:
+        frames = []
+        band_height = 20
+        for i in range(num_frames):
+            frame = self._create_base_frame()
+            frame = self._add_noise(frame, sigma=np.random.uniform(30, 40))
+            for y in range(0, self.height, band_height):
+                band_noise = np.random.randint(-30, 30)
+                band_slice = slice(y, min(y + band_height, self.height))
+                frame[band_slice, :] = np.clip(
+                    frame[band_slice, :].astype(np.int16) + band_noise, 0, 255
+                ).astype(np.uint8)
+            frames.append(frame)
+        return frames
+
+    def generate_rolling_shutter_clip(self, num_frames: int = 90) -> List[np.ndarray]:
+        frames = []
+        amplitude = 12
+        phase = 0.3
+        for i in range(num_frames):
+            frame = self._create_base_frame()
+            result = np.zeros_like(frame)
+            for row in range(self.height):
+                row_pct = row / self.height
+                dx = int(amplitude * np.sin(row_pct * np.pi + i * phase))
+                if dx >= 0:
+                    result[row, dx:] = frame[row, :self.width - dx]
+                else:
+                    result[row, :self.width + dx] = frame[row, -dx:]
+            frames.append(result)
+        return frames
+
+    def generate_beard_shadow_clip(self, num_frames: int = 90) -> List[np.ndarray]:
+        frames = []
+        shadow_color = np.array([40, 35, 30], dtype=np.float32)
+        for i in range(num_frames):
+            frame = self._create_base_frame()
+            if i % 2 == 0:
+                lower_third_y = 2 * self.height // 3
+                lower_third_h = self.height - lower_third_y
+                opacity = np.random.random((lower_third_h, self.width)) * 0.6
+                roi = frame[lower_third_y:, :, :].astype(np.float32)
+                blended = roi * (1 - opacity[:, :, np.newaxis]) + shadow_color * opacity[:, :, np.newaxis]
+                frame[lower_third_y:, :, :] = np.clip(blended, 0, 255).astype(np.uint8)
+            frames.append(frame)
+        return frames
+
+    def generate_face_cutoff_clip(self, num_frames: int = 90) -> List[np.ndarray]:
+        frames = []
+        for i in range(num_frames):
+            frame = self._create_base_frame()
+            displacement = int(self.width * 0.8 * np.sin(2 * np.pi * i / num_frames))
+            M = np.float32([[1, 0, displacement], [0, 1, 0]])
+            frame = cv2.warpAffine(frame, M, (self.width, self.height), borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
+            frames.append(frame)
+        return frames
+
     def _create_base_frame(self) -> np.ndarray:
         # BEAST MODE FIX: Added noise/texture so MediaPipe doesn't reject it as a flat poster.
         frame = np.ones((self.height, self.width, 3), dtype=np.uint8) * 180
@@ -291,6 +363,21 @@ def compute_geometric_consistency(transforms: list) -> float:
     return float(max(0.0, 1.0 - min(std_det / mean_det, 1.0)))
 
 
+def run_benchmark(suite: BenchmarkSuite) -> BenchmarkSuite:
+    for clip in suite.clips:
+        if clip.generator:
+            frames = clip.generator()
+            clip.metrics = BenchmarkMetrics(
+                drift_score=compute_drift_score(frames),
+                flicker_score=compute_flicker_score(frames),
+                geometric_consistency_score=1.0,
+                total_frames=len(frames),
+                processing_time_s=0.0,
+                fps=0.0,
+            )
+    return suite
+
+
 def create_default_suite() -> BenchmarkSuite:
     suite = BenchmarkSuite()
     gen = SyntheticClipGenerator()
@@ -302,5 +389,10 @@ def create_default_suite() -> BenchmarkSuite:
     suite.add_clip("synthetic_hard_dropped", ClipCategory.HARD, "Dropped frames", "hard", lambda: gen.generate_dropped_frames_clip())
     suite.add_clip("synthetic_adversarial_lowlight", ClipCategory.ADVERSARIAL, "Low light, noise, sunglasses", "adversarial", gen.generate_adversarial_clip)
     suite.add_clip("synthetic_adversarial_lighting", ClipCategory.ADVERSARIAL, "Sudden lighting changes", "adversarial", gen.generate_lighting_change_clip)
+    suite.add_clip("synthetic_hard_overexposure", ClipCategory.HARD, "Overexposure blowout", "hard", gen.generate_overexposure_clip)
+    suite.add_clip("synthetic_hard_webcam_noise", ClipCategory.HARD, "Heavy sensor noise with banding", "hard", gen.generate_webcam_noise_clip)
+    suite.add_clip("synthetic_adversarial_rolling_shutter", ClipCategory.ADVERSARIAL, "Simulated rolling shutter skew", "adversarial", gen.generate_rolling_shutter_clip)
+    suite.add_clip("synthetic_adversarial_beard_shadow", ClipCategory.ADVERSARIAL, "Beard shadow on lower face", "adversarial", gen.generate_beard_shadow_clip)
+    suite.add_clip("synthetic_adversarial_face_cutoff", ClipCategory.ADVERSARIAL, "Face partially off-screen", "adversarial", gen.generate_face_cutoff_clip)
 
     return suite
