@@ -288,6 +288,8 @@ class FaceOSPipeline:
             else 0.5
         )
         self._last_hybrid_alpha_mean: float = 1.0
+        self._last_effective_blend_max: float = self._hybrid_blend_max
+        self._last_appearance_uncertainty: float = 0.0
 
         # DIAGNOSTIC ONLY (default OFF, zero cost when off): when enabled, the
         # latent render path stashes its pre-composite rendered face, the actual
@@ -1825,6 +1827,8 @@ class FaceOSPipeline:
                     contract_assertions_passed=bool(contract_assertions_passed),
                     gate_state=str(self._last_gate_state),
                     hybrid_alpha_mean=float(self._last_hybrid_alpha_mean),
+                    effective_blend_max=float(self._last_effective_blend_max),
+                    appearance_uncertainty=float(self._last_appearance_uncertainty),
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1843,6 +1847,8 @@ class FaceOSPipeline:
                     "contract_assertions_passed": bool(contract_assertions_passed),
                     "gate_state": str(self._last_gate_state),
                     "hybrid_alpha_mean": float(self._last_hybrid_alpha_mean),
+                    "effective_blend_max": float(self._last_effective_blend_max),
+                    "appearance_uncertainty": float(self._last_appearance_uncertainty),
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)
@@ -1995,6 +2001,8 @@ class FaceOSPipeline:
         # latent / no observation crossed (the truth on any non-hybrid frame);
         # the latent path overwrites it with the real mean alpha when it renders.
         self._last_hybrid_alpha_mean = 1.0
+        self._last_effective_blend_max = self._hybrid_blend_max
+        self._last_appearance_uncertainty = 0.0
 
         # BHENCHOD SANITIZER: Kill 256-channel tensors before they reach the renderer
         if intrinsic_components is not None and getattr(intrinsic_components, 'shading', None) is not None:
@@ -2982,11 +2990,23 @@ class FaceOSPipeline:
             # render (render_geom.canonical_face=cropped), so it is pixel-aligned.
             solid_interior = (feathered_mask > 0.99).astype(np.float32)
             latent_uncertainty = est.query_uncertainty(render_geom)
+
+            # ── D-05 Task 2.5: expression-aware hybrid blend ────────────────
+            # Scale blend_max by appearance divergence from enrollment. At
+            # neutral expression the latent albedo faithfully represents the
+            # face; at extreme expression the static albedo is less reliable,
+            # so we allow more source observation crossing.
+            appear_unc = float(getattr(est.latent(), "appearance_uncertainty", 0.0) or 0.0)
+            effective_blend_max = self._hybrid_blend_max + (1.0 - self._hybrid_blend_max) * appear_unc
+            effective_blend_max = float(np.clip(effective_blend_max, self._hybrid_blend_max, 1.0))
+            self._last_effective_blend_max = effective_blend_max
+            self._last_appearance_uncertainty = appear_unc
+
             rendered_u8 = self._hybrid_face(
                 rendered_u8, cropped, latent_uncertainty, solid_interior,
-                blend_max=self._hybrid_blend_max,
+                blend_max=effective_blend_max,
             )
-            alpha_map = self._hybrid_blend_alpha(latent_uncertainty, self._hybrid_blend_max)
+            alpha_map = self._hybrid_blend_alpha(latent_uncertainty, effective_blend_max)
             _zone = solid_interior > 0.5
             self._last_hybrid_alpha_mean = (
                 float(np.mean(alpha_map[_zone])) if bool(_zone.any()) else 1.0

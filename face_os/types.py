@@ -482,6 +482,10 @@ class LatentRenderTelemetry:
     hybrid_alpha_mean: float = 1.0         # Phase 2B: mean per-pixel LATENT
     #   authority (1.0 = pure latent; <1 = low-freq observation blended in where
     #   uncertain). Proves the uncertainty hybrid actually engaged.
+    effective_blend_max: float = 0.5       # D-05 Task 2.5: per-frame effective
+    #   hybrid blend cap, scaled by appearance divergence from enrollment
+    appearance_uncertainty: float = 0.0    # D-05 Task 2.5: expression divergence
+    #   from enrollment (0=neutral, 1=far); drives blend_max modulation
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -495,4 +499,6 @@ class LatentRenderTelemetry:
             "contract_assertions_passed": self.contract_assertions_passed,
             "gate_state": self.gate_state,
             "hybrid_alpha_mean": self.hybrid_alpha_mean,
+            "effective_blend_max": self.effective_blend_max,
+            "appearance_uncertainty": self.appearance_uncertainty,
         }
