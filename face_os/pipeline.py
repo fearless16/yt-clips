@@ -2937,8 +2937,14 @@ class FaceOSPipeline:
             adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
             if adjusted_lm is None:
                 return None
+            # The latent atlas size is the ground-truth canonical grid.  Using
+            # cfg.canonical.atlas_size (1024x1024) here while the stored latent
+            # is 256x256 causes warpAffine to map most output lookups outside
+            # the source array (BORDER_REPLICATE smear).  Fix: pin to the real
+            # latent atlas so the coordinate systems agree.
+            latent_atlas_hw = tuple(int(s) for s in est._atlas_size)
             M, _ = canonical_map.compute_alignment(
-                adjusted_lm, canonical_size=tuple(cfg.canonical.atlas_size),
+                adjusted_lm, canonical_size=latent_atlas_hw,
             )
             M_inv_2x3 = np.linalg.inv(M)[:2]
             inverse_transform = np.eye(3, dtype=np.float32)
@@ -2946,7 +2952,7 @@ class FaceOSPipeline:
 
             # Crop-sized geometry mask (canonical elliptical mask warped to crop).
             canonical_mask = self._make_canonical_geometry_mask(
-                tuple(cfg.canonical.atlas_size)[::-1]
+                latent_atlas_hw[::-1]
             )
             crop_mask = cv2.warpAffine(
                 canonical_mask, M_inv_2x3, (crop_w, crop_h),
