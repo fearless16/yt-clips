@@ -93,23 +93,25 @@ class AIClient:
         "opencode": ["mimo-v2.5-pro", "mimo-v2.5", "kimi-k2.5", "kimi-k2.6", "glm-5", "glm-5.1",
                      "deepseek-v4-flash", "deepseek-v4-pro", "minimax-m2.7", "qwen3.6-plus", "qwen3.7-max"],
         "groq": ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "qwen/qwen3-32b"],
-        "openrouter": ["deepseek/deepseek-v4-flash", "google/gemini-2.0-flash-001", "qwen/qwen3.5-122b-a10b", "anthropic/claude-sonnet-4"],
-        "nvidia": ["meta/llama-3.3-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1"],
+        "openrouter": ["google/gemini-2.0-flash-001", "deepseek/deepseek-v4-flash", "qwen/qwen3.5-122b-a10b", "anthropic/claude-sonnet-4"],
+        "nvidia": ["nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct"],
     }
 
     # Speed-ordered tiers — fastest first.
-    # Tier 1: OpenCode Go (mimo-v2.5-pro ~3.2s, free with Go sub)
-    # Tier 2: Groq (0.5-1s, fast but quota-limited)
-    # Tier 3: OpenCode Go fallback models
-    # Tier 4: NVIDIA / OpenRouter
-    # Tier 5: qwen3.7-max (slow ~20s, last resort)
+    # Tier 1: qwen3.6-plus (OpenCode Go)
+    # Tier 2: MiMo v2.5pro (OpenCode Go, Xiaomi, free with sub)
+    # Tier 3: Groq (0.5-1s, fast but quota-limited)
+    # Tier 4: NVIDIA
+    # Tier 5: OpenCode Go fallback models (kimi, glm, deepseek, minimax)
+    # Tier 6: OpenRouter (last priority — gemini, deepseek, qwen, claude)
+    # Tier 7: qwen3.7-max (slow ~20s, last resort)
     FASTEST_TIERS = [
+        [("opencode", "qwen3.6-plus")],
         [("opencode", "mimo-v2.5-pro"), ("opencode", "mimo-v2.5")],
         [("groq", "meta-llama/llama-4-scout-17b-16e-instruct"), ("groq", "llama-3.3-70b-versatile"), ("groq", "qwen/qwen3-32b")],
-        [("opencode", "kimi-k2.5"), ("opencode", "kimi-k2.6"), ("opencode", "glm-5.1"), ("opencode", "glm-5")],
-        [("opencode", "deepseek-v4-flash"), ("opencode", "minimax-m2.7"), ("opencode", "qwen3.6-plus")],
-        [("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1"), ("openrouter", "deepseek/deepseek-v4-flash"), ("openrouter", "google/gemini-2.0-flash-001")],
-        [("nvidia", "meta/llama-3.3-70b-instruct"), ("openrouter", "qwen/qwen3.5-122b-a10b")],
+        [("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1"), ("nvidia", "meta/llama-3.3-70b-instruct")],
+        [("opencode", "kimi-k2.5"), ("opencode", "kimi-k2.6"), ("opencode", "glm-5.1"), ("opencode", "glm-5"), ("opencode", "deepseek-v4-flash"), ("opencode", "minimax-m2.7")],
+        [("openrouter", "google/gemini-2.0-flash-001"), ("openrouter", "deepseek/deepseek-v4-flash"), ("openrouter", "qwen/qwen3.5-122b-a10b"), ("openrouter", "anthropic/claude-sonnet-4")],
         [("opencode", "qwen3.7-max")],
     ]
 
