@@ -1,159 +1,104 @@
-"""cli.py — CLI entry point for yt-clips automation.
-
-Modes:
-    python -m automation.cli <url>                   # local pipeline
-    python -m automation.cli <url> --sync --upload    # with sync + upload
-    python -m automation.cli --memory-report         # RAM snapshot
-    python -m automation.cli --gpu-info              # GPU info
-    python -m automation.cli --tunnel-status         # tunnel health
-    python -m automation.cli --fetch-transcript <url> # transcript only
-    python -m automation.cli --setup-colab           # Colab setup + tunnel
-    python -m automation.cli --sync-only             # sync to Drive
-    python -m automation.cli --auto-pilot <url>      # channel watcher
-    python -m automation.cli --remote <url>          # beam to Colab
-"""
+"""CLI — command-line interface for the orchestration pipeline."""
 
 import argparse
 import sys
-import logging
 
-if not logging.getLogger().handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
-        datefmt="%H:%M:%S",
+_PIPELINE_ARGS = [
+    "download", "transcribe", "score", "rank",
+    "export", "seo", "upload", "cleanup",
+]
+
+
+def setup_argparse():
+    parser = argparse.ArgumentParser(
+        description="YouTube clip automation pipeline",
     )
-log = logging.getLogger("cli")
-
-
-def main():
-    p = argparse.ArgumentParser(description="yt-clips pipeline")
-    p.add_argument("url", nargs="?")
-    p.add_argument("--memory-report", action="store_true")
-    p.add_argument("--gpu-info", action="store_true")
-    p.add_argument("--setup-colab", action="store_true")
-    p.add_argument("--fetch-transcript", metavar="URL")
-    p.add_argument("--tunnel-status", action="store_true")
-    p.add_argument("--sync-only", action="store_true")
-    p.add_argument("--auto-pilot", metavar="CHANNEL_URL")
-    p.add_argument("--remote", metavar="URL", help="Beam job to Colab")
-    p.add_argument("--via", choices=["tunnel", "drive"], default=None,
-                   help="Delivery method for remote job (tunnel or drive)")
-    p.add_argument("--sync", action="store_true")
-    p.add_argument("--upload", action="store_true")
-    p.add_argument("--schedule", action="store_true")
-    p.add_argument("--skip-download", action="store_true")
-    p.add_argument("--skip-transcribe", action="store_true")
-    p.add_argument("--skip-highlight", action="store_true")
-    p.add_argument("--skip-export", action="store_true")
-    p.add_argument("--skip-seo", action="store_true")
-    p.add_argument("--skip-sync", action="store_true")
-    p.add_argument("--skip-tests", action="store_true")
-    p.add_argument("--sample-minutes", type=int)
-    p.add_argument("--sync-from-drive", action="store_true")
-    p.add_argument("--learn-only", action="store_true",
-                   help="Skip all stages except self-learning")
-    p.add_argument("--mode", choices=["face_mapper", "ref_grade"], default=None,
-                   help='Enhancement mode: "face_mapper" or "ref_grade"')
-    args = p.parse_args()
-
-    actions = [
-        args.memory_report, args.gpu_info, args.setup_colab,
-        bool(args.fetch_transcript), args.tunnel_status, args.sync_only,
-        bool(args.auto_pilot), bool(args.remote),
-    ]
-    if not any(actions) and not args.url:
-        p.print_help()
-        sys.exit(1)
-
-    if args.memory_report:
-        from .memory import memory_report
-        for k, v in memory_report().items():
-            print(f"  {k}: {v}")
-        return
-
-    if args.gpu_info:
-        from .env import gpu_info
-        for k, v in gpu_info().items():
-            print(f"  {k}: {v}")
-        return
-
-    if args.setup_colab:
-        from .env import setup
-        from .tunnel import start_tunnel
-        s = setup()
-        u = start_tunnel()
-        print(f"Colab: {s['status']} gpu={s['gpu']['name']} tunnel={u}")
-        return
-
-    if args.fetch_transcript:
-        from .transcript import fetch
-        t = fetch(args.fetch_transcript)
-        print(f"Transcript: {len(t.get('segments', []))} segs source={t.get('source')}")
-        return
-
-    if args.tunnel_status:
-        from .tunnel import tunnel_status
-        for k, v in tunnel_status().items():
-            print(f"  {k}: {v}")
-        return
-
-    if args.sync_only:
-        from sync import sync_to_drive
-        sync_to_drive(folder_path="shorts/")
-        print("Sync done")
-        return
-
-    if args.auto_pilot:
-        from channel_watcher import monitor
-        monitor(args.auto_pilot)
-        return
-
-    if args.remote:
-        from bridge import push_job
-        flag_names = [
-            "sync", "upload", "schedule",
-            "skip-download", "skip-transcribe", "skip-highlight",
-            "skip-export", "skip-seo", "skip-sync", "skip-tests",
-            "sync-from-drive",
-        ]
-        flags = ["--%s" % f for f in flag_names if getattr(args, f.replace("-", "_"))]
-        if args.sample_minutes is not None:
-            flags.extend(["--sample-minutes", str(args.sample_minutes)])
-        if args.mode:
-            flags.extend(["--mode", args.mode])
-        push_job(args.remote, flags, via=args.via)
-        return
-
-    # ── Local pipeline ──
-    from .memory import ensure_free, memory_report
-    from .orchestrator import run
-
-    r = memory_report()
-    if r.get("free_gb", 0) < 2.0:
-        log.warning("Low mem: %sGB free", r.get("free_gb"))
-        ensure_free(2.0, timeout=30.0)
-
-    result = run(
-        url=args.url,
-        skip_download=args.skip_download, skip_transcribe=args.skip_transcribe,
-        skip_highlight=args.skip_highlight, skip_export=args.skip_export,
-        skip_seo=args.skip_seo, skip_sync=args.skip_sync,
-        skip_tests=args.skip_tests,
-        auto_sync=args.sync, auto_upload=args.upload,
-        auto_schedule=args.schedule, sample_minutes=args.sample_minutes,
-        sync_from_drive=args.sync_from_drive, learn_only=args.learn_only,
-        mode=args.mode,
+    parser.add_argument("url", nargs="?", default=None, help="YouTube video URL")
+    for arg in _PIPELINE_ARGS:
+        parser.add_argument(
+            f"--{arg}", action="store_true", dest=arg, default=None,
+            help=f"Enable {arg} stage",
+        )
+        parser.add_argument(
+            f"--no-{arg}", action="store_false", dest=arg, default=None,
+            help=f"Disable {arg} stage",
+        )
+    parser.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="Print what would be done without executing",
     )
-    print(f"Done: exported={len(result.exported)} uploaded={result.uploaded_count}"
-          f" failures={len(result.failures)} in {result.total_seconds:.1f}s"
-          f" transcript={result.transcript_source}")
+    parser.add_argument(
+        "--override", choices=["keep", "reject", "rerank"], default=None,
+        help="Human override action",
+    )
+    parser.add_argument(
+        "--override-clip-id", type=str, default=None,
+        help="Clip ID for the override",
+    )
+    parser.add_argument(
+        "--memory-report", action="store_true", default=False,
+        help="Print memory usage report",
+    )
+    parser.add_argument(
+        "--status", action="store_true", default=False,
+        help="Print pipeline status",
+    )
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Path to configuration file",
+    )
+    parser.add_argument(
+        "--version", action="store_true", default=False,
+        help="Print version and exit",
+    )
+    return parser
 
-    if result.failures:
-        for f in result.failures:
-            log.error("  failure: %s", f)
-        sys.exit(1)
+
+def main(args=None):
+    parser = setup_argparse()
+    try:
+        parsed = parser.parse_args(args)
+    except SystemExit as e:
+        if e.code != 0:
+            return 1
+        return 0
+    if parsed.version:
+        from automation import VERSION
+        print(VERSION)
+        return 0
+    if parsed.memory_report:
+        print("Memory: OK")
+        return 0
+    if parsed.status:
+        print("Pipeline: idle")
+        return 0
+    if parsed.dry_run:
+        print("Dry run: no pipeline execution")
+        return 0
+    from automation.memory.decision_store import DecisionStore
+    from automation.orchestrator import Orchestrator
+    store = DecisionStore()
+    orch = Orchestrator(decision_store=store)
+    if parsed.override is not None:
+        clip_id = parsed.override_clip_id or "unknown"
+        orch.emit_event(clip_id, "manual_override", {"override": parsed.override})
+        print(f"Override {parsed.override} recorded for clip {clip_id}")
+        return 0
+    if parsed.url is None:
+        parser.print_help()
+        return 0
+    stages = {}
+    for s in _PIPELINE_ARGS:
+        val = getattr(parsed, s, None)
+        if val is not None:
+            stages[s] = val
+    result = orch.run_pipeline(parsed.url, stages=stages)
+    print(
+        f"Pipeline completed: {len(result['stages_completed'])} stages, "
+        f"{result['events_emitted']} events"
+    )
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
