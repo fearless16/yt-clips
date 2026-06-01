@@ -55,7 +55,6 @@ _DEFAULTS: Dict[str, Any] = {
 
     # ─── Temporal Stabilizer ───────────────────────────────────────────────
     "temporal": {
-        "identity_inertia": 0.85,             # How much identity resists change (0-1)
         "flicker_threshold": 15.0,            # LAB distance to trigger stabilization
         "temporal_window": 5,                 # Frames to average for stabilization
         "use_motion_compensation": True,      # Compensate for camera motion
@@ -91,9 +90,6 @@ _DEFAULTS: Dict[str, Any] = {
 
     # ─── D-05 Latent Identity ──────────────────────────────────────────────
     "latent": {
-        "render_source": "legacy",             # 'legacy' | 'latent' (Phase 2)
-        "gate_policy": "production",           # 'production' (Option 1) | 'forced_latent' (Option 3)
-        "shadow_enabled": True,                # Shadow-mode latent update (Phase 1)
         "contract_mode": "warn",               # 'warn' | 'fatal'
         "hybrid_blend_max": 0.5,               # Per-pixel uncertainty blend cap
     },
