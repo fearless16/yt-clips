@@ -3009,6 +3009,21 @@ class FaceOSPipeline:
             feathered_mask = cv2.GaussianBlur(
                 crop_mask, (feather_ksize, feather_ksize), cfg.compositor.feather_pixels / 2
             )
+            # D-05 Phase 3: inject identity-sourced detail (latent microdetail).
+            # The legacy path does this via _inject_detail_residual with the
+            # source crop's intrinsic decomposition; the latent path uses its
+            # OWN stored microdetail (warped into crop geometry by
+            # synthesize_identity). Same 0.55 strength as the physical path.
+            detail_res = getattr(components, 'detail_residual', None)
+            if detail_res is not None:
+                d = np.asarray(detail_res, dtype=np.float32)
+                if d.shape[:2] != rendered_face.shape[:2]:
+                    d = cv2.resize(d, (rendered_face.shape[1], rendered_face.shape[0]))
+                fm = feathered_mask.astype(np.float32)
+                if fm.ndim == 2:
+                    fm = fm[:, :, np.newaxis]
+                d = d * fm
+                rendered_face = np.clip(rendered_face + 0.55 * d, 0.0, 1.0)
             rendered_u8 = (rendered_face * 255.0).astype(np.uint8)
             if rendered_u8.shape[:2] != (crop_h, crop_w):
                 rendered_u8 = cv2.resize(rendered_u8, (crop_w, crop_h))

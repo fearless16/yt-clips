@@ -453,6 +453,15 @@ class ABComparator:
         selector is the `render_source` instance attribute (pipeline.py:2073).
         We therefore set/restore `render_source` (mirroring how the legacy
         `_run_pipeline` toggles `render_mode_override`). Working contract wins.
+
+        D-05 Phase 3 FIX (2026-06-01): the production relative-to-floor gate
+        (_evaluate_latent_gate) requires confidence to rise above the enrollment
+        seed before the latent may drive pixels. On clips where intrinsic
+        decomposition never fires, confidence stays frozen at seed level and the
+        gate permanently refuses — the A/B comparison degenerates to
+        alpha-vs-after-warmup-alpha. For latent A/B, we force
+        ``gate_policy='forced_latent'`` (Option 3) so the latent drives pixels
+        unconditionally while initialized. The policy is restored after the pass.
         """
         if hasattr(pipeline, '_reset_state'):
             pipeline._reset_state()
@@ -462,9 +471,16 @@ class ABComparator:
         original_source = getattr(pipeline, 'render_source', 'legacy')
         pipeline.render_source = render_source
 
+        # D-05 Phase 3: force the latent render path during A/B so the
+        # production confidence gate cannot hide real pixel output.
+        original_policy = getattr(pipeline, '_gate_policy', 'production')
+        if render_source == 'latent':
+            pipeline._gate_policy = 'forced_latent'
+
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             pipeline.render_source = original_source
+            pipeline._gate_policy = original_policy
             return [], [], []
 
         frames, landmarks_list, transforms_list, frame_idx = [], [], [], 0
@@ -490,6 +506,7 @@ class ABComparator:
         finally:
             cap.release()
             pipeline.render_source = original_source
+            pipeline._gate_policy = original_policy
         return frames, landmarks_list, transforms_list
 
     def compare_render_sources(
