@@ -15,6 +15,8 @@ Tests cover:
 """
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from face_os.pipeline import FaceOSPipeline
@@ -145,3 +147,26 @@ class TestGatePolicyDispatch:
             confidence_floor=0.2335,
         )
         assert engage is False
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 4. set_anchor enrollment_mesh parameter (Task 2.5)
+# ═══════════════════════════════════════════════════════════════════
+
+class TestSetAnchorEnrollmentMesh:
+
+    def test_set_anchor_accepts_enrollment_mesh(self):
+        import numpy as np
+        from face_os.subsystems.identity_estimator import IdentityEstimator
+
+        mock_state = MagicMock()
+        estimator = IdentityEstimator(mock_state)
+
+        ref_bgr = np.zeros((128, 128, 3), dtype=np.uint8)
+        some_mesh = np.random.randn(478, 3).astype(np.float32)
+
+        with patch.object(estimator, '_set_anchor_impl'):
+            estimator.set_anchor(ref_bgr, enrollment_mesh=some_mesh)
+
+        assert estimator._enrollment_mesh is not None
+        assert np.array_equal(estimator._enrollment_mesh, some_mesh)

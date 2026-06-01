@@ -776,7 +776,7 @@ class FaceOSPipeline:
                 # D-05 Task 2.1/2.6: Seed the lighting-invariant latent from the
                 # same enrollment reference (shadow mode — does not drive render).
                 if self._identity_estimator is not None:
-                    self._identity_estimator.set_anchor(ref_bgr)
+                    self._identity_estimator.set_anchor(ref_bgr, enrollment_mesh=ref_mesh)
                     self._last_latent_confidence = float(
                         self._identity_estimator.latent().mean_confidence()
                     )
