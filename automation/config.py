@@ -1,69 +1,32 @@
-"""config.py — Cached YAML config loader.
-
-Reads config.yaml lazily with 10-minute TTL caching.
-Supports dot-notation access via get("section.key").
-
-Usage::
-
-    from .config import get, load, log_path, log_level
-    cfg = load()
-    val = get("paths.input", default="data/")
-"""
+"""Configuration loader — YAML config with dot-notation access."""
 
 from pathlib import Path
+from typing import Any
 
-from ._cache import CONFIG_CACHE
-
-
-def _load_yaml(path: str) -> dict:
+try:
     import yaml
+except ImportError:
+    yaml = None
+
+
+def load(path: str | None = None) -> dict:
+    path = path or "config.yaml"
     p = Path(path)
     if not p.exists():
         return {}
+    if yaml is None:
+        raise RuntimeError("PyYAML is required for config loading")
     with p.open("r") as f:
-        data = yaml.safe_load(f) or {}
-    return data
+        return yaml.safe_load(f) or {}
 
 
-def load(path: str = "config.yaml") -> dict:
-    """Load and cache the config YAML file.
-
-    Results cached 10 minutes in CONFIG_CACHE.
-    Returns empty dict if file does not exist.
-    """
-    cached = CONFIG_CACHE.get(path)
-    if cached is not None:
-        return cached
-    cfg = _load_yaml(path)
-    CONFIG_CACHE.set(path, cfg)
-    return cfg
-
-
-def get(key: str, default=None):
-    """Dot-notation access to config values.
-
-    Example::
-
-        get("paths.input")          # -> config["paths"]["input"]
-        get("nonexistent.key", 42)  # -> 42
-    """
+def get(cfg: dict, key: str, default: Any = None) -> Any:
     parts = key.split(".")
-    cur = load()
-    for p in parts:
-        if isinstance(cur, dict):
-            cur = cur.get(p)
-            if cur is None:
-                return default
-        else:
+    current = cfg
+    for part in parts:
+        if not isinstance(current, dict):
             return default
-    return cur
-
-
-def log_path() -> str:
-    """Return configured log file path, or 'logs/pipeline.log'."""
-    return get("logging.log_file", "logs/pipeline.log")
-
-
-def log_level() -> str:
-    """Return configured log level, or 'INFO'."""
-    return get("logging.level", "INFO")
+        if part not in current:
+            return default
+        current = current[part]
+    return current
