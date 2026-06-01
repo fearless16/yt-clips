@@ -13,10 +13,10 @@ Quick links:
 - [Test suite](face_os/STATE.md#test-suite)
 
 ```bash
-.venv/bin/python -m pytest tests/face_os/ -v
+.venv/bin/python -m pytest face_os/tests/ -v
 ```
 
-**Last updated:** 2026-05-23 | **Tests:** 614 collected | **Source:** 14,899 lines | **Version:** v3.7
+**Last updated:** 2026-06-02 | **Tests:** 441 passed, 0 failed, 3 skipped | **Source:** ~17,300 lines | **Version:** v3.9
 
 ### Architecture Summary
 

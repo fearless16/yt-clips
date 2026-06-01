@@ -53,7 +53,6 @@ crop:
   allow_bottom_crop: true
 
 temporal:
-  identity_inertia: 0.85
   flicker_threshold: 15.0
   temporal_window: 5
   use_motion_compensation: true
