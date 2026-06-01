@@ -1,18 +1,12 @@
 """
 bridge.py — The local-to-cloud bridge.
-Writes a job file that the Colab watcher will pick up.
+Tunnel-only delivery to Colab watcher. Drive is credentials-only.
 
-Delivery:
-   --via tunnel: POST to colab_url.txt/kaggle_url.txt tunnel endpoint
-   --via drive:  upload remote_job.json to Google Drive yt-clips/ folder
-   default:      tunnel first, then Drive, then file fallback
-
-Always falls back to local file + manual injection if chosen method fails.
+Falls back to local remote_job.json + manual injection if tunnel is down.
 """
 import argparse
 import json
 import time
-import sys
 from pathlib import Path
 
 from utils.config import load_config
@@ -22,15 +16,13 @@ cfg = load_config()
 log = get_logger("bridge", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 
-def push_job(url: str, flags: list, via: str | None = None):
-    """Push a pipeline job to the Colab worker.
+def push_job(url: str, flags: list):
+    """Push a pipeline job to the Colab worker via tunnel.
 
     Args:
         url: YouTube URL to process.
         flags: Additional CLI flags for the pipeline.
-        via: Delivery method — "tunnel", "drive", or None for default (tunnel→drive→file).
     """
-    # ─── Refresh tokens before push ──────────────────────────────────────────
     try:
         from utils.token_refresh import ensure_fresh_tokens
         ensure_fresh_tokens()
@@ -44,7 +36,7 @@ def push_job(url: str, flags: list, via: str | None = None):
         "status": "pending",
     }
 
-    # ─── Attach all credential files ─────────────────────────────────────────
+    # ─── Attach credential files (embedded in the job payload) ─────
     cred_patterns = ["cookies.txt", ".env", "*token*.json", "client_secret*.json", "client_secrets.json"]
     cred_files: list[Path] = []
     for p in cred_patterns:
@@ -53,85 +45,18 @@ def push_job(url: str, flags: list, via: str | None = None):
         if secret_path.exists() and secret_path.stat().st_size > 0:
             key = secret_path.name
             job[key] = secret_path.read_text(encoding="utf-8")
-            log.info(f"🔑 Attached {key} ({secret_path.stat().st_size} bytes)")
+            log.info(f"Attached {key} ({secret_path.stat().st_size} bytes)")
 
-    # ─── Delivery ───────────────────────────────────────────────────────────
-    delivered = False
-    if via == "tunnel":
-        log.info("📡 Delivery: tunnel only")
-        delivered = _push_via_tunnel(job)
-    elif via == "drive":
-        log.info("📡 Delivery: Drive only")
-        delivered = _push_via_drive_api(job)
-    else:
-        # Default: tunnel first, then Drive
-        delivered = _push_via_tunnel(job) or _push_via_drive_api(job)
-
-    if delivered:
+    # ─── Tunnel delivery ──────────────────────────────────────────
+    if _push_via_tunnel(job):
         return
 
-    # ─── Local File Fallback ────────────────────────────────────────────────
+    # ─── Local file fallback + manual injection ───────────────────
     job_path = Path("remote_job.json").absolute()
     with open(job_path, "w") as f:
         json.dump(job, f, indent=2)
-    log.info(f"📂 Job saved to local folder for sync: {job_path}")
-
-    # ─── Manual Injection Block ─────────────────────────────────────────────
-    log.info("═" * 50)
-    log.info("💎 MANUAL INJECTION (If all else fails)")
-    log.info("═" * 50)
-    inject_code = (
-        f"import json; job={json.dumps(job)}; "
-        f"f=open('remote_job.json','w'); json.dump(job,f); f.close(); print('✨ Injected!')"
-    )
-    print(inject_code)
-    log.info("═" * 50)
-
-
-def _push_via_drive_api(job: dict) -> bool:
-    """Attempt to push job via Google Drive API. Returns True on success."""
-    try:
-        from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
-        from googleapiclient.http import MediaIoBaseUpload
-        import io
-
-        log.info("📡 Attempting Direct Drive API upload...")
-        service = get_drive_service()
-
-        if not service or service == FILESYSTEM_MODE:
-            raise ConnectionError("Drive API not available (Colab FS mode or no creds)")
-
-        # Find or create yt-clips folder
-        folder_id = find_or_create_folder(service, "yt-clips")
-
-        # Check for existing remote_job.json to UPDATE (prevents duplicates)
-        results = service.files().list(
-            q=f"name = 'remote_job.json' and '{folder_id}' in parents and trashed = false",
-            fields="files(id)",
-        ).execute()
-        existing = results.get("files", [])
-
-        media = MediaIoBaseUpload(
-            io.BytesIO(json.dumps(job, indent=2).encode("utf-8")),
-            mimetype="application/json",
-        )
-
-        if existing:
-            file_id = existing[0]["id"]
-            service.files().update(fileId=file_id, media_body=media).execute()
-            log.info("✅ Existing job file updated on Drive!")
-        else:
-            file_metadata = {"name": "remote_job.json", "parents": [folder_id]}
-            service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-            log.info("✨ New job file created on Drive!")
-
-        log.info("🚀 Job beamed to Drive. (Note: Colab mount may take 30-60s to sync)")
-        return True
-
-    except Exception as e:
-        log.info(f"ℹ️ Direct Drive API not ready ({e}).")
-        log.info("👉 Tip: Run 'gcloud auth application-default login' to fix this permanently.")
-        return False
+    log.info(f"Tunnel unavailable — job saved to {job_path}")
+    log.info("Upload to Colab manually or run Cell 3 on Colab to pick it up.")
 
 
 def _push_via_tunnel(job: dict) -> bool:
@@ -149,7 +74,7 @@ def _push_via_tunnel(job: dict) -> bool:
     try:
         import requests
 
-        log.info(f"📡 Sending via Tunnel: {colab_url}")
+        log.info(f"Sending via Tunnel: {colab_url}")
         response = requests.post(
             f"{colab_url}/job",
             json=job,
@@ -157,14 +82,14 @@ def _push_via_tunnel(job: dict) -> bool:
             timeout=10,
         )
         if response.status_code in (200, 202):
-            log.info("✅ Job received by remote tunnel instantly!")
+            log.info("Job received by remote tunnel instantly!")
             return True
         else:
-            log.warning(f"⚠️ Tunnel returned error {response.status_code}")
+            log.warning(f"Tunnel returned error {response.status_code}")
             return False
 
     except Exception as e:
-        log.info(f"ℹ️ Tunnel delivery skipped ({e})")
+        log.info(f"Tunnel delivery skipped ({e})")
         return False
 
 
