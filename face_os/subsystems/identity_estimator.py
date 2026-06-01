@@ -31,18 +31,26 @@ from face_os.types import IdentityEstimatorState, IdentityLatent
 logger = logging.getLogger(__name__)
 
 # ── Fusion tuning constants (named, justified — NOT magic EMA rates) ──────────
-# Numerical floor for uncertainty-weighted gains.
 _EPS = 1e-6
-# How strongly a temporal drift_score inflates stored uncertainty before fusion
-# (Kalman "predict" step). Larger drift -> more willing to accept new evidence.
-# This is the ONLY source of uncertainty inflation (design.md:349-351); fusion
-# itself is a pure Kalman shrink (design.md:361), so accumulating evidence can
-# only tighten the posterior. No "failed-to-beat-best-seen" ratchet exists.
 _K_TEMPORAL_INFLATE = 0.5
-# Bound on the per-channel white-balance scale so reference normalization can
-# never blow albedo up pathologically (keeps the latent color-stable — Req 5).
 _WB_SCALE_MIN = 0.5
 _WB_SCALE_MAX = 2.0
+
+# ── Appearance encoder constants (Task 2.5 — manifold wiring) ─────────────────
+_APPEARANCE_DIM = 16
+_PROJECTION_SEED = 42
+_PROJECTION_INPUT_DIM = 478 * 3
+_MAX_APPEARANCE_DISTANCE = 10.0
+
+
+def _build_projection_matrix() -> np.ndarray:
+    """Johnson-Lindenstrauss projection: (16, 1434) random matrix.
+
+    Preserves pairwise distances in the deformation field with high probability,
+    no training data required. Fixed seed for deterministic reproducibility.
+    """
+    rng = np.random.RandomState(_PROJECTION_SEED)
+    return rng.randn(_APPEARANCE_DIM, _PROJECTION_INPUT_DIM).astype(np.float32) / np.sqrt(_PROJECTION_INPUT_DIM)
 
 
 class IdentityEstimator:
@@ -75,24 +83,85 @@ class IdentityEstimator:
         self._state = identity_state
         self._manifold = manifold
         self._atlas_size = atlas_size
-        # Sole-owned latent — empty/uninitialized until set_anchor / update_latent.
         self._latent = IdentityLatent(atlas_size=atlas_size)
-        # Provenance of the last synthesized normal_map ('mesh' | 'face_prior').
         self._last_normal_source = "face_prior"
-        # Per-pixel best-seen observation quality (estimator-internal bookkeeping,
-        # owned alongside the sole-owned latent). Drives best-observation-only
-        # microdetail and honest (monotonic) uncertainty under occlusion.
         self._best_quality: Optional[np.ndarray] = None
+        # ── Task 2.5: appearance encoder state ──────────────────────────────
+        self._enrollment_mesh: Optional[np.ndarray] = None
+        self._projection_matrix: np.ndarray = _build_projection_matrix()
 
     def latent(self) -> IdentityLatent:
-        """Public accessor for the sole-owned identity latent.
-
-        The pipeline must only touch the latent through this accessor and the
-        public mutation methods — never by reaching into private fields.
-        """
         return self._latent
 
-    def set_anchor(self, reference_face_bgr: np.ndarray) -> None:
+    def store_enrollment_mesh(self, mesh: np.ndarray) -> None:
+        """Store the enrollment reference mesh for appearance encoding.
+
+        The enrollment mesh defines the "neutral expression" origin on the
+        appearance manifold. Per-frame deformation is measured relative to
+        this reference and projected to 16-D appearance_code.
+
+        Args:
+            mesh: (478, 3) float32 landmark positions from the enrollment frame.
+        """
+        mesh_arr = np.asarray(mesh, dtype=np.float32)
+        if mesh_arr.ndim != 2 or mesh_arr.shape[0] < 468 or mesh_arr.shape[1] < 3:
+            logger.warning(
+                "store_enrollment_mesh: invalid shape %s; appearance encoding disabled.",
+                mesh_arr.shape,
+            )
+            self._enrollment_mesh = None
+            return
+        self._enrollment_mesh = mesh_arr
+        self._invalidate_appearance_code()
+
+    def _encode_appearance(self, mesh: np.ndarray) -> Optional[np.ndarray]:
+        """Encode landmark deformation → 16-D appearance_code.
+
+        Computes the deformation field between the current mesh and the stored
+        enrollment mesh, then projects to 16-D via a fixed Johnson-Lindenstrauss
+        random projection. Scale-invariant (normalizes by face bounding box).
+
+        Args:
+            mesh: (N, 3+) float32 current frame landmarks.
+
+        Returns:
+            (16,) float32 appearance_code, or None if enrollment not available.
+        """
+        if self._enrollment_mesh is None:
+            return None
+        mesh_arr = np.asarray(mesh, dtype=np.float32)
+        if mesh_arr.ndim != 2 or mesh_arr.shape[0] < 468 or mesh_arr.shape[1] < 3:
+            return None
+        if mesh_arr.shape != self._enrollment_mesh.shape:
+            return None
+        deformation = (mesh_arr - self._enrollment_mesh).flatten().astype(np.float32)
+        bbox_size = float(
+            max(
+                mesh_arr[:, 0].max() - mesh_arr[:, 0].min(),
+                mesh_arr[:, 1].max() - mesh_arr[:, 1].min(),
+                1.0,
+            )
+        )
+        deformation = deformation / bbox_size
+        code = self._projection_matrix @ deformation
+        return code.astype(np.float32)
+
+    def _invalidate_appearance_code(self) -> None:
+        """Reset appearance_code to neutral (zeros) and uncertainty to 0.0.
+
+        Called when enrollment mesh changes so stale codes don't leak.
+        """
+        if self._latent.initialized:
+            self._latent.appearance_code = np.zeros(
+                self._appearance_dim(), dtype=np.float32
+            )
+            self._latent.appearance_uncertainty = 0.0
+
+    def set_anchor(
+        self,
+        reference_face_bgr: np.ndarray,
+        enrollment_mesh: Optional[np.ndarray] = None,
+    ) -> None:
         """Initialize the latent from an enrollment reference frame.
 
         The reference is decomposed into intrinsic components; its albedo is
@@ -106,6 +175,8 @@ class IdentityEstimator:
 
         Args:
             reference_face_bgr: (H, W, 3) uint8 BGR enrollment crop.
+            enrollment_mesh: Optional (478, 3) float32 landmarks for appearance
+                encoding (Task 2.5 — manifold wiring).
         """
         # ── 0. Guard the input — never raise on a degenerate reference ──────────
         ref = np.asarray(reference_face_bgr) if reference_face_bgr is not None else None
@@ -125,9 +196,12 @@ class IdentityEstimator:
                 "leaving latent uninitialized.",
                 exc,
             )
-            # Reset to a clean, uninitialized latent so partial state never leaks.
             self._latent = IdentityLatent(atlas_size=self._atlas_size)
             return
+
+        # ── Store enrollment mesh for appearance encoding (Task 2.5) ─────────
+        if enrollment_mesh is not None:
+            self.store_enrollment_mesh(enrollment_mesh)
 
         # ── Keep the legacy anchor consistent during shadow mode (best-effort) ──
         try:
@@ -397,6 +471,17 @@ class IdentityEstimator:
         latent.microdetail = new_detail
         latent.microdetail_uncertainty = new_md_unc
         latent.observation_count = new_count
+
+        # ── 7. Encode appearance from current geometry (Task 2.5) ───────────
+        mesh = getattr(geometry, "mesh", None)
+        if mesh is not None:
+            code = self._encode_appearance(mesh)
+            if code is not None:
+                latent.appearance_code = code
+                latent.appearance_uncertainty = float(np.clip(
+                    np.linalg.norm(code) / _MAX_APPEARANCE_DISTANCE, 0.0, 1.0
+                ))
+
         return latent
 
     # ── Task 2.3 — synthesize_identity (latent is the PRIMARY render input) ────
