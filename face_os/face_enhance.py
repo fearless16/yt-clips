@@ -327,3 +327,153 @@ def _sharpen(frame: np.ndarray, amount: float = 0.3, radius: float = 1.0) -> np.
     blurred = cv2.GaussianBlur(frame, (ksize, ksize), radius)
     # sharpened = frame * (1 + amount) - blurred * amount
     return cv2.addWeighted(frame, 1.0 + amount, blurred, -amount, 0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase A: Signal Processing Repair
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _measure_sharpness(img: np.ndarray, mask: Optional[np.ndarray] = None) -> float:
+    """Laplacian variance sharpness metric. Higher = sharper."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    lap = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
+    if mask is not None and mask.max() > 0.01:
+        m = (mask > 0.5).astype(np.float32)
+        if m.shape[:2] != lap.shape[:2]:
+            m = cv2.resize(m, (lap.shape[1], lap.shape[0]), interpolation=cv2.INTER_NEAREST)
+        lap = lap * m
+    return float(np.var(lap))
+
+
+def adaptive_sharpen(
+    frame: np.ndarray,
+    face_mask: Optional[np.ndarray] = None,
+    fine_amount: float = 1.4,
+    fine_radius: float = 0.6,
+    coarse_amount: float = 0.8,
+    coarse_radius: float = 1.2,
+    target_sharpness: float = 300.0,
+    deficit_gain: float = 1.5,
+    min_amount_mult: float = 0.5,
+    max_amount_mult: float = 2.5,
+) -> np.ndarray:
+    """Adaptive dual-radius USM — scales amount based on sharpness deficit.
+
+    Sharp frames receive reduced amounts (avoid over-sharpening); blurry
+    frames receive increased amounts up to max_amount_mult.
+
+    Args:
+        frame: uint8 BGR input image
+        face_mask: optional float32 mask in [0,1] (outside pixels unchanged)
+        fine_amount: base amount for fine-scale (0.6px) USM
+        fine_radius: radius for fine-scale USM
+        coarse_amount: base amount for coarse-scale (1.2px) USM
+        coarse_radius: radius for coarse-scale USM
+        target_sharpness: Laplacian variance target
+        deficit_gain: how aggressively to scale amounts per unit deficit
+        min_amount_mult: minimum multiplier (for already-sharp frames)
+        max_amount_mult: maximum multiplier (for heavily blurred frames)
+    """
+    sharpness = _measure_sharpness(frame, face_mask)
+    target = max(target_sharpness, 1.0)
+    deficit = (target - sharpness) / target
+    scale = 1.0 + deficit * deficit_gain
+    scale = np.clip(scale, min_amount_mult, max_amount_mult)
+
+    eff_fine = float(np.clip(fine_amount * scale, 0.0, fine_amount * max_amount_mult))
+    eff_coarse = float(np.clip(coarse_amount * scale, 0.0, coarse_amount * max_amount_mult))
+
+    if face_mask is not None and face_mask.max() > 0.01:
+        sharpened = _sharpen(frame, amount=eff_fine, radius=fine_radius)
+        sharpened = _sharpen(sharpened, amount=eff_coarse, radius=coarse_radius)
+        m3 = np.clip(face_mask.astype(np.float32), 0.0, 1.0)
+        if m3.shape[:2] != frame.shape[:2]:
+            m3 = cv2.resize(m3, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
+        m3 = m3[:, :, np.newaxis]
+        result = (frame.astype(np.float32) * (1.0 - m3) + sharpened.astype(np.float32) * m3)
+        return np.clip(result, 0, 255).astype(np.uint8)
+
+    frame = _sharpen(frame, amount=eff_fine, radius=fine_radius)
+    return _sharpen(frame, amount=eff_coarse, radius=coarse_radius)
+
+
+def enhance_contrast(
+    frame: np.ndarray,
+    face_mask: Optional[np.ndarray] = None,
+    clip_limit: float = 2.0,
+    tile_grid_size: tuple = (8, 8),
+) -> np.ndarray:
+    """Adaptive contrast enhancement via CLAHE on luminance channel.
+
+    Args:
+        frame: uint8 BGR input image
+        face_mask: optional float32 mask in [0,1] (outside pixels unchanged)
+        clip_limit: CLAHE clip limit for local contrast limiting
+        tile_grid_size: CLAHE tile grid (w, h)
+    """
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l_channel = lab[:, :, 0]
+    clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
+    l_eq = clahe.apply(l_channel)
+
+    if face_mask is not None and face_mask.max() > 0.01:
+        m = np.clip(face_mask.astype(np.float32), 0.0, 1.0)
+        if m.shape[:2] != frame.shape[:2]:
+            m = cv2.resize(m, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
+        l_blended = (l_channel.astype(np.float32) * (1.0 - m) + l_eq.astype(np.float32) * m)
+        l_eq = np.clip(l_blended, 0, 255).astype(np.uint8)
+
+    lab[:, :, 0] = l_eq
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+
+def apply_energy_conservation(
+    composite: np.ndarray,
+    source: np.ndarray,
+    face_mask: Optional[np.ndarray] = None,
+    energy_limit: float = 0.95,
+) -> np.ndarray:
+    """Normalize the energy of a composite to match the source.
+
+    Matches the physical renderer's _apply_energy_conservation contract:
+    - If output/target > energy_limit → scale down
+    - If output/target < 0.5 → scale up (capped at 4x)
+
+    Args:
+        composite: uint8 BGR composite output
+        source: uint8 BGR source reference for target energy
+        face_mask: optional float32 mask (only interior pixels scaled)
+        energy_limit: max energy ratio before scaling down
+    """
+    if face_mask is not None and face_mask.max() > 0.05:
+        m = np.clip(face_mask.astype(np.float32), 0.0, 1.0)
+        if m.shape[:2] != composite.shape[:2]:
+            m = cv2.resize(m, (composite.shape[1], composite.shape[0]), interpolation=cv2.INTER_NEAREST)
+        interior = m > 0.5
+        src_energy = float(np.mean(source[interior])) if interior.any() else float(np.mean(source))
+        out_energy = float(np.mean(composite[interior])) if interior.any() else float(np.mean(composite))
+    else:
+        src_energy = float(np.mean(source))
+        out_energy = float(np.mean(composite))
+
+    if src_energy <= 1e-8 or out_energy <= 1e-8:
+        return composite
+
+    ratio = out_energy / src_energy
+    f32 = composite.astype(np.float32)
+    if ratio > energy_limit:
+        scale = energy_limit / ratio
+        f32 *= scale
+    elif ratio < 0.5:
+        scale = min(0.5 / ratio, 4.0)
+        f32 *= scale
+
+    if face_mask is not None and face_mask.max() > 0.05:
+        m = np.clip(face_mask.astype(np.float32), 0.0, 1.0)
+        if m.shape[:2] != composite.shape[:2]:
+            m = cv2.resize(m, (composite.shape[1], composite.shape[0]), interpolation=cv2.INTER_LINEAR)
+        m3 = m[:, :, np.newaxis]
+        result = composite.astype(np.float32) * (1.0 - m3) + f32 * m3
+        return np.clip(result, 0, 255).astype(np.uint8)
+
+    return np.clip(f32, 0, 255).astype(np.uint8)

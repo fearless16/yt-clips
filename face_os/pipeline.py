@@ -1636,7 +1636,7 @@ class FaceOSPipeline:
         # D-01c: Multi-band blending when configured
         blend_mode = self._resolve_blend_mode()
         if blend_mode == "laplacian":
-            output = multiband_blend(cropped, identity_in_crop, aligned_mask, levels=4)
+            output = multiband_blend(cropped, identity_in_crop, aligned_mask)
         else:
             output = _blend_linear(cropped, identity_in_crop, aligned_mask)
 
@@ -1914,18 +1914,26 @@ class FaceOSPipeline:
         self,
         output: np.ndarray,
         face_mask: Optional[np.ndarray],
+        source_sharpness: Optional[float] = None,
     ) -> np.ndarray:
         """Apply the common post-composite detail and photometric lock pass.
 
-        Multi-radius USM recovers HF lost through canonical warp + multiband
-        blending. Two radii target different frequency bands:
-          - Fine (0.6px): skin pores, eyelashes, hair strands
-          - Coarse (1.2px): edges, contours, feature boundaries
+        Phase A (D-01): Adaptive dual-radius USM recovers HF lost through
+        canonical warp + multiband blending. Amount scales with measured
+        sharpness deficit — blurry frames get more, sharp frames get less
+        (avoids over-sharpening ringing). Local contrast enhancement via
+        CLAHE on the luminance channel follows.
+
+        Phase A calibration: sharpness target is resolution-calibrated from
+        the source crop's Laplacian variance. Target = max(source_hf * 1.3, 200),
+        clamped to [200, 600]. Without source reference, falls back to 300.
         """
-        # Fine-scale HF recovery (skin texture)
-        output = face_enhance._sharpen(output, amount=1.4, radius=0.6)
-        # Coarse-scale edge recovery
-        output = face_enhance._sharpen(output, amount=0.8, radius=1.2)
+        if source_sharpness is not None:
+            target = max(min(source_sharpness * 1.3, 600.0), 200.0)
+        else:
+            target = 300.0
+        output = face_enhance.adaptive_sharpen(output, face_mask=face_mask, target_sharpness=target)
+        output = face_enhance.enhance_contrast(output, face_mask=face_mask)
         return photometric_lock(output, face_mask)
 
     def _compute_energy_terms(
@@ -2121,7 +2129,10 @@ class FaceOSPipeline:
                 if gate_engage else None
             )
             if latent_result is not None:
-                latent_result = self._postprocess_rendered_crop(latent_result, face_mask)
+                latent_result = self._postprocess_rendered_crop(
+                    latent_result, face_mask,
+                    source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+                )
                 self._telemetry["physical_render_frames"] += 1
                 self._emit_frame_telemetry(
                     frame_idx, fallback_reason, intrinsic_components,
@@ -2156,8 +2167,10 @@ class FaceOSPipeline:
                 # Source-HF re-injection: recover HF lost in canonical warp
                 result = self._reinject_source_hf(result, cropped, face_mask, strength=0.80)
                 self._telemetry["physical_render_frames"] += 1
-                result = self._postprocess_rendered_crop(result, face_mask)
-                # D-08: Per-frame telemetry (before early return)
+                result = self._postprocess_rendered_crop(
+                    result, face_mask,
+                    source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+                )
                 self._emit_frame_telemetry(
                     frame_idx, fallback_reason, intrinsic_components,
                     energy_terms, prev_physical, prev_alpha,
@@ -2198,6 +2211,10 @@ class FaceOSPipeline:
                     output = self._composite_identity_to_crop(
                         cropped, identity_face, landmarks, crop_plan, frame_idx,
                     )
+                    # Phase A (D-01): Energy conservation on alpha composite path
+                    output = face_enhance.apply_energy_conservation(
+                        output, cropped, face_mask=face_mask, energy_limit=0.95,
+                    )
                     output = self._inject_detail_residual(
                         output,
                         intrinsic_components,
@@ -2206,8 +2223,10 @@ class FaceOSPipeline:
                     )
                     # Source-HF re-injection on alpha path too
                     output = self._reinject_source_hf(output, cropped, face_mask, strength=0.75)
-                    output = self._postprocess_rendered_crop(output, face_mask)
-                    self._telemetry["alpha_fallback_frames"] += 1
+                    output = self._postprocess_rendered_crop(
+                        output, face_mask,
+                        source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+                    )
                     if fallback_reason:
                         fb_dist = self._telemetry["fallback_reason_distribution"]
                         fb_dist[fallback_reason] = fb_dist.get(fallback_reason, 0) + 1
@@ -2256,8 +2275,10 @@ class FaceOSPipeline:
         )
         # Source-HF re-injection on enhancement path (was missing before)
         rendered = self._reinject_source_hf(rendered, cropped, face_mask, strength=0.65)
-        rendered = self._postprocess_rendered_crop(rendered, face_mask)
-        # RULE 8: Track render timing
+        rendered = self._postprocess_rendered_crop(
+            rendered, face_mask,
+            source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+        )
         render_time_ms = (_time.perf_counter() - _render_start) * 1000
         self._telemetry["render_time_sum_ms"] += render_time_ms
         self._telemetry["render_time_count"] += 1
@@ -2469,7 +2490,7 @@ class FaceOSPipeline:
             # D-01c: Multi-band blending when configured
             blend_mode = self._resolve_blend_mode()
             if blend_mode == "laplacian":
-                blended = multiband_blend(cropped, rendered_face, feathered_mask, levels=4)
+                blended = multiband_blend(cropped, rendered_face, feathered_mask)
             else:
                 blended = _blend_linear(cropped, rendered_face, feathered_mask)
 
@@ -3024,7 +3045,7 @@ class FaceOSPipeline:
 
             blend_mode = self._resolve_blend_mode()
             if blend_mode == "laplacian":
-                output = multiband_blend(cropped, rendered_u8, feathered_mask, levels=4)
+                output = multiband_blend(cropped, rendered_u8, feathered_mask)
             else:
                 output = _blend_linear(cropped, rendered_u8, feathered_mask)
 
