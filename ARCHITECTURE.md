@@ -77,7 +77,7 @@ IdentityManifold      ❌ No        ❌ No     ❌ No        ❌ No
 VisibilityCalibration ❌ No        ❌ No     ❌ No        ❌ No
 ```
 
-**Key:** ACTIVE ≠ VALIDATED. PhysicalRenderer runs 96% of frames but no proof yet that output quality improved over alpha compositing. See `AGAINST.md`.
+**Key:** ACTIVE ≠ VALIDATED. PhysicalRenderer runs 96% of frames but no proof yet that output quality improved over alpha compositing.
 
 ### V2 Subsystem Architecture
 
@@ -257,4 +257,4 @@ Two config files:
 | I-10 Stranded modules | ❌ PENDING |
 | ARCHITECTURE.md stale | ✅ UPDATED |
 
-See `AGAINST.md` for full analysis.
+See `face_os/STATE.md` for current drift status.
