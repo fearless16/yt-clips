@@ -250,6 +250,14 @@ class FaceOSPipeline:
         # cfg.latent.render_source when present.
         render_source = getattr(latent_cfg, 'render_source', None) if latent_cfg else None
         self.render_source: str = render_source if render_source in ('legacy', 'latent') else 'legacy'
+
+        # D-05 Phase 2A: gate policy selector. 'production' = Option 1
+        # (relative-to-floor confidence gate, the existing _evaluate_latent_gate);
+        # 'forced_latent' = Option 3 (engage whenever latent is initialized,
+        # for A/B proving the path works). Option 2 (per-pixel blend) is a
+        # future refinement. Honors cfg.latent.gate_policy when present.
+        gate_policy = getattr(latent_cfg, 'gate_policy', None) if latent_cfg else None
+        self._gate_policy: str = gate_policy if gate_policy in ('production', 'forced_latent') else 'production'
         # Fraction of the rendered crop still driven by source pixels (1.0 =
         # fully source/legacy). The latent render path lowers this to its face
         # coverage complement; read into per-frame telemetry.
@@ -2075,12 +2083,17 @@ class FaceOSPipeline:
             and self._identity_estimator is not None
         ):
             _latent = self._identity_estimator.latent()
-            gate_engage, gate_state = self._evaluate_latent_gate(
-                initialized=_latent.initialized,
-                confidence=self._last_latent_confidence,
-                confidence_prev=self._prev_latent_confidence,
-                confidence_floor=self._latent_confidence_floor,
-            )
+            if self._gate_policy == 'forced_latent':
+                gate_engage, gate_state = self._evaluate_latent_gate_forced(
+                    initialized=_latent.initialized,
+                )
+            else:
+                gate_engage, gate_state = self._evaluate_latent_gate(
+                    initialized=_latent.initialized,
+                    confidence=self._last_latent_confidence,
+                    confidence_prev=self._prev_latent_confidence,
+                    confidence_floor=self._latent_confidence_floor,
+                )
             self._last_gate_state = gate_state
             # Track this frame's confidence for the NEXT frame's spike check,
             # regardless of the decision, so the trajectory stays honest.
@@ -2558,6 +2571,41 @@ class FaceOSPipeline:
             return False, "confidence_spike"
         if confidence < (confidence_floor + margin):
             return False, "below_floor"
+        return True, "engaged"
+
+    @staticmethod
+    def _evaluate_latent_gate_forced(
+        initialized: bool,
+        confidence: float = 0.0,
+        confidence_prev: float = 0.0,
+        confidence_floor: float = 0.0,
+        margin: float = 0.01,
+        spike_drop: float = 0.05,
+    ) -> tuple:
+        """D-05 Phase 2A OPTION 3: FORCED LATENT gate — A/B proving stage.
+
+        Engage whenever the latent is initialized, unconditionally. Confidence,
+        floor, and spike detection are accepted in the signature for drop-in
+        substitution with _evaluate_latent_gate, but ignored — the gate's sole
+        purpose is proving the latent path drives pixels end-to-end.
+
+        Once the path is proven, the policy promotes to Option 1 (production
+        relative-to-floor gate, _evaluate_latent_gate). Option 2 (per-pixel
+        uncertainty blend) is a future refinement.
+
+        Args:
+            initialized: latent has absorbed at least the enrollment observation.
+            confidence: ignored.
+            confidence_prev: ignored.
+            confidence_floor: ignored.
+            margin: ignored.
+            spike_drop: ignored.
+
+        Returns:
+            (engage: bool, gate_state: str) — gate_state is the telemetry label.
+        """
+        if not initialized:
+            return False, "uninitialized"
         return True, "engaged"
 
     @staticmethod
