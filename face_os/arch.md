@@ -1080,47 +1080,106 @@ Ye one-liner architecture ko aur mathematically closed karega.
 
 ### 2) **Exact gate rule**
 
-Doc bolta hai verification / confidence / invariants, but final decision equation aur crisp ho sakta hai:
+**Formal equation (implemented in `accept_gate.py`):**
 
-[
-\text{accept} = f(\text{geometry}, \text{identity}, \text{temporal}, \text{lighting})
-]
+```
+accept_t = geometry_ok_t ∧ identity_ok_t ∧ temporal_ok_t ∧ lighting_ok_t
 
-Aur hard reject condition:
+where:
+  geometry_ok_t = (G_conf ≥ τ_g) ∧ transform_graph.valid ∧ mask.finite
+  identity_ok_t = (I_conf ≥ τ_i)
+  temporal_ok_t = (T_conf ≥ τ_t)
+  lighting_ok_t = ∀L ∈ {ambient, diffuse, specular, direction}: isfinite(L)
 
-[
-\text{if accept}=0 \Rightarrow \text{no update, no render}
-]
+thresholds: τ_g=0.05, τ_i=0.01, τ_t=0.05
+```
+
+**Hard reject invariant:**
+
+```
+accept_t = 0  ⟹  identity_state.update() skipped
+                  latent fusion skipped
+                  render falls back to alpha/enhancement path
+```
+
+**Score (continuous confidence):**
+
+```
+score_t = min(G_conf, I_conf, T_conf, 1.0 if lighting_ok else 0.0)
+```
+
+**Implementation:** `accept_gate.py:evaluate_acceptance()` — deterministic, no side effects, returns `AcceptDecision` with explicit reason string.
 
 ### 3) **One final objective function**
 
-Ye abhi implicitly spread hai. Isko ek loss me pack kar do:
+**Formal equation:**
 
-[
-\min J = \lambda_g E_{geom} + \lambda_i E_{id} + \lambda_t E_{temp} + \lambda_r E_{render}
-]
+```
+J_t = λ_g · E_geom + λ_i · E_identity + λ_t · E_temporal + λ_p · E_photometric
 
-Isse runtime aur tests dono seedhe ho jayenge.
+where:
+  E_geom       = (|yaw| + |pitch| + |roll|) / 180          [pose magnitude]
+  E_identity   = intrinsic.reconstruction_error             [decomposition quality]
+  E_temporal   = trace(latent_covariance)                   [state uncertainty]
+  E_photometric = intrinsic.decomposition_quality           [photometric fit]
+
+weights: λ_g=1.0, λ_i=1.0, λ_t=1.0, λ_p=1.0 (equal weighting, z-score normalized)
+```
+
+**Implementation:** `pipeline.py:_compute_energy_terms()` — returns normalized dict, used by `_evaluate_physical_gate()` for render path selection.
+
+**Invariant:** All terms z-score normalized via `EnergyScaler` before combination, ensuring unit variance across the clip.
 
 ### 4) **Fallback policy**
 
-Architecture says “no hidden fallback,” which is good, but exact fallback hierarchy missing hai:
+**Explicit hierarchy (no hidden fallback):**
 
-* if geometry fails, do what?
-* if identity weak hai, do what?
-* if temporal confidence low hai, do what?
+```
+Priority 1: LATENT PATH
+  condition: accept_gate.accept ∧ intrinsic_components available
+  action: synthesize_identity → estimate_lighting → render_from_latent
+  fallback_reason: None
 
-Ye explicitly लिखna चाहिए.
+Priority 2: PHYSICAL PATH  
+  condition: intrinsic_components available ∧ energy gate passes
+  action: PhysicalRenderer.render_with_mesh()
+  fallback_reason: "energy_geom_extreme" | "energy_photometric_low" | "latent_uncertainty_high"
+
+Priority 3: ALPHA PATH (identity composite)
+  condition: identity_face available ∧ landmarks available
+  action: _composite_identity_to_crop() + face_enhance
+  fallback_reason: "intrinsic_unavailable" | "no_landmarks" | "renderer_mode_alpha" | "physical_renderer_failed"
+
+Priority 4: ENHANCEMENT PATH (basic)
+  condition: face detected but no identity/geometry
+  action: face_enhance.apply_energy_conservation() only
+  fallback_reason: "compositor_exception" | accept gate rejection
+```
+
+**Hard invariant:** Every frame emits explicit `render_path` + `fallback_reason` in telemetry (D-08). No silent fallback.
 
 ### 5) **Threshold calibration contract**
 
-Tu invariants bol raha hai, but thresholds ka source-of-truth doc me aur clear ho sakta hai:
+**Source-of-truth thresholds (all in `config.py` or module defaults):**
 
-* min embedding dist
-* max drift
-* min visibility
-* crop cutoff
-* temporal confidence floor
+| Domain | Threshold | Value | Location | Purpose |
+|--------|-----------|-------|----------|---------|
+| **Accept Gate** | min_geometry_confidence | 0.05 | accept_gate.py:23 | Geometry subsystem usable |
+| | min_identity_confidence | 0.01 | accept_gate.py:24 | Identity update allowed |
+| | min_temporal_confidence | 0.05 | accept_gate.py:25 | Temporal state valid |
+| **Identity** | embedding_tolerance | 0.50 | config.py:18 | Face matching (lower=strict) |
+| | max_identity_drift | 20.0 LAB | config.py:122 | Anchor distance limit |
+| | anchor_threshold | 25.0 LAB | identity_state.py | Anchor correction trigger |
+| **Geometry** | min_face_size | 60 px | config.py:25 | Detection minimum |
+| | max_crop_velocity | 50 px/frame | config.py:51 | Temporal smoothness |
+| **Temporal** | flicker_threshold | 15.0 LAB | config.py:58 | Stabilization trigger |
+| | max_lost_frames | 30 | config.py:27 | LOST_FACE declaration |
+| **Quality** | confidence_threshold | 0.3 | config.py:99 | Use source vs memory |
+| | min_sharpness | 10.0 | config.py:124 | Laplacian variance floor |
+| **Verification** | min_face_pixels | 4000 | config.py | Verification gate |
+| | liveness_threshold | 0.5 | config.py | Anti-spoofing |
+
+**Calibration invariant:** All thresholds are explicit, named, and configurable via `face_os_config.yaml`. No magic constants in hot paths.
 
 ## Verdict
 
