@@ -42,6 +42,7 @@ _PROJECTION_SEED = 42
 _PROJECTION_INPUT_DIM = 478 * 3
 _MAX_APPEARANCE_DISTANCE = 10.0
 _MAX_MANIFOLD_OBSERVATIONS = 64
+_APPEARANCE_OBS_NOISE_SIGMA_SQ = 0.1
 
 
 def _build_projection_matrix() -> np.ndarray:
@@ -90,6 +91,7 @@ class IdentityEstimator:
         self._enrollment_mesh: Optional[np.ndarray] = None
         self._projection_matrix: np.ndarray = _build_projection_matrix()
         self._observation_points: list = []
+        self._smoothed_appearance: Optional[np.ndarray] = None
         if self._manifold is None:
             from face_os.identity_manifold import IdentityManifold, ManifoldConfig
             self._manifold = IdentityManifold(ManifoldConfig(dimension=self._appearance_dim(), max_geodesic_distance=_MAX_APPEARANCE_DISTANCE))
@@ -160,6 +162,23 @@ class IdentityEstimator:
                 self._appearance_dim(), dtype=np.float32
             )
             self._latent.appearance_uncertainty = 0.0
+            self._smoothed_appearance = None
+
+    def _riemannian_gain(self, metric: np.ndarray, innovation: np.ndarray) -> np.ndarray:
+        """Apply metric-aware Kalman gain to an innovation vector.
+
+        Eigendecomposes the learned manifold metric tensor, then applies per-direction
+        gain ``λ_i / (λ_i + σ²)``. Directions with high observed variance (large λ_i)
+        are familiar — gain ≈ 1, trust the observation. Directions with only the
+        regularization floor (λ_i ≈ ε) are novel — gain ≈ 0, stick with current state.
+
+        Returns the gain-weighted innovation vector in the original basis.
+        """
+        vals, vecs = np.linalg.eigh(metric)
+        vals = np.clip(vals, 1e-6, None)
+        gains = vals / (vals + _APPEARANCE_OBS_NOISE_SIGMA_SQ)
+        innovation_basis = vecs.T @ innovation
+        return vecs @ (gains * innovation_basis)
 
     def set_anchor(
         self,
@@ -360,6 +379,8 @@ class IdentityEstimator:
         """Core fusion on a validated BGR observation (see ``update_latent``)."""
         atlas_h, atlas_w = self._atlas_size
 
+        from face_os.identity_manifold import IdentityPoint
+
         # ── 1. Decompose the OBSERVATION (source is telemetry, not memory) ─────
         # Reuse a caller-provided decomposition when present (avoids a redundant
         # second decompose of the same canonical_face this frame); otherwise
@@ -484,25 +505,36 @@ class IdentityEstimator:
         if mesh is not None:
             code = self._encode_appearance(mesh)
             if code is not None:
-                latent.appearance_code = code
+                self._observation_points.append(code.copy())
+                if len(self._observation_points) > _MAX_MANIFOLD_OBSERVATIONS:
+                    self._observation_points = self._observation_points[-_MAX_MANIFOLD_OBSERVATIONS:]
+
                 enrollment = self._manifold.get_point("enrollment")
                 if enrollment is not None:
-                    self._observation_points.append(code.copy())
-                    if len(self._observation_points) > _MAX_MANIFOLD_OBSERVATIONS:
-                        self._observation_points = self._observation_points[-_MAX_MANIFOLD_OBSERVATIONS:]
                     if len(self._observation_points) >= 3:
-                        from face_os.identity_manifold import IdentityPoint
                         neighbors = [IdentityPoint(coordinates=p) for p in self._observation_points]
                         metric = self._manifold.compute_metric_tensor(enrollment, neighbors)
                         enrollment.metric_tensor = metric
-                    current = IdentityPoint(coordinates=code)
+                    if self._smoothed_appearance is not None and getattr(enrollment, "metric_tensor", None) is not None:
+                        innovation = code - self._smoothed_appearance
+                        weighted = self._riemannian_gain(enrollment.metric_tensor, innovation)
+                        self._smoothed_appearance = self._smoothed_appearance + weighted
+                    else:
+                        self._smoothed_appearance = code.copy()
+                    smoothed_code = self._smoothed_appearance
+                else:
+                    smoothed_code = code
+
+                latent.appearance_code = smoothed_code.astype(np.float32)
+                current = IdentityPoint(coordinates=smoothed_code)
+                if enrollment is not None:
                     distance = self._manifold.geodesic_distance(enrollment, current)
                     latent.appearance_uncertainty = float(min(
                         distance / self._manifold.config.max_geodesic_distance, 1.0
                     ))
                 else:
                     latent.appearance_uncertainty = float(np.clip(
-                        np.linalg.norm(code) / _MAX_APPEARANCE_DISTANCE, 0.0, 1.0
+                        np.linalg.norm(smoothed_code) / _MAX_APPEARANCE_DISTANCE, 0.0, 1.0
                     ))
 
         return latent
