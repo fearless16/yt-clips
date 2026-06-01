@@ -1915,6 +1915,7 @@ class FaceOSPipeline:
         output: np.ndarray,
         face_mask: Optional[np.ndarray],
         source_sharpness: Optional[float] = None,
+        edge_protection: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Apply the common post-composite detail and photometric lock pass.
 
@@ -1927,12 +1928,19 @@ class FaceOSPipeline:
         Phase A calibration: sharpness target is resolution-calibrated from
         the source crop's Laplacian variance. Target = max(source_hf * 1.3, 200),
         clamped to [200, 600]. Without source reference, falls back to 300.
+
+        D-04: Edge protection mask from normal-variance analysis reduces
+        sharpening at geometric edges to prevent halos at nose bridge,
+        jaw contour, and eyebrow ridges.
         """
         if source_sharpness is not None:
             target = max(min(source_sharpness * 1.3, 600.0), 200.0)
         else:
             target = 300.0
-        output = face_enhance.adaptive_sharpen(output, face_mask=face_mask, target_sharpness=target)
+        output = face_enhance.adaptive_sharpen(
+            output, face_mask=face_mask, target_sharpness=target,
+            edge_protection=edge_protection,
+        )
         output = face_enhance.enhance_contrast(output, face_mask=face_mask)
         return photometric_lock(output, face_mask)
 
@@ -2056,6 +2064,10 @@ class FaceOSPipeline:
             intrinsic_components, identity_face, landmarks, frame_idx
         )
 
+        # D-04: Normal-variance edge protection mask (geometry-aware sharpening)
+        normal_map = compositor.face_prior_normal_map(cropped.shape[0], cropped.shape[1])
+        edge_protection_mask = compositor.compute_normal_variance_mask(normal_map)
+
         # RULE 8: Timing
         import time as _time
         _render_start = _time.perf_counter()
@@ -2132,6 +2144,7 @@ class FaceOSPipeline:
                 latent_result = self._postprocess_rendered_crop(
                     latent_result, face_mask,
                     source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+                    edge_protection=edge_protection_mask,
                 )
                 self._telemetry["physical_render_frames"] += 1
                 self._emit_frame_telemetry(
@@ -2170,6 +2183,7 @@ class FaceOSPipeline:
                 result = self._postprocess_rendered_crop(
                     result, face_mask,
                     source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+                    edge_protection=edge_protection_mask,
                 )
                 self._emit_frame_telemetry(
                     frame_idx, fallback_reason, intrinsic_components,
@@ -2226,6 +2240,7 @@ class FaceOSPipeline:
                     output = self._postprocess_rendered_crop(
                         output, face_mask,
                         source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+                        edge_protection=edge_protection_mask,
                     )
                     if fallback_reason:
                         fb_dist = self._telemetry["fallback_reason_distribution"]
@@ -2278,6 +2293,7 @@ class FaceOSPipeline:
         rendered = self._postprocess_rendered_crop(
             rendered, face_mask,
             source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+            edge_protection=edge_protection_mask,
         )
         render_time_ms = (_time.perf_counter() - _render_start) * 1000
         self._telemetry["render_time_sum_ms"] += render_time_ms

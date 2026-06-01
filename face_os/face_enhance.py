@@ -356,6 +356,7 @@ def adaptive_sharpen(
     deficit_gain: float = 1.5,
     min_amount_mult: float = 0.5,
     max_amount_mult: float = 2.5,
+    edge_protection: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Adaptive dual-radius USM — scales amount based on sharpness deficit.
 
@@ -373,6 +374,8 @@ def adaptive_sharpen(
         deficit_gain: how aggressively to scale amounts per unit deficit
         min_amount_mult: minimum multiplier (for already-sharp frames)
         max_amount_mult: maximum multiplier (for heavily blurred frames)
+        edge_protection: optional (H,W) float32 mask [0,1] — high values
+            reduce sharpening to prevent halos at geometric edges (D-04)
     """
     sharpness = _measure_sharpness(frame, face_mask)
     target = max(target_sharpness, 1.0)
@@ -389,8 +392,15 @@ def adaptive_sharpen(
         m3 = np.clip(face_mask.astype(np.float32), 0.0, 1.0)
         if m3.shape[:2] != frame.shape[:2]:
             m3 = cv2.resize(m3, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
-        m3 = m3[:, :, np.newaxis]
-        result = (frame.astype(np.float32) * (1.0 - m3) + sharpened.astype(np.float32) * m3)
+        if edge_protection is not None:
+            ep = cv2.resize(edge_protection.astype(np.float32), (frame.shape[1], frame.shape[0]))
+            ep = np.clip(ep, 0.0, 1.0)[:, :, np.newaxis]
+            m3_exp = m3[:, :, np.newaxis]
+            blend = m3_exp * (1.0 - ep * 0.6)
+            result = (frame.astype(np.float32) * (1.0 - blend) + sharpened.astype(np.float32) * blend)
+        else:
+            m3 = m3[:, :, np.newaxis]
+            result = (frame.astype(np.float32) * (1.0 - m3) + sharpened.astype(np.float32) * m3)
         return np.clip(result, 0, 255).astype(np.uint8)
 
     frame = _sharpen(frame, amount=eff_fine, radius=fine_radius)
