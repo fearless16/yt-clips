@@ -553,6 +553,9 @@ class IdentityEstimator:
             np.asarray(latent.microdetail, dtype=np.float32), geometry, render_hw, channels=3
         ).astype(np.float32)
 
+        appear_conf = 1.0 - float(latent.appearance_uncertainty)
+        detail = detail * appear_conf
+
         # Normals: geometry mesh if available, else face-prior ellipsoid.
         normal_map = self._normals_for(geometry, h, w)
 
