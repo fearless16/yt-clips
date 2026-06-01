@@ -239,6 +239,7 @@ def test_latent_render_telemetry_to_dict_has_full_schema():
         "latent_confidence", "albedo_drift_from_anchor", "uncertainty_mean",
         "contract_assertions_passed", "gate_state", "hybrid_alpha_mean",
         "effective_blend_max", "appearance_uncertainty",
+        "deform_max", "deform_mean",
     }
     assert set(d.keys()) == expected_keys
     assert d["frame_idx"] == 7
@@ -526,6 +527,8 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
         hybrid_alpha_mean=0.74,
         effective_blend_max=0.72,
         appearance_uncertainty=0.35,
+        deform_max=0.8,
+        deform_mean=0.15,
     )
     d = telem.to_dict()
     assert set(d.keys()) == {
@@ -533,6 +536,7 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
         "latent_confidence", "albedo_drift_from_anchor", "uncertainty_mean",
         "contract_assertions_passed", "gate_state", "hybrid_alpha_mean",
         "effective_blend_max", "appearance_uncertainty",
+        "deform_max", "deform_mean",
     }
     # values round-trip
     assert d["frame_idx"] == 42
@@ -547,6 +551,8 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
     assert d["hybrid_alpha_mean"] == 0.74
     assert d["effective_blend_max"] == 0.72
     assert d["appearance_uncertainty"] == 0.35
+    assert d["deform_max"] == 0.8
+    assert d["deform_mean"] == 0.15
     # types
     assert isinstance(d["frame_idx"], int)
     assert isinstance(d["render_path"], str)
@@ -556,6 +562,8 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
     assert isinstance(d["hybrid_alpha_mean"], float)
     assert isinstance(d["effective_blend_max"], float)
     assert isinstance(d["appearance_uncertainty"], float)
+    assert isinstance(d["deform_max"], float)
+    assert isinstance(d["deform_mean"], float)
 
 
 def test_latent_render_telemetry_defaults_document_legacy_truth():

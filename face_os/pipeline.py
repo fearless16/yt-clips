@@ -290,6 +290,8 @@ class FaceOSPipeline:
         self._last_hybrid_alpha_mean: float = 1.0
         self._last_effective_blend_max: float = self._hybrid_blend_max
         self._last_appearance_uncertainty: float = 0.0
+        self._last_deform_max: float = 0.0
+        self._last_deform_mean: float = 0.0
 
         # DIAGNOSTIC ONLY (default OFF, zero cost when off): when enabled, the
         # latent render path stashes its pre-composite rendered face, the actual
@@ -1829,6 +1831,8 @@ class FaceOSPipeline:
                     hybrid_alpha_mean=float(self._last_hybrid_alpha_mean),
                     effective_blend_max=float(self._last_effective_blend_max),
                     appearance_uncertainty=float(self._last_appearance_uncertainty),
+                    deform_max=float(self._last_deform_max),
+                    deform_mean=float(self._last_deform_mean),
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1849,6 +1853,8 @@ class FaceOSPipeline:
                     "hybrid_alpha_mean": float(self._last_hybrid_alpha_mean),
                     "effective_blend_max": float(self._last_effective_blend_max),
                     "appearance_uncertainty": float(self._last_appearance_uncertainty),
+                    "deform_max": float(self._last_deform_max),
+                    "deform_mean": float(self._last_deform_mean),
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)
@@ -2003,6 +2009,8 @@ class FaceOSPipeline:
         self._last_hybrid_alpha_mean = 1.0
         self._last_effective_blend_max = self._hybrid_blend_max
         self._last_appearance_uncertainty = 0.0
+        self._last_deform_max = 0.0
+        self._last_deform_mean = 0.0
 
         # BHENCHOD SANITIZER: Kill 256-channel tensors before they reach the renderer
         if intrinsic_components is not None and getattr(intrinsic_components, 'shading', None) is not None:
@@ -3001,6 +3009,8 @@ class FaceOSPipeline:
             effective_blend_max = float(np.clip(effective_blend_max, self._hybrid_blend_max, 1.0))
             self._last_effective_blend_max = effective_blend_max
             self._last_appearance_uncertainty = appear_unc
+            self._last_deform_max = float(getattr(est, "_last_deform_max", 0.0) or 0.0)
+            self._last_deform_mean = float(getattr(est, "_last_deform_mean", 0.0) or 0.0)
 
             rendered_u8 = self._hybrid_face(
                 rendered_u8, cropped, latent_uncertainty, solid_interior,

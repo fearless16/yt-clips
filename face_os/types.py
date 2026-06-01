@@ -486,6 +486,10 @@ class LatentRenderTelemetry:
     #   hybrid blend cap, scaled by appearance divergence from enrollment
     appearance_uncertainty: float = 0.0    # D-05 Task 2.5: expression divergence
     #   from enrollment (0=neutral, 1=far); drives blend_max modulation
+    deform_max: float = 0.0                # D-05 Task 2.5: max deformation
+    #   magnitude on atlas — expression-driven gain modulation upper bound
+    deform_mean: float = 0.0               # D-05 Task 2.5: mean deformation
+    #   magnitude on atlas — average expression-driven gain lift
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -501,4 +505,6 @@ class LatentRenderTelemetry:
             "hybrid_alpha_mean": self.hybrid_alpha_mean,
             "effective_blend_max": self.effective_blend_max,
             "appearance_uncertainty": self.appearance_uncertainty,
+            "deform_max": self.deform_max,
+            "deform_mean": self.deform_mean,
         }
