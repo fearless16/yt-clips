@@ -584,6 +584,93 @@ class ABComparator:
             'frames_compared': n,
         }
 
+    def corpus_compare_sources(
+        self,
+        pipeline,
+        corpus: List[Tuple[str, str]],
+        max_frames: int = 100,
+        **gate_kwargs,
+    ) -> "CorpusSourceReport":
+        """Run latent-vs-legacy A/B on a corpus of video clips (D-05 multi-clip gate).
+
+        Args:
+            pipeline: FaceOSPipeline instance.
+            corpus: List of (clip_name, video_path) tuples.
+            max_frames: Max frames to process per clip.
+            **gate_kwargs: Passed through to compare_render_sources
+                (ssim_floor, lab_drift_ceiling, sharpness_ratio_floor,
+                 flicker_ratio_ceiling).
+
+        Returns:
+            CorpusSourceReport with per-clip details and aggregate statistics.
+        """
+        report = CorpusSourceReport()
+        all_ssim: List[float] = []
+        all_lab: List[float] = []
+        all_sharp_ratio: List[float] = []
+        all_flicker_ratio: List[float] = []
+
+        for clip_name, video_path in corpus:
+            try:
+                result = self.compare_render_sources(
+                    pipeline, video_path, max_frames=max_frames, **gate_kwargs,
+                )
+            except Exception as e:
+                _logger.warning("Corpus A/B failed for %s: %s", clip_name, e)
+                result = {
+                    'regressed': True,
+                    'reasons': [str(e)],
+                    'ssim_mean': 0.0,
+                    'lab_drift_mean': 999.0,
+                    'sharpness_ratio': 0.0,
+                    'flicker_ratio': 999.0,
+                    'frames_compared': 0,
+                }
+
+            clip_entry = {
+                'clip': clip_name,
+                'video_path': video_path,
+                'regressed': result.get('regressed', True),
+                'reasons': result.get('reasons', []),
+                'ssim_mean': result.get('ssim_mean', 0.0),
+                'lab_drift_mean': result.get('lab_drift_mean', 0.0),
+                'sharpness_ratio': result.get('sharpness_ratio', 0.0),
+                'flicker_ratio': result.get('flicker_ratio', 0.0),
+                'frames_compared': result.get('frames_compared', 0),
+                'checks': result.get('checks', {}),
+            }
+            report.clips.append(clip_entry)
+            report.total_clips += 1
+
+            if result.get('regressed', True):
+                report.regressed += 1
+            else:
+                report.passed += 1
+
+            ssim = result.get('ssim_mean', 0.0)
+            lab = result.get('lab_drift_mean', 0.0)
+            sr = result.get('sharpness_ratio', 0.0)
+            fr = result.get('flicker_ratio', 0.0)
+            if ssim > 0:
+                all_ssim.append(ssim)
+            if lab < 900:
+                all_lab.append(lab)
+            if sr > 0:
+                all_sharp_ratio.append(sr)
+            if fr < 900:
+                all_flicker_ratio.append(fr)
+
+        if all_ssim:
+            report.ssim_mean_overall = float(np.mean(all_ssim))
+        if all_lab:
+            report.lab_drift_mean_overall = float(np.mean(all_lab))
+        if all_sharp_ratio:
+            report.sharpness_ratio_mean_overall = float(np.mean(all_sharp_ratio))
+        if all_flicker_ratio:
+            report.flicker_ratio_mean_overall = float(np.mean(all_flicker_ratio))
+
+        return report
+
     def benchmark_report(self, comparison_result: dict) -> str:
         # Kept intact for brevity, logic is fine
         comp = comparison_result.get("comparison", {})
@@ -613,4 +700,52 @@ class ABComparator:
             lines.append(f"| {name} | {vp:.4f} | {va:.4f} | {better} |")
 
         lines.extend(["", f"**Verdict:** {winner} wins with {improvement:.1f}% improvement."])
+        return "\n".join(lines)
+
+
+@dataclass
+class CorpusSourceReport:
+    """Aggregated D-05 latent-vs-legacy results across a corpus of video clips."""
+    clips: List[Dict] = field(default_factory=list)
+    total_clips: int = 0
+    passed: int = 0
+    regressed: int = 0
+    ssim_mean_overall: float = 0.0
+    lab_drift_mean_overall: float = 0.0
+    sharpness_ratio_mean_overall: float = 0.0
+    flicker_ratio_mean_overall: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "total_clips": self.total_clips,
+            "passed": self.passed,
+            "regressed": self.regressed,
+            "ssim_mean_overall": self.ssim_mean_overall,
+            "lab_drift_mean_overall": self.lab_drift_mean_overall,
+            "sharpness_ratio_mean_overall": self.sharpness_ratio_mean_overall,
+            "flicker_ratio_mean_overall": self.flicker_ratio_mean_overall,
+            "clips": self.clips,
+        }
+
+    def summary(self) -> str:
+        """Human-readable summary suitable for D-05 gate decision."""
+        status = "READY" if self.regressed == 0 and self.total_clips > 0 else "BLOCKED"
+        lines = [
+            f"# D-05 Corpus A/B Report: Latent vs Legacy",
+            f"Status: {status}",
+            f"Clips: {self.total_clips} total, {self.passed} passed, {self.regressed} regressed",
+            f"Mean SSIM: {self.ssim_mean_overall:.4f}",
+            f"Mean LAB drift: {self.lab_drift_mean_overall:.2f}",
+            f"Mean sharpness ratio: {self.sharpness_ratio_mean_overall:.4f}",
+            f"Mean flicker ratio: {self.flicker_ratio_mean_overall:.4f}",
+            "",
+        ]
+        for clip in self.clips:
+            regressed = clip.get("regressed", True)
+            name = clip.get("clip", "unknown")
+            ssim = clip.get("ssim_mean", "N/A")
+            if isinstance(ssim, (int, float)):
+                ssim = f"{ssim:.4f}"
+            lines.append(f"- {name}: {'REGRESSED' if regressed else 'OK'} "
+                         f"(SSIM={ssim})")
         return "\n".join(lines)
