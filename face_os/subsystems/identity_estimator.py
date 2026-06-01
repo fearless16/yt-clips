@@ -105,6 +105,7 @@ class IdentityEstimator:
         self._projection_matrix: np.ndarray = _build_projection_matrix()
         self._projection_pinv: np.ndarray = _build_projection_pinv(self._projection_matrix)
         self._observation_points: list = []
+        self._observation_weights: list = []
         self._smoothed_appearance: Optional[np.ndarray] = None
         if self._manifold is None:
             from face_os.identity_manifold import IdentityManifold, ManifoldConfig
@@ -354,6 +355,7 @@ class IdentityEstimator:
 
         self._manifold.add_point("enrollment", appearance_code, confidence=1.0)
         self._observation_points = []
+        self._observation_weights = []
 
         # ── 8. Populate and store the latent ──
         self._latent = IdentityLatent(
@@ -574,14 +576,18 @@ class IdentityEstimator:
             code = self._encode_appearance(mesh)
             if code is not None:
                 self._observation_points.append(code.copy())
+                frame_weight = float(np.mean(quality).item())
+                self._observation_weights.append(max(frame_weight, 1e-6))
                 if len(self._observation_points) > _MAX_MANIFOLD_OBSERVATIONS:
                     self._observation_points = self._observation_points[-_MAX_MANIFOLD_OBSERVATIONS:]
+                    self._observation_weights = self._observation_weights[-_MAX_MANIFOLD_OBSERVATIONS:]
 
                 enrollment = self._manifold.get_point("enrollment")
                 if enrollment is not None:
                     if len(self._observation_points) >= 3:
                         neighbors = [IdentityPoint(coordinates=p) for p in self._observation_points]
-                        metric = self._manifold.compute_metric_tensor(enrollment, neighbors)
+                        w_arr = np.array(self._observation_weights, dtype=np.float64)
+                        metric = self._manifold.compute_metric_tensor(enrollment, neighbors, weights=w_arr)
                         enrollment.metric_tensor = metric
                     if self._smoothed_appearance is not None and getattr(enrollment, "metric_tensor", None) is not None:
                         innovation = code - self._smoothed_appearance
