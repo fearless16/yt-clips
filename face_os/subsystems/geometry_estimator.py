@@ -15,7 +15,12 @@ from typing import Optional
 
 import numpy as np
 
-from face_os.types import GeometryState
+from face_os.types import (
+    CoordinateSpace,
+    GeometryState,
+    TransformEdge,
+    TransformGraph,
+)
 
 
 class GeometryEstimator:
@@ -81,6 +86,16 @@ class GeometryEstimator:
             state.canonical_face = canonical
             state.canonical_transform = M
             state.inverse_transform = np.linalg.inv(M)
+            graph = TransformGraph()
+            graph.add(
+                TransformEdge.from_matrix(
+                    M,
+                    CoordinateSpace.SOURCE_FRAME,
+                    CoordinateSpace.CANONICAL_UV,
+                )
+            )
+            state.transform_graph = graph
+            state.invariants["canonical_transform"] = graph.to_dict()
 
         return state
 
@@ -93,6 +108,7 @@ class GeometryEstimator:
         landmarks=None,
         pose=(0.0, 0.0, 0.0),
         geometry_confidence: float = 0.0,
+        crop_transform=None,
     ) -> GeometryState:
         """Package already-extracted geometry primitives into a GeometryState.
 
@@ -123,20 +139,47 @@ class GeometryEstimator:
         state.landmarks = landmarks
         state.pose = tuple(pose) if pose is not None else (0.0, 0.0, 0.0)
         state.geometry_confidence = float(geometry_confidence)
+        state.crop_transform = crop_transform
         if landmarks is not None and hasattr(landmarks, "points"):
             state.landmarks_478 = landmarks.points
 
+        graph = TransformGraph()
         if canonical_transform is not None:
             M = np.asarray(canonical_transform, dtype=np.float32)
             # Promote a 2x3 affine to 3x3 so inverse_transform is well-defined.
             if M.shape == (2, 3):
                 M = np.vstack([M, [0.0, 0.0, 1.0]]).astype(np.float32)
             state.canonical_transform = M
+            graph.add(
+                TransformEdge.from_matrix(
+                    M,
+                    CoordinateSpace.SOURCE_FRAME,
+                    CoordinateSpace.CANONICAL_UV,
+                )
+            )
             if M.shape == (3, 3):
                 try:
                     state.inverse_transform = np.linalg.inv(M).astype(np.float32)
+                    graph.add(
+                        TransformEdge.from_matrix(
+                            state.inverse_transform,
+                            CoordinateSpace.CANONICAL_UV,
+                            CoordinateSpace.SOURCE_FRAME,
+                        )
+                    )
                 except np.linalg.LinAlgError:
                     state.inverse_transform = None
+
+        state.transform_graph = graph
+        state.invariants["transform_graph"] = graph.to_dict()
+        if mask is not None:
+            mask_arr = np.asarray(mask, dtype=np.float32)
+            state.invariants["mask_coverage"] = float(
+                np.mean(mask_arr > 0.5)
+            ) if mask_arr.size else 0.0
+        if mesh is not None:
+            mesh_arr = np.asarray(mesh)
+            state.invariants["landmark_count"] = int(mesh_arr.shape[0]) if mesh_arr.ndim >= 1 else 0
 
         return state
 

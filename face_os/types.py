@@ -37,6 +37,15 @@ class EnhancementLevel(Enum):
     SKIP = auto()
 
 
+class CoordinateSpace(Enum):
+    """Explicit coordinate spaces required by face_os/arch.md."""
+    SOURCE_FRAME = "source_frame_space"
+    CROP = "crop_space"
+    CANONICAL_UV = "canonical_uv_space"
+    RENDER = "render_space"
+    OUTPUT = "output_space"
+
+
 # ─── Frame-level structures ─────────────────────────────────────────────────
 
 @dataclass
@@ -115,6 +124,127 @@ class CropPlan:
 
 
 @dataclass
+class TransformEdge:
+    """A declared transform between two coordinate spaces."""
+    matrix: np.ndarray
+    source_space: CoordinateSpace
+    target_space: CoordinateSpace
+    determinant: float = 1.0
+    scale_min: float = 1.0
+    scale_max: float = 1.0
+    invertible: bool = True
+
+    @classmethod
+    def from_matrix(
+        cls,
+        matrix: np.ndarray,
+        source_space: CoordinateSpace,
+        target_space: CoordinateSpace,
+    ) -> "TransformEdge":
+        m = np.asarray(matrix, dtype=np.float32)
+        if m.shape == (2, 3):
+            m = np.vstack([m, [0.0, 0.0, 1.0]]).astype(np.float32)
+        det = 0.0
+        scale_min = 0.0
+        scale_max = 0.0
+        invertible = False
+        if m.shape == (3, 3):
+            linear = m[:2, :2]
+            det = float(np.linalg.det(linear))
+            try:
+                svals = np.linalg.svd(linear, compute_uv=False)
+                scale_min = float(np.min(svals))
+                scale_max = float(np.max(svals))
+            except np.linalg.LinAlgError:
+                scale_min = 0.0
+                scale_max = 0.0
+            invertible = bool(abs(det) > 1e-8 and np.all(np.isfinite(m)))
+        return cls(
+            matrix=m,
+            source_space=source_space,
+            target_space=target_space,
+            determinant=det,
+            scale_min=scale_min,
+            scale_max=scale_max,
+            invertible=invertible,
+        )
+
+
+@dataclass
+class TransformGraph:
+    """Ordered transform chain with measurable invariants."""
+    edges: List[TransformEdge] = field(default_factory=list)
+
+    def add(self, edge: TransformEdge) -> None:
+        self.edges.append(edge)
+
+    @property
+    def valid(self) -> bool:
+        return all(edge.invertible for edge in self.edges)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "valid": self.valid,
+            "edges": [
+                {
+                    "source_space": edge.source_space.value,
+                    "target_space": edge.target_space.value,
+                    "determinant": edge.determinant,
+                    "scale_min": edge.scale_min,
+                    "scale_max": edge.scale_max,
+                    "invertible": edge.invertible,
+                }
+                for edge in self.edges
+            ],
+        }
+
+
+@dataclass
+class SemanticMeshMask:
+    """Mesh-derived semantic masks and topology metrics."""
+    mask: np.ndarray
+    regions: Dict[str, np.ndarray] = field(default_factory=dict)
+    sdf: Optional[np.ndarray] = None
+    triangle_count: int = 0
+    inverted_triangles: int = 0
+    coverage: float = 0.0
+    source: str = "mesh_478"
+
+    def invariant_report(self) -> Dict[str, Any]:
+        return {
+            "source": self.source,
+            "triangle_count": int(self.triangle_count),
+            "inverted_triangles": int(self.inverted_triangles),
+            "coverage": float(self.coverage),
+            "topology_valid": int(self.inverted_triangles) == 0,
+            "has_sdf": self.sdf is not None,
+        }
+
+
+@dataclass
+class AcceptDecision:
+    """Central render/update gate decision."""
+    accept: bool
+    reason: Optional[str] = None
+    geometry_ok: bool = True
+    identity_ok: bool = True
+    temporal_ok: bool = True
+    lighting_ok: bool = True
+    score: float = 1.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "accept": bool(self.accept),
+            "reason": self.reason,
+            "geometry_ok": bool(self.geometry_ok),
+            "identity_ok": bool(self.identity_ok),
+            "temporal_ok": bool(self.temporal_ok),
+            "lighting_ok": bool(self.lighting_ok),
+            "score": float(self.score),
+        }
+
+
+@dataclass
 class EnhancementMask:
     face_mask: Optional[np.ndarray] = None
     eye_mask: Optional[np.ndarray] = None
@@ -148,6 +278,9 @@ class GeometryState:
     mesh: Optional[np.ndarray] = None
     semantic_regions: Optional[Dict[str, np.ndarray]] = None
     mask: Optional[np.ndarray] = None
+    semantic_mask: Optional[SemanticMeshMask] = None
+    transform_graph: TransformGraph = field(default_factory=TransformGraph)
+    invariants: Dict[str, Any] = field(default_factory=dict)
     geometry_confidence: float = 0.0
     canonical_face: Optional[np.ndarray] = None
 
@@ -171,6 +304,11 @@ class TemporalState:
     continuity_score: float = 1.0
     smoothing_constraints: Dict[str, float] = field(default_factory=dict)
     pose: Optional[Tuple[float, float, float]] = None
+    confidence_map: Optional[np.ndarray] = None
+    landmark_velocity: float = 0.0
+    landmark_acceleration: float = 0.0
+    flicker_score: float = 0.0
+    texture_update_allowed: bool = False
 
 
 # ─── Pipeline structures ────────────────────────────────────────────────────
@@ -506,6 +644,14 @@ class LatentRenderTelemetry:
     #   magnitude on atlas — expression-driven gain modulation upper bound
     deform_mean: float = 0.0               # D-05 Task 2.5: mean deformation
     #   magnitude on atlas — average expression-driven gain lift
+    observation_residual_mean: float = 0.0  # §16.1: mean LAB forward-model
+    #   residual ‖O_t − Ô_t‖ over face interior (lower = latent better explains
+    #   the observation; finite and bounded per the §16.1 invariant).
+    observation_noise_mean: float = 0.0     # §16.1: mean per-pixel ε_t norm
+    #   (the part of the observation the forward model cannot explain).
+    observation_confidence: float = 0.0     # §16.1: exp(−residual_mean/30),
+    #   a scalar trust signal derived from the forward-model residual (1.0 =
+    #   perfect match, 0.0 = large unexplained residual).
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -527,4 +673,7 @@ class LatentRenderTelemetry:
             "appearance_uncertainty": self.appearance_uncertainty,
             "deform_max": self.deform_max,
             "deform_mean": self.deform_mean,
+            "observation_residual_mean": self.observation_residual_mean,
+            "observation_noise_mean": self.observation_noise_mean,
+            "observation_confidence": self.observation_confidence,
         }

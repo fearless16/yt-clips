@@ -42,6 +42,7 @@ import numpy as np
 
 from face_os.config import get_config
 from face_os.types import (
+    AcceptDecision,
     ConfidenceMap,
     CropPlan,
     EnhancementMask,
@@ -65,6 +66,7 @@ from face_os import compositor
 from face_os.compositor import _blend_linear, multiband_blend, _srgb_to_linear, _linear_to_srgb
 from face_os.photometric import photometric_lock, reset_photometric_lock
 from face_os import export_qc
+from face_os.accept_gate import evaluate_acceptance
 
 # NEW modules
 from face_os.identity_state import IdentityState
@@ -79,6 +81,7 @@ from face_os.lie_group import SIM2Transform, interpolate_sim2
 from face_os.renderer_mode import RendererMode, RendererModeState
 from face_os.state_evolution import StateEvolution
 from face_os.energy_scaling import EnergyScaler
+from face_os.observation_model import compute_observation_residual
 
 # D-10: Subsystem wrappers (thin delegation, boundary enforcement)
 from face_os.subsystems import IdentityEstimator, TemporalEstimator, FaceRenderer, GeometryEstimator
@@ -258,6 +261,19 @@ class FaceOSPipeline:
         self._last_appearance_uncertainty: float = 0.0
         self._last_deform_max: float = 0.0
         self._last_deform_mean: float = 0.0
+        self._last_obs_residual_mean: float = 0.0
+        self._last_obs_noise_mean: float = 0.0
+        self._last_obs_confidence: float = 0.0
+        self._last_accept_decision = AcceptDecision(
+            accept=False,
+            reason="not_evaluated",
+            geometry_ok=False,
+            identity_ok=False,
+            temporal_ok=False,
+            lighting_ok=True,
+            score=0.0,
+        )
+        self._last_transform_graph = {}
 
         # DIAGNOSTIC ONLY (default OFF, zero cost when off): when enabled, the
         # latent render path stashes its pre-composite rendered face, the actual
@@ -1296,7 +1312,15 @@ class FaceOSPipeline:
             # GATE: Skip update if face mask is too small
             if canonical_face_mask is not None and canonical_face_mask.sum() < 100:
                 # Face mask too small — skip update
-                pass
+                self._last_accept_decision = AcceptDecision(
+                    accept=False,
+                    reason="accept_reject_geometry",
+                    geometry_ok=False,
+                    identity_ok=True,
+                    temporal_ok=True,
+                    lighting_ok=True,
+                    score=0.0,
+                )
             else:
                 # Get verification parameters from track
                 face_bbox = face_track.smooth_bbox
@@ -1307,16 +1331,40 @@ class FaceOSPipeline:
                 
                 embedding = face_track.detection.embedding if face_track.detection else None
 
-                # Update with verification gate
                 mesh_478 = getattr(face_track, 'mesh_478', None)
-                identity_updated = self.identity_state.update(
-                    canonical_face, masked_quality, pose=pose,
-                    face_bbox=face_bbox,
-                    landmarks_pts=landmarks_pts,
-                    embedding=embedding,
-                    mesh_478=mesh_478,
-                    warp_M=M[:2] if M is not None else None,
+                geom_state = self._geometry_estimator.assemble_state(
+                    canonical_face=canonical_face,
+                    canonical_transform=M,
+                    mask=canonical_face_mask,
+                    mesh=mesh_478,
+                    landmarks=landmarks,
+                    pose=pose if pose is not None else (0.0, 0.0, 0.0),
+                    geometry_confidence=(
+                        face_track.detection.confidence
+                        if face_track.detection else 0.0
+                    ),
                 )
+                self._last_transform_graph = geom_state.transform_graph.to_dict()
+                self._last_accept_decision = evaluate_acceptance(
+                    geom_state,
+                    identity_confidence=(
+                        float(np.mean(masked_quality))
+                        if masked_quality is not None else 0.0
+                    ),
+                    temporal=None,
+                    lighting=None,
+                )
+
+                identity_updated = False
+                if self._last_accept_decision.accept:
+                    identity_updated = self.identity_state.update(
+                        canonical_face, masked_quality, pose=pose,
+                        face_bbox=face_bbox,
+                        landmarks_pts=landmarks_pts,
+                        embedding=embedding,
+                        mesh_478=mesh_478,
+                        warp_M=M[:2] if M is not None else None,
+                    )
 
                 # D-05: Latent update — fuse observation into the
                 # lighting-invariant latent via uncertainty-weighted fusion.
@@ -1333,18 +1381,6 @@ class FaceOSPipeline:
                     and self.identity_state._intrinsic_components is not None
                 ):
                     try:
-                        geom_state = self._geometry_estimator.assemble_state(
-                            canonical_face=canonical_face,
-                            canonical_transform=M,
-                            mask=canonical_face_mask,
-                            mesh=mesh_478,
-                            landmarks=landmarks,
-                            pose=pose if pose is not None else (0.0, 0.0, 0.0),
-                            geometry_confidence=(
-                                face_track.detection.confidence
-                                if face_track.detection else 0.0
-                            ),
-                        )
                         latent = self._identity_estimator.update_latent(
                             canonical_face, geom_state, masked_quality,
                             intrinsic=self.identity_state._intrinsic_components,
@@ -1746,6 +1782,12 @@ class FaceOSPipeline:
                 "resample_count": int(resample_count),
                 "energy_terms": energy_terms if energy_terms else {},
                 "transform_det": sim2_det,
+                "transform_graph": getattr(self, "_last_transform_graph", {}),
+                "accept_decision": (
+                    self._last_accept_decision.to_dict()
+                    if hasattr(getattr(self, "_last_accept_decision", None), "to_dict")
+                    else {}
+                ),
             }
             # D-05 Phase 0: attach a per-frame LatentRenderTelemetry sub-dict.
             # Additive only — legacy frames report latent_primary=False and
@@ -1785,6 +1827,9 @@ class FaceOSPipeline:
                     appearance_uncertainty=float(self._last_appearance_uncertainty),
                     deform_max=float(self._last_deform_max),
                     deform_mean=float(self._last_deform_mean),
+                    observation_residual_mean=float(self._last_obs_residual_mean),
+                    observation_noise_mean=float(self._last_obs_noise_mean),
+                    observation_confidence=float(self._last_obs_confidence),
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1807,6 +1852,9 @@ class FaceOSPipeline:
                     "appearance_uncertainty": float(self._last_appearance_uncertainty),
                     "deform_max": float(self._last_deform_max),
                     "deform_mean": float(self._last_deform_mean),
+                    "observation_residual_mean": 0.0,
+                    "observation_noise_mean": 0.0,
+                    "observation_confidence": 0.0,
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)
@@ -1850,6 +1898,12 @@ class FaceOSPipeline:
                 "resample_count": 0,
                 "energy_terms": {},
                 "transform_det": 1.0,
+                "transform_graph": getattr(self, "_last_transform_graph", {}),
+                "accept_decision": (
+                    self._last_accept_decision.to_dict()
+                    if hasattr(getattr(self, "_last_accept_decision", None), "to_dict")
+                    else {}
+                ),
                 "latent": error_latent,
             })
             self._latent_telemetry_log.append(error_latent)
@@ -1974,6 +2028,9 @@ class FaceOSPipeline:
         self._last_appearance_uncertainty = 0.0
         self._last_deform_max = 0.0
         self._last_deform_mean = 0.0
+        self._last_obs_residual_mean = 0.0
+        self._last_obs_noise_mean = 0.0
+        self._last_obs_confidence = 0.0
 
         # BHENCHOD SANITIZER: Kill 256-channel tensors before they reach the renderer
         if intrinsic_components is not None and getattr(intrinsic_components, 'shading', None) is not None:
@@ -2060,7 +2117,12 @@ class FaceOSPipeline:
             and self._identity_estimator is not None
         ):
             _latent = self._identity_estimator.latent()
-            gate_engage = _latent.initialized
+            accept_decision = getattr(self, "_last_accept_decision", None)
+            gate_engage = _latent.initialized and (
+                accept_decision is None or bool(getattr(accept_decision, "accept", False))
+            )
+            if _latent.initialized and not gate_engage and accept_decision is not None:
+                fallback_reason = getattr(accept_decision, "reason", None) or fallback_reason
             latent_result = (
                 self._render_with_latent(
                     cropped, landmarks, crop_plan, frame_idx, geom_state=geom_state,
@@ -2841,6 +2903,13 @@ class FaceOSPipeline:
             if rendered is None:
                 return None
             rendered_face = np.clip(np.asarray(rendered, np.float32), 0.0, 1.0)
+
+            obs_res = compute_observation_residual(
+                rendered_face, cropped, mask=crop_mask,
+            )
+            self._last_obs_residual_mean = obs_res.residual_mean
+            self._last_obs_noise_mean = obs_res.noise_mean
+            self._last_obs_confidence = obs_res.observation_confidence
 
             # ── Composite the rendered face into the crop (linear-light) ───────
             # Compositing the face region into the frame is legitimate; only

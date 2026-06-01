@@ -1060,3 +1060,75 @@ guard," used as a POSITIVE promotion signal next to the tripwires — not a sing
 magic pass/fail. Promoting the default to `latent` on the strength of this signal
 (plus passing tripwires) is now a bounded judgement call rather than a blocked-on-
 unimplemented-§16.10 dead end.
+
+
+==> 
+
+## Jo abhi missing / under-specified lag raha hai
+
+### 1) **Explicit observation model**
+
+Spec me hidden state hai, but ye clear equation aur strong hona chahiye:
+
+[
+y_t = R(x_t) + \epsilon_t
+]
+
+Meaning:
+source frame = identity ka noisy observation.
+Ye one-liner architecture ko aur mathematically closed karega.
+
+### 2) **Exact gate rule**
+
+Doc bolta hai verification / confidence / invariants, but final decision equation aur crisp ho sakta hai:
+
+[
+\text{accept} = f(\text{geometry}, \text{identity}, \text{temporal}, \text{lighting})
+]
+
+Aur hard reject condition:
+
+[
+\text{if accept}=0 \Rightarrow \text{no update, no render}
+]
+
+### 3) **One final objective function**
+
+Ye abhi implicitly spread hai. Isko ek loss me pack kar do:
+
+[
+\min J = \lambda_g E_{geom} + \lambda_i E_{id} + \lambda_t E_{temp} + \lambda_r E_{render}
+]
+
+Isse runtime aur tests dono seedhe ho jayenge.
+
+### 4) **Fallback policy**
+
+Architecture says “no hidden fallback,” which is good, but exact fallback hierarchy missing hai:
+
+* if geometry fails, do what?
+* if identity weak hai, do what?
+* if temporal confidence low hai, do what?
+
+Ye explicitly लिखna चाहिए.
+
+### 5) **Threshold calibration contract**
+
+Tu invariants bol raha hai, but thresholds ka source-of-truth doc me aur clear ho sakta hai:
+
+* min embedding dist
+* max drift
+* min visibility
+* crop cutoff
+* temporal confidence floor
+
+## Verdict
+
+**Missing nahi hai majorly.**
+Bas **final closure** ke liye:
+
+1. observation model
+2. gate equation
+3. single objective
+4. fallback policy
+5. threshold contract
