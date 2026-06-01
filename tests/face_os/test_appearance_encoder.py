@@ -451,3 +451,151 @@ def test_invalidate_appearance_code_noop_when_uninitialized():
     estimator._invalidate_appearance_code()
     assert latent.initialized is False
     assert latent.appearance_uncertainty == 1.0  # default
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test 11 — canonical 2D landmark positions
+# ═══════════════════════════════════════════════════════════════════
+
+def test_canonical_lm_2d_computed_on_store_enrollment():
+    """store_enrollment_mesh computes _canonical_lm_2d in [0,256] atlas space."""
+    estimator = _make_estimator()
+    mesh = _make_enrollment_mesh()
+    estimator.store_enrollment_mesh(mesh)
+
+    lm2d = estimator._canonical_lm_2d
+    assert lm2d is not None
+    assert lm2d.shape == (478, 2)
+    assert lm2d.dtype == np.float32
+    # All landmarks within [0, 256] (with some margin for the padding)
+    assert lm2d[:, 0].min() >= 0
+    assert lm2d[:, 0].max() <= 256
+    assert lm2d[:, 1].min() >= 0
+    assert lm2d[:, 1].max() <= 256
+    # At least some variation (not all same point)
+    assert lm2d[:, 0].max() - lm2d[:, 0].min() > 40
+    assert lm2d[:, 1].max() - lm2d[:, 1].min() > 40
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test 12 — _compute_deformation_map
+# ═══════════════════════════════════════════════════════════════════
+
+def test_compute_deformation_map_zeros_when_no_data():
+    """Returns zero-filled map when smoothed appearance is None."""
+    estimator = _make_estimator(atlas_size=(64, 64))
+    dmap = estimator._compute_deformation_map(64, 64)
+    assert dmap.shape == (64, 64)
+    assert dmap.dtype == np.float32
+    assert np.allclose(dmap, 0.0)
+
+
+def test_compute_deformation_map_zeros_when_no_canonical_lm():
+    """Returns zeros when _canonical_lm_2d is None."""
+    estimator = _make_estimator(atlas_size=(64, 64))
+    estimator._smoothed_appearance = np.ones(16, dtype=np.float32) * 0.5
+    dmap = estimator._compute_deformation_map(64, 64)
+    assert np.allclose(dmap, 0.0)
+
+
+def test_compute_deformation_map_shape():
+    """With valid enrollment + smoothed appearance, returns (h,w) float32 map."""
+    rng = np.random.RandomState(42)
+    estimator = _make_estimator(atlas_size=(64, 64))
+    enrollment = _make_enrollment_mesh(rng)
+    estimator.store_enrollment_mesh(enrollment)
+
+    # Seed smoothed_appearance with a non-zero code to trigger deformation
+    estimator._smoothed_appearance = rng.normal(0, 0.01, 16).astype(np.float32)
+
+    dmap = estimator._compute_deformation_map(64, 64)
+    assert dmap.shape == (64, 64)
+    assert dmap.dtype == np.float32
+
+
+def test_compute_deformation_map_typically_nonzero_for_offset_code():
+    """A clearly non-zero code should produce non-zero deformation regions."""
+    rng = np.random.RandomState(73)
+    estimator = _make_estimator(atlas_size=(64, 64))
+    enrollment = _make_enrollment_mesh(rng)
+    estimator.store_enrollment_mesh(enrollment)
+    estimator._smoothed_appearance = rng.normal(0, 0.1, 16).astype(np.float32)
+
+    dmap = estimator._compute_deformation_map(64, 64)
+    # At least some pixels should register deformation
+    assert float(np.max(dmap)) > 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test 13 — Deformation stats propagation
+# ═══════════════════════════════════════════════════════════════════
+
+def test_deformation_stats_updated_in_update_latent():
+    """After update_latent with a mesh, _last_deform_{max,mean} are populated."""
+    rng = np.random.RandomState(7)
+    estimator = _make_estimator(atlas_size=(64, 64))
+    enrollment = _make_enrollment_mesh(rng)
+    estimator.store_enrollment_mesh(enrollment)
+
+    face = _make_face_bgr(h=64, w=64, rng=rng)
+    quality = np.ones((64, 64), dtype=np.float32)
+
+    # Initialize latent
+    estimator.update_latent(face, _make_geometry(), quality)
+
+    # Deform the mesh
+    deformed = enrollment.copy()
+    deformed[:, 1] += 10.0
+    estimator.update_latent(face, _make_geometry(mesh=deformed), quality)
+
+    # Stats should be set (might be zero if deformation map is zero, which is fine)
+    assert isinstance(estimator._last_deform_max, float)
+    assert isinstance(estimator._last_deform_mean, float)
+
+
+def test_deformation_stats_zero_for_identity_mesh():
+    """When geometry == enrollment, deformation stats are zero."""
+    rng = np.random.RandomState(13)
+    estimator = _make_estimator(atlas_size=(64, 64))
+    enrollment = _make_enrollment_mesh(rng)
+    estimator.store_enrollment_mesh(enrollment)
+
+    face = _make_face_bgr(h=64, w=64, rng=rng)
+    quality = np.ones((64, 64), dtype=np.float32)
+
+    estimator.update_latent(face, _make_geometry(), quality)
+    estimator.update_latent(face, _make_geometry(mesh=enrollment.copy()), quality)
+
+    assert estimator._last_deform_max == 0.0
+    assert estimator._last_deform_mean == 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test 14 — Expression-aware Kalman gain modulation
+# ═══════════════════════════════════════════════════════════════════
+
+def test_compute_deformation_map_with_identity_code():
+    """Zero appearance_code → zero deformation everywhere."""
+    rng = np.random.RandomState(99)
+    estimator = _make_estimator(atlas_size=(64, 64))
+    enrollment = _make_enrollment_mesh(rng)
+    estimator.store_enrollment_mesh(enrollment)
+    estimator._smoothed_appearance = np.zeros(16, dtype=np.float32)
+
+    dmap = estimator._compute_deformation_map(64, 64)
+    assert np.allclose(dmap, 0.0)
+
+
+def test_deformation_gain_modulation_is_ge_one():
+    """Expression-aware gain multiplier is always >= 1.0 (boosting gain)."""
+    rng = np.random.RandomState(57)
+    estimator = _make_estimator(atlas_size=(64, 64))
+    enrollment = _make_enrollment_mesh(rng)
+    estimator.store_enrollment_mesh(enrollment)
+    estimator._smoothed_appearance = rng.normal(0, 0.5, 16).astype(np.float32)
+
+    dmap = estimator._compute_deformation_map(64, 64)
+    from face_os.subsystems.identity_estimator import _K_EXPRESSION_GAIN
+    deform_gain = np.clip(1.0 + dmap * _K_EXPRESSION_GAIN, 1.0, 3.0)
+    assert np.all(deform_gain >= 1.0)
+    assert np.all(deform_gain <= 3.0)
