@@ -44,6 +44,7 @@ _MAX_APPEARANCE_DISTANCE = 10.0
 _MAX_MANIFOLD_OBSERVATIONS = 64
 _APPEARANCE_OBS_NOISE_SIGMA_SQ = 0.1
 _K_EXPRESSION_GAIN = 2.0
+_PINV_RIDGE_LAMBDA = 0.01
 
 
 def _build_projection_matrix() -> np.ndarray:
@@ -188,12 +189,33 @@ class IdentityEstimator:
             self._latent.appearance_uncertainty = 0.0
             self._smoothed_appearance = None
 
+    def _get_regularized_pinv(self) -> np.ndarray:
+        """Return ridge-regularized pseudoinverse of the JL projection.
+
+        P_reg^+ = P^T (P P^T + λ I)^{-1}  via Woodbury identity.
+
+        Tikhonov regularization penalizes large deformation magnitudes,
+        pulling the reconstruction toward the enrollment mesh. This stabilises
+        the deformation map in landmark-poor regions where the JL nullspace
+        otherwise allows arbitrary large excursions.
+
+        Returns:
+            (1434, 16) float32 regularized pseudoinverse matrix.
+        """
+        P = self._projection_matrix
+        M = P @ P.T  # (16, 16)
+        M_reg = M + _PINV_RIDGE_LAMBDA * np.eye(_APPEARANCE_DIM, dtype=np.float32)
+        return (P.T @ np.linalg.inv(M_reg)).astype(np.float32)
+
     def _compute_deformation_map(self, atlas_h: int, atlas_w: int) -> np.ndarray:
         """Reconstruct expression deformation from smoothed appearance_code.
 
         Inverts the JL projection to recover the principal (478, 3) deformation
         field, then interpolates its magnitude onto the atlas grid via Delaunay
         triangulation of the canonical 2D landmark positions.
+
+        Uses ridge-regularized pseudoinverse (Tikhonov λ=0.01) to prevent
+        large unphysical deformations in landmark-poor atlas regions.
 
         Returns:
             (atlas_h, atlas_w) float32 scalar deformation magnitude map, or zeros
@@ -202,7 +224,9 @@ class IdentityEstimator:
         if self._smoothed_appearance is None or self._canonical_lm_2d is None:
             return np.zeros((atlas_h, atlas_w), dtype=np.float32)
 
-        deform = self._projection_pinv @ np.asarray(self._smoothed_appearance, dtype=np.float32)
+        code = np.asarray(self._smoothed_appearance, dtype=np.float32)
+        pinv = self._get_regularized_pinv()
+        deform = pinv @ code
         deform = deform.reshape(-1, 3)
         n_lm = deform.shape[0]
         if n_lm != self._canonical_lm_2d.shape[0]:

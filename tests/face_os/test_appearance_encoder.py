@@ -599,3 +599,52 @@ def test_deformation_gain_modulation_is_ge_one():
     deform_gain = np.clip(1.0 + dmap * _K_EXPRESSION_GAIN, 1.0, 3.0)
     assert np.all(deform_gain >= 1.0)
     assert np.all(deform_gain <= 3.0)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test 15 — Regularized pseudoinverse
+# ═══════════════════════════════════════════════════════════════════
+
+def test_regularized_pinv_shape():
+    """_get_regularized_pinv returns (1434, 16) float32."""
+    estimator = _make_estimator()
+    pinv = estimator._get_regularized_pinv()
+    assert pinv.shape == (1434, 16)
+    assert pinv.dtype == np.float32
+
+
+def test_regularized_pinv_smaller_deformation_than_standard():
+    """Regularized pinv produces smaller deformation magnitudes than standard."""
+    rng = np.random.RandomState(42)
+    estimator = _make_estimator()
+    pinv_reg = estimator._get_regularized_pinv()
+    pinv_std = estimator._projection_pinv
+
+    # Test with several codes
+    total_reg = 0.0
+    total_std = 0.0
+    for _ in range(10):
+        code = rng.normal(0, 0.5, 16).astype(np.float32)
+        deform_reg = pinv_reg @ code
+        deform_std = pinv_std @ code
+        total_reg += float(np.linalg.norm(deform_reg))
+        total_std += float(np.linalg.norm(deform_std))
+
+    assert total_reg < total_std, (
+        f"Regularized total {total_reg:.2f} >= standard {total_std:.2f}"
+    )
+
+
+def test_regularized_pinv_reconstructs_code_approximately():
+    """P·pinv_reg·code ≈ code (small reprojection error despite regularization)."""
+    rng = np.random.RandomState(31)
+    estimator = _make_estimator()
+    pinv = estimator._get_regularized_pinv()
+    P = estimator._projection_matrix
+
+    for _ in range(5):
+        code = rng.normal(0, 0.5, 16).astype(np.float32)
+        deform = pinv @ code
+        reconstructed = P @ deform
+        err = np.linalg.norm(reconstructed - code) / max(np.linalg.norm(code), 1e-6)
+        assert err < 0.15, f"Reconstruction error {err:.4f} too high"
