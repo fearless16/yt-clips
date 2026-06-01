@@ -76,6 +76,7 @@ class ParallelPool:
         def _run():
             try:
                 if self._stop_event.is_set():
+                    future.set_exception(RuntimeError("pool is shut down"))
                     return
                 report = memory_report()
                 if report["environment"] == "linux":

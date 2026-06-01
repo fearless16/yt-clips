@@ -306,11 +306,6 @@ def _fetch_via_ytdlp(video_id: str) -> dict | None:
                     pass
             segments = _parse_vtt(text)
             return {"segments": segments, "language": "en", "source": "vtt"}
-        for p in vtt_files:
-            try:
-                p.unlink()
-            except OSError:
-                pass
         log.warning("yt-dlp produced no VTT files for %s", video_id)
         return None
     except Exception as e:

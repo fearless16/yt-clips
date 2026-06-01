@@ -132,7 +132,7 @@ def _upload_one(service, file_path: Path, target_folder_id: str,
     return True
 
 
-def push(include_data: bool = False) -> bool:
+def push(include_data: bool = False, config_only: bool = False) -> bool:
     """Sync local code files to Google Drive with batch API + local cache."""
     try:
         from utils.token_refresh import ensure_fresh_tokens
@@ -157,23 +157,27 @@ def push(include_data: bool = False) -> bool:
 
         # 2. Build file list to sync — NO face_os (separate module, not for Colab)
         root = Path(".")
-        files_to_sync = (
-            list(root.glob("*.py"))
-            + list(root.glob("*.yaml"))
-            + list(root.glob("*.sh"))
-            + list(root.glob("*.txt"))
-            + list(root.glob(".env"))
-            + list(root.glob("utils/*.py"))
-            + list(root.glob("utils/*.yaml"))
-            + list(root.glob("automation/*.py"))
-            + list(root.glob("automation/seo/*.py"))
-            + list(root.glob("transcripts/*.json"))
-            + list(root.glob("highlights/*.yaml"))
-            + list(root.glob("photos/*.png"))
-            + list(root.glob("photos/*.jpg"))
-            + list(root.glob("photos/*.jpeg"))
-        )
-        # face_os/ is intentionally excluded: it's a standalone module with its own lifecycle
+        files_to_sync = []
+        if not config_only:
+            files_to_sync = (
+                list(root.glob("*.py"))
+                + list(root.glob("*.yaml"))
+                + list(root.glob("*.sh"))
+                + list(root.glob("*.txt"))
+                + list(root.glob(".env"))
+                + list(root.glob("utils/*.py"))
+                + list(root.glob("utils/*.yaml"))
+                + list(root.glob("automation/*.py"))
+                + list(root.glob("automation/seo/*.py"))
+                + list(root.glob("transcripts/*.json"))
+                + list(root.glob("highlights/*.yaml"))
+                + list(root.glob("photos/*.png"))
+                + list(root.glob("photos/*.jpg"))
+                + list(root.glob("photos/*.jpeg"))
+            )
+            # face_os/ is intentionally excluded: it's a standalone module with its own lifecycle
+        else:
+            files_to_sync = []
 
         if include_data:
             log.info("📦 Including input data (video) in sync...")
@@ -290,5 +294,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Sync local code files to Google Drive.")
     parser.add_argument("--include-data", action="store_true", help="Include input/ video files")
+    parser.add_argument("--config-only", action="store_true", help="Skip code, push only config + data files")
     args = parser.parse_args()
-    sys.exit(0 if push(include_data=args.include_data) else 1)
+    sys.exit(0 if push(include_data=args.include_data, config_only=args.config_only) else 1)
