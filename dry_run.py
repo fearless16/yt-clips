@@ -366,7 +366,8 @@ def dry_run(url: str,
              skip_sync, skip_seo, auto_sync, auto_upload, auto_schedule, mode)
     log.info("=" * 64)
 
-    from automation import decision_store
+    from automation.memory.decision_store import DecisionStore as _DS
+    decision_store = _DS()
     decision_store.clear()
     event_count_before = 0
 
