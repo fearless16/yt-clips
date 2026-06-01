@@ -241,6 +241,8 @@ def test_latent_render_telemetry_to_dict_has_full_schema():
         "coverage_pose", "mean_visibility", "coverage_light", "c_recon",
         "effective_blend_max", "appearance_uncertainty",
         "deform_max", "deform_mean",
+        "observation_residual_mean", "observation_noise_mean",
+        "observation_confidence",
     }
     assert set(d.keys()) == expected_keys
     assert d["frame_idx"] == 7
@@ -534,6 +536,9 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
         appearance_uncertainty=0.35,
         deform_max=0.8,
         deform_mean=0.15,
+        observation_residual_mean=12.5,
+        observation_noise_mean=11.8,
+        observation_confidence=0.66,
     )
     d = telem.to_dict()
     assert set(d.keys()) == {
@@ -543,6 +548,8 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
         "coverage_pose", "mean_visibility", "coverage_light", "c_recon",
         "effective_blend_max", "appearance_uncertainty",
         "deform_max", "deform_mean",
+        "observation_residual_mean", "observation_noise_mean",
+        "observation_confidence",
     }
     # values round-trip
     assert d["frame_idx"] == 42
@@ -563,6 +570,9 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
     assert d["appearance_uncertainty"] == 0.35
     assert d["deform_max"] == 0.8
     assert d["deform_mean"] == 0.15
+    assert d["observation_residual_mean"] == 12.5
+    assert d["observation_noise_mean"] == 11.8
+    assert d["observation_confidence"] == 0.66
     # types
     assert isinstance(d["frame_idx"], int)
     assert isinstance(d["render_path"], str)

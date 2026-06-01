@@ -276,10 +276,17 @@ LATENT_TELEMETRY_KEYS = {
     "contract_assertions_passed",
     "gate_state",
     "hybrid_alpha_mean",
+    "coverage_pose",
+    "mean_visibility",
+    "coverage_light",
+    "c_recon",
     "effective_blend_max",
     "appearance_uncertainty",
     "deform_max",
     "deform_mean",
+    "observation_residual_mean",
+    "observation_noise_mean",
+    "observation_confidence",
 }
 
 FRAME_TELEMETRY_KEYS = {

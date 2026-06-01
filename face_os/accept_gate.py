@@ -21,7 +21,7 @@ def evaluate_acceptance(
     temporal: Optional[TemporalState] = None,
     lighting=None,
     min_geometry_confidence: float = 0.05,
-    min_identity_confidence: float = 0.05,
+    min_identity_confidence: float = 0.01,
     min_temporal_confidence: float = 0.05,
 ) -> AcceptDecision:
     """Return the single frame accept/reject decision.
