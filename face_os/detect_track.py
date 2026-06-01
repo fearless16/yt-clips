@@ -16,6 +16,10 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+# Suppress MediaPipe C++ log noise (feedback manager, clearcut)
+os.environ.setdefault('GLOG_minloglevel', '2')
+os.environ.setdefault('MEDIAPIPE_LOG_LEVEL', 'error')
+
 from face_os.config import get_config
 from face_os.types import (
     FaceDetection,

@@ -302,6 +302,7 @@ def mesh_normal_map(
     normal_map = cv2.resize(normal_map_lr, (w, h), interpolation=cv2.INTER_CUBIC)
 
     norms = np.linalg.norm(normal_map, axis=2, keepdims=True)
-    normal_map = np.where(norms > 1e-8, normal_map / norms, np.array([0, 0, 1], dtype=np.float32))
+    with np.errstate(divide='ignore', invalid='ignore'):
+        normal_map = np.where(norms > 1e-8, normal_map / norms, np.array([0, 0, 1], dtype=np.float32))
 
     return normal_map
