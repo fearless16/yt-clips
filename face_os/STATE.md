@@ -1,6 +1,6 @@
 # Face OS v3.9 — Compact State Reference
 
-**Last updated:** 2026-06-02 | **Tests:** 441 passed, 0 failed, 3 skipped | **Source:** ~17,300 lines
+**Last updated:** 2026-06-02 | **Tests:** 523 passed, 7 failed (pre-existing), 3 skipped | **Source:** ~17,500 lines
 
 This file is the current source of truth for Face OS. Older status files may
 describe historical drift; use this file for current runtime alignment.
@@ -28,6 +28,7 @@ pipeline.py (single orchestration runtime)
     ├── accept_gate.py (central accept/reject gate)
     ├── visibility.py (per-UV geometric visibility)
     ├── reconstruction_confidence.py (C_recon composite)
+    ├── observation_model.py (forward-model residual Ô_t vs O_t)
     ├── ab_validation.py (validation harness)
     ├── export_qc.py
     ├── subsystems/
@@ -123,7 +124,8 @@ Utility files (standalone, not pipeline modules): `colab_server.py`, `colab_clie
 | test_temporal_confidence_only.py | 5 | Temporal confidence propagation |
 | test_color_cast.py | 4 | Color cast detection/correction |
 | test_accept_gate.py | 3 | Accept/reject gate |
-| **Total** | **441** | |
+| test_observation_model.py | 9 | Forward-model residual, noise, confidence |
+| **Total** | **450** | |
 
 ## Run Commands
 
