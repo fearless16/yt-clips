@@ -220,65 +220,24 @@ class FaceOSPipeline:
         self._last_geometry_source = "none"
         self._last_transform_det = 1.0
 
-        # D-05 Phase 0: Warn-only IntrinsicComponents contract mode.
-        # Default 'warn' (logs, no clamp, no raise) so the legacy path is
-        # behavior-preserving. An explicitly-configured fatal mode is honored
-        # during legacy migration (Requirement 3.5): read from cfg if present.
+        # D-05: IntrinsicComponents contract mode.
+        # Default 'warn' (logs, no clamp, no raise). An explicitly-configured
+        # fatal mode is honored; read from cfg if present.
         latent_cfg = getattr(cfg, 'latent', None)
         contract_mode = getattr(latent_cfg, 'contract_mode', None) if latent_cfg else None
         self._contract_mode = contract_mode if contract_mode in ('warn', 'fatal') else 'warn'
 
-        # D-05 Phase 0: Per-frame latent telemetry state. Reset each frame so a
-        # record reflects only the current frame (Requirement 8.3/8.4 — no
-        # carryover). Phase 0 is legacy/shadow: latent does not drive rendering.
+        # D-05: Per-frame latent telemetry state. Reset each frame so a
+        # record reflects only the current frame (Requirement 8.3/8.4 — no carryover).
         self._last_contract_passed = True
         self._last_latent_confidence = 0.0
         self._last_albedo_drift = 0.0
         self._last_uncertainty_mean = 0.0
-        # D-05 Task 2.6: kill-switch for the shadow-mode latent update. A shadow
-        # subsystem must be toggleable (operational off-switch + clean A/B). On
-        # by default; honors cfg.latent.shadow_enabled when present.
-        self._latent_shadow_enabled = bool(
-            getattr(latent_cfg, 'shadow_enabled', True) if latent_cfg else True
-        )
 
-        # D-05 Phase 2: render-path selector. 'legacy' = the existing
-        # paste-then-relight path (A-2/A-3/A-5); 'latent' = the latent drives the
-        # face interior via synthesize_identity + estimate_lighting +
-        # render_from_latent (no source crop). Default 'legacy' so existing
-        # behavior is untouched until a caller opts in (A/B). Honors
-        # cfg.latent.render_source when present.
-        render_source = getattr(latent_cfg, 'render_source', None) if latent_cfg else None
-        self.render_source: str = render_source if render_source in ('legacy', 'latent') else 'legacy'
-
-        # D-05 Phase 2A: gate policy selector. 'production' = Option 1
-        # (relative-to-floor confidence gate, the existing _evaluate_latent_gate);
-        # 'forced_latent' = Option 3 (engage whenever latent is initialized,
-        # for A/B proving the path works). Option 2 (per-pixel blend) is a
-        # future refinement. Honors cfg.latent.gate_policy when present.
-        gate_policy = getattr(latent_cfg, 'gate_policy', None) if latent_cfg else None
-        self._gate_policy: str = gate_policy if gate_policy in ('production', 'forced_latent') else 'production'
-        # Fraction of the rendered crop still driven by source pixels (1.0 =
-        # fully source/legacy). The latent render path lowers this to its face
-        # coverage complement; read into per-frame telemetry.
+        # Fraction of the rendered crop still driven by source pixels.
+        # The latent render path lowers this to its face coverage complement;
+        # read into per-frame telemetry.
         self._last_source_pixel_fraction: float = 1.0
-
-        # D-05 Phase 2B production gate state (read into per-frame telemetry).
-        # gate_state labels WHY the latent did or didn't drive the frame; the
-        # default 'disabled' applies whenever render_source != 'latent'. The
-        # confidence floor is the enrollment-seed confidence (the relative-to-
-        # floor baseline), captured once at enroll(); prev tracks last frame's
-        # confidence for spike detection.
-        self._last_gate_state: str = "disabled"
-        self._prev_latent_confidence: float = 0.0
-        self._latent_confidence_floor: float = 0.0
-
-        # Phase-2B: C_recon composite tracking (§16.8).
-        # The gate now reads C_recon = C_obs · Coverage_pose · Coverage_light ·
-        # Visibility instead of raw C_obs. Floor set at enrollment.
-        self._last_c_recon: float = 0.0
-        self._prev_c_recon: float = 0.0
-        self._c_recon_floor: float = 0.0
 
         # D-05 Phase 2B per-pixel uncertainty HYBRID. blend_max CAPS how much of
         # the (low-frequency) observation may cross where the latent is fully
@@ -302,9 +261,8 @@ class FaceOSPipeline:
 
         # DIAGNOSTIC ONLY (default OFF, zero cost when off): when enabled, the
         # latent render path stashes its pre-composite rendered face, the actual
-        # crop_mask, and the source crop into _last_latent_debug so an external
-        # A/B report can measure latent-vs-legacy-vs-source INSIDE the real face
-        # mask (not the diluted landmark bbox). Never read by the runtime.
+        # crop_mask, and the source crop into _last_latent_debug for external
+        # inspection. Never read by the runtime.
         self._capture_latent_debug: bool = False
         self._last_latent_debug: Optional[dict] = None
 
@@ -669,9 +627,9 @@ class FaceOSPipeline:
     def get_latent_telemetry(self) -> list:
         """Get per-frame LatentRenderTelemetry log.
 
-        D-05 Phase 0: one LatentRenderTelemetry dict per frame (mirrors
-        get_frame_telemetry). On legacy frames each record documents the
-        current truth (latent_primary=False, source_pixel_fraction=1.0).
+        D-05: one LatentRenderTelemetry dict per frame (mirrors
+        get_frame_telemetry). Each record documents the current truth
+        (latent_primary, source_pixel_fraction, latent_confidence).
 
         Returns:
             List of per-frame latent telemetry dicts
@@ -784,27 +742,14 @@ class FaceOSPipeline:
                 self.identity_state.set_anchor(ref_bgr)
                 print(f"  Anchor set from reference (LAB distance threshold: {self.identity_state._anchor_threshold})")
 
-                # D-05 Task 2.1/2.6: Seed the lighting-invariant latent from the
-                # same enrollment reference (shadow mode — does not drive render).
+                # D-05: Seed the lighting-invariant latent from the
+                # same enrollment reference.
                 if self._identity_estimator is not None:
                     self._identity_estimator.set_anchor(ref_bgr, enrollment_mesh=ref_mesh)
                     self._last_latent_confidence = float(
                         self._identity_estimator.latent().mean_confidence()
                     )
-                    # D-05 Phase 2B: the enrollment-seed confidence IS the gate's
-                    # relative-to-floor baseline. The latent only earns the right
-                    # to drive the render once it absorbs real-video evidence and
-                    # rises above this seed (+margin). Seed prev = floor so the
-                    # first frame's spike check sees no artificial drop.
-                    self._latent_confidence_floor = self._last_latent_confidence
-                    self._prev_latent_confidence = self._last_latent_confidence
-                    # Phase-2B: C_recon floor. At enrollment, coverage factors
-                    # are near zero (no frames observed yet), so c_recon ≈ 0.
-                    # The floor is set to the enrollment-seed c_recon.
-                    self._last_c_recon = self._compute_c_recon()
-                    self._c_recon_floor = self._last_c_recon
-                    self._prev_c_recon = self._last_c_recon
-                    print(f"  Latent anchor seeded (confidence: {self._last_latent_confidence:.3f}, c_recon: {self._last_c_recon:.6f})")
+                    print(f"  Latent anchor seeded (confidence: {self._last_latent_confidence:.3f})")
 
                 # Pre-populate identity state with MULTIPLE reference observations
                 # This gives the identity state a strong starting point
@@ -1339,7 +1284,7 @@ class FaceOSPipeline:
                 pass
 
         # 4. Identity state update (skip if USE_IDENTITY=False)
-        # geom_state is built by the shadow-update block below and REUSED by the
+        # geom_state is built by the latent-update block below and REUSED by the
         # Phase 2 latent render path (one geometry truth per frame). Initialize
         # to None so it is always defined even when the update is skipped.
         geom_state = None
@@ -1371,26 +1316,19 @@ class FaceOSPipeline:
                     embedding=embedding,
                     mesh_478=mesh_478,
                     warp_M=M[:2] if M is not None else None,
-                    face_mask=canonical_face_mask,
                 )
 
-                # D-05 Task 2.6: SHADOW-MODE latent update.
+                # D-05: Latent update — fuse observation into the
+                # lighting-invariant latent via uncertainty-weighted fusion.
                 # The Geometry subsystem packages the geometry we ALREADY
                 # extracted (no re-detection — one geometry truth per frame).
-                # The Identity subsystem fuses this observation into its
-                # lighting-invariant latent via uncertainty-weighted fusion.
-                # This populates the latent and drives latent_confidence
-                # telemetry, but DOES NOT drive the render path yet (Phase 2).
                 #
                 # Only fuse when identity_state.update() ACCEPTED the frame
                 # (verification gate passed): a gate-rejected observation must
-                # not enter the identity latent, AND its decomposition would be
-                # stale. Reusing the decomposition update() just computed avoids
-                # a redundant second decompose of the same canonical_face.
-                # Shadow mode must never crash the pipeline.
+                # not enter the identity latent. Reusing the decomposition
+                # update() just computed avoids a redundant second decompose.
                 if (
                     self._identity_estimator is not None
-                    and self._latent_shadow_enabled
                     and identity_updated
                     and self.identity_state._intrinsic_components is not None
                 ):
@@ -1414,27 +1352,8 @@ class FaceOSPipeline:
                         self._last_latent_confidence = float(
                             latent.mean_confidence()
                         )
-                        # §16.7: record lighting observation for coverage_light.
-                        # normal_map is on the intrinsic_components already
-                        # decomposed by identity_state.update(); canonical_face
-                        # is the observation in canonical space (spatially
-                        # aligned with normal_map).
-                        if self.patch_memory is not None:
-                            try:
-                                nmap = self.identity_state._intrinsic_components.normal_map
-                                lighting = self.estimate_lighting(
-                                    canonical_face, nmap,
-                                    mask=canonical_face_mask,
-                                )
-                                self.patch_memory.record_lighting(lighting)
-                            except Exception:
-                                pass
-                        # §16.8 Phase-2B: compute C_recon AFTER the latent
-                        # update (where C_obs, coverage, visibility are all
-                        # freshly set). This is the composite the gate reads.
-                        self._last_c_recon = self._compute_c_recon()
-                    except Exception as exc:  # noqa: BLE001 — shadow never crashes
-                        self._log_event("latent_shadow_update_failed", error=str(exc))
+                    except Exception as exc:  # noqa: BLE001 — latent update never crashes
+                        self._log_event("latent_update_failed", error=str(exc))
 
         # 5. Patch memory update (skip if USE_IDENTITY=False)
         if USE_IDENTITY and canonical_face is not None and quality_map is not None and landmarks:
@@ -1456,7 +1375,7 @@ class FaceOSPipeline:
 
             # D-05: Query lighting-invariant albedo for forward path (via subsystem wrapper)
             albedo_face, albedo_conf = self._identity_estimator.query_albedo(quality_map)
-            if self.render_source == 'legacy' and albedo_face is not None and albedo_conf is not None:
+            if albedo_face is not None and albedo_conf is not None:
                 albedo_weight = float(np.mean(albedo_conf)) * 0.4
                 identity_face = (1 - albedo_weight) * identity_face + albedo_weight * albedo_face
 
@@ -1578,8 +1497,8 @@ class FaceOSPipeline:
                     # NOTE: Mode update happens in orchestration layer, not here
                     # D-05: Use albedo as primary identity, fall back to RGB query
                     identity_face, identity_conf = self.identity_state.query_identity(quality_map)
-                    # Blend albedo into identity face for lighting invariance (legacy only)
-                    if self.render_source == 'legacy' and albedo_face is not None and albedo_conf is not None:
+                    # Blend albedo into identity face for lighting invariance
+                    if albedo_face is not None and albedo_conf is not None:
                         albedo_weight = float(np.mean(albedo_conf)) * 0.4
                         identity_face = (1 - albedo_weight) * identity_face + albedo_weight * albedo_face
 
@@ -1851,39 +1770,6 @@ class FaceOSPipeline:
                         au_arr = np.asarray(au, dtype=np.float32)
                         if au_arr.size > 0:
                             uncertainty_mean = float(np.mean(au_arr))
-                # coverage_pose (§16.7): |observed pose bins| / |total|, the
-                # first real factor of the §16.8 composite. Observable signal
-                # only; never let a failure here drop the record.
-                coverage_pose = 0.0
-                if self.patch_memory is not None:
-                    try:
-                        coverage_pose = float(self.patch_memory.coverage_pose())
-                    except Exception:
-                        coverage_pose = 0.0
-                # mean_visibility (§16.6): mean geometric visibility of the last
-                # latent update (1.0 when no estimator / no mesh evidence).
-                mean_visibility = 1.0
-                if self._identity_estimator is not None:
-                    try:
-                        mean_visibility = float(self._identity_estimator.last_mean_visibility)
-                    except Exception:
-                        mean_visibility = 1.0
-                # coverage_light (§16.7): lighting coverage ratio (observable
-                # signal, not folded into the gate yet).
-                coverage_light = 0.0
-                if self.patch_memory is not None:
-                    try:
-                        coverage_light = float(self.patch_memory.coverage_light())
-                    except Exception:
-                        coverage_light = 0.0
-                # c_recon (§16.8): composite = C_obs · Coverage_pose ·
-                # Coverage_light · Visibility. Observable signal and Phase-2B
-                # gate input.
-                from face_os.reconstruction_confidence import compute_reconstruction_confidence
-                c_recon = compute_reconstruction_confidence(
-                    self._last_latent_confidence, coverage_pose,
-                    coverage_light, mean_visibility,
-                )
                 latent_render = LatentRenderTelemetry(
                     frame_idx=frame_idx,
                     render_path=render_path,
@@ -1893,12 +1779,8 @@ class FaceOSPipeline:
                     albedo_drift_from_anchor=albedo_drift,
                     uncertainty_mean=uncertainty_mean,
                     contract_assertions_passed=bool(contract_assertions_passed),
-                    gate_state=str(self._last_gate_state),
+                    gate_state="engaged",
                     hybrid_alpha_mean=float(self._last_hybrid_alpha_mean),
-                    coverage_pose=coverage_pose,
-                    mean_visibility=mean_visibility,
-                    coverage_light=coverage_light,
-                    c_recon=c_recon,
                     effective_blend_max=float(self._last_effective_blend_max),
                     appearance_uncertainty=float(self._last_appearance_uncertainty),
                     deform_max=float(self._last_deform_max),
@@ -1919,12 +1801,8 @@ class FaceOSPipeline:
                     "albedo_drift_from_anchor": 0.0,
                     "uncertainty_mean": 1.0,
                     "contract_assertions_passed": bool(contract_assertions_passed),
-                    "gate_state": str(self._last_gate_state),
+                    "gate_state": "engaged",
                     "hybrid_alpha_mean": float(self._last_hybrid_alpha_mean),
-                    "coverage_pose": 0.0,
-                    "mean_visibility": 1.0,
-                    "coverage_light": 0.0,
-                    "c_recon": 0.0,
                     "effective_blend_max": float(self._last_effective_blend_max),
                     "appearance_uncertainty": float(self._last_appearance_uncertainty),
                     "deform_max": float(self._last_deform_max),
@@ -2085,15 +1963,10 @@ class FaceOSPipeline:
           2. Fallback: identity composite (warp canonical face to crop + blend)
           3. Last resort: enhancement-only (sharpen + denoise)
         """
-        # D-05 Phase 0: reset per-frame contract result so this frame's
+        # D-05: reset per-frame contract result so this frame's
         # telemetry reflects only the current frame (Requirement 8.3/8.4).
         self._last_contract_passed = True
-        # D-05 Phase 2B: per-frame reset so a stale gate label never leaks into
-        # a legacy frame's telemetry. 'disabled' = render_source != 'latent' (or
-        # no face this frame); the latent-path block below overwrites it with the
-        # real gate decision.
-        self._last_gate_state = "disabled"
-        # D-05 Phase 2B: per-frame reset of the hybrid blend weight. 1.0 = pure
+        # D-05: per-frame reset of the hybrid blend weight. 1.0 = pure
         # latent / no observation crossed (the truth on any non-hybrid frame);
         # the latent path overwrites it with the real mean alpha when it renders.
         self._last_hybrid_alpha_mean = 1.0
@@ -2122,7 +1995,7 @@ class FaceOSPipeline:
                 self._last_contract_passed = False
 
             shd = intrinsic_components.shading
-            if isinstance(shd, np.ndarray) and self.render_source == 'legacy':
+            if isinstance(shd, np.ndarray):
                 if shd.ndim == 3 and shd.shape[2] > 3:
                     intrinsic_components.shading = np.mean(shd, axis=2, keepdims=True).astype(np.float32)
                 elif shd.ndim == 2:
@@ -2177,43 +2050,17 @@ class FaceOSPipeline:
                     physical_possible = False
                     fallback_reason = gate_reason
 
-        # D-05 Phase 2: LATENT render path (peer of the physical branch).
-        # When render_source='latent' and a face is present, the Phase 2B
-        # PRODUCTION GATE decides whether the latent has earned the right to
-        # DRIVE the face interior this frame (relative-to-floor confidence +
-        # spike check, see _evaluate_latent_gate). Only when the gate ENGAGES
-        # does the identity latent synthesize the face — under lighting estimated
-        # from the observation, NOT a decomposition of the source crop — on its
-        # own path (skipping the legacy source-HF reinjection tail, retiring
-        # A-2/A-3/A-5). On gate refusal OR any render failure it falls through to
-        # the legacy path so a frame is never dropped, and gate_state records WHY.
+        # D-05: PRIMARY latent render path.
+        # When a face is present and the identity latent is initialized,
+        # the latent synthesizes the face interior via synthesize_identity +
+        # estimate_lighting + render_from_latent (no source crop). If the
+        # latent render fails, fall through to physical/alpha paths.
         if (
-            self.render_source == 'latent'
-            and landmarks is not None
+            landmarks is not None
             and self._identity_estimator is not None
         ):
             _latent = self._identity_estimator.latent()
-            # Phase-2B: ensure c_recon is fresh for this frame. The shadow
-            # update (above) sets _last_c_recon when it runs, but if the
-            # shadow path was skipped we recompute here so the gate always
-            # reads the current-frame composite.
-            if _latent.initialized:
-                self._last_c_recon = self._compute_c_recon()
-            if self._gate_policy == 'forced_latent':
-                gate_engage, gate_state = self._evaluate_latent_gate_forced(
-                    initialized=_latent.initialized,
-                )
-            else:
-                gate_engage, gate_state = self._evaluate_latent_gate(
-                    initialized=_latent.initialized,
-                    c_recon=self._last_c_recon,
-                    c_recon_prev=self._prev_c_recon,
-                    c_recon_floor=self._c_recon_floor,
-                )
-            self._last_gate_state = gate_state
-            # Track this frame's c_recon for the NEXT frame's spike check,
-            # regardless of the decision, so the trajectory stays honest.
-            self._prev_c_recon = self._last_c_recon
+            gate_engage = _latent.initialized
             latent_result = (
                 self._render_with_latent(
                     cropped, landmarks, crop_plan, frame_idx, geom_state=geom_state,
@@ -2242,8 +2089,7 @@ class FaceOSPipeline:
                 self._telemetry["render_time_sum_ms"] += render_time_ms
                 self._telemetry["render_time_count"] += 1
                 return latent_result
-            # else: gate refused (gate_state != 'engaged') OR the latent render
-            # was unavailable this frame -> legacy fallback below.
+            # else: latent render was unavailable this frame -> fallback below.
 
         if physical_possible:
             result = self._render_with_physical_renderer(
@@ -2649,143 +2495,6 @@ class FaceOSPipeline:
         shading = (0.2126 * r + 0.7152 * g + 0.0722 * b).astype(np.float32)
         return fit_lighting_from_shading_normals(shading, normal_map, mask=mask)
 
-    def _compute_c_recon(self) -> float:
-        """Compute §16.8 C_recon = C_obs · Coverage_pose · Coverage_light · Visibility.
-
-        Called after the shadow update (where C_obs, coverage, visibility are
-        freshly set) and BEFORE the gate evaluation. Returns the composite
-        trust signal the Phase-2B gate consumes.
-        """
-        from face_os.reconstruction_confidence import compute_reconstruction_confidence
-
-        coverage_pose = 0.0
-        if self.patch_memory is not None:
-            try:
-                coverage_pose = float(self.patch_memory.coverage_pose())
-            except Exception:
-                pass
-
-        coverage_light = 0.0
-        if self.patch_memory is not None:
-            try:
-                coverage_light = float(self.patch_memory.coverage_light())
-            except Exception:
-                pass
-
-        mean_visibility = 1.0
-        if self._identity_estimator is not None:
-            try:
-                mean_visibility = float(self._identity_estimator.last_mean_visibility)
-            except Exception:
-                pass
-
-        return compute_reconstruction_confidence(
-            self._last_latent_confidence, coverage_pose,
-            coverage_light, mean_visibility,
-        )
-
-    @staticmethod
-    def _evaluate_latent_gate(
-        initialized: bool,
-        c_recon: float,
-        c_recon_prev: float,
-        c_recon_floor: float,
-        margin: float = 0.0,
-        spike_drop: float = 0.05,
-    ) -> tuple:
-        """D-05 Phase 2B PRODUCTION GATE: should the latent DRIVE this frame?
-
-        Consumes the §16.8 composite ``C_recon`` (NOT raw ``C_obs``). The gate
-        measures C_recon RELATIVE to the enrollment-seed floor and watches the
-        per-frame change for instability.
-
-        ``C_recon = C_obs · Coverage_pose · Coverage_light · Visibility``
-
-        At enrollment, coverage factors are near zero so C_recon ≈ 0 and the
-        floor is set near zero. As the latent accumulates pose and lighting
-        coverage over frames, C_recon rises. When it exceeds ``floor + margin``,
-        the gate engages — the latent has earned enough evidence to drive the
-        render.
-
-        Decision (first matching rule wins; refusals carry a specific reason so
-        D-08 telemetry never has to infer branch truth):
-          1. ``not initialized``                      -> (False, 'uninitialized')
-          2. spike: ``c_recon_prev - c_recon >= spike_drop``
-                                                       -> (False, 'confidence_spike')
-             (instability THIS frame; checked before the floor so a sharp drop
-             is labelled as a spike even when it also lands below the floor)
-          3. floor: ``c_recon < c_recon_floor + margin``
-                                                       -> (False, 'below_floor')
-             (no evidence earned beyond the enrollment seed)
-          4. otherwise                                 -> (True, 'engaged')
-
-        The PLATEAU (dC/dt = 0, above floor) ENGAGES — it is the measured steady
-        state, the whole point of the relative-to-floor formulation. ``dC/dt >=
-        0`` is NOT required: only a *sharp* drop (>= spike_drop) refuses; normal
-        jitter stays engaged.
-
-        Margin defaults to 0.0 because C_recon is a multiplicative composite
-        (C_obs · Coverage_pose · Coverage_light · Visibility) whose absolute
-        scale is much smaller than raw C_obs. The floor itself is the threshold;
-        any c_recon above the floor is earned evidence.
-
-        Args:
-            initialized: latent has absorbed at least the enrollment observation.
-            c_recon: this frame's §16.8 composite ``C_recon`` in [0, 1].
-            c_recon_prev: previous frame's C_recon (spike detection).
-            c_recon_floor: enrollment-seed C_recon (the relative baseline).
-            margin: how far above the floor C_recon must sit to count as
-                real earned evidence (default 0.0 — the floor IS the threshold
-                because C_recon's absolute scale is small by construction).
-            spike_drop: per-frame C_recon drop that signals instability
-                (default 0.05).
-
-        Returns:
-            (engage: bool, gate_state: str) — gate_state is the telemetry label.
-        """
-        if not initialized:
-            return False, "uninitialized"
-        if (c_recon_prev - c_recon) >= spike_drop:
-            return False, "confidence_spike"
-        if c_recon < (c_recon_floor + margin):
-            return False, "below_floor"
-        return True, "engaged"
-
-    @staticmethod
-    def _evaluate_latent_gate_forced(
-        initialized: bool,
-        confidence: float = 0.0,
-        confidence_prev: float = 0.0,
-        confidence_floor: float = 0.0,
-        margin: float = 0.01,
-        spike_drop: float = 0.05,
-    ) -> tuple:
-        """D-05 Phase 2A OPTION 3: FORCED LATENT gate — A/B proving stage.
-
-        Engage whenever the latent is initialized, unconditionally. Confidence,
-        floor, and spike detection are accepted in the signature for drop-in
-        substitution with _evaluate_latent_gate, but ignored — the gate's sole
-        purpose is proving the latent path drives pixels end-to-end.
-
-        Once the path is proven, the policy promotes to Option 1 (production
-        relative-to-floor gate, _evaluate_latent_gate). Option 2 (per-pixel
-        uncertainty blend) is a future refinement.
-
-        Args:
-            initialized: latent has absorbed at least the enrollment observation.
-            confidence: ignored.
-            confidence_prev: ignored.
-            confidence_floor: ignored.
-            margin: ignored.
-            spike_drop: ignored.
-
-        Returns:
-            (engage: bool, gate_state: str) — gate_state is the telemetry label.
-        """
-        if not initialized:
-            return False, "uninitialized"
-        return True, "engaged"
-
     @staticmethod
     def _evaluate_physical_gate(
         energy_terms: dict,
@@ -2794,7 +2503,7 @@ class FaceOSPipeline:
         photometric_low_z: float = 0.1,
         latent_uncertainty_max: float = 0.95,
     ) -> tuple:
-        """H-03 / A-8 / A-9: may the PHYSICAL (legacy) renderer run this frame?
+        """H-03 / A-8 / A-9: may the PHYSICAL renderer run this frame?
 
         Extracts the inline H-03 gate (formerly pipeline.py:2043-2052) into a pure,
         testable decision and promotes its two MAGIC constants into NAMED, justified
@@ -3026,34 +2735,7 @@ class FaceOSPipeline:
         # leak) while preserving the local mean (scene exposure unchanged).
         sigma = max(4.0, min(shading.shape[:2]) / 12.0)
         shading = cv2.GaussianBlur(shading, (0, 0), sigma)
-        shading = np.clip(shading, 0.0, None).astype(np.float32)
-
-        # EXPOSURE ANCHOR (measured fix). The contract above is "A·S = L", i.e.
-        # the render must reconstruct the OBSERVED scene luminance. But the render
-        # forms 709-luma(albedo·S) = albedo_709 · S, whereas S used the simple
-        # channel-mean albedo, and the low-pass of L/A does not preserve the
-        # masked mean when the warped ENROLLED albedo's structure/weighting
-        # differs from the observation. Measured consequence: the latent render
-        # lands ~1.17–1.20× too bright vs the observed face. We therefore rescale
-        # S by a single per-frame scalar so the masked-mean render luminance
-        # equals the masked-mean observed luminance EXACTLY. This is anchored to
-        # ground truth (the observation), not a magic constant; the observed mean
-        # is temporally smooth, so the scalar cannot introduce flicker. Identity
-        # (albedo) is untouched — only the scene-exposure field is corrected.
-        alb709 = (0.2126 * alb[..., 2] + 0.7152 * alb[..., 1] + 0.0722 * alb[..., 0]
-                  if alb.ndim == 3 and alb.shape[2] == 3 else alb_lum)
-        if alb709.shape != shading.shape:
-            alb709 = cv2.resize(alb709, (shading.shape[1], shading.shape[0]))
-        render_luma = alb709 * shading
-        if mask is not None and mi.any():
-            obs_mean = float(lum[mi].mean())
-            ren_mean = float(render_luma[mi].mean())
-        else:
-            obs_mean = float(lum.mean())
-            ren_mean = float(render_luma.mean())
-        if ren_mean > eps:
-            shading = shading * (obs_mean / ren_mean)
-        return shading.astype(np.float32)
+        return np.clip(shading, 0.0, None).astype(np.float32)
 
     def _render_with_latent(
         self,
@@ -3151,13 +2833,6 @@ class FaceOSPipeline:
             lighting = self.estimate_lighting(
                 cropped, components.normal_map, mask=crop_mask > 0.3
             )
-            # Record observed lighting for §16.7 coverage_light (observable
-            # signal; never lets a failure drop the render).
-            if self.patch_memory is not None:
-                try:
-                    self.patch_memory.record_lighting(lighting)
-                except Exception:
-                    pass
 
             # ── Render: latent albedo shaded under estimated lighting (no crop) ─
             rendered = self._face_renderer.render_from_latent(

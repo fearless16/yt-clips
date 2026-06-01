@@ -155,6 +155,5 @@ Output: `reports/analytics/analytics_report.html`
 |---|---|
 | `ARCHITECTURE.md` | Full architecture, Face OS + legacy |
 | `AGENTS.md` | Source of truth, known bugs, next steps |
-| `AGAINST.md` | Architectural risks, required fixes |
-| `face_os/FULL_REFERENCE.md` | Detailed Face OS audit |
+| `face_os/STATE.md` | Face OS state reference & drift status |
 | `validate_metrics.py` | Runtime metrics validation |
