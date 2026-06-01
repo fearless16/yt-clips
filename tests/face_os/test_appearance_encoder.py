@@ -648,3 +648,96 @@ def test_regularized_pinv_reconstructs_code_approximately():
         reconstructed = P @ deform
         err = np.linalg.norm(reconstructed - code) / max(np.linalg.norm(code), 1e-6)
         assert err < 0.15, f"Reconstruction error {err:.4f} too high"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Test 16 — Geodesic outlier rejection
+# ═══════════════════════════════════════════════════════════════════
+
+def test_outlier_rejection_skips_accumulation():
+    """An extreme code jump is classified as outlier and skipped."""
+    rng = np.random.RandomState(42)
+    estimator = _make_estimator(atlas_size=(64, 64))
+    enrollment_mesh = _make_enrollment_mesh(rng)
+
+    face = _make_face_bgr(h=64, w=64, rng=rng)
+    estimator.set_anchor(face, enrollment_mesh=enrollment_mesh)
+    quality = np.ones((64, 64), dtype=np.float32)
+
+    # Build a stable history with slight natural variation
+    for i in range(15):
+        mesh = enrollment_mesh.copy()
+        mesh[:, 1] += 2.0 + rng.normal(0, 1.0, 478).astype(np.float32)
+        estimator.update_latent(face, _make_geometry(mesh=mesh), quality)
+
+    obs_before = len(estimator._observation_points)
+    smoothed_before = estimator._smoothed_appearance.copy()
+
+    # Inject an extreme jump (10x the base deformation)
+    extreme_mesh = enrollment_mesh.copy()
+    extreme_mesh[:, 1] += 30.0
+    estimator.update_latent(face, _make_geometry(mesh=extreme_mesh), quality)
+
+    # Observation count should NOT have increased (extreme was rejected)
+    assert len(estimator._observation_points) == obs_before, (
+        f"Observation count grew from {obs_before} to {len(estimator._observation_points)}"
+        f" — extreme frame should be rejected"
+    )
+    # Smoothed code should remain stable (not jump to the extreme)
+    np.testing.assert_allclose(
+        estimator._smoothed_appearance, smoothed_before, atol=0.1
+    )
+
+
+def test_outlier_rejection_small_jumps_accepted():
+    """Small, consistent deformation is always accepted (not an outlier)."""
+    rng = np.random.RandomState(42)
+    estimator = _make_estimator(atlas_size=(64, 64))
+    enrollment_mesh = _make_enrollment_mesh(rng)
+
+    face = _make_face_bgr(h=64, w=64, rng=rng)
+    estimator.set_anchor(face, enrollment_mesh=enrollment_mesh)
+    quality = np.ones((64, 64), dtype=np.float32)
+
+    # Build a stable history with slight natural variation
+    for i in range(15):
+        mesh = enrollment_mesh.copy()
+        mesh[:, 1] += 2.0 + rng.normal(0, 1.0, 478).astype(np.float32)
+        estimator.update_latent(face, _make_geometry(mesh=mesh), quality)
+
+    obs_count_before = len(estimator._observation_points)
+
+    # Slightly different deformation — should be accepted
+    small_mesh = enrollment_mesh.copy()
+    small_mesh[:, 1] += 4.0  # within natural variation range
+    estimator.update_latent(face, _make_geometry(mesh=small_mesh), quality)
+
+    assert len(estimator._observation_points) > obs_count_before, (
+        "Small deformation jump should be accepted"
+    )
+
+
+def test_outlier_rejection_no_premature_flagging():
+    """Before MIN_HISTORY frames, no frame is ever flagged as outlier."""
+    rng = np.random.RandomState(99)
+    estimator = _make_estimator(atlas_size=(64, 64))
+
+    face = _make_face_bgr(h=64, w=64, rng=rng)
+    estimator.set_anchor(face, enrollment_mesh=_make_enrollment_mesh(rng))
+    quality = np.ones((64, 64), dtype=np.float32)
+
+    # Feed extreme frames from the start — none should be rejected
+    for i in range(8):  # less than GEODESIC_OUTLIER_MIN_HISTORY=10
+        mesh = _make_enrollment_mesh(rng)
+        mesh[:, 1] += rng.normal(0, 50, 478).astype(np.float32)
+        estimator.update_latent(
+            face, _make_geometry(mesh=mesh), quality
+        )
+
+    # All non-seed frames should have been accumulated
+    # set_anchor does not go through update_latent, so only the 8 explicit
+    # update_latent calls produce observations (first one seeds latent)
+    assert len(estimator._observation_points) == 8, (
+        f"Expected 8 observations (set_anchor seeds latent, all 8 frames "
+        f"go through fusion), got {len(estimator._observation_points)}"
+    )
