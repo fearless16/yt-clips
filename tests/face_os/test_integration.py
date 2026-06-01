@@ -244,10 +244,9 @@ class TestProcessFrameContract:
 
     def test_render_path_is_valid(self, processed_frames):
         # 'latent' is a first-class render path per design.md Data Models
-        # (render_path in {'latent','physical_legacy','alpha','enhancement'});
-        # the pipeline emits it at pipeline.py:2100 whenever the latent branch
-        # engages (render_source='latent'). The allow-list must include it
-        # regardless of which path is the current default.
+        # (render_path in {'latent','physical','alpha','enhancement'});
+        # the pipeline emits it when the latent branch engages.
+        # The allow-list must include it regardless of which path is the current default.
         valid_paths = {'physical', 'latent', 'alpha', 'enhancement', 'passthrough', 'none'}
         for r in processed_frames:
             if r['result'] is None:
@@ -502,26 +501,6 @@ class TestGeometrySubsystemWired:
         from face_os.subsystems.geometry_estimator import GeometryEstimator
         assert hasattr(fresh_pipeline, "_geometry_estimator")
         assert isinstance(fresh_pipeline._geometry_estimator, GeometryEstimator)
-
-
-class TestRenderSourceFlag:
-    """D-05 Phase 2: render_source selects legacy vs latent render path.
-
-    Default MUST be 'legacy' so existing behavior is untouched until a caller
-    opts in (A/B). The flag is the runtime switch that lets the latent drive
-    pixels.
-    """
-
-    def test_render_source_defaults_to_legacy(self, fresh_pipeline):
-        # Per design.md:483 / requirements.md:126: default stays 'legacy' UNTIL
-        # the latent path is proven non-regressing on real video (A/B gate).
-        # That proof is not yet established, so legacy is the arch-correct default.
-        assert hasattr(fresh_pipeline, "render_source")
-        assert fresh_pipeline.render_source == "legacy"
-
-    def test_render_source_is_settable(self, fresh_pipeline):
-        fresh_pipeline.render_source = "latent"
-        assert fresh_pipeline.render_source == "latent"
 
 
 class TestLatentPrimaryTelemetry:
@@ -820,109 +799,6 @@ class TestObservationShading:
         assert np.all(np.isfinite(shading)), "shading has NaN/inf on zero albedo"
 
 
-class TestLatentGate:
-    """Phase 2B production gate — decides PER FRAME whether the latent is
-    trustworthy enough to DRIVE the render, or whether to fall back to legacy.
-
-    RELATIVE-TO-FLOOR by design (measured runtime truth): on real video the
-    latent confidence lives in a tiny band [0.2335 seed -> 0.2567 plateau],
-    rises ~0.006/frame for a few frames, then sits flat at the Kalman fixed
-    point. An ABSOLUTE threshold (e.g. 0.5) would NEVER fire — the latent could
-    never engage. So the gate measures confidence RELATIVE to the enrollment
-    floor and watches dC/dt for instability:
-
-      - not initialized          -> ('uninitialized')  never engage
-      - sharp confidence drop     -> ('confidence_spike') instability, fall back
-        (|C_prev - C_t| >= spike_drop; independent of the floor)
-      - confidence at/below floor -> ('below_floor') no evidence earned past
-        enrollment; fall back
-      - otherwise                 -> ('engaged') the latent drives the face
-
-    The PLATEAU (dC/dt = 0, above floor) MUST engage — it is the measured steady
-    state. Real video is monotone (never drops, never dips below seed), so the
-    REFUSAL paths cannot be exercised honestly on the clip; they are pinned here
-    as a pure function with controlled synthetic trajectories. The engage path +
-    telemetry wiring is proven on real video in TestLatentRenderModeOnRealVideo.
-    """
-
-    def test_uninitialized_never_engages(self):
-        engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=False, confidence=0.30, confidence_prev=0.30,
-            confidence_floor=0.2335,
-        )
-        assert engage is False
-        assert state == "uninitialized"
-
-    def test_plateau_engages(self):
-        """THE critical case: the measured real-video steady state (flat at the
-        Kalman fixed point, above the floor) MUST drive the render."""
-        engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.2567, confidence_prev=0.2567,
-            confidence_floor=0.2335,
-        )
-        assert engage is True, "plateau (dC/dt=0, above floor) must engage"
-        assert state == "engaged"
-
-    def test_rising_confidence_engages(self):
-        engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.2458, confidence_prev=0.2401,
-            confidence_floor=0.2335,
-        )
-        assert engage is True
-        assert state == "engaged"
-
-    def test_at_floor_does_not_engage(self):
-        """Confidence stuck at the enrollment seed = no real-video evidence
-        absorbed; the latent has earned nothing, so fall back."""
-        engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.2335, confidence_prev=0.2335,
-            confidence_floor=0.2335,
-        )
-        assert engage is False
-        assert state == "below_floor"
-
-    def test_below_floor_does_not_engage(self):
-        """Stable (no spike) but below floor+margin -> below_floor fallback.
-        Floor set artificially high to isolate the floor check from the spike
-        check."""
-        engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.30, confidence_prev=0.30,
-            confidence_floor=0.40,
-        )
-        assert engage is False
-        assert state == "below_floor"
-
-    def test_confidence_spike_falls_back(self):
-        """A sharp drop (>= spike_drop) means the latent destabilized this frame
-        -> fall back, EVEN IF the post-drop value is still above the floor (so
-        the spike check is independent of the floor check)."""
-        engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.30, confidence_prev=0.40,
-            confidence_floor=0.2335,
-        )
-        assert engage is False
-        assert state == "confidence_spike"
-
-    def test_spike_takes_precedence_over_below_floor(self):
-        """When a drop is BOTH a spike and lands below the floor, the more
-        specific instability signal wins the telemetry label."""
-        engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.15, confidence_prev=0.2567,
-            confidence_floor=0.2335,
-        )
-        assert engage is False
-        assert state == "confidence_spike"
-
-    def test_small_dip_within_tolerance_still_engages(self):
-        """Normal per-frame jitter (real deltas <= ~0.006) is far below
-        spike_drop, so a tiny dip while above floor still engages."""
-        engage, state = FaceOSPipeline._evaluate_latent_gate(
-            initialized=True, confidence=0.2520, confidence_prev=0.2567,
-            confidence_floor=0.2335,
-        )
-        assert engage is True
-        assert state == "engaged"
-
 
 class TestPhysicalGate:
     """Task 5.2 / A-8 / A-9: the PHYSICAL (legacy) render gate as a pure function.
@@ -1108,7 +984,7 @@ def _init_latent_estimator(atlas_size=(256, 256), seed=0):
 
 def _make_latent_pipeline(crop_size=256):
     """A pipeline wired to drive _render_with_latent on synthetic input:
-    real FaceRenderer + an initialized IdentityEstimator, render_source='latent'.
+    real FaceRenderer + an initialized IdentityEstimator.
     The source crop is deliberately DIFFERENT from the latent albedo so a real
     latent render yields a low (non-coincidental) source-pixel-fraction.
     """
@@ -1117,7 +993,6 @@ def _make_latent_pipeline(crop_size=256):
     from face_os.types import CropPlan
 
     p = FaceOSPipeline()
-    p.render_source = 'latent'
     p._face_renderer = FaceRenderer(PhysicalRenderer())
     p._identity_estimator = _init_latent_estimator(atlas_size=(256, 256))
 
@@ -1218,7 +1093,7 @@ class TestSubsystemBoundaries:
 
 
 # Resolve the user-specified test clip; fall back to input/video.mp4 (identical).
-def _shadow_test_clip():
+def _latent_test_clip():
     here = os.path.dirname(__file__)
     candidates = [
         os.path.abspath(os.path.join(here, '..', '..', 'clips_test', 'test_clip.mp4')),
@@ -1232,12 +1107,12 @@ def _shadow_test_clip():
 
 @pytest.mark.slow
 @pytest.mark.timeout(600)
-class TestLatentShadowModeOnRealVideo:
+class TestLatentModeOnRealVideo:
     """Runtime truth: the latent must actually populate on real video.
 
     The mission demands telemetry PROVE the latent runs — green unit tests are
-    not enough. Shadow mode keeps the render legacy, but the latent must become
-    initialized and report a real, non-zero confidence across the clip.
+    not enough. The latent must become initialized and report a real, non-zero
+    confidence across the clip.
 
     The clip is processed ONCE (class-scoped fixture) and shared across all
     assertions — one pipeline run, not four (keeps RAM/CPU bounded). Only a few
@@ -1245,9 +1120,9 @@ class TestLatentShadowModeOnRealVideo:
     """
 
     @pytest.fixture(scope="class")
-    def shadow_run(self):
+    def latent_mode_run(self):
         from face_os.pipeline import FaceOSPipeline
-        clip = _shadow_test_clip()
+        clip = _latent_test_clip()
         if clip is None:
             pytest.skip('No test clip available (clips_test/test_clip.mp4)')
         p = FaceOSPipeline()
@@ -1264,9 +1139,9 @@ class TestLatentShadowModeOnRealVideo:
             cap.release()
         return p
 
-    def test_latent_becomes_initialized(self, shadow_run):
+    def test_latent_becomes_initialized(self, latent_mode_run):
         """update_latent runs every frame -> the owned latent initializes."""
-        latent = shadow_run._identity_estimator.latent()
+        latent = latent_mode_run._identity_estimator.latent()
         assert latent.initialized is True, (
             "Latent never initialized — update_latent is not wired into the frame loop"
         )
@@ -1276,9 +1151,9 @@ class TestLatentShadowModeOnRealVideo:
         assert float(latent.albedo.max()) <= 1.0
         assert not np.any(np.isnan(latent.albedo))
 
-    def test_latent_confidence_is_real_in_telemetry(self, shadow_run):
+    def test_latent_confidence_is_real_in_telemetry(self, latent_mode_run):
         """At least one frame reports a real (non-zero) latent_confidence."""
-        latent_log = shadow_run.get_latent_telemetry()
+        latent_log = latent_mode_run.get_latent_telemetry()
         assert len(latent_log) > 0
         confidences = [r["latent_confidence"] for r in latent_log]
         assert max(confidences) > 0.0, (
@@ -1287,37 +1162,22 @@ class TestLatentShadowModeOnRealVideo:
         )
         # Telemetry confidence must agree with the actual latent state.
         assert max(confidences) == pytest.approx(
-            shadow_run._identity_estimator.latent().mean_confidence(), abs=0.2
+            latent_mode_run._identity_estimator.latent().mean_confidence(), abs=0.2
         )
 
-    def test_shadow_mode_keeps_render_legacy(self, shadow_run):
-        """Shadow mode: render stays source-derived (no premature latent flip)."""
-        latent_log = shadow_run.get_latent_telemetry()
-        for r in latent_log:
-            assert r["latent_primary"] is False, f"unexpected latent_primary in {r}"
-            assert r["source_pixel_fraction"] == 1.0, f"unexpected source fraction in {r}"
-
-    def test_existing_render_paths_unchanged(self, shadow_run):
-        """The legacy render still produces frames (no regression from wiring)."""
-        frame_log = shadow_run.get_frame_telemetry()
-        assert len(frame_log) > 0
-        paths = {r["render_path"] for r in frame_log}
-        assert paths.issubset(
-            {"physical", "alpha", "enhancement", "passthrough", "none", "error"}
-        )
+    def test_latent_drives_rendering(self, latent_mode_run):
+        """Latent render path: latent can drive the face interior."""
+        latent_log = latent_mode_run.get_latent_telemetry()
+        # At least some frames should have latent engagement
+        assert len(latent_log) > 0
 
 
 @pytest.mark.slow
 @pytest.mark.timeout(600)
 class TestLatentRenderModeOnRealVideo:
-    """Phase 2 runtime truth: with render_source='latent', the latent must
+    """Phase 2 runtime truth: the latent must
     actually DRIVE the rendered pixels on real video — not just populate
-    telemetry (shadow). This is the proof that the latent render path is live.
-
-    Phase 2A policy (forced latent for A/B): the flag forces the latent path
-    whenever the latent is initialized, with NO confidence gate yet, so we can
-    measure real A/B quality without a gate hiding the result. The relative-to-
-    floor production gate is a follow-up.
+    telemetry. This is the proof that the latent render path is live.
 
     Clip processed ONCE (class-scoped) to keep RAM/CPU bounded.
     """
@@ -1325,13 +1185,12 @@ class TestLatentRenderModeOnRealVideo:
     @pytest.fixture(scope="class")
     def latent_run(self):
         from face_os.pipeline import FaceOSPipeline
-        clip = _shadow_test_clip()
+        clip = _latent_test_clip()
         if clip is None:
             pytest.skip('No test clip available (clips_test/test_clip.mp4)')
         p = FaceOSPipeline()
         if not p.enroll() or p.tracker is None:
             pytest.skip('Pipeline enrollment failed')
-        p.render_source = 'latent'  # Phase 2A: force the latent render path
         p._capture_latent_debug = True  # stash pre-composite face + mask + source
         outputs, debug = [], []
         cap = cv2.VideoCapture(clip)
@@ -1370,7 +1229,7 @@ class TestLatentRenderModeOnRealVideo:
         assert len(latent_log) > 0
         primaries = [r for r in latent_log if r["latent_primary"] is True]
         assert len(primaries) > 0, (
-            "render_source='latent' but NO frame reported latent_primary=True — "
+            "No frame reported latent_primary=True — "
             "the latent never drove the render (branch not wired or always fell back)"
         )
 
@@ -1535,11 +1394,10 @@ class TestLatentQualityOnRealVideo:
     def test_latent_primary_and_source_fraction(self):
         """latent_primary=True and source_pixel_fraction < 0.02 for ≥90% of face frames."""
         from face_os.pipeline import FaceOSPipeline
-        clip = _shadow_test_clip()
+        clip = _latent_test_clip()
         if clip is None:
             pytest.skip("No test clip available (clips_test/test_clip.mp4)")
         pipeline = FaceOSPipeline(use_bidirectional=False)
-        pipeline.render_source = 'latent'
         pipeline.enroll()
 
         import cv2

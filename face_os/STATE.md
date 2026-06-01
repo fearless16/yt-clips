@@ -1,6 +1,6 @@
-# Face OS v3.8 — Compact State Reference
+# Face OS v3.9 — Compact State Reference
 
-**Last updated:** 2026-06-02 | **Tests:** 479 collected in face_os/tests/ (479 passing, 3 skipped) | **Source:** ~15,700 lines
+**Last updated:** 2026-06-01 | **Tests:** 441 passed, 0 failed, 3 skipped | **Source:** ~12,600 lines
 
 This file is the current source of truth for Face OS. Older status files may
 describe historical drift; use this file for current runtime alignment.
@@ -21,7 +21,7 @@ pipeline.py (single orchestration runtime)
     ├── photometric.py
     ├── state_evolution.py / temporal_solve.py / lie_group.py
     ├── energy_scaling.py (now gates rendering decisions)
-    ├── ab_validation.py (A/B comparison harness)
+    ├── ab_validation.py (validation harness)
     └── subsystems/
         ├── identity_estimator.py
         ├── temporal_estimator.py
@@ -35,13 +35,13 @@ pipeline.py (single orchestration runtime)
 | D-01 | Signal-preserving render path | **ALIGNED** | Linear-light compositing via sRGB↔linear conversion. HF detail injection in linear space (fixed C-01). Consistent detail→sharpen→photometric order across all paths. |
 | D-02 | PhysicalRenderer improves quality vs alpha | **ALIGNED MECHANISM** | Real Lambertian+Blinn-Phong shading, real mesh normals. A/B framework with SSIM, LAB drift, Procrustes metrics. |
 | D-03 | Benchmark corpus | **ALIGNED** | 13 synthetic hard-condition generators (overexposure, webcam_noise, rolling_shutter, beard_shadow, face_cutoff, etc.). `run_benchmark()` populates `BenchmarkMetrics` from suite clips. `create_default_suite()` ships 12-clip default corpus. 57 dedicated tests in `test_benchmark_suite.py`. |
-| D-04 | Dense geometry integration | **ALIGNED** | Physical path calls DenseGeometryEstimator.estimate() with anatomical anchor-based landmark mapping (fixed H-07). Face-prior normal map + normal-variance edge protection (`edge_protection` param) wired into all 4 render paths via `_postprocess_rendered_crop`. |
-| D-05 | Identity decoupling | **LATENT PATH PROVEN (explicit flag); default stays `legacy` — Phase 3 default-flip BLOCKED on A/B non-regression proof** | The latent render path works end-to-end on real video and is the architectural retirement of paste-then-relight: with `render_source='latent'` the latent DRIVES the face via `synthesize_identity` → `estimate_lighting` (closed-form Lambertian inverse from the OBSERVATION) → `render_from_latent` (`observed=None`, fatal contract), composited as a PEER branch in `_render_core` skipping the source-HF tail (retires A-2/A-3/A-5). **Runtime truth (real clip `clips_test/test_clip.mp4`, render_source='latent' forced):** `TestLatentRenderModeOnRealVideo` 10/10 + `TestLatentQualityOnRealVideo`: **100% of face frames latent_primary=True**, and **96.6% of driven frames have source_pixel_fraction < 0.02** (mean 0.0129, median 0.0115, p90 0.0193, max 0.0220) — spec Requirement 7.3 (≥90% of physical frames < 0.02) HONESTLY met for the first time. The earlier lighting-collapse/flat-render (mesh-normal hypothesis REFUTED) is fixed: shading carries scene exposure via `_observation_shading = lowpass(observed_luminance / latent_albedo)`. Relative-to-floor production gate (`_evaluate_latent_gate`) + per-pixel uncertainty hybrid (`_hybrid_face`) both PROVEN engaging. BeliefPixel demoted (`USE_LEGACY_RGB_BELIEF=False`), 0.4 blend + drift-bucket retired on the latent path, silent sanitizers removed (`assert_intrinsic_contract` sole guard). **Default = `legacy` (pipeline.py:252).** Per design.md:483 / requirements.md:126 the default flips to latent ONLY once A/B is proven non-regressing on real video; that A/B proof is NOT yet established, so the prior "flip to latent / Phase 3 complete" was premature and is reverted. **3 runtime-truth bugs found & fixed (2026-05-31)** by running the FULL slow suite on the real clip (docs had claimed green without it — the "green tests hiding broken runtime" trap): (1) premature default flip broke shadow-mode invariants; (2) `test_render_path_is_valid` allow-list predated `latent`; (3) `TestLatentQualityOnRealVideo` used the wrong statistic (mean, dominated by legacy `=1.0` frames) instead of the spec's frame-count criterion, and hardcoded the 1.2 GB master video. Fast 282, slow 14, 0 failures.
+| D-04 | Dense geometry integration | **ALIGNED** | Physical path calls DenseGeometryEstimator.estimate() with anatomical anchor-based landmark mapping (fixed H-07). Face-prior normal map + normal-variance edge protection wired into all render paths via `_postprocess_rendered_crop`. |
+| D-05 | Identity decoupling | **ALIGNED — Latent is the SOLE render path (v3.9)** | Legacy paste-then-relight path completely removed. `render_source` selector, production/forced gate policy, and shadow mode ALL deleted. Latent drives the face unconditionally via `synthesize_identity` → `estimate_lighting` → `render_from_latent`. `corpus_validate()` replaces `corpus_compare_sources()` for single-pass latent validation. |
 | D-06 | Predictive temporal belief | **ALIGNED MECHANISM** | SIM(2) velocity prediction computed and used for 1-2 frame occlusion recovery (fixed H-02). True SE(2)/SIM(2) Lie algebra exp/log (fixed H-04). |
-| D-07 | State-space runtime brain | **NOT NEEDED (v3.x)** | Current Kalman filter (state_evolution.py) + SIM(2) velocity prediction + energy_scaling is architecturally sufficient for temporal consistency and occlusion recovery. optimizer_architecture.py (32 tests passing, zero runtime integration) is a Phase C scheduled module — no integration planned for v3.x. |
-| D-08 | Per-frame truthful telemetry | **ALIGNED** | `_emit_frame_telemetry()` accepts explicit branch truth. All paths emit explicit telemetry including energy gating reasons. |
+| D-07 | State-space runtime brain | **NOT NEEDED (v3.x)** | Current Kalman filter (state_evolution.py) + SIM(2) velocity prediction + energy_scaling is architecturally sufficient for temporal consistency. optimizer_architecture.py has been deleted (stranded, zero runtime integration). |
+| D-08 | Per-frame truthful telemetry | **ALIGNED** | `_emit_frame_telemetry()` accepts explicit branch truth. All paths emit explicit telemetry including energy gating reasons. `gate_state` hardcoded to "engaged" post-legacy-removal. |
 | D-09 | Visual regression validation | **ALIGNED** | Integration tests validate sharpness, contrast ratio, flicker, NaN/Inf, telemetry schema on real video. |
-| D-10 | Probabilistic architectural closure | **NOT NEEDED (v3.x)** | Subsystem wrappers (IdentityEstimator, TemporalEstimator, GeometryEstimator, FaceRenderer) are real runtime delegates. Factor-graph inference, uncertainty propagation, MAP runtime, and Bayesian temporal inference are explicitly deferred to Phase C. STRANDED_MODULES.md:2630 confirms D-10 is "NOT NEEDED" for current architecture. |
+| D-10 | Probabilistic architectural closure | **NOT NEEDED (v3.x)** | Subsystem wrappers (IdentityEstimator, TemporalEstimator, GeometryEstimator, FaceRenderer) are real runtime delegates. Factor-graph inference, uncertainty propagation, MAP runtime are explicitly deferred to Phase C. |
 
 **Current honest summary:** 7 aligned mechanisms/areas, 3 Phase C deferred, 0 broken.
 
@@ -49,7 +49,7 @@ pipeline.py (single orchestration runtime)
 
 | Function | File:Line | Purpose |
 |---|---:|---|
-| `process_frame` | pipeline.py:698 | Public single-frame API for tests and A/B validation |
+| `process_frame` | pipeline.py:698 | Public single-frame API for tests and validation |
 | `_process_frame_v2` | pipeline.py:~1000 | Forward-only frame processing |
 | `_render_core` | pipeline.py:~1680 | Single render branch selector with energy gating |
 | `_render_with_physical_renderer` | pipeline.py:~1770 | Physical renderer + dense-geometry path |
@@ -58,7 +58,8 @@ pipeline.py (single orchestration runtime)
 | `multiband_blend` | compositor.py:92 | Laplacian pyramid blend |
 | `photometric_lock` | photometric.py:29 | LAB temporal luminance lock |
 | `render_with_mesh` | physical_renderer.py:329 | Mesh-derived normal rendering |
-| `compare_render_methods` | ab_validation.py:270 | Physical vs alpha A/B harness |
+| `compare_render_methods` | ab_validation.py:378 | Physical vs alpha A/B harness |
+| `corpus_validate` | ab_validation.py:480 | Single-pass latent validation over corpus |
 | `SE2Transform.exp/log` | lie_group.py:43-100 | True SE(2) Lie algebra maps |
 | `SIM2Transform.exp/log` | lie_group.py:100-140 | True SIM(2) Lie algebra maps |
 
@@ -67,6 +68,7 @@ pipeline.py (single orchestration runtime)
 | File | Current Role |
 |---|---|
 | test_integration.py | End-to-end pipeline, telemetry, render quality, compositor, Lie group, geometry, identity, A/B |
+| test_ab_comparator_latent.py | A/B physical-vs-alpha comparison + corpus validation |
 
 ## Run Commands
 
