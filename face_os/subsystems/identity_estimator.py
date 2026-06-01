@@ -43,6 +43,7 @@ _PROJECTION_INPUT_DIM = 478 * 3
 _MAX_APPEARANCE_DISTANCE = 10.0
 _MAX_MANIFOLD_OBSERVATIONS = 64
 _APPEARANCE_OBS_NOISE_SIGMA_SQ = 0.1
+_K_EXPRESSION_GAIN = 2.0
 
 
 def _build_projection_matrix() -> np.ndarray:
@@ -53,6 +54,17 @@ def _build_projection_matrix() -> np.ndarray:
     """
     rng = np.random.RandomState(_PROJECTION_SEED)
     return rng.randn(_APPEARANCE_DIM, _PROJECTION_INPUT_DIM).astype(np.float32) / np.sqrt(_PROJECTION_INPUT_DIM)
+
+
+def _build_projection_pinv(P: np.ndarray) -> np.ndarray:
+    """Moore-Penrose pseudoinverse of the JL projection matrix.
+
+    P^T @ (P @ P^T)^{-1} — reconstructs approximate deformation field from
+    the 16-D appearance_code. The reconstruction captures the principal
+    expression deformation; residual high-frequency detail is lost in the
+    JL compression (which is by design).
+    """
+    return np.linalg.pinv(P).astype(np.float32)
 
 
 class IdentityEstimator:
@@ -89,7 +101,9 @@ class IdentityEstimator:
         self._last_normal_source = "face_prior"
         self._best_quality: Optional[np.ndarray] = None
         self._enrollment_mesh: Optional[np.ndarray] = None
+        self._canonical_lm_2d: Optional[np.ndarray] = None
         self._projection_matrix: np.ndarray = _build_projection_matrix()
+        self._projection_pinv: np.ndarray = _build_projection_pinv(self._projection_matrix)
         self._observation_points: list = []
         self._smoothed_appearance: Optional[np.ndarray] = None
         if self._manifold is None:
@@ -118,6 +132,13 @@ class IdentityEstimator:
             self._enrollment_mesh = None
             return
         self._enrollment_mesh = mesh_arr
+        lm_xy = mesh_arr[:, :2].astype(np.float32)
+        x_min, x_max = lm_xy[:, 0].min(), lm_xy[:, 0].max()
+        y_min, y_max = lm_xy[:, 1].min(), lm_xy[:, 1].max()
+        scale = max(x_max - x_min, y_max - y_min, 1.0)
+        lm_uv_x = (lm_xy[:, 0] - x_min) / scale * 200.0 + 28.0
+        lm_uv_y = (lm_xy[:, 1] - y_min) / scale * 200.0 + 28.0
+        self._canonical_lm_2d = np.stack([lm_uv_x, lm_uv_y], axis=-1).astype(np.float32)
         self._invalidate_appearance_code()
 
     def _encode_appearance(self, mesh: np.ndarray) -> Optional[np.ndarray]:
@@ -163,6 +184,45 @@ class IdentityEstimator:
             )
             self._latent.appearance_uncertainty = 0.0
             self._smoothed_appearance = None
+
+    def _compute_deformation_map(self, atlas_h: int, atlas_w: int) -> np.ndarray:
+        """Reconstruct expression deformation from smoothed appearance_code.
+
+        Inverts the JL projection to recover the principal (478, 3) deformation
+        field, then interpolates its magnitude onto the atlas grid via Delaunay
+        triangulation of the canonical 2D landmark positions.
+
+        Returns:
+            (atlas_h, atlas_w) float32 scalar deformation magnitude map, or zeros
+            if appearance code / canonical landmarks are unavailable.
+        """
+        if self._smoothed_appearance is None or self._canonical_lm_2d is None:
+            return np.zeros((atlas_h, atlas_w), dtype=np.float32)
+
+        deform = self._projection_pinv @ np.asarray(self._smoothed_appearance, dtype=np.float32)
+        deform = deform.reshape(-1, 3)
+        n_lm = deform.shape[0]
+        if n_lm != self._canonical_lm_2d.shape[0]:
+            return np.zeros((atlas_h, atlas_w), dtype=np.float32)
+
+        deform_mag = np.linalg.norm(deform[:, :2], axis=-1)
+
+        try:
+            from scipy.interpolate import griddata
+            grid_x, grid_y = np.meshgrid(
+                np.arange(atlas_w, dtype=np.float32),
+                np.arange(atlas_h, dtype=np.float32),
+            )
+            deform_map = griddata(
+                self._canonical_lm_2d.astype(np.float64),
+                deform_mag.astype(np.float64),
+                (grid_x.astype(np.float64), grid_y.astype(np.float64)),
+                method="linear",
+                fill_value=0.0,
+            )
+            return np.clip(deform_map, 0.0, None).astype(np.float32)
+        except Exception:
+            return np.zeros((atlas_h, atlas_w), dtype=np.float32)
 
     def _riemannian_gain(self, metric: np.ndarray, innovation: np.ndarray) -> np.ndarray:
         """Apply metric-aware Kalman gain to an innovation vector.
@@ -463,6 +523,14 @@ class IdentityEstimator:
 
         gain = (stored_unc_b / (stored_unc_b + obs_unc_b + _EPS)) * quality_b
         gain = np.clip(gain, 0.0, 1.0).astype(np.float32)
+
+        deform_map = self._compute_deformation_map(atlas_h, atlas_w)
+        if np.any(deform_map > 0):
+            deform_gain = np.clip(
+                1.0 + deform_map[:, :, np.newaxis] * _K_EXPRESSION_GAIN, 1.0, 3.0
+            ).astype(np.float32)
+            gain = gain * deform_gain
+            gain = np.clip(gain, 0.0, 1.0).astype(np.float32)
 
         # Albedo fuses unconditionally (design.md:360). The quality-scaled gain
         # already self-suppresses motion as quality → 0, so an occluded frame
