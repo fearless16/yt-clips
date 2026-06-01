@@ -89,6 +89,15 @@ _DEFAULTS: Dict[str, Any] = {
         "use_pose_weighting": True,           # Weight observations by pose similarity
     },
 
+    # ─── D-05 Latent Identity ──────────────────────────────────────────────
+    "latent": {
+        "render_source": "legacy",             # 'legacy' | 'latent' (Phase 2)
+        "gate_policy": "production",           # 'production' (Option 1) | 'forced_latent' (Option 3)
+        "shadow_enabled": True,                # Shadow-mode latent update (Phase 1)
+        "contract_mode": "warn",               # 'warn' | 'fatal'
+        "hybrid_blend_max": 0.5,               # Per-pixel uncertainty blend cap
+    },
+
     # ─── Compositor ────────────────────────────────────────────────────────
     "compositor": {
         "confidence_threshold": 0.3,          # Below this, use source pixels

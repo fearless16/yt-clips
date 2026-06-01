@@ -498,6 +498,14 @@ class LatentRenderTelemetry:
     #   Coverage_light · Visibility. The composite trust signal and Phase-2B
     #   gate input (arch §19). Observable SIGNAL; not yet wired to the live
     #   gate (that is the Phase-2B default-flip decision).
+    effective_blend_max: float = 0.5       # D-05 Task 2.5: per-frame effective
+    #   hybrid blend cap, scaled by appearance divergence from enrollment
+    appearance_uncertainty: float = 0.0    # D-05 Task 2.5: expression divergence
+    #   from enrollment (0=neutral, 1=far); drives blend_max modulation
+    deform_max: float = 0.0                # D-05 Task 2.5: max deformation
+    #   magnitude on atlas — expression-driven gain modulation upper bound
+    deform_mean: float = 0.0               # D-05 Task 2.5: mean deformation
+    #   magnitude on atlas — average expression-driven gain lift
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -515,4 +523,8 @@ class LatentRenderTelemetry:
             "mean_visibility": self.mean_visibility,
             "coverage_light": self.coverage_light,
             "c_recon": self.c_recon,
+            "effective_blend_max": self.effective_blend_max,
+            "appearance_uncertainty": self.appearance_uncertainty,
+            "deform_max": self.deform_max,
+            "deform_mean": self.deform_mean,
         }

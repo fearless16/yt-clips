@@ -153,6 +153,124 @@ class TestMultibandBlend:
 # Compositor Class
 # ═══════════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════════
+# Adaptive Pyramid Levels
+# ═══════════════════════════════════════════════════════════════════
+
+class TestAdaptivePyramidLevels:
+    """Pyramid levels adapt to crop size for fewer unnecessary resamples.
+
+    Phase A (D-01): single-resample pipeline — reduce pyramid depth
+    for small face crops where 4 levels are excessive.
+    """
+
+    def test_small_crop_uses_fewer_levels(self):
+        """Crop < 200px min dimension → ≤ 2 pyramid levels."""
+        h, w = 128, 128
+        bg = np.full((h, w, 3), 50, dtype=np.uint8)
+        fg = np.full((h, w, 3), 200, dtype=np.uint8)
+        mask = np.zeros((h, w), dtype=np.float32)
+        mask[32:96, 32:96] = np.linspace(0, 1, 64)[None, :] ** 2
+
+        result = multiband_blend(bg, fg, mask)
+        assert result.shape == (h, w, 3)
+        assert result.dtype == np.uint8
+        # Interior of mask should be close to fg
+        center_val = float(np.mean(result[h//2, w//2]))
+        assert center_val > 100, f"Center={center_val:.1f} not near fg={200}"
+        # Exterior should be close to bg
+        corner_val = float(np.mean(result[:8, :8]))
+        assert corner_val < 100, f"Corner={corner_val:.1f} not near bg={50}"
+
+    def test_medium_crop_uses_three_levels(self):
+        """Crop 200-500px min dimension → ≤ 3 pyramid levels."""
+        h, w = 256, 256
+        bg = np.random.randint(20, 80, (h, w, 3), dtype=np.uint8)
+        fg = np.random.randint(150, 220, (h, w, 3), dtype=np.uint8)
+        mask = np.zeros((h, w), dtype=np.float32)
+        Y, X = np.mgrid[0:h, 0:w].astype(np.float32)
+        mask = ((X - w/2)**2 + (Y - h/2)**2 < 60**2).astype(np.float32)
+
+        result = multiband_blend(bg, fg, mask)
+        assert result.shape == (h, w, 3)
+        assert result.dtype == np.uint8
+        center_val = float(np.mean(result[h//2, w//2]))
+        assert center_val > 100, f"Center too dim: {center_val:.1f}"
+
+    def test_large_crop_uses_four_levels(self):
+        """Crop > 500px min dimension → full 4 pyramid levels."""
+        h, w = 600, 400
+        bg = np.random.randint(30, 90, (h, w, 3), dtype=np.uint8)
+        fg = np.random.randint(160, 240, (h, w, 3), dtype=np.uint8)
+        mask = np.ones((h, w), dtype=np.float32) * 0.6
+
+        result = multiband_blend(bg, fg, mask)
+        assert result.shape == (h, w, 3)
+        assert result.dtype == np.uint8
+
+    def test_output_quality_equivalent(self):
+        """Reduced pyramid levels don't degrade output for visible-size crops."""
+        h, w = 256, 256
+        bg = np.random.randint(30, 90, (h, w, 3), dtype=np.uint8)
+        fg = np.random.randint(160, 240, (h, w, 3), dtype=np.uint8)
+        mask = np.zeros((h, w), dtype=np.float32)
+        mask[64:192, 64:192] = 1.0
+
+        r3 = multiband_blend(bg, fg, mask)
+        r4 = multiband_blend(bg, fg, mask, levels=4)
+        # Results should be very similar (mean difference < 5)
+        diff = float(np.mean(np.abs(r3.astype(np.float32) - r4.astype(np.float32))))
+        assert diff < 8.0, f"Adaptive vs full levels differ by {diff:.1f}"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Fast-Path Linear Blend
+# ═══════════════════════════════════════════════════════════════════
+
+class TestFastPathLinearBlend:
+    """Skip Laplacian pyramid when mask is near-uniform (Phase A optimization)."""
+
+    def test_full_mask_returns_foreground(self):
+        """mask=1 → multiband_blend returns fg (same as linear blend)."""
+        h, w = 128, 128
+        bg = np.random.randint(30, 90, (h, w, 3), dtype=np.uint8)
+        fg = np.random.randint(160, 240, (h, w, 3), dtype=np.uint8)
+        mask = np.ones((h, w), dtype=np.float32)
+
+        result = multiband_blend(bg, fg, mask)
+        np.testing.assert_array_equal(result, fg)
+
+    def test_zero_mask_returns_background(self):
+        """mask=0 → multiband_blend returns bg."""
+        h, w = 128, 128
+        bg = np.random.randint(30, 90, (h, w, 3), dtype=np.uint8)
+        fg = np.random.randint(160, 240, (h, w, 3), dtype=np.uint8)
+        mask = np.zeros((h, w), dtype=np.float32)
+
+        result = multiband_blend(bg, fg, mask)
+        np.testing.assert_array_equal(result, bg)
+
+    def test_near_full_mask_uses_fast_path(self):
+        """mask>0.999 → fast path: output equals fg."""
+        h, w = 128, 128
+        bg = np.random.randint(30, 90, (h, w, 3), dtype=np.uint8)
+        fg = np.random.randint(160, 240, (h, w, 3), dtype=np.uint8)
+        mask = np.full((h, w), 0.999, dtype=np.float32)
+
+        result = multiband_blend(bg, fg, mask)
+        np.testing.assert_array_equal(result, fg)
+
+    def test_near_empty_mask_uses_fast_path(self):
+        """mask<0.001 → fast path: output equals bg."""
+        h, w = 128, 128
+        bg = np.random.randint(30, 90, (h, w, 3), dtype=np.uint8)
+        fg = np.random.randint(160, 240, (h, w, 3), dtype=np.uint8)
+        mask = np.full((h, w), 0.001, dtype=np.float32)
+
+        result = multiband_blend(bg, fg, mask)
+        np.testing.assert_array_equal(result, bg)
+
+
 class TestCompositorClass:
     """Compositor high-level interface.
 

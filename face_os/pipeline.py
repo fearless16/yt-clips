@@ -250,6 +250,14 @@ class FaceOSPipeline:
         # cfg.latent.render_source when present.
         render_source = getattr(latent_cfg, 'render_source', None) if latent_cfg else None
         self.render_source: str = render_source if render_source in ('legacy', 'latent') else 'legacy'
+
+        # D-05 Phase 2A: gate policy selector. 'production' = Option 1
+        # (relative-to-floor confidence gate, the existing _evaluate_latent_gate);
+        # 'forced_latent' = Option 3 (engage whenever latent is initialized,
+        # for A/B proving the path works). Option 2 (per-pixel blend) is a
+        # future refinement. Honors cfg.latent.gate_policy when present.
+        gate_policy = getattr(latent_cfg, 'gate_policy', None) if latent_cfg else None
+        self._gate_policy: str = gate_policy if gate_policy in ('production', 'forced_latent') else 'production'
         # Fraction of the rendered crop still driven by source pixels (1.0 =
         # fully source/legacy). The latent render path lowers this to its face
         # coverage complement; read into per-frame telemetry.
@@ -287,6 +295,10 @@ class FaceOSPipeline:
             else 0.5
         )
         self._last_hybrid_alpha_mean: float = 1.0
+        self._last_effective_blend_max: float = self._hybrid_blend_max
+        self._last_appearance_uncertainty: float = 0.0
+        self._last_deform_max: float = 0.0
+        self._last_deform_mean: float = 0.0
 
         # DIAGNOSTIC ONLY (default OFF, zero cost when off): when enabled, the
         # latent render path stashes its pre-composite rendered face, the actual
@@ -775,7 +787,7 @@ class FaceOSPipeline:
                 # D-05 Task 2.1/2.6: Seed the lighting-invariant latent from the
                 # same enrollment reference (shadow mode — does not drive render).
                 if self._identity_estimator is not None:
-                    self._identity_estimator.set_anchor(ref_bgr)
+                    self._identity_estimator.set_anchor(ref_bgr, enrollment_mesh=ref_mesh)
                     self._last_latent_confidence = float(
                         self._identity_estimator.latent().mean_confidence()
                     )
@@ -1657,7 +1669,7 @@ class FaceOSPipeline:
         # D-01c: Multi-band blending when configured
         blend_mode = self._resolve_blend_mode()
         if blend_mode == "laplacian":
-            output = multiband_blend(cropped, identity_in_crop, aligned_mask, levels=4)
+            output = multiband_blend(cropped, identity_in_crop, aligned_mask)
         else:
             output = _blend_linear(cropped, identity_in_crop, aligned_mask)
 
@@ -1887,6 +1899,10 @@ class FaceOSPipeline:
                     mean_visibility=mean_visibility,
                     coverage_light=coverage_light,
                     c_recon=c_recon,
+                    effective_blend_max=float(self._last_effective_blend_max),
+                    appearance_uncertainty=float(self._last_appearance_uncertainty),
+                    deform_max=float(self._last_deform_max),
+                    deform_mean=float(self._last_deform_mean),
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1909,6 +1925,10 @@ class FaceOSPipeline:
                     "mean_visibility": 1.0,
                     "coverage_light": 0.0,
                     "c_recon": 0.0,
+                    "effective_blend_max": float(self._last_effective_blend_max),
+                    "appearance_uncertainty": float(self._last_appearance_uncertainty),
+                    "deform_max": float(self._last_deform_max),
+                    "deform_mean": float(self._last_deform_mean),
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)
@@ -1968,18 +1988,34 @@ class FaceOSPipeline:
         self,
         output: np.ndarray,
         face_mask: Optional[np.ndarray],
+        source_sharpness: Optional[float] = None,
+        edge_protection: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Apply the common post-composite detail and photometric lock pass.
 
-        Multi-radius USM recovers HF lost through canonical warp + multiband
-        blending. Two radii target different frequency bands:
-          - Fine (0.6px): skin pores, eyelashes, hair strands
-          - Coarse (1.2px): edges, contours, feature boundaries
+        Phase A (D-01): Adaptive dual-radius USM recovers HF lost through
+        canonical warp + multiband blending. Amount scales with measured
+        sharpness deficit — blurry frames get more, sharp frames get less
+        (avoids over-sharpening ringing). Local contrast enhancement via
+        CLAHE on the luminance channel follows.
+
+        Phase A calibration: sharpness target is resolution-calibrated from
+        the source crop's Laplacian variance. Target = max(source_hf * 1.3, 200),
+        clamped to [200, 600]. Without source reference, falls back to 300.
+
+        D-04: Edge protection mask from normal-variance analysis reduces
+        sharpening at geometric edges to prevent halos at nose bridge,
+        jaw contour, and eyebrow ridges.
         """
-        # Fine-scale HF recovery (skin texture)
-        output = face_enhance._sharpen(output, amount=1.4, radius=0.6)
-        # Coarse-scale edge recovery
-        output = face_enhance._sharpen(output, amount=0.8, radius=1.2)
+        if source_sharpness is not None:
+            target = max(min(source_sharpness * 1.3, 600.0), 200.0)
+        else:
+            target = 300.0
+        output = face_enhance.adaptive_sharpen(
+            output, face_mask=face_mask, target_sharpness=target,
+            edge_protection=edge_protection,
+        )
+        output = face_enhance.enhance_contrast(output, face_mask=face_mask)
         return photometric_lock(output, face_mask)
 
     def _compute_energy_terms(
@@ -2061,6 +2097,10 @@ class FaceOSPipeline:
         # latent / no observation crossed (the truth on any non-hybrid frame);
         # the latent path overwrites it with the real mean alpha when it renders.
         self._last_hybrid_alpha_mean = 1.0
+        self._last_effective_blend_max = self._hybrid_blend_max
+        self._last_appearance_uncertainty = 0.0
+        self._last_deform_max = 0.0
+        self._last_deform_mean = 0.0
 
         # BHENCHOD SANITIZER: Kill 256-channel tensors before they reach the renderer
         if intrinsic_components is not None and getattr(intrinsic_components, 'shading', None) is not None:
@@ -2097,6 +2137,10 @@ class FaceOSPipeline:
         energy_terms = self._compute_energy_terms(
             intrinsic_components, identity_face, landmarks, frame_idx
         )
+
+        # D-04: Normal-variance edge protection mask (geometry-aware sharpening)
+        normal_map = compositor.face_prior_normal_map(cropped.shape[0], cropped.shape[1])
+        edge_protection_mask = compositor.compute_normal_variance_mask(normal_map)
 
         # RULE 8: Timing
         import time as _time
@@ -2155,12 +2199,17 @@ class FaceOSPipeline:
             # reads the current-frame composite.
             if _latent.initialized:
                 self._last_c_recon = self._compute_c_recon()
-            gate_engage, gate_state = self._evaluate_latent_gate(
-                initialized=_latent.initialized,
-                c_recon=self._last_c_recon,
-                c_recon_prev=self._prev_c_recon,
-                c_recon_floor=self._c_recon_floor,
-            )
+            if self._gate_policy == 'forced_latent':
+                gate_engage, gate_state = self._evaluate_latent_gate_forced(
+                    initialized=_latent.initialized,
+                )
+            else:
+                gate_engage, gate_state = self._evaluate_latent_gate(
+                    initialized=_latent.initialized,
+                    c_recon=self._last_c_recon,
+                    c_recon_prev=self._prev_c_recon,
+                    c_recon_floor=self._c_recon_floor,
+                )
             self._last_gate_state = gate_state
             # Track this frame's c_recon for the NEXT frame's spike check,
             # regardless of the decision, so the trajectory stays honest.
@@ -2172,7 +2221,11 @@ class FaceOSPipeline:
                 if gate_engage else None
             )
             if latent_result is not None:
-                latent_result = self._postprocess_rendered_crop(latent_result, face_mask)
+                latent_result = self._postprocess_rendered_crop(
+                    latent_result, face_mask,
+                    source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+                    edge_protection=edge_protection_mask,
+                )
                 self._telemetry["physical_render_frames"] += 1
                 self._emit_frame_telemetry(
                     frame_idx, fallback_reason, intrinsic_components,
@@ -2207,8 +2260,11 @@ class FaceOSPipeline:
                 # Source-HF re-injection: recover HF lost in canonical warp
                 result = self._reinject_source_hf(result, cropped, face_mask, strength=0.80)
                 self._telemetry["physical_render_frames"] += 1
-                result = self._postprocess_rendered_crop(result, face_mask)
-                # D-08: Per-frame telemetry (before early return)
+                result = self._postprocess_rendered_crop(
+                    result, face_mask,
+                    source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+                    edge_protection=edge_protection_mask,
+                )
                 self._emit_frame_telemetry(
                     frame_idx, fallback_reason, intrinsic_components,
                     energy_terms, prev_physical, prev_alpha,
@@ -2249,6 +2305,10 @@ class FaceOSPipeline:
                     output = self._composite_identity_to_crop(
                         cropped, identity_face, landmarks, crop_plan, frame_idx,
                     )
+                    # Phase A (D-01): Energy conservation on alpha composite path
+                    output = face_enhance.apply_energy_conservation(
+                        output, cropped, face_mask=face_mask, energy_limit=0.95,
+                    )
                     output = self._inject_detail_residual(
                         output,
                         intrinsic_components,
@@ -2257,8 +2317,11 @@ class FaceOSPipeline:
                     )
                     # Source-HF re-injection on alpha path too
                     output = self._reinject_source_hf(output, cropped, face_mask, strength=0.75)
-                    output = self._postprocess_rendered_crop(output, face_mask)
-                    self._telemetry["alpha_fallback_frames"] += 1
+                    output = self._postprocess_rendered_crop(
+                        output, face_mask,
+                        source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+                        edge_protection=edge_protection_mask,
+                    )
                     if fallback_reason:
                         fb_dist = self._telemetry["fallback_reason_distribution"]
                         fb_dist[fallback_reason] = fb_dist.get(fallback_reason, 0) + 1
@@ -2307,8 +2370,11 @@ class FaceOSPipeline:
         )
         # Source-HF re-injection on enhancement path (was missing before)
         rendered = self._reinject_source_hf(rendered, cropped, face_mask, strength=0.65)
-        rendered = self._postprocess_rendered_crop(rendered, face_mask)
-        # RULE 8: Track render timing
+        rendered = self._postprocess_rendered_crop(
+            rendered, face_mask,
+            source_sharpness=face_enhance._measure_sharpness(cropped, face_mask),
+            edge_protection=edge_protection_mask,
+        )
         render_time_ms = (_time.perf_counter() - _render_start) * 1000
         self._telemetry["render_time_sum_ms"] += render_time_ms
         self._telemetry["render_time_count"] += 1
@@ -2520,7 +2586,7 @@ class FaceOSPipeline:
             # D-01c: Multi-band blending when configured
             blend_mode = self._resolve_blend_mode()
             if blend_mode == "laplacian":
-                blended = multiband_blend(cropped, rendered_face, feathered_mask, levels=4)
+                blended = multiband_blend(cropped, rendered_face, feathered_mask)
             else:
                 blended = _blend_linear(cropped, rendered_face, feathered_mask)
 
@@ -2683,6 +2749,41 @@ class FaceOSPipeline:
             return False, "confidence_spike"
         if c_recon < (c_recon_floor + margin):
             return False, "below_floor"
+        return True, "engaged"
+
+    @staticmethod
+    def _evaluate_latent_gate_forced(
+        initialized: bool,
+        confidence: float = 0.0,
+        confidence_prev: float = 0.0,
+        confidence_floor: float = 0.0,
+        margin: float = 0.01,
+        spike_drop: float = 0.05,
+    ) -> tuple:
+        """D-05 Phase 2A OPTION 3: FORCED LATENT gate — A/B proving stage.
+
+        Engage whenever the latent is initialized, unconditionally. Confidence,
+        floor, and spike detection are accepted in the signature for drop-in
+        substitution with _evaluate_latent_gate, but ignored — the gate's sole
+        purpose is proving the latent path drives pixels end-to-end.
+
+        Once the path is proven, the policy promotes to Option 1 (production
+        relative-to-floor gate, _evaluate_latent_gate). Option 2 (per-pixel
+        uncertainty blend) is a future refinement.
+
+        Args:
+            initialized: latent has absorbed at least the enrollment observation.
+            confidence: ignored.
+            confidence_prev: ignored.
+            confidence_floor: ignored.
+            margin: ignored.
+            spike_drop: ignored.
+
+        Returns:
+            (engage: bool, gate_state: str) — gate_state is the telemetry label.
+        """
+        if not initialized:
+            return False, "uninitialized"
         return True, "engaged"
 
     @staticmethod
@@ -2988,8 +3089,14 @@ class FaceOSPipeline:
             adjusted_lm = self._adjust_landmarks_to_crop(landmarks, crop_plan)
             if adjusted_lm is None:
                 return None
+            # The latent atlas size is the ground-truth canonical grid.  Using
+            # cfg.canonical.atlas_size (1024x1024) here while the stored latent
+            # is 256x256 causes warpAffine to map most output lookups outside
+            # the source array (BORDER_REPLICATE smear).  Fix: pin to the real
+            # latent atlas so the coordinate systems agree.
+            latent_atlas_hw = tuple(int(s) for s in est._atlas_size)
             M, _ = canonical_map.compute_alignment(
-                adjusted_lm, canonical_size=tuple(cfg.canonical.atlas_size),
+                adjusted_lm, canonical_size=latent_atlas_hw,
             )
             M_inv_2x3 = np.linalg.inv(M)[:2]
             inverse_transform = np.eye(3, dtype=np.float32)
@@ -2997,7 +3104,7 @@ class FaceOSPipeline:
 
             # Crop-sized geometry mask (canonical elliptical mask warped to crop).
             canonical_mask = self._make_canonical_geometry_mask(
-                tuple(cfg.canonical.atlas_size)[::-1]
+                latent_atlas_hw[::-1]
             )
             crop_mask = cv2.warpAffine(
                 canonical_mask, M_inv_2x3, (crop_w, crop_h),
@@ -3067,6 +3174,21 @@ class FaceOSPipeline:
             feathered_mask = cv2.GaussianBlur(
                 crop_mask, (feather_ksize, feather_ksize), cfg.compositor.feather_pixels / 2
             )
+            # D-05 Phase 3: inject identity-sourced detail (latent microdetail).
+            # The legacy path does this via _inject_detail_residual with the
+            # source crop's intrinsic decomposition; the latent path uses its
+            # OWN stored microdetail (warped into crop geometry by
+            # synthesize_identity). Same 0.55 strength as the physical path.
+            detail_res = getattr(components, 'detail_residual', None)
+            if detail_res is not None:
+                d = np.asarray(detail_res, dtype=np.float32)
+                if d.shape[:2] != rendered_face.shape[:2]:
+                    d = cv2.resize(d, (rendered_face.shape[1], rendered_face.shape[0]))
+                fm = feathered_mask.astype(np.float32)
+                if fm.ndim == 2:
+                    fm = fm[:, :, np.newaxis]
+                d = d * fm
+                rendered_face = np.clip(rendered_face + 0.55 * d, 0.0, 1.0)
             rendered_u8 = (rendered_face * 255.0).astype(np.uint8)
             if rendered_u8.shape[:2] != (crop_h, crop_w):
                 rendered_u8 = cv2.resize(rendered_u8, (crop_w, crop_h))
@@ -3093,11 +3215,25 @@ class FaceOSPipeline:
             # render (render_geom.canonical_face=cropped), so it is pixel-aligned.
             solid_interior = (feathered_mask > 0.99).astype(np.float32)
             latent_uncertainty = est.query_uncertainty(render_geom)
+
+            # ── D-05 Task 2.5: expression-aware hybrid blend ────────────────
+            # Scale blend_max by appearance divergence from enrollment. At
+            # neutral expression the latent albedo faithfully represents the
+            # face; at extreme expression the static albedo is less reliable,
+            # so we allow more source observation crossing.
+            appear_unc = float(getattr(est.latent(), "appearance_uncertainty", 0.0) or 0.0)
+            effective_blend_max = self._hybrid_blend_max + (1.0 - self._hybrid_blend_max) * appear_unc
+            effective_blend_max = float(np.clip(effective_blend_max, self._hybrid_blend_max, 1.0))
+            self._last_effective_blend_max = effective_blend_max
+            self._last_appearance_uncertainty = appear_unc
+            self._last_deform_max = float(getattr(est, "_last_deform_max", 0.0) or 0.0)
+            self._last_deform_mean = float(getattr(est, "_last_deform_mean", 0.0) or 0.0)
+
             rendered_u8 = self._hybrid_face(
                 rendered_u8, cropped, latent_uncertainty, solid_interior,
-                blend_max=self._hybrid_blend_max,
+                blend_max=effective_blend_max,
             )
-            alpha_map = self._hybrid_blend_alpha(latent_uncertainty, self._hybrid_blend_max)
+            alpha_map = self._hybrid_blend_alpha(latent_uncertainty, effective_blend_max)
             _zone = solid_interior > 0.5
             self._last_hybrid_alpha_mean = (
                 float(np.mean(alpha_map[_zone])) if bool(_zone.any()) else 1.0
@@ -3105,7 +3241,7 @@ class FaceOSPipeline:
 
             blend_mode = self._resolve_blend_mode()
             if blend_mode == "laplacian":
-                output = multiband_blend(cropped, rendered_u8, feathered_mask, levels=4)
+                output = multiband_blend(cropped, rendered_u8, feathered_mask)
             else:
                 output = _blend_linear(cropped, rendered_u8, feathered_mask)
 

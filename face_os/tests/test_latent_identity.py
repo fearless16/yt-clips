@@ -239,6 +239,8 @@ def test_latent_render_telemetry_to_dict_has_full_schema():
         "latent_confidence", "albedo_drift_from_anchor", "uncertainty_mean",
         "contract_assertions_passed", "gate_state", "hybrid_alpha_mean",
         "coverage_pose", "mean_visibility", "coverage_light", "c_recon",
+        "effective_blend_max", "appearance_uncertainty",
+        "deform_max", "deform_mean",
     }
     assert set(d.keys()) == expected_keys
     assert d["frame_idx"] == 7
@@ -528,14 +530,19 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
         mean_visibility=0.83,
         coverage_light=0.11,
         c_recon=0.003,
+        effective_blend_max=0.72,
+        appearance_uncertainty=0.35,
+        deform_max=0.8,
+        deform_mean=0.15,
     )
     d = telem.to_dict()
-    # exactly the 14 schema keys
     assert set(d.keys()) == {
         "frame_idx", "render_path", "latent_primary", "source_pixel_fraction",
         "latent_confidence", "albedo_drift_from_anchor", "uncertainty_mean",
         "contract_assertions_passed", "gate_state", "hybrid_alpha_mean",
         "coverage_pose", "mean_visibility", "coverage_light", "c_recon",
+        "effective_blend_max", "appearance_uncertainty",
+        "deform_max", "deform_mean",
     }
     # values round-trip
     assert d["frame_idx"] == 42
@@ -552,6 +559,10 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
     assert d["mean_visibility"] == 0.83
     assert d["coverage_light"] == 0.11
     assert d["c_recon"] == 0.003
+    assert d["effective_blend_max"] == 0.72
+    assert d["appearance_uncertainty"] == 0.35
+    assert d["deform_max"] == 0.8
+    assert d["deform_mean"] == 0.15
     # types
     assert isinstance(d["frame_idx"], int)
     assert isinstance(d["render_path"], str)
@@ -563,6 +574,10 @@ def test_latent_render_telemetry_to_dict_value_roundtrip():
     assert isinstance(d["mean_visibility"], float)
     assert isinstance(d["coverage_light"], float)
     assert isinstance(d["c_recon"], float)
+    assert isinstance(d["effective_blend_max"], float)
+    assert isinstance(d["appearance_uncertainty"], float)
+    assert isinstance(d["deform_max"], float)
+    assert isinstance(d["deform_mean"], float)
 
 
 def test_latent_render_telemetry_defaults_document_legacy_truth():
