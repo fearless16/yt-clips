@@ -233,3 +233,48 @@ class Compositor:
         if confidence.shape[:2] != (h, w):
             confidence = cv2.resize(confidence, (w, h), interpolation=cv2.INTER_LINEAR)
         return _blend_linear(original, enhanced, confidence)
+
+
+def face_prior_normal_map(h: int, w: int) -> np.ndarray:
+    """D-04: Analytic ellipsoid face-prior normal map (zero cost, landmark-free).
+
+    Unit normals derived from the gradient of a parametric ellipsoid
+    approximating face surface curvature. Serves as geometric reference
+    when full mesh normals are not available (alpha/enhancement paths).
+
+    Args:
+        h, w: Height and width of the target normal map.
+
+    Returns:
+        float32 (H, W, 3) unit-normal map.
+    """
+    cy, cx = h / 2.0, w / 2.0
+    ry, rx = h * 0.47, w * 0.42
+    yy, xx = np.ogrid[:h, :w]
+    nx = (xx - cx) / max(rx, 1.0)
+    ny = (yy - cy) / max(ry, 1.0)
+    r2 = nx**2 + ny**2
+    nz = np.sqrt(np.maximum(0.0, 1.0 - np.clip(r2, 0.0, 1.0)))
+    norm = np.sqrt(nx**2 + ny**2 + nz**2) + 1e-8
+    normal_map = np.stack([nx / norm, ny / norm, nz / norm], axis=2)
+    return normal_map.astype(np.float32)
+
+
+def compute_normal_variance_mask(normal_map: np.ndarray, radius: int = 5) -> np.ndarray:
+    """D-04: Normal-variance edge mask for geometry-aware blending.
+
+    Computes local normal variance via Gaussian blur to detect
+    anatomical edges (nose bridge, eyebrows, jaw contour) vs flat
+    regions (cheeks, forehead).
+
+    Args:
+        normal_map: float32 (H,W,3) unit-normal map.
+        radius: Gaussian blur kernel radius in pixels.
+
+    Returns:
+        float32 (H,W) edge mask in [0, 1] — high values at
+        geometric edges, low values at flat regions.
+    """
+    blurred = cv2.GaussianBlur(normal_map, (0, 0), radius)
+    variance = np.sum((normal_map.astype(np.float32) - blurred) ** 2, axis=2)
+    return variance / (max(np.percentile(variance, 98), 1e-6))
