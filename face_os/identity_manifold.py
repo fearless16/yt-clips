@@ -288,14 +288,16 @@ class IdentityManifold:
         self,
         point: IdentityPoint,
         neighbors: list,
+        weights: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Compute metric tensor at point from neighbors.
 
-        Uses local covariance to estimate metric.
+        Uses local (optionally weighted) covariance to estimate metric.
 
         Args:
             point: Point on manifold
             neighbors: List of neighboring points
+            weights: Optional per-neighbor confidence weights for covariance
 
         Returns:
             Metric tensor (d x d)
@@ -303,7 +305,6 @@ class IdentityManifold:
         if len(neighbors) < 2:
             return np.eye(self._dimension)
 
-        # Compute tangent vectors to neighbors
         tangents = []
         for neighbor in neighbors:
             tangent = self.log_map(point, neighbor.coordinates)
@@ -311,9 +312,20 @@ class IdentityManifold:
 
         tangents = np.array(tangents)
 
-        # Metric tensor = covariance of tangent vectors
-        metric = np.cov(tangents.T) + self.config.metric_regularization * np.eye(self._dimension)
+        if weights is not None and len(weights) == len(tangents):
+            w = np.asarray(weights, dtype=np.float64)
+            w_sum = w.sum()
+            if w_sum > 0:
+                w = w / w_sum
+                mean = np.average(tangents, axis=0, weights=w)
+                centered = tangents - mean
+                metric = (centered.T * w) @ centered
+            else:
+                metric = np.cov(tangents.T)
+        else:
+            metric = np.cov(tangents.T)
 
+        metric = metric + self.config.metric_regularization * np.eye(self._dimension)
         return metric
 
     def parallel_transport(
