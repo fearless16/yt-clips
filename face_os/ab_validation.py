@@ -727,17 +727,25 @@ class CorpusSourceReport:
             "clips": self.clips,
         }
 
+    def any_regressed(self) -> bool:
+        """True if any clip regressed (convenience for D-05 gate decision)."""
+        return self.regressed > 0
+
+    def all_passed(self) -> bool:
+        """True if all clips passed and at least one was tested."""
+        return self.regressed == 0 and self.total_clips > 0
+
     def summary(self) -> str:
         """Human-readable summary suitable for D-05 gate decision."""
-        status = "READY" if self.regressed == 0 and self.total_clips > 0 else "BLOCKED"
+        status = "READY" if self.all_passed() else "BLOCKED"
         lines = [
             f"# D-05 Corpus A/B Report: Latent vs Legacy",
             f"Status: {status}",
             f"Clips: {self.total_clips} total, {self.passed} passed, {self.regressed} regressed",
-            f"Mean SSIM: {self.ssim_mean_overall:.4f}",
-            f"Mean LAB drift: {self.lab_drift_mean_overall:.2f}",
-            f"Mean sharpness ratio: {self.sharpness_ratio_mean_overall:.4f}",
-            f"Mean flicker ratio: {self.flicker_ratio_mean_overall:.4f}",
+            f"Mean SSIM: {self.ssim_mean_overall:.4f} (floor 0.85)",
+            f"Mean LAB drift: {self.lab_drift_mean_overall:.2f} (ceiling 12.0)",
+            f"Mean sharpness ratio: {self.sharpness_ratio_mean_overall:.4f} (floor 0.80)",
+            f"Mean flicker ratio: {self.flicker_ratio_mean_overall:.4f} (ceiling 1.50)",
             "",
         ]
         for clip in self.clips:
@@ -746,6 +754,8 @@ class CorpusSourceReport:
             ssim = clip.get("ssim_mean", "N/A")
             if isinstance(ssim, (int, float)):
                 ssim = f"{ssim:.4f}"
+            reasons = clip.get("reasons", [])
+            reason_str = f" ({'; '.join(reasons)})" if reasons else ""
             lines.append(f"- {name}: {'REGRESSED' if regressed else 'OK'} "
-                         f"(SSIM={ssim})")
+                         f"(SSIM={ssim}){reason_str}")
         return "\n".join(lines)
