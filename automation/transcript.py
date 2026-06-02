@@ -106,6 +106,10 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
 
     try:
         creds = Credentials.from_authorized_user_file(str(token_path))
+        # Check if token has youtube.force-ssl scope
+        if creds.scopes and "https://www.googleapis.com/auth/youtube.force-ssl" not in creds.scopes:
+            log.debug("YouTube token lacks youtube.force-ssl scope, skipping API method")
+            return None
         if not creds.valid and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         if not creds.valid:
