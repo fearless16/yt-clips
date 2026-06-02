@@ -3,40 +3,21 @@ import time
 from unittest.mock import patch, MagicMock
 from utils.ai_client import AIClient, classify_error, ErrorCategory
 
+
 def reset_shared_state():
     with AIClient._shared_lock:
         AIClient._provider_failures.clear()
         AIClient._provider_cooldown_until.clear()
         AIClient._provider_token_buckets.clear()
 
-def _disable_opencode(ai):
-    """Disable OpenCode provider for tests that test other providers."""
-    ai.opencode_api_key = None
-
-def test_openrouter_failover():
-    reset_shared_state()
-    ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = "mock_groq"
-    ai.openrouter_api_key = "mock_openrouter"
-    ai.nvidia_api_key = None
-
-    with patch.object(ai, "generate_groq", side_effect=RuntimeError("Groq Down")), \
-         patch.object(ai, "generate_openrouter", return_value="OpenRouter Success") as mock_or:
-
-        res = ai.generate_text("test prompt")
-        assert res == "OpenRouter Success"
-        mock_or.assert_called_once_with("test prompt", None)
 
 def test_provider_circuit_breaker():
     reset_shared_state()
     ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = "mock_groq"
-    ai.openrouter_api_key = None
+    ai.opencode_api_key = "mock_oc"
     ai.nvidia_api_key = None
 
-    with patch.object(ai, "generate_groq", side_effect=RuntimeError("Groq Down")), \
+    with patch.object(ai, "generate_opencode", side_effect=RuntimeError("OC Down")), \
          patch.object(ai, "generate_ollama", side_effect=RuntimeError("Ollama Down")):
         for _ in range(5):
             try:
@@ -48,26 +29,25 @@ def test_provider_circuit_breaker():
             ai.generate_text("test prompt")
         assert "All LLM providers failed" in str(exc_info.value)
 
+
 def test_rate_limit_token_bucket():
     reset_shared_state()
     with AIClient._shared_lock:
-        AIClient._provider_token_buckets["groq"] = {
+        AIClient._provider_token_buckets["opencode"] = {
             "capacity": 30.0,
             "tokens": 0.0,
             "last_update": time.time(),
             "refill_rate": 0.5
         }
     ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = "mock_groq"
-    ai.openrouter_api_key = None
+    ai.opencode_api_key = "mock_oc"
     ai.nvidia_api_key = None
 
-    with patch.object(ai, "generate_groq", return_value="Groq Fallback") as mock_groq, \
+    with patch.object(ai, "generate_opencode", return_value="OC Fallback") as mock_oc, \
          patch.object(ai, "generate_ollama", side_effect=RuntimeError("Ollama Down")):
         res = ai.generate_text("test prompt")
-        assert res == "Groq Fallback"
-        mock_groq.assert_called_once()
+        assert res == "OC Fallback"
+        mock_oc.assert_called_once()
 
 
 # --- Error classification tests ---
@@ -103,32 +83,29 @@ def test_classify_error_server_error():
 def test_auth_failure_stops_retry():
     reset_shared_state()
     ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = "mock_groq"
-    ai.openrouter_api_key = None
+    ai.opencode_api_key = "mock_oc"
     ai.nvidia_api_key = None
 
     auth_exc = Exception("Invalid API key")
     auth_exc.status_code = 401
 
-    with patch.object(ai, "generate_groq", side_effect=auth_exc):
+    with patch.object(ai, "generate_opencode", side_effect=auth_exc):
         with pytest.raises(RuntimeError, match="Auth failures detected"):
             ai.generate_text("test prompt")
 
 def test_quota_exhaustion_skips_provider():
     reset_shared_state()
     ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = "mock_groq"
-    ai.openrouter_api_key = "mock_or"
-    ai.nvidia_api_key = None
+    ai.opencode_api_key = "mock_oc"
+    ai.nvidia_api_key = "mock_nv"
+    ai._model = "qwen3.6-plus"
 
     quota_exc = Exception("quota exceeded")
-    with patch.object(ai, "generate_groq", side_effect=quota_exc), \
-         patch.object(ai, "generate_openrouter", return_value="OR OK"):
+    with patch.object(ai, "generate_opencode", side_effect=quota_exc), \
+         patch.object(ai, "generate_nvidia", return_value="NV OK") as mock_nv:
         res = ai.generate_text("test prompt")
-        assert res == "OR OK"
-        assert AIClient._in_cooldown("groq")
+        assert res == "NV OK"
+        assert AIClient._in_cooldown("opencode")
 
 
 # --- 429 / Retry-After + racer health integration ---
@@ -140,69 +117,59 @@ class _FakeResp:
         if retry_after is not None:
             self.headers["retry-after"] = str(retry_after)
 
-
 class FakeRateLimitError(Exception):
     def __init__(self, retry_after=None):
         super().__init__("rate limited")
         self.status_code = 429
         self.response = _FakeResp(429, retry_after)
 
-
 def test_classify_rate_limit_and_retry_after():
     e = FakeRateLimitError(retry_after=12)
     assert classify_error(e) == ErrorCategory.RATE_LIMIT
     assert AIClient._is_rate_limited(e) is True
 
-
 def test_429_sets_cooldown_from_retry_after():
     reset_shared_state()
-    AIClient._note_provider_error("groq", FakeRateLimitError(retry_after=120))
-    assert AIClient._in_cooldown("groq") is True
-    cooled = AIClient._provider_cooldown_until["groq"]
+    AIClient._note_provider_error("opencode", FakeRateLimitError(retry_after=120))
+    assert AIClient._in_cooldown("opencode") is True
+    cooled = AIClient._provider_cooldown_until["opencode"]
     assert cooled > time.time() + 100
-
 
 def test_generic_error_does_not_cooldown():
     reset_shared_state()
-    AIClient._note_provider_error("groq", RuntimeError("boom"))
-    assert AIClient._in_cooldown("groq") is False
+    AIClient._note_provider_error("opencode", RuntimeError("boom"))
+    assert AIClient._in_cooldown("opencode") is False
 
 
 def test_fastest_first_records_success_and_skips_cooldown():
     reset_shared_state()
     ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = "k"
-    ai.openrouter_api_key = None
+    ai.opencode_api_key = "k"
     ai.nvidia_api_key = None
 
-    with patch.object(AIClient, "generate_groq", return_value="RACED OK"):
+    with patch.object(AIClient, "generate_opencode", return_value="RACED OK"):
         out = ai.generate_fastest_first("p", "s")
     assert out == "RACED OK"
-    assert ai.get_used_provider() == "groq"
-    assert AIClient._in_cooldown("groq") is False
+    assert ai.get_used_provider() == "opencode"
+    assert AIClient._in_cooldown("opencode") is False
 
 
-def test_fastest_first_returns_empty_when_all_fail_no_generic_fallback():
+def test_fastest_first_returns_empty_when_all_fail():
     reset_shared_state()
     ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = "k"
-    ai.openrouter_api_key = None
+    ai.opencode_api_key = "k"
     ai.nvidia_api_key = None
 
-    with patch.object(AIClient, "generate_groq", side_effect=FakeRateLimitError(retry_after=60)):
+    with patch.object(AIClient, "generate_opencode", side_effect=FakeRateLimitError(retry_after=60)):
         out = ai.generate_fastest_first("p", "s")
     assert out == ""
-    assert AIClient._in_cooldown("groq") is True
+    assert AIClient._in_cooldown("opencode") is True
 
 
 def test_fastest_first_keeps_slow_but_valid_response():
     reset_shared_state()
     ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = "k"
-    ai.openrouter_api_key = None
+    ai.opencode_api_key = "k"
     ai.nvidia_api_key = None
 
     def slow_ok(prompt, system_instruction=None):
@@ -210,152 +177,168 @@ def test_fastest_first_keeps_slow_but_valid_response():
         return "SLOW VALID"
 
     with patch("utils.config.load_config", return_value={"ai": {"race_tier_timeout_seconds": 5.0}, "logging": {}}):
-        with patch.object(AIClient, "generate_groq", side_effect=slow_ok):
+        with patch.object(AIClient, "generate_opencode", side_effect=slow_ok):
             out = ai.generate_fastest_first("p", "s")
     assert out == "SLOW VALID"
 
 
-# --- Bug 2: failover model selection is no longer deterministic ---
-
 def test_call_provider_random_model_on_failover_not_fixed_index():
     reset_shared_state()
     ai = AIClient()
-    ai.groq_api_key = "k"
-    ai._model = "some-non-groq-model"
+    ai.opencode_api_key = "k"
+    ai._model = "some-non-opencode-model"
 
     seen = set()
-
     def capture(prompt, system_instruction=None):
         seen.add(ai._model)
         return "ok"
 
-    with patch.object(ai, "generate_groq", side_effect=capture):
+    with patch.object(ai, "generate_opencode", side_effect=capture):
         for _ in range(40):
-            ai._call_provider("groq", "p", None)
+            ai._call_provider("opencode", "p", None)
 
-    assert seen.issubset(set(AIClient.PROVIDER_MODELS["groq"]))
+    assert seen.issubset(set(AIClient.PROVIDER_MODELS["opencode"]))
     assert len(seen) > 1
 
 
 def test_call_provider_honors_prefer_model():
     reset_shared_state()
     ai = AIClient()
-    ai.groq_api_key = "k"
+    ai.opencode_api_key = "k"
     ai._model = "x"
-    target = AIClient.PROVIDER_MODELS["groq"][2]
+    target = AIClient.PROVIDER_MODELS["opencode"][2]
     used = {}
 
     def capture(prompt, system_instruction=None):
         used["model"] = ai._model
         return "ok"
 
-    with patch.object(ai, "generate_groq", side_effect=capture):
-        ai._call_provider("groq", "p", None, prefer_model=target)
+    with patch.object(ai, "generate_opencode", side_effect=capture):
+        ai._call_provider("opencode", "p", None, prefer_model=target)
     assert used["model"] == target
 
 
 def test_call_provider_restores_state_on_exception():
     reset_shared_state()
     ai = AIClient()
-    ai.groq_api_key = "k"
-    ai._provider, ai._model = "groq", "meta-llama/llama-4-scout-17b-16e-instruct"
+    ai.opencode_api_key = "k"
+    ai._provider, ai._model = "opencode", "qwen3.6-plus"
     with patch.object(ai, "generate_nvidia", side_effect=RuntimeError("boom")):
         with pytest.raises(RuntimeError):
             ai._call_provider("nvidia", "p", None)
-    assert ai._provider == "groq"
-    assert ai._model == "meta-llama/llama-4-scout-17b-16e-instruct"
+    assert ai._provider == "opencode"
+    assert ai._model == "qwen3.6-plus"
 
-
-# --- Bug 3: token bucket is per (provider, model), not per provider ---
 
 def test_token_bucket_is_per_model_not_per_provider():
     reset_shared_state()
-    m0, m1 = AIClient.PROVIDER_MODELS["groq"][0], AIClient.PROVIDER_MODELS["groq"][1]
+    models = AIClient.PROVIDER_MODELS["opencode"]
+    m0, m1 = models[0], models[1]
     with AIClient._shared_lock:
-        AIClient._provider_token_buckets[f"groq:{m0}"] = {
+        AIClient._provider_token_buckets[f"opencode:{m0}"] = {
             "capacity": 30.0, "tokens": 0.0, "last_update": time.time(), "refill_rate": 0.5,
         }
-    assert AIClient._check_and_consume_token("groq", m0) is False
-    assert AIClient._check_and_consume_token("groq", m1) is True
+    assert AIClient._check_and_consume_token("opencode", m0) is False
+    assert AIClient._check_and_consume_token("opencode", m1) is True
 
 
 def test_token_bucket_cooldown_is_per_provider():
     reset_shared_state()
     with AIClient._shared_lock:
-        AIClient._provider_cooldown_until["groq"] = time.time() + 300
-    for m in AIClient.PROVIDER_MODELS["groq"]:
-        assert AIClient._check_and_consume_token("groq", m) is False
+        AIClient._provider_cooldown_until["opencode"] = time.time() + 300
+    for m in AIClient.PROVIDER_MODELS["opencode"]:
+        assert AIClient._check_and_consume_token("opencode", m) is False
 
 
 def test_token_bucket_capacity_is_config_driven():
     reset_shared_state()
     fake_cfg = {"ai": {"rate_limit": {"capacity": 3, "refill_per_sec": 0.0}}, "logging": {}}
     with patch("utils.ai_client._cfg", fake_cfg):
-        prov, model = "groq", "m"
+        prov, model = "opencode", "m"
         ok = sum(1 for _ in range(10) if AIClient._check_and_consume_token(prov, model))
     assert ok == 3
 
 
-# --- Bugs 1 & 5: racer plan is diverse + honors prefer_provider/prefer_model ---
+# --- Racer plan tests ---
 
-def _plan_first_picks(ai, n=60, **kw):
-    return [plan[0][0] for plan in (ai._available_plan(**kw) for _ in range(n)) if plan]
-
-
-def test_available_plan_shuffles_for_diversity():
+def test_all_models_shuffles_for_diversity():
     reset_shared_state()
     ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = "k"
-    ai.openrouter_api_key = ai.nvidia_api_key = None
-    leaders = {ai._available_plan()[0][0][1] for _ in range(60)}
-    assert len(leaders) > 1
+    ai.opencode_api_key = "k"
+    ai.nvidia_api_key = "k"
+    first_models = set()
+    for _ in range(120):
+        models = ai._all_models()
+        if models:
+            first_models.add(models[0])
+    # With 13 models across 2 providers, should see at least 2 different first picks
+    assert len(first_models) > 1, f"Only saw {first_models}"
 
 
-def test_available_plan_prefer_model_wins_front():
+def test_all_models_prefer_model_wins_front():
     reset_shared_state()
     ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = "k"
-    ai.openrouter_api_key = ai.nvidia_api_key = None
-    target = AIClient.PROVIDER_MODELS["groq"][2]
-    for _ in range(30):
-        first_provider, first_model = ai._available_plan(prefer_model=target)[0][0]
-        assert first_model == target
-
-
-def test_available_plan_prefer_provider_boosts_provider():
-    reset_shared_state()
-    ai = AIClient()
-    _disable_opencode(ai)
-    ai.groq_api_key = ai.openrouter_api_key = "k"
+    ai.opencode_api_key = "k"
     ai.nvidia_api_key = None
+    target = AIClient.PROVIDER_MODELS["opencode"][2]
+    for _ in range(30):
+        models = ai._all_models(prefer_model=target)
+        assert models[0][1] == target
+
+
+def test_all_models_prefer_provider_boosts_provider():
+    reset_shared_state()
+    ai = AIClient()
+    ai.opencode_api_key = "k"
+    ai.nvidia_api_key = "k"
     for _ in range(20):
-        plan = ai._available_plan(prefer_provider="openrouter")
-        for tier in plan:
-            provs = [p for p, _ in tier]
-            if "openrouter" in provs:
-                assert tier[0][0] == "openrouter"
-                break
+        models = ai._all_models(prefer_provider="nvidia")
+        assert models[0][0] == "nvidia"
+
 
 def test_no_deepseek_provider():
     assert "deepseek" not in AIClient.PROVIDER_MODELS
 
+
 def test_failover_chain_excludes_deepseek():
     reset_shared_state()
     ai = AIClient()
-    chain = ai._get_failover_chain("groq")
+    chain = ai._get_failover_chain("opencode")
     assert "deepseek" not in chain
+
 
 def test_opencode_is_primary_in_chain():
     reset_shared_state()
     ai = AIClient()
     chain = ai._get_failover_chain("opencode")
     assert chain[0] == "opencode"
-    chain2 = ai._get_failover_chain("groq")
+    chain2 = ai._get_failover_chain("nvidia")
     assert "opencode" in chain2
+
 
 def test_opencode_provider_models():
     assert "opencode" in AIClient.PROVIDER_MODELS
     assert "mimo-v2.5-pro" in AIClient.PROVIDER_MODELS["opencode"]
     assert "qwen3.7-max" in AIClient.PROVIDER_MODELS["opencode"]
+
+
+def test_model_timeouts_include_qwen37():
+    assert "qwen3.7-max" in AIClient.MODEL_TIMEOUTS
+    assert AIClient.MODEL_TIMEOUTS["qwen3.7-max"] == 180.0
+
+
+def test_providers_only_opencode_nvidia():
+    assert set(AIClient.PROVIDER_MODELS.keys()) == {"opencode", "nvidia"}
+    assert "groq" not in AIClient.PROVIDER_MODELS
+    assert "openrouter" not in AIClient.PROVIDER_MODELS
+
+
+def test_get_available_providers_only_enabled():
+    reset_shared_state()
+    ai = AIClient()
+    ai.opencode_api_key = "k"
+    ai.nvidia_api_key = None
+    avail = ai.get_available_providers()
+    assert "opencode" in avail
+    assert "nvidia" not in avail
+    assert "groq" not in avail

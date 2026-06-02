@@ -92,36 +92,18 @@ class AIClient:
     PROVIDER_MODELS = {
         "opencode": ["mimo-v2.5-pro", "mimo-v2.5", "kimi-k2.5", "kimi-k2.6", "glm-5", "glm-5.1",
                      "deepseek-v4-flash", "deepseek-v4-pro", "minimax-m2.7", "qwen3.6-plus", "qwen3.7-max"],
-        "groq": ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "qwen/qwen3-32b"],
-        "openrouter": ["google/gemini-2.0-flash-001", "deepseek/deepseek-v4-flash", "qwen/qwen3.5-122b-a10b", "anthropic/claude-sonnet-4"],
         "nvidia": ["nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct"],
     }
 
-    # Speed-ordered tiers — fastest first.
-    # Tier 1: qwen3.6-plus (OpenCode Go)
-    # Tier 2: MiMo v2.5pro (OpenCode Go, Xiaomi, free with sub)
-    # Tier 3: Groq (0.5-1s, fast but quota-limited)
-    # Tier 4: NVIDIA
-    # Tier 5: OpenCode Go fallback models (kimi, glm, deepseek, minimax)
-    # Tier 6: OpenRouter (last priority — gemini, deepseek, qwen, claude)
-    # Tier 7: qwen3.7-max (slow ~20s, last resort)
-    FASTEST_TIERS = [
-        [("opencode", "qwen3.6-plus")],
-        [("opencode", "mimo-v2.5-pro"), ("opencode", "mimo-v2.5")],
-        [("groq", "meta-llama/llama-4-scout-17b-16e-instruct"), ("groq", "llama-3.3-70b-versatile"), ("groq", "qwen/qwen3-32b")],
-        [("nvidia", "nvidia/llama-3.3-nemotron-super-49b-v1"), ("nvidia", "meta/llama-3.3-70b-instruct")],
-        [("opencode", "kimi-k2.5"), ("opencode", "kimi-k2.6"), ("opencode", "glm-5.1"), ("opencode", "glm-5"), ("opencode", "deepseek-v4-flash"), ("opencode", "minimax-m2.7")],
-        [("openrouter", "google/gemini-2.0-flash-001"), ("openrouter", "deepseek/deepseek-v4-flash"), ("openrouter", "qwen/qwen3.5-122b-a10b"), ("openrouter", "anthropic/claude-sonnet-4")],
-        [("opencode", "qwen3.7-max")],
-    ]
+    # Per-model timeouts (seconds) for non-blocking race.
+    # qwen3.7-max is slow (~20-120s); others return in 1-10s.
+    MODEL_TIMEOUTS = {
+        "qwen3.7-max": 180.0,
+    }
 
     def __init__(self):
-        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
-        self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         self.nvidia_api_key = os.getenv("NVIDIA_API_KEY")
         self.nvidia_base_url = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-        self.groq_api_key = os.getenv("GROQ_API_KEY")
-        self.groq_base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
         self.opencode_api_key = os.getenv("OPENCODE_ZEN_API_KEY")
         self.opencode_base_url = os.getenv("OPENCODE_ZEN_BASE_URL", "https://opencode.ai/zen/go/v1")
         self.ollama_url = "http://localhost:11434/api/generate"
@@ -220,7 +202,7 @@ class AIClient:
             return cls._provider_cooldown_until.get(provider, 0.0) > time.time()
 
     def _get_failover_chain(self, start_provider: str) -> List[str]:
-        chain = ["opencode", "groq", "openrouter", "nvidia"]
+        chain = ["opencode", "nvidia"]
         if start_provider in chain:
             chain.remove(start_provider)
             chain.insert(0, start_provider)
@@ -248,10 +230,6 @@ class AIClient:
         try:
             if provider == "opencode":
                 return self.generate_opencode(prompt, system_instruction)
-            elif provider == "groq":
-                return self.generate_groq(prompt, system_instruction)
-            elif provider == "openrouter":
-                return self.generate_openrouter(prompt, system_instruction)
             elif provider == "nvidia":
                 return self.generate_nvidia(prompt, system_instruction)
             else:
@@ -265,8 +243,6 @@ class AIClient:
         out_tokens = output_chars // 4
         rates = {
             "opencode": {"in": 0.0, "out": 0.0},
-            "groq": {"in": 0.59, "out": 0.79},
-            "openrouter": {"in": 0.20, "out": 0.40},
             "nvidia": {"in": 0.07, "out": 0.07},
             "ollama": {"in": 0.0, "out": 0.0}
         }
@@ -296,10 +272,6 @@ class AIClient:
         available_chain = []
         for p in chain:
             if p == "opencode" and self.opencode_api_key:
-                available_chain.append(p)
-            elif p == "groq" and self.groq_api_key:
-                available_chain.append(p)
-            elif p == "openrouter" and self.openrouter_api_key:
                 available_chain.append(p)
             elif p == "nvidia" and self.nvidia_api_key:
                 available_chain.append(p)
@@ -371,42 +343,36 @@ class AIClient:
 
         raise RuntimeError(f"All LLM providers failed. Errors: {'; '.join(errors)}")
 
-    def _available_plan(self, prefer_provider: Optional[str] = None,
-                        prefer_model: Optional[str] = None) -> List[List[tuple]]:
+    def _all_models(self, prefer_provider: Optional[str] = None,
+                    prefer_model: Optional[str] = None) -> List[tuple]:
         import random as _random
-        has_key = {
-            "opencode": bool(self.opencode_api_key),
-            "groq": bool(self.groq_api_key),
-            "openrouter": bool(self.openrouter_api_key),
-            "nvidia": bool(self.nvidia_api_key),
-        }
-        plan = []
-        for tier in self.FASTEST_TIERS:
-            available = [(p, m) for p, m in tier if has_key.get(p)]
-            if not available:
+        models = []
+        for p, ms in self.PROVIDER_MODELS.items():
+            if p == "opencode" and not self.opencode_api_key:
                 continue
-            _random.shuffle(available)
-            if prefer_provider:
-                preferred = [x for x in available if x[0] == prefer_provider]
-                others = [x for x in available if x[0] != prefer_provider]
-                available = preferred + others
-            if prefer_model:
-                exact = [x for x in available if x[1] == prefer_model]
-                rest = [x for x in available if x[1] != prefer_model]
-                available = exact + rest
-            plan.append(available)
-        return plan
+            if p == "nvidia" and not self.nvidia_api_key:
+                continue
+            for m in ms:
+                models.append((p, m))
+        _random.shuffle(models)
+        if prefer_provider:
+            preferred = [x for x in models if x[0] == prefer_provider]
+            others = [x for x in models if x[0] != prefer_provider]
+            models = preferred + others
+        if prefer_model:
+            exact = [x for x in models if x[1] == prefer_model]
+            rest = [x for x in models if x[1] != prefer_model]
+            models = exact + rest
+        return models
 
     def generate_fastest_first(self, prompt: str, system_instruction: Optional[str] = None,
                                prefer_provider: Optional[str] = None,
                                prefer_model: Optional[str] = None) -> str:
-        plan = self._available_plan(prefer_provider=prefer_provider, prefer_model=prefer_model)
-        if not plan:
+        all_models = self._all_models(prefer_provider=prefer_provider, prefer_model=prefer_model)
+        runnable = [(p, m) for p, m in all_models if self._check_and_consume_token(p, m)]
+        if not runnable:
             log.info("Racer: no API-keyed providers available - falling back to Ollama")
             return self.generate_ollama(prompt, system_instruction)
-
-        ai_cfg = _cfg.get("ai", {})
-        tier_timeout = float(ai_cfg.get("race_tier_timeout_seconds", 45.0))
 
         def make_call(p, m):
             thread_client = AIClient()
@@ -415,51 +381,44 @@ class AIClient:
             fn = getattr(thread_client, f"generate_{p}")
             return fn(prompt, system_instruction)
 
-        for tier_idx, tier in enumerate(plan):
-            runnable = []
-            for provider, model in tier:
-                if not self._check_and_consume_token(provider, model):
+        log.info("Racer: racing %d models simultaneously: %s",
+                 len(runnable), ", ".join(f"{p}/{m}" for p, m in runnable))
+
+        default_timeout = float(_cfg.get("ai", {}).get("race_tier_timeout_seconds", 45.0))
+        deadline = time.monotonic() + max(
+            self.MODEL_TIMEOUTS.get(m, default_timeout) for _, m in runnable
+        )
+
+        with ThreadPoolExecutor(max_workers=len(runnable)) as exc:
+            fut_map = {exc.submit(make_call, p, m): (p, m) for p, m in runnable}
+            pending = set(fut_map)
+            while pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                done, pending = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
+                if not done:
                     continue
-                runnable.append((provider, model))
-            if not runnable:
-                continue
-            log.info("Racer tier %d: racing %s", tier_idx, ", ".join(f"{p}/{m}" for p, m in runnable))
+                for fut in done:
+                    p, m = fut_map[fut]
+                    try:
+                        text = fut.result()
+                    except Exception as e:
+                        self._note_provider_error(p, e)
+                        log.warning("Racer %s/%s failed: %s", p, m, e)
+                        continue
+                    if text and text.strip() and "API key missing" not in text:
+                        self._record_success(p)
+                        self._last_provider = p
+                        self._last_model = m
+                        log.info("Racer winner: %s/%s", p, m)
+                        for f in pending:
+                            f.cancel()
+                        return text.strip()
+            for f in pending:
+                f.cancel()
 
-            with ThreadPoolExecutor(max_workers=len(runnable)) as exc:
-                fut_map = {exc.submit(make_call, p, m): (p, m) for p, m in runnable}
-                pending = set(fut_map)
-                deadline = time.monotonic() + tier_timeout
-                winner = None
-                while pending:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                    done, pending = wait(pending, timeout=remaining, return_when=FIRST_COMPLETED)
-                    if not done:
-                        break
-                    for fut in done:
-                        p, m = fut_map[fut]
-                        try:
-                            text = fut.result()
-                        except Exception as e:
-                            self._note_provider_error(p, e)
-                            log.warning("Racer %s/%s failed: %s", p, m, e)
-                            continue
-                        if text and text.strip() and "API key missing" not in text:
-                            self._record_success(p)
-                            self._last_provider = p
-                            self._last_model = m
-                            winner = text.strip()
-                            log.info("Racer winner: %s/%s", p, m)
-                            break
-                    if winner:
-                        break
-                for f in pending:
-                    f.cancel()
-                if winner:
-                    return winner
-
-        log.warning("Racer: all available models failed/cooled down")
+        log.warning("Racer: all available models failed or timed out")
         return ""
 
     # --- OPENCODE GO ---
@@ -494,33 +453,6 @@ class AIClient:
             raise ValueError(f"OpenCode returned empty (finish_reason={response.choices[0].finish_reason})")
         return content.strip()
 
-    # --- OPENROUTER ---
-
-    def generate_openrouter(self, prompt: str, system_instruction: Optional[str] = None) -> str:
-        if not self.openrouter_api_key:
-            raise ValueError("OpenRouter API key missing")
-        client = OpenAI(api_key=self.openrouter_api_key, base_url=self.openrouter_base_url)
-        messages = []
-        if system_instruction:
-            messages.append({"role": "system", "content": system_instruction})
-        messages.append({"role": "user", "content": prompt})
-        self._last_provider = "openrouter"
-        self._last_model = self._model
-        t0 = time.monotonic()
-        response = client.chat.completions.create(
-            model=self._model, messages=messages, temperature=0.7, max_tokens=8192,
-            extra_headers={"HTTP-Referer": "https://github.com/prajwalbairagi/yt-clips"},
-        )
-        duration_ms = int((time.monotonic() - t0) * 1000)
-        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
-        log.info("LLM: openrouter/%s (%dms, %d tokens)", self._model, duration_ms, tokens,
-                 extra={"stage": "llm_generate", "duration_ms": duration_ms,
-                        "metadata": {"provider": "openrouter", "model": self._model, "tokens": tokens}})
-        content = response.choices[0].message.content
-        if content is None:
-            raise ValueError(f"OpenRouter returned empty (finish_reason={response.choices[0].finish_reason})")
-        return content.strip()
-
     # --- NVIDIA ---
 
     def generate_nvidia(self, prompt: str, system_instruction: Optional[str] = None) -> str:
@@ -547,38 +479,6 @@ class AIClient:
             raise ValueError(f"NVIDIA returned empty (finish_reason={response.choices[0].finish_reason})")
         return content.strip()
 
-    # --- GROQ ---
-
-    def generate_groq(self, prompt: str, system_instruction: Optional[str] = None) -> str:
-        if not self.groq_api_key:
-            raise ValueError("Groq API key missing")
-        total = len(system_instruction or "") + len(prompt)
-        if total > 28000:
-            excess = total - 28000
-            prompt = prompt[:max(len(prompt) - excess - 500, 8000)]
-            if system_instruction:
-                system_instruction = system_instruction[:2000]
-        client = OpenAI(api_key=self.groq_api_key, base_url=self.groq_base_url)
-        messages = []
-        if system_instruction:
-            messages.append({"role": "system", "content": system_instruction})
-        messages.append({"role": "user", "content": prompt})
-        self._last_provider = "groq"
-        self._last_model = self._model
-        t0 = time.monotonic()
-        response = client.chat.completions.create(
-            model=self._model, messages=messages, temperature=0.7, max_tokens=8192,
-        )
-        duration_ms = int((time.monotonic() - t0) * 1000)
-        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
-        log.info("LLM: groq/%s (%dms, %d tokens)", self._model, duration_ms, tokens,
-                 extra={"stage": "llm_generate", "duration_ms": duration_ms,
-                        "metadata": {"provider": "groq", "model": self._model, "tokens": tokens}})
-        content = response.choices[0].message.content
-        if content is None:
-            raise ValueError(f"Groq returned empty (finish_reason={response.choices[0].finish_reason})")
-        return content.strip()
-
     def get_used_provider(self) -> str:
         return self._last_provider or self._provider
 
@@ -589,10 +489,6 @@ class AIClient:
         available = {}
         if self.opencode_api_key:
             available["opencode"] = self.PROVIDER_MODELS["opencode"]
-        if self.groq_api_key:
-            available["groq"] = self.PROVIDER_MODELS["groq"]
-        if self.openrouter_api_key:
-            available["openrouter"] = self.PROVIDER_MODELS["openrouter"]
         if self.nvidia_api_key:
             available["nvidia"] = self.PROVIDER_MODELS["nvidia"]
         return available
