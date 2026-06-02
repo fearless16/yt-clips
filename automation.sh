@@ -17,7 +17,7 @@ echo "  GPU: $GPU_NAME"
 
 # ── Mount Drive ───────────────────────────────────────────────────────
 echo ""
-echo "--- Step 1/5: Mount Drive ---"
+echo "--- Step 1/5: Mount Drive + Git Clone ---"
 DRIVE_DIR=""
 for p in "/content/drive/MyDrive/yt-clips" "/content/drive/My Drive/yt-clips"; do
     [ -d "$p" ] && { DRIVE_DIR="$p"; break; }
@@ -29,16 +29,30 @@ if [ -z "$DRIVE_DIR" ]; then
     done
 fi
 if [ -z "$DRIVE_DIR" ]; then echo "ERROR: yt-clips/ not found on Drive"; exit 1; fi
-cd "$DRIVE_DIR"
-echo "  PWD: $DRIVE_DIR"
+echo "  Secrets dir: $DRIVE_DIR"
 
-# Pull latest code from git (if cloned)
-git pull origin main 2>/dev/null && echo "  git pull ✓" || echo "  (no git repo, using Drive sync)"
+# Git clone / pull code (code comes from git, not Drive)
+REPO="/content/yt-clips"
+if [ -d "$REPO/.git" ]; then
+    git -C "$REPO" pull origin main 2>/dev/null && echo "  git pull ✓" || echo "  git pull failed"
+else
+    git clone https://github.com/fearless16/yt-clips "$REPO"
+    echo "  git clone ✓"
+fi
+cd "$REPO"
 
-# ── API Keys ──────────────────────────────────────────────────────────
+# ── API Keys (copy from Drive to repo) ──────────────────────────────
 echo ""
 echo "--- Step 2/5: API Keys ---"
-[ -f .env ] && { set -a; source .env; set +a; echo "  .env loaded ✓"; } || echo "  WARNING: no .env found (create one and re-run push_code.py)"
+SECRET_FILES=".env drive_token.json yt_channel_token.json yt_analytics_token.json client_secrets.json cookies.txt channel_logo.png face_landmarker.task"
+for fname in $SECRET_FILES; do
+    src="$DRIVE_DIR/$fname"
+    if [ -f "$src" ]; then
+        cp "$src" "$REPO/$fname"
+        echo "  Copied: $fname"
+    fi
+done
+[ -f .env ] && { set -a; source .env; set +a; echo "  .env loaded ✓"; } || echo "  WARNING: no .env found"
 
 # ── Deps ──────────────────────────────────────────────────────────────
 echo ""
@@ -118,7 +132,7 @@ done
 # ── Summary ───────────────────────────────────────────────────────────
 echo ""
 echo "═══ COLAB WORKER ONLINE ═══"
-echo "  Watcher polling remote_job.json from Drive every 10s"
+echo "  Watcher: jobs delivered via tunnel (POST /job)"
 if [ -n "$URL" ]; then
     echo "  Tunnel: $URL"
 else

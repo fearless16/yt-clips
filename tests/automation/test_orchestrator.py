@@ -186,27 +186,20 @@ class TestMain:
         assert events[0].event_type == EventType.manual_override
 
     def test_valid_url_runs_pipeline(self, monkeypatch, capsys):
+        from automation.orchestrator import PipelineResult
         called = {}
 
-        class MockOrchestrator:
-            def __init__(self, **kwargs):
-                pass
+        def mock_run(url, **kwargs):
+            called["url"] = url
+            called["kwargs"] = kwargs
+            r = PipelineResult()
+            r.exported = []
+            r.uploaded_count = 0
+            r.failures = []
+            r.total_seconds = 0.1
+            return r
 
-            def run_pipeline(self, url, clip_data=None, stages=None):
-                called["url"] = url
-                called["stages"] = stages
-                return {
-                    "url": url, "stages_completed": ["download"],
-                    "events_emitted": 1, "errors": [],
-                }
-
-        monkeypatch.setattr(
-            "automation.orchestrator.Orchestrator", MockOrchestrator,
-        )
-        monkeypatch.setattr(
-            "automation.memory.decision_store.DecisionStore",
-            lambda: DecisionStore(),
-        )
+        monkeypatch.setattr("automation.orchestrator.run", mock_run)
         from automation.cli import main
         ret = main(["https://youtube.com/watch?v=test"])
         assert ret == 0
