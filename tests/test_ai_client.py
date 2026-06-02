@@ -271,7 +271,7 @@ def test_all_models_shuffles_for_diversity():
         models = ai._all_models()
         if models:
             first_models.add(models[0])
-    # With 13 models across 2 providers, should see at least 2 different first picks
+    # With 15 models across 2 providers, should see at least 2 different first picks
     assert len(first_models) > 1, f"Only saw {first_models}"
 
 
@@ -319,18 +319,40 @@ def test_opencode_is_primary_in_chain():
 def test_opencode_provider_models():
     assert "opencode" in AIClient.PROVIDER_MODELS
     assert "mimo-v2.5-pro" in AIClient.PROVIDER_MODELS["opencode"]
+    assert "mimo-v2.5" in AIClient.PROVIDER_MODELS["opencode"]
+    assert "mimo-v2.5-mini" in AIClient.PROVIDER_MODELS["opencode"]
+    assert "mimo-v2.5-flash" in AIClient.PROVIDER_MODELS["opencode"]
     assert "qwen3.7-max" in AIClient.PROVIDER_MODELS["opencode"]
 
 
 def test_model_timeouts_include_qwen37():
     assert "qwen3.7-max" in AIClient.MODEL_TIMEOUTS
     assert AIClient.MODEL_TIMEOUTS["qwen3.7-max"] == 180.0
+    assert AIClient.MODEL_TIMEOUTS["mimo-v2.5-mini"] == 30.0
+    assert AIClient.MODEL_TIMEOUTS["mimo-v2.5-flash"] == 30.0
 
 
 def test_providers_only_opencode_nvidia():
     assert set(AIClient.PROVIDER_MODELS.keys()) == {"opencode", "nvidia"}
     assert "groq" not in AIClient.PROVIDER_MODELS
     assert "openrouter" not in AIClient.PROVIDER_MODELS
+
+
+def test_xiaomi_mimo_in_nvidia():
+    assert "xiaomi/mimo-v2.5-pro" in AIClient.PROVIDER_MODELS["nvidia"]
+    assert "xiaomi/mimo-v2.5" in AIClient.PROVIDER_MODELS["nvidia"]
+
+
+def test_xiaomi_mimo_in_opencode():
+    assert "mimo-v2.5-pro" in AIClient.PROVIDER_MODELS["opencode"]
+    assert "mimo-v2.5" in AIClient.PROVIDER_MODELS["opencode"]
+    assert "mimo-v2.5-mini" in AIClient.PROVIDER_MODELS["opencode"]
+    assert "mimo-v2.5-flash" in AIClient.PROVIDER_MODELS["opencode"]
+
+
+def test_total_model_count():
+    total = sum(len(v) for v in AIClient.PROVIDER_MODELS.values())
+    assert total == 17, f"Expected 17 models, got {total}"
 
 
 def test_get_available_providers_only_enabled():

@@ -2,6 +2,22 @@
 
 ---
 
+## Testing (MANDATORY)
+
+**Every code change MUST be validated before commit:**
+
+```bash
+# 1. Run unit tests
+.venv/bin/python -m pytest tests/ -v --ignore=tests/test_face_detect.py
+
+# 2. Run pipeline dry run (stubs all external APIs)
+.venv/bin/python dry_run.py https://youtu.be/test --skip-download --skip-transcribe
+```
+
+If either fails, DO NOT commit. Fix first.
+
+---
+
 ## Face OS (`face_os/`)
 
 **Full documentation → `face_os/STATE.md`** (single source of truth).
