@@ -381,9 +381,10 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None) -> Dict:
 
 
 def _parse_json_response(text: str) -> Optional[Dict]:
-    """Parse LLM JSON output, handling markdown and Python dict quirks.
+    """Parse LLM JSON output, handling markdown, truncation, and Python dict quirks.
 
     Attempts: direct json.loads, then markdown code fence stripping,
+    then truncation repair (add closing braces, trim incomplete values),
     then Python dict-to-JSON conversion. Returns None on total failure.
     """
     if not text or not text.strip():
@@ -391,34 +392,89 @@ def _parse_json_response(text: str) -> Optional[Dict]:
 
     text = _clean_dict_from_description(text)
 
-    # Attempt direct JSON parse
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
+    # Helper: try to parse, optionally repairing truncation
+    def _try_parse(s: str) -> Optional[Dict]:
+        try:
+            return json.loads(s)
+        except json.JSONDecodeError:
+            return None
 
-    # Try extracting JSON from markdown code block
+    # 1. Direct parse
+    result = _try_parse(text)
+    if result is not None:
+        return result
+
+    # 2. Extract JSON from markdown code block
     json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if json_match:
-        try:
-            return json.loads(json_match.group(1))
-        except json.JSONDecodeError:
-            pass
+        result = _try_parse(json_match.group(1))
+        if result is not None:
+            return result
 
-    # Try looking for { at first position
+    # 3. Look for { onwards
     brace_start = text.find("{")
     if brace_start >= 0:
-        try:
-            return json.loads(text[brace_start:])
-        except json.JSONDecodeError:
-            pass
+        candidate = text[brace_start:]
+        result = _try_parse(candidate)
+        if result is not None:
+            return result
+        # 3b. Try truncation repair: close all open braces/brackets, trim trailing garbage
+        fixed = _repair_truncated_json(candidate)
+        if fixed is not None:
+            return fixed
 
-    # Last attempt: try replacing single quotes with double quotes
+    # 4. Single quotes fallback
     try:
         single_quoted = re.sub(r"'", '"', text)
-        return json.loads(single_quoted)
-    except (json.JSONDecodeError, ValueError):
+        result = _try_parse(single_quoted)
+        if result is not None:
+            return result
+        # 4b. With truncation repair
+        brace_start = single_quoted.find("{")
+        if brace_start >= 0:
+            fixed = _repair_truncated_json(single_quoted[brace_start:])
+            if fixed is not None:
+                return fixed
+    except Exception:
+        pass
+
+    return None
+
+
+def _repair_truncated_json(s: str) -> Optional[Dict]:
+    """Attempt to repair truncated JSON by closing open braces/brackets
+    and trimming incomplete trailing values."""
+    if not s:
         return None
+    # Find the last complete key-value pair before truncation
+    # Strategy: try progressively shorter suffixes
+    for _ in range(min(5, len(s) // 10 + 1)):
+        # Remove trailing whitespace
+        s = s.rstrip()
+        if not s:
+            break
+        # Count unclosed braces/brackets
+        opens = s.count("{") + s.count("[")
+        closes = s.count("}") + s.count("]")
+        if opens == closes:
+            try:
+                return json.loads(s)
+            except json.JSONDecodeError:
+                pass
+        # Trim last line/partial value
+        last_newline = s.rfind("\n")
+        if last_newline > s.rfind("{"):
+            s = s[:last_newline]
+        else:
+            # Try closing unclosed braces
+            needed = opens - closes
+            if needed > 0:
+                try:
+                    return json.loads(s + "}" * needed)
+                except json.JSONDecodeError:
+                    pass
+            break
+    return None
 
 
 # ── Yield-optimized title generation ───────────────────────────────────────────
@@ -678,30 +734,48 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
     all_results = []
 
     clips = list(highlights.items())
+    failures = []
     for idx, (clip_id, info) in enumerate(clips, start=1):
         transcript = info.get("text", "Cricket Live")
         log.info("SEO [%d/%d]: %s", idx, len(clips), clip_id)
 
-        result = generate_clip_seo(
-            clip_id=clip_id,
-            transcript=transcript,
-            video_title=video_title,
-            scorecard=scorecard,
-            trend_topics=trend_topics,
-            live_stream_url=live_stream_url,
-            teams=teams,
-        )
-        all_results.append(result)
+        try:
+            result = generate_clip_seo(
+                clip_id=clip_id,
+                transcript=transcript,
+                video_title=video_title,
+                scorecard=scorecard,
+                trend_topics=trend_topics,
+                live_stream_url=live_stream_url,
+                teams=teams,
+            )
+            all_results.append(result)
 
-        # Save individual file immediately (safe even if later clips fail)
-        per_clip_path = Path(output_dir) / f"{clip_id}_metadata.json"
-        with open(per_clip_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
+            # Save individual file immediately
+            per_clip_path = Path(output_dir) / f"{clip_id}_metadata.json"
+            with open(per_clip_path, "w", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+        except SEOGenerationError as e:
+            log.warning("[%s] SEO failed — writing failure marker: %s", clip_id, e)
+            failures.append(clip_id)
+            marker_data = {
+                "clip_id": clip_id,
+                "transcript": transcript,
+                "video_title": video_title,
+                "is_shorts": True,
+            }
+            marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
+            with open(marker_path, "w") as f:
+                json.dump(marker_data, f)
+            all_results.append({"_seo_failed": True, "clip_id": clip_id})
 
         # Breathing room between clips (skip after last)
         if idx < len(clips):
             log.debug("Sleeping 5s before next SEO call...")
             time.sleep(5)
+
+    if failures:
+        log.warning("SEO failures for %d clip(s): %s", len(failures), failures)
 
     # Also write a combined results file
     combined_path = Path(output_dir) / "seo_results.json"
