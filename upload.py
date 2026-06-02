@@ -337,7 +337,7 @@ def upload_video(
     log.info(f"🚀 Uploading to YouTube: {title[:80]}...")
 
     chunk_mb = int(cfg.get("youtube", {}).get("upload_chunk_size_mb", 8))
-    media_body = MediaFileUpload(video_path, chunksize=chunk_mb * 1024 * 1024, resumable=True)
+    media_body = MediaFileUpload(video_path, chunksize=chunk_mb * 1024 * 1024, resumable=False)
     insert_request = youtube.videos().insert(
         part=",".join(body.keys()),
         body=body,
@@ -345,47 +345,8 @@ def upload_video(
         notifySubscribers=cfg.get("youtube", {}).get("notify_subscribers", True),
     )
 
-    response = None
-    last_progress = -10
-    last_progress_time = time.monotonic()
-    retry_sleep = 5
-    max_sleep = 60
-    max_retries = int(cfg.get("youtube", {}).get("upload_max_retries", 6))
-    deadline = time.monotonic() + float(cfg.get("youtube", {}).get("upload_deadline_seconds", 1800))
-    transient_retries = 0
-
     try:
-        while response is None:
-            try:
-                status, response = insert_request.next_chunk()
-                if status:
-                    retry_sleep = 5
-                    transient_retries = 0
-                    progress = int(status.progress() * 100)
-                    now = time.monotonic()
-                    if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
-                        log.info(f"   Upload Progress: {progress}%")
-                        last_progress = progress
-                        last_progress_time = now
-            except Exception as chunk_err:
-                import http.client
-                from googleapiclient.errors import HttpError
-                is_transient = (isinstance(chunk_err, HttpError) and chunk_err.resp.status in [500, 502, 503, 504]) or \
-                    isinstance(chunk_err, (http.client.IncompleteRead, http.client.CannotSendRequest, ConnectionError))
-                if is_transient:
-                    transient_retries += 1
-                    if transient_retries > max_retries or time.monotonic() > deadline:
-                        log.error("Giving up on %s after %d transient retries / deadline",
-                                  video_path, transient_retries)
-                        raise
-                    log.warning("Transient error (%d/%d): %s — retrying in %ds...",
-                                transient_retries, max_retries, chunk_err, retry_sleep)
-                    time.sleep(retry_sleep)
-                    retry_sleep = min(retry_sleep * 2, max_sleep)
-                    continue
-                else:
-                    raise chunk_err
-
+        response = insert_request.execute()
         video_id = response["id"]
         log.info(f"✅ Upload successful! Video ID: {video_id}")
 
