@@ -99,7 +99,7 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
         log.warning("YouTube Data API libraries not available")
         return None
 
-    token_path = Path("yt_token.json")
+    token_path = Path("yt_channel_token.json")
     if not token_path.exists():
         log.warning("YouTube Data API token not found at %s", token_path)
         return None

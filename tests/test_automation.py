@@ -390,19 +390,19 @@ class TestWatcherSecretExtraction:
                 "url": "https://youtu.be/test",
                 "flags": ["--upload"],
                 "client_secrets.json": '{"web":{"client_id":"test"}}',
-                "yt_token.json": '{"token":"test","refresh_token":"rt"}',
+                "yt_channel_token.json": '{"token":"test","refresh_token":"rt"}',
             }
             job_path = Path(tmp) / "remote_job.json"
             job_path.write_text(json.dumps(job))
             
             loaded = json.loads(job_path.read_text())
-            for secret_file in ["client_secrets.json", "yt_token.json"]:
+            for secret_file in ["client_secrets.json", "yt_channel_token.json"]:
                 if secret_file in loaded and loaded[secret_file]:
                     (Path(tmp) / secret_file).write_text(loaded[secret_file], encoding="utf-8")
                     del loaded[secret_file]
             
-            assert not (Path(tmp) / "yt_token.json").exists() or (Path(tmp) / "yt_token.json").read_text() == '{"token":"test","refresh_token":"rt"}'
-            assert "yt_token.json" not in loaded
+            assert not (Path(tmp) / "yt_channel_token.json").exists() or (Path(tmp) / "yt_channel_token.json").read_text() == '{"token":"test","refresh_token":"rt"}'
+            assert "yt_channel_token.json" not in loaded
             assert "client_secrets.json" not in loaded
 
     def test_missing_url_skipped(self):

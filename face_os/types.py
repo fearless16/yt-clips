@@ -231,6 +231,9 @@ class AcceptDecision:
     temporal_ok: bool = True
     lighting_ok: bool = True
     score: float = 1.0
+    # Phase 2B (§19): which trust signal fed the identity decision
+    trust_source: str = "c_obs"            # "c_recon" | "c_obs_fallback" | "c_obs"
+    c_recon: Optional[float] = None        # §16.8 composite at decision time (or None)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -241,6 +244,8 @@ class AcceptDecision:
             "temporal_ok": bool(self.temporal_ok),
             "lighting_ok": bool(self.lighting_ok),
             "score": float(self.score),
+            "trust_source": self.trust_source,
+            "c_recon": (None if self.c_recon is None else float(self.c_recon)),
         }
 
 
@@ -652,6 +657,12 @@ class LatentRenderTelemetry:
     observation_confidence: float = 0.0     # §16.1: exp(−residual_mean/30),
     #   a scalar trust signal derived from the forward-model residual (1.0 =
     #   perfect match, 0.0 = large unexplained residual).
+    gate_trust_source: str = "c_obs"        # Phase 2B: which trust signal fed
+    #   the accept gate: 'c_recon' (composite ≥ min_c_recon) or 'c_obs'
+    #   (legacy raw observation). 'c_obs' means either c_recon was disabled
+    #   or the composite was non-finite and we fell back.
+    gate_decision_accept: bool = True       # Phase 2B: AcceptDecision.accept
+    #   at the time of update evaluation.
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -676,4 +687,6 @@ class LatentRenderTelemetry:
             "observation_residual_mean": self.observation_residual_mean,
             "observation_noise_mean": self.observation_noise_mean,
             "observation_confidence": self.observation_confidence,
+            "gate_trust_source": self.gate_trust_source,
+            "gate_decision_accept": self.gate_decision_accept,
         }

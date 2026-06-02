@@ -14,12 +14,12 @@ cfg = load_config()
 log = get_logger("token_refresh", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 TOKEN_FILES = {
-    "yt_token.json": ["https://www.googleapis.com/auth/youtube.upload"],
-    "token.json": ["https://www.googleapis.com/auth/drive.file"],
-    "yt_analytics_token.json": [
+    "yt_channel_token.json": [
+        "https://www.googleapis.com/auth/youtube.upload",
         "https://www.googleapis.com/auth/youtube.readonly",
         "https://www.googleapis.com/auth/yt-analytics.readonly",
     ],
+    "drive_token.json": ["https://www.googleapis.com/auth/drive.file"],
 }
 
 
