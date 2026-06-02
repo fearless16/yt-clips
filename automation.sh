@@ -69,7 +69,7 @@ echo "--- Step 4/5: Python Deps ---"
 pip install -q torch torchvision torchaudio \
     --extra-index-url https://download.pytorch.org/whl/cu121
 pip install -q \
-    yt-dlp faster-whisper youtube-transcript-api \
+    yt-dlp faster-whisper youtube-transcript-api mediapipe \
     rich PyYAML opencv-python-headless numpy \
     filterpy scipy openai python-dotenv Pillow requests \
     ultralytics gfpgan basicsr realesrgan \
