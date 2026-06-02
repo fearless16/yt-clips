@@ -56,12 +56,10 @@ def _has_access_error(stderr: str) -> bool:
     return any(hint in lower for hint in ACCESS_ERROR_HINTS)
 
 
-def _cookie_args(dl_cfg: dict) -> list[str]:
-    cookie_path = dl_cfg.get("cookies") or dl_cfg.get("cookies_path") or dl_cfg.get("cookiefile")
-    candidates = [Path(cookie_path)] if cookie_path else [Path("cookies.txt")]
-    for candidate in candidates:
-        if candidate.exists() and candidate.stat().st_size > 0:
-            return ["--cookies", str(candidate)]
+def _cookie_args() -> list[str]:
+    cookie = Path("cookies.txt")
+    if cookie.exists() and cookie.stat().st_size > 0:
+        return ["--cookies", str(cookie)]
     return []
 
 
@@ -202,7 +200,7 @@ def _base_yt_dlp_cmd(dl_cfg: dict, template: str) -> list[str]:
     # Throttled-rate keepalive — prevents connection drops on long downloads
     cmd.extend(["--throttled-rate", "100K"])
 
-    cmd.extend(_cookie_args(dl_cfg))
+    cmd.extend(_cookie_args())
     cmd.extend(_js_runtime_args(dl_cfg))
     return cmd
 
@@ -356,7 +354,7 @@ def download(url: str, output_path: Optional[str] = None, sample_minutes: Option
             "--dump-json",
             "--no-playlist",
             "--no-warnings",
-            *_cookie_args(dl_cfg),
+            *_cookie_args(),
             *_js_runtime_args(dl_cfg),
             url,
         ]
