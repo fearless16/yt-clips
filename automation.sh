@@ -80,50 +80,62 @@ echo ""
 echo "--- Step 5/5: Start Watcher + Tunnel ---"
 mkdir -p input temp transcripts highlights shorts logs photos
 
-pkill -9 -f 'python watcher.py' 2>/dev/null || true
+pkill -9 -f 'python.*watcher.py' 2>/dev/null || true
 fuser -k 5000/tcp 2>/dev/null || true
-pkill -f 'serveo|localhost.run|localtunnel' 2>/dev/null || true
+pkill -f 'serveo\|localhost.run\|localtunnel\|ngrok' 2>/dev/null || true
 sleep 2
 
+# Start watcher directly (not via automation.watcher — that suppresses output)
+python3 watcher.py > watcher.log 2>&1 &
+WATCHER_PID=$!
+sleep 3
+
+# Verify watcher is up
+if curl -s http://localhost:5000/health >/dev/null 2>&1; then
+    echo "  Watcher: OK (PID $WATCHER_PID)"
+else
+    echo "  Watcher: FAILED — check watcher.log"
+    tail -5 watcher.log 2>/dev/null
+fi
+
+# Start tunnel
 python3 -c "
-import sys; sys.path.insert(0, '.')
-from automation.watcher import start_watcher
+import sys, os, time, json, urllib.request
+sys.path.insert(0, '.')
+os.chdir('$REPO')
+
+# Load .env
+if os.path.exists('.env'):
+    for line in open('.env'):
+        line = line.strip()
+        if line and '=' in line and not line.startswith('#'):
+            k, v = line.split('=', 1)
+            os.environ[k.strip()] = v.strip()
+
 from automation.tunnel import start_tunnel
-import urllib.request
-
-ok = start_watcher(port=5000)
-print(f'  Watcher: {\"OK\" if ok else \"FAILED\"}')
-
 url = start_tunnel(port=5000)
 if url:
-    print(f'  Tunnel:  {url}')
-    try:
-        # ACTUAL VALIDATION: Try to hit the public URL
-        # We use a short timeout because it might take a second to propagate
-        import time
-        success = False
-        for _ in range(5):
-            try:
-                r = urllib.request.urlopen(f'{url}/health', timeout=5)
-                if r.status == 200:
-                    success = True
-                    break
-            except:
-                time.sleep(2)
-        print(f'  Tunnel Health: {\"VERIFIED\" if success else \"TIMEOUT/FAILED\"}')
-    except Exception as e:
-        print(f'  Tunnel Health: ERROR ({e})')
-    
+    print(url)
     open('colab_url.txt','w').write(url.strip())
+    # Verify
+    ok = False
+    for _ in range(5):
+        try:
+            r = urllib.request.urlopen(f'{url}/health', timeout=5)
+            if r.status == 200:
+                ok = True
+                break
+        except: time.sleep(2)
+    print(f'  Health: {\"OK\" if ok else \"TIMEOUT\"}')
 else:
-    print('  Tunnel: FAILED')
-" &
+    print('FAILED')
+" > tunnel_output.txt 2>&1 &
 
-# Wait up to 15s for the URL file (background process writes it asynchronously)
+# Wait for tunnel URL
 URL=""
-for i in $(seq 1 15); do
-    if [ -f colab_url.txt ]; then
-        URL=$(cat colab_url.txt)
+for i in $(seq 1 45); do
+    URL=$(head -1 tunnel_output.txt 2>/dev/null)
+    if [ -n "$URL" ] && [ "$URL" != "FAILED" ]; then
         break
     fi
     sleep 1
