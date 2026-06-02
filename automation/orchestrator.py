@@ -479,11 +479,11 @@ def run(
     if learn_only or auto_upload or auto_schedule:
         try:
             with run_phase(log, "stage 9a Analytics", "analytics", run_id=rid):
-                try:
-                    from automation.seo.analytics import generate_daily_insights
-                    generate_daily_insights()
-                except ImportError:
-                    log.info("[analytics] generate_daily_insights not available — skipping")
+                from automation.memory.decision_store import DecisionStore
+                from automation.seo.analytics import Analytics
+                a = Analytics(DecisionStore())
+                summary = a.get_summary()
+                log.info("[analytics] summary: %s", summary)
         except Exception as e:
             result.failures.append(f"stage9a: {e}")
 
