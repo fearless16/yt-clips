@@ -256,7 +256,7 @@ def run(
                     result.exported = export_all(
                         highlights_path, video_path,
                         transcript_path=transcript_path,
-                        generate_seo=True,
+                        generate_seo=False,
                     )
                     for clip_path in result.exported:
                         _emit_event(f"{stem}/{clip_path.stem}", EventType.exported, {
@@ -476,12 +476,12 @@ def run(
                 result.failures.append(f"stage8b: {e}")
 
     # ── Stage 9: Self-learning ──────────────────────────────────────────
-    if learn_only or auto_upload or auto_schedule:
+    result.total_seconds = time.monotonic() - start
+    if result.exported or learn_only:
         try:
             with run_phase(log, "stage 9a Analytics", "analytics", run_id=rid):
-                from automation.memory.decision_store import DecisionStore
                 from automation.seo.analytics import Analytics
-                a = Analytics(DecisionStore())
+                a = Analytics(_DECISION_STORE)
                 summary = a.get_summary()
                 log.info("[analytics] summary: %s", summary)
         except Exception as e:
@@ -541,7 +541,6 @@ def run(
         except Exception as e:
             result.failures.append(f"stage9d: {e}")
 
-    result.total_seconds = time.monotonic() - start
     status = "partial" if result.failures else "ok"
     log.info(
         "[EXIT] pipeline run_id=%s url=%s exported=%d uploaded=%d "

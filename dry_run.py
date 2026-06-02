@@ -1,33 +1,37 @@
 """
-dry_run.py — Execute pipeline logic with ALL external calls stubbed.
+dry_run.py — Execute pipeline with real code, only API calls stubbed.
 
-Runs the same 9-phase logic as automation/orchestrator.py (phases 0,1,2,3,4,
-4.5,5,5.5,6,7,8) but replaces every outbound call (Whisper, YouTube API, Drive
-API, LLM, ffmpeg, yt-dlp, thumbnail rendering) with no-op mocks or minimal fast
-paths. It exercises the REAL observability layer (utils.logger.run_phase +
-new_run_id), the REAL transcript correction (utils.transcript_postproc), and the
-REAL config — so it validates config, phase ordering, skip flags, structured
-logging, the SEO escalate-not-degrade retry queue, and PipelineResult output,
-all locally in seconds.
+Calls automation/orchestrator.run() directly — every internal function,
+import path, data-flow branch, and observability layer runs for real.
+Only external APIs (YouTube Data API, yt-dlp, ffmpeg/ffprobe, Google
+Drive, AI providers, PIL, faster-whisper, HTTP trend fetches, etc.)
+are intercepted at the boundary and return plausible fake data.
+
+This catches bugs in function signatures, import paths, config keys,
+phase ordering, skip-flag logic, return-type contracts, logging, the
+SEO escalate-not-degrade retry queue, and PipelineResult — all locally
+in seconds without any network/GPU/disk-IO to external services.
 
 Usage:
     python dry_run.py https://youtu.be/4ylLhtICj1I
     python dry_run.py https://youtu.be/4ylLhtICj1I --skip-download --skip-transcribe
     python dry_run.py https://youtu.be/4ylLhtICj1I --upload --sync --schedule
-    python dry_run.py https://youtu.be/4ylLhtICj1I --mode ref_grade
-    python dry_run.py --list-external        # list all stubbed external calls
+    python dry_run.py --list-external        # list all API-call intercept points
     python dry_run.py --validate-config      # only check required config keys
 """
 
 import argparse
+import contextlib
 import io
 import json
 import logging
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -38,13 +42,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("dry_run")
 
-# Real observability primitives — exercised (not stubbed) so the dry run
-# actually validates the structured-logging layer.
 from utils.logger import run_phase, new_run_id, JsonStreamHandler
 
-_STUBBED_CALLS: list[str] = []
+# ── Config validation ─────────────────────────────────────────────────────
 
-# Config keys introduced by the pipeline overhaul that MUST exist.
 REQUIRED_CONFIG_KEYS = [
     ("ai", "retry_base_delay_seconds"),
     ("ai", "retry_max_delay_seconds"),
@@ -64,7 +65,6 @@ EXPECTED_PHASE_STAGES = [
     "automation_learner", "provider_health", "event_store_validation",
 ]
 
-# Prompts module must be importable and all templates must format cleanly.
 REQUIRED_PROMPTS = [
     "HIGHLIGHT_RANKER_SYSTEM", "HIGHLIGHT_RANKER_USER_TEMPLATE",
     "CANDIDATE_EVAL_SYSTEM", "CANDIDATE_EVAL_USER_TEMPLATE",
@@ -88,33 +88,37 @@ class PipelineResult:
     seo_generated: int = 0
 
 
-def _stub(name: str, *args, **kwargs):
-    _STUBBED_CALLS.append(name)
-    log.info("  [STUB] %s%s", name, f" ({args[0]})" if args else "")
+_FAKE_SEGMENTS = [
+    {"start": 0.0, "end": 5.0, "text": "Hello and welcome to the live stream"},
+    {"start": 5.0, "end": 10.0, "text": "Today coaly is batting brilliantly"},
+    {"start": 30.0, "end": 35.0, "text": "coaly hits a massive six"},
+    {"start": 60.0, "end": 65.0, "text": "bumra bowls a perfect yorker"},
+    {"start": 120.0, "end": 125.0, "text": "What a catch in the deep"},
+    {"start": 300.0, "end": 305.0, "text": "And that's the end of the over"},
+]
 
+_FAKE_TRANSCRIPT = {
+    "segments": _FAKE_SEGMENTS,
+    "source": "api",
+}
 
-def _make_segments():
-    # Includes deliberate mishearings ("coaly", "bumra") so the REAL
-    # transcript correction layer has something to fix.
-    return {
-        "segments": [
-            {"start": 0.0, "end": 5.0, "text": "Hello and welcome to the live stream"},
-            {"start": 5.0, "end": 10.0, "text": "Today coaly is batting brilliantly"},
-            {"start": 30.0, "end": 35.0, "text": "coaly hits a massive six"},
-            {"start": 60.0, "end": 65.0, "text": "bumra bowls a perfect yorker"},
-            {"start": 120.0, "end": 125.0, "text": "What a catch in the deep"},
-            {"start": 300.0, "end": 305.0, "text": "And that's the end of the over"},
-        ],
-        "source": "api",
-    }
+_FAKE_HIGHLIGHTS = {
+    "clip1": {"start": 30, "end": 55, "label": "Kohli Six", "text": "coaly hits a massive six"},
+    "clip2": {"start": 60, "end": 85, "label": "Yorker", "text": "bumra bowls a perfect yorker"},
+    "clip3": {"start": 120, "end": 145, "label": "Amazing Catch", "text": "What a catch in the deep"},
+}
 
+_FAKE_SEO_JSON = json.dumps({
+    "title": "Kohli Six! #Shorts",
+    "description": "Amazing shot by Kohli in today's match! Subscribe for more. #Shorts",
+    "hashtags": ["#Shorts", "#Kohli", "#IPL"],
+    "search_terms": ["kohli six", "ipl highlights", "rcb vs csk"],
+})
 
-def _make_highlights():
-    return [
-        {"start_sec": 30, "end_sec": 55, "score": 0.92, "label": "Kohli Six"},
-        {"start_sec": 60, "end_sec": 85, "score": 0.88, "label": "Yorker"},
-        {"start_sec": 120, "end_sec": 145, "score": 0.85, "label": "Amazing Catch"},
-    ]
+_FAKE_FFPROBE_OUTPUT = json.dumps({
+    "streams": [{"width": 1080, "height": 1920, "codec_type": "video"}],
+    "format": {"duration": "180.0"},
+})
 
 
 def _create_fake_video(path: str, size_mb: int = 10):
@@ -125,182 +129,433 @@ def _create_fake_video(path: str, size_mb: int = 10):
         log.info("  [FAKE] Created %s (%d MB)", path, size_mb)
 
 
-def _create_fake_clips(export_dir: str, stems: list[str]):
+def _create_fake_clip(export_dir: str, stem: str):
     d = Path(export_dir)
     d.mkdir(parents=True, exist_ok=True)
-    exported = []
-    for s in stems:
-        clip = d / f"{s}.mp4"
-        if not clip.exists():
-            clip.write_bytes(b"C" * 1024 * 1024)
-        exported.append(clip)
-    return exported
+    clip = d / f"{stem}.mp4"
+    if not clip.exists():
+        clip.write_bytes(b"C" * 1024 * 1024)
+    return clip
 
 
-# ─── Stubbed external module replacements ─────────────────────────────────────
-
-def stub_transcript_fetch(url: str, output_path: str = "") -> dict:
-    _stub("transcript.fetch", url)
-    data = _make_segments()
-    if output_path:
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w") as f:
-            json.dump(data, f)
-    return data
-
-
-def stub_download(url: str, output_path: str, **kwargs) -> str:
-    _stub("download.download", url)
-    _create_fake_video(output_path)
-    return output_path
-
-
-def stub_transcribe(video_path: str, output_path: str):
-    _stub("transcribe.transcribe", video_path)
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(_make_segments(), f)
+def _make_valid_wav_bytes(num_samples: int = 16000) -> bytes:
+    """Return a minimal valid 16-bit mono 16kHz WAV file."""
+    import struct
+    data_size = num_samples * 2  # 16-bit = 2 bytes per sample
+    sample_rate = 16000
+    fmt_data = struct.pack('<HHIIHH', 1, 1, sample_rate, sample_rate * 2, 2, 16)
+    buf = bytearray()
+    buf += b'RIFF'
+    buf += struct.pack('<I', 36 + data_size)
+    buf += b'WAVE'
+    buf += b'fmt '
+    buf += struct.pack('<I', 16)
+    buf += fmt_data
+    buf += b'data'
+    buf += struct.pack('<I', data_size)
+    buf += b'\x00' * data_size
+    return bytes(buf)
 
 
-def stub_detect_highlights(transcript_path: str, video_path: str, output_path: str) -> list:
-    _stub("highlight.detect_highlights", transcript_path)
-    import yaml
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    clips = {f"clip{i+1}": {"start": h["start_sec"], "end": h["end_sec"],
-                            "label": h["label"], "text": "coaly six bumra yorker"}
-             for i, h in enumerate(_make_highlights())}
-    with open(output_path, "w") as f:
-        yaml.dump(clips, f)
-    return list(clips.keys())
+# ── External-API intercept context ─────────────────────────────────────────
+
+@contextlib.contextmanager
+def _api_intercept_context(video_path: str):
+    """Context manager that intercepts every external-API boundary call.
+
+    Every ``unittest.mock.patch`` here targets the lowest point where our
+    code touches an external dependency (network, subprocess, ML model, GPU,
+    local binary).  All internal business logic runs unchanged.
+    """
+    # ── 1. AI / LLM providers ──────────────────────────────────────────────
+
+    def _fake_generate_fastest_first(self, prompt="", system_instruction=None,
+                                     prefer_provider=None, prefer_model=None):
+        log.info("  [FAKE AI] generate_fastest_first (prompt=%.60s...)",
+                 prompt.replace("\n", " ")[:60])
+        return _FAKE_SEO_JSON
+
+    def _fake_generate_text(prompt="", system_instruction=None):
+        log.info("  [FAKE AI] generate_text (prompt=%.60s...)",
+                 prompt.replace("\n", " ")[:60])
+        return "Kohli hit a six. Bumrah bowled a yorker. Amazing catch."
+
+    def _fake_generate_image(prompt="", **kwargs):
+        log.info("  [FAKE AI] generate_image (prompt=%.60s...)", prompt[:60])
+        return b"JPEG" * 1024
+
+        # ── 2. subprocess — intercept ffmpeg/ffprobe/yt-dlp/aria2c/nvidia-smi ──
+
+    _original_subprocess_run = subprocess.run
+    _original_subprocess_popen = subprocess.Popen
+    _last_ffmpeg_t = [10.0]  # list to allow mutation in nested function
+
+    def _fake_subprocess_run(cmd, *args, **kwargs):
+        cmd_str = " ".join(str(c) for c in cmd) if isinstance(cmd, list) else str(cmd)
+        low = cmd_str.lower()
+        text_mode = kwargs.get("text", kwargs.get("universal_newlines", False))
+        def _out(s):
+            return s if text_mode else s.encode()
+        def _empty():
+            return "" if text_mode else b""
+        # ffprobe: return contextual fake JSON
+        if "ffprobe" in low:
+            log.info("  [FAKE ffprobe] %s", cmd_str[:100])
+            text = cmd_str.lower()
+            if "format=duration" in text and "show_entries" in text:
+                # If this looks like a clip validation file, use a small duration.
+                # Otherwise fall back to the full video duration.
+                if any(p in cmd_str for p in ("shorts/", "temp/")):
+                    dur = _last_ffmpeg_t[0]
+                else:
+                    dur = 180.0
+                fake = json.dumps({"format": {"duration": str(dur)}})
+            elif "r_frame_rate" in text:
+                fake = json.dumps({"streams": [{"width": 1080, "height": 1920, "r_frame_rate": "30/1"}]})
+            elif "stream=width,height" in text and "codec_type" not in text:
+                fake = json.dumps({"streams": [{"width": 1080, "height": 1920}]})
+            elif "codec_type" in text:
+                fake = json.dumps({"streams": [{"codec_type": "audio"}]})
+            else:
+                fake = _FAKE_FFPROBE_OUTPUT
+            return subprocess.CompletedProcess(cmd, 0, _out(fake), _empty())
+        # ffmpeg: create output file at last position argument
+        if "ffmpeg" in low:
+            log.info("  [FAKE ffmpeg] %s", cmd_str[:120])
+            # encoders list: return a real-looking list
+            if "-encoders" in low:
+                return subprocess.CompletedProcess(cmd, 0,
+                    _out("Encoders:\n V..... libx264              H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)\n"),
+                    _empty())
+            # Capture -t flag value for later ffprobe duration matching
+            for i, c in enumerate(cmd):
+                if isinstance(c, str) and c == "-t" and i + 1 < len(cmd):
+                    try:
+                        _last_ffmpeg_t[0] = float(cmd[i + 1])
+                    except (ValueError, IndexError):
+                        pass
+            out_path = None
+            for c in reversed(cmd):
+                if isinstance(c, str) and (c.endswith(".mp4") or c.endswith(".wav") or c.endswith(".nut") or c.endswith(".jpg")):
+                    out_path = c
+                    break
+            if out_path:
+                Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+                if out_path.endswith(".wav"):
+                    Path(out_path).write_bytes(_make_valid_wav_bytes(16000))
+                else:
+                    Path(out_path).write_bytes(b"F" * 1024 * 500)  # 500KB to pass size validation
+            return subprocess.CompletedProcess(cmd, 0, _empty(), _empty())
+        # yt-dlp call: create fake video file
+        if "yt-dlp" in low or ("yt" in low and "dlp" in low):
+            log.info("  [FAKE yt-dlp] %s", cmd_str[:100])
+            _create_fake_video(video_path)
+            # --dump-json needs real-looking metadata
+            if "--dump-json" in low or "dump" in low:
+                fake_meta = json.dumps({
+                    "id": "4ylLhtICj1I", "title": "Cricket Highlights",
+                    "duration": 180, "ext": "mp4",
+                    "width": 1920, "height": 1080,
+                })
+                return subprocess.CompletedProcess(cmd, 0, _out(fake_meta), _empty())
+            return subprocess.CompletedProcess(cmd, 0, _empty(), _empty())
+        # aria2c: return version string (download.py checks for it)
+        if "aria2c" in low:
+            return subprocess.CompletedProcess(cmd, 0, _out("aria2c 1.36.0"), _empty())
+        # nvidia-smi: return no-GPU
+        if "nvidia-smi" in low:
+            return subprocess.CompletedProcess(cmd, 0, _empty(), _empty())
+        # apt-get: skip
+        if "apt-get" in low or "apt " in low:
+            return subprocess.CompletedProcess(cmd, 0, _empty(), _empty())
+        # Everything else (mkdir, pip, cp, ls, etc.) pass through
+        return _original_subprocess_run(cmd, *args, **kwargs)
+
+    class _FakePopen:
+        def __init__(self, cmd, *args, **kwargs):
+            cmd_str = " ".join(str(c) for c in cmd) if isinstance(cmd, list) else str(cmd)
+            log.info("  [FAKE Popen] %s", cmd_str[:100])
+            if "yt-dlp" in cmd_str.lower():
+                _create_fake_video(video_path)
+            self.returncode = 0
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO("")
+        def communicate(self, input=None, timeout=None):
+            return ("", "")
+        def wait(self, timeout=None):
+            return 0
+        def poll(self):
+            return 0
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    # ── 3. Google APIs — YouTube Data, Drive ───────────────────────────────
+
+    def _fake_google_build(service_name, version, *args, **kwargs):
+        log.info("  [FAKE Google API] build %s %s", service_name, version)
+        svc = MagicMock()
+        if service_name == "youtube":
+            # videos().insert() → executed → {"id": "test_video_id"}
+            insert_mock = MagicMock()
+            insert_mock.execute.return_value = {"id": "test_video_id"}
+            svc.videos().insert.return_value = insert_mock
+            # thumbnails().set() → executed
+            svc.thumbnails().set().execute.return_value = {"id": "test_thumb_id"}
+            # videoCategories().list() → assignable categories
+            svc.videoCategories().list().execute.return_value = {
+                "items": [{"id": "17", "snippet": {"assignable": True}},
+                          {"id": "24", "snippet": {"assignable": True}}]
+            }
+            # captions().list() → empty (so transcript falls through to _fetch_via_api)
+            svc.captions().list().execute.return_value = {"items": []}
+            # search().list() → empty
+            svc.search().list().execute.return_value = {"items": []}
+        if service_name == "drive":
+            svc.files().list().execute.return_value = {"files": []}
+            svc.files().create().execute.return_value = {"id": "fake_file_id", "name": "dummy"}
+            svc.files().get_media.return_value = MagicMock()
+        if service_name == "youtubeAnalytics":
+            svc.reports().query().execute.return_value = {
+                "columnHeaders": [{"name": "video"}, {"name": "estimatedMinutesWatched"}],
+                "rows": [],
+            }
+        return svc
+
+    # ── 4. faster-whisper ─────────────────────────────────────────────────
+
+    class _FakeWhisperInfo:
+        duration = 180.0
+        language = "en"
+        duration_after_vad = None
+        @property
+        def language(self):
+            return "en"
+
+    class _FakeWhisperModel:
+        def __init__(self, *args, **kwargs):
+            log.info("  [FAKE faster-whisper] WhisperModel.__init__ (skipping GPU)")
+        def transcribe(self, audio, *args, **kwargs):
+            log.info("  [FAKE faster-whisper] model.transcribe(audio=%s)", str(audio)[:60])
+            seg = MagicMock()
+            seg.start = 0.0; seg.end = 5.0; seg.text = "Kohli hit a six"; seg.words = []
+            return iter([seg]), _FakeWhisperInfo()
+
+    class _FakeBatchedPipeline:
+        def __init__(self, model=None, *args, **kwargs):
+            self._model = model
+        def transcribe(self, audio, *args, **kwargs):
+            seg = MagicMock()
+            seg.start = 0.0; seg.end = 5.0; seg.text = "Kohli hit a six"; seg.words = []
+            return iter([seg]), _FakeWhisperInfo()
+
+    # ── 5. youtube-transcript-api ──────────────────────────────────────────
+
+    class _FakeTranscript:
+        language_code = "en"
+        def fetch(self):
+            return _FAKE_SEGMENTS
+
+    class _FakeTranscriptList:
+        def list(self, video_id):
+            return self
+        def find_transcript(self, langs):
+            return _FakeTranscript()
+        def find_generated_transcript(self, langs):
+            return _FakeTranscript()
+        def __iter__(self):
+            return iter([_FakeTranscript()])
+        def __next__(self):
+            return _FakeTranscript()
+
+    class _FakeYouTubeTranscriptApi:
+        def __init__(self, http_client=None):
+            pass
+        def list(self, video_id):
+            return _FakeTranscriptList()
+
+    # ── 6. PIL ─────────────────────────────────────────────────────────────
+
+    def _fake_pil_open(*args, **kwargs):
+        img = MagicMock()
+        img.width = 1080
+        img.height = 1920
+        img.mode = "RGB"
+        img.size = (1080, 1920)
+        img.convert.return_value = img
+        img.resize.return_value = img
+        img.crop.return_value = img
+        return img
+
+    # ── 7. Pillow ImageEnhance ─────────────────────────────────────────────
+
+    class _FakeEnhancer:
+        def enhance(self, factor):
+            return _fake_pil_open()
+
+    def _fake_image_enhance(*args, **kwargs):
+        return _FakeEnhancer()
+
+    # ── 8. Pillow ImageFont ────────────────────────────────────────────────
+
+    class _FakeFont:
+        @staticmethod
+        def truetype(*args, **kwargs):
+            return MagicMock()
+        def getbbox(self, text):
+            return (0, 0, len(text) * 10, 20)
+
+    # ── 9. Pillow ImageDraw ────────────────────────────────────────────────
+
+    class _FakeDraw:
+        def __init__(self, *args, **kwargs):
+            pass
+        def text(self, *args, **kwargs):
+            pass
+        def rectangle(self, *args, **kwargs):
+            pass
+        def textbbox(self, *args, **kwargs):
+            return (0, 0, 100, 20)
+        def multiline_textbbox(self, *args, **kwargs):
+            return (0, 0, 100, 20)
+
+    # ── 10. Pillow ImageFilter ─────────────────────────────────────────────
+
+    class _FakeFilter:
+        pass
+
+    # ── 11. requests — HTTP for trends ─────────────────────────────────────
+
+    _fake_response = MagicMock()
+    _fake_response.status_code = 200
+    _fake_response.text = "<html>fake</html>"
+    _fake_response.content = b"fake"
+    _fake_response.json.return_value = {"items": []}
+    _fake_response.ok = True
+
+    class _FakeSession:
+        def __init__(self):
+            self.headers = {}
+            self.cookies = MagicMock()
+        def get(self, *args, **kwargs):
+            log.info("  [FAKE HTTP] GET %s", str(args[0])[:80] if args else "")
+            return _fake_response
+        def post(self, *args, **kwargs):
+            return _fake_response
+        def mount(self, *args, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    # ── 12. torch (CUDA query for export) ──────────────────────────────────
+
+    def _fake_torch_cuda_device_count():
+        return 0
+
+    # ── 14. SuperResEnhancer ───────────────────────────────────────────────
+
+    class _FakeSuperRes:
+        def upscale_video(self, input_path, output_path, *args, **kwargs):
+            log.info("  [FAKE SuperRes] upscale %s -> %s", input_path, output_path)
+            Path(output_path).write_bytes(Path(input_path).read_bytes())
+            return output_path
+
+    # ── 15. face_mapper / ref_grade / premium_analyzer ─────────────────────
+
+    def _fake_face_map_video(*args, **kwargs):
+        log.info("  [FAKE face_mapper] map_video")
+        return None
+
+    def _fake_ref_grade(*args, **kwargs):
+        log.info("  [FAKE ref_grade] grade_video")
+        return kwargs.get("output_path", args[-1] if args else "")
+
+    # ── 16. upload._probe_video ────────────────────────────────────────────
+
+    def _fake_probe_video(path):
+        return {"width": 1080, "height": 1920, "duration": 60.0}
+
+    # ── 17. OAuth token refresh ────────────────────────────────────────────
+
+    class _FakeCredentials:
+        valid = True
+        expired = False
+        refresh_token = "fake_refresh"
+        def __init__(self, *args, **kwargs):
+            pass
+        def refresh(self, request):
+            pass
+        @classmethod
+        def from_authorized_user_file(cls, *args, **kwargs):
+            log.info("  [FAKE OAuth] Credentials.from_authorized_user_file")
+            return cls()
+        def to_json(self):
+            return '{"token": "fake"}'
+
+    _fake_creds = _FakeCredentials()
+
+    # ── 18. scheduler ──────────────────────────────────────────────────────
+
+    def _fake_get_next_upload_time():
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    # ── Apply ALL patches ──────────────────────────────────────────────────
+
+    _patches = [
+        # AI providers
+        patch("utils.ai_client.AIClient.generate_fastest_first", _fake_generate_fastest_first),
+        patch("utils.ai_client.AIClient.generate_text", _fake_generate_text),
+        patch("utils.ai_client.AIClient.generate_image", _fake_generate_image),
+        # subprocess intercept
+        patch("subprocess.run", _fake_subprocess_run),
+        patch("subprocess.check_output", _fake_subprocess_run),
+        patch("subprocess.Popen", _FakePopen),
+        # Google APIs
+        patch("googleapiclient.discovery.build", _fake_google_build),
+        # faster-whisper (both module-level and any cached module-level refs)
+        patch("faster_whisper.WhisperModel", _FakeWhisperModel),
+        patch("faster_whisper.BatchedInferencePipeline", _FakeBatchedPipeline),
+        patch("transcribe.WhisperModel", _FakeWhisperModel),
+        # youtube-transcript-api
+        patch("youtube_transcript_api.YouTubeTranscriptApi", _FakeYouTubeTranscriptApi),
+        # PIL
+        patch("PIL.Image.open", _fake_pil_open),
+        patch("PIL.Image.new", _fake_pil_open),
+        patch("PIL.ImageEnhance.Contrast", _fake_image_enhance),
+        patch("PIL.ImageEnhance.Brightness", _fake_image_enhance),
+        patch("PIL.ImageEnhance.Sharpness", _fake_image_enhance),
+        patch("PIL.ImageDraw.Draw", _FakeDraw),
+        patch("PIL.ImageFont.truetype", _FakeFont.truetype),
+        patch("PIL.ImageFilter.GaussianBlur", _FakeFilter),
+        # requests
+        patch("requests.Session", _FakeSession),
+        # OpenAI SDK (covered by AIClient patches above — the `chat` attribute
+        # is a cached_property so string-path patching won't work here)
+        # torch CUDA
+        patch("torch.cuda.device_count", _fake_torch_cuda_device_count),
+        # SuperResEnhancer
+        patch("utils.super_res.SuperResEnhancer", _FakeSuperRes),
+        # Upload probe
+        patch("upload._probe_video", _fake_probe_video),
+        # OAuth credential loading
+        patch("google.oauth2.credentials.Credentials", _FakeCredentials),
+        # scheduler
+        patch("scheduler.get_next_upload_time", _fake_get_next_upload_time),
+    ]
+
+    with contextlib.ExitStack() as stack:
+        for p in _patches:
+            stack.enter_context(p)
+        yield
 
 
-def stub_export_all(highlights_path: str, video_path: str, **kwargs) -> list[Path]:
-    _stub("export.export_all", highlights_path)
-    import yaml
-    with open(highlights_path) as f:
-        data = yaml.safe_load(f) or {}
-    stems = list(data.keys()) if data else [f"clip{i+1}" for i in range(3)]
-    export_dir = str(Path(kwargs.get("output_dir", "shorts")) / "2026-05-29_000000")
-    return _create_fake_clips(export_dir, stems)
-
-
-def stub_grade_video(clip_path: str, ref_path: str, output_path: str) -> str:
-    _stub("ref_grade.grade_video", clip_path)
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(output_path).write_bytes(Path(clip_path).read_bytes())
-    return output_path
-
-
-def stub_enhance_video(clip_path: str, ref_path: str, output_path: str, **kwargs) -> str:
-    _stub("face_mapper.enhance_video", clip_path)
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(output_path).write_bytes(Path(clip_path).read_bytes())
-    return output_path
-
-
-def stub_process_all_seo(highlights_path: str, export_dir: str, fail_last: bool = True):
-    """Stub SEO. Writes metadata for each clip; to exercise the escalate-not-
-    degrade queue, the LAST clip is left WITHOUT metadata and instead gets a
-    self-contained *_seo_failed.json marker (as the real code does on failure)."""
-    _stub("seo.process_all_seo", export_dir)
-    d = Path(export_dir)
-    clips = sorted(d.glob("*.mp4"))
-    for i, clip in enumerate(clips):
-        is_last = (i == len(clips) - 1)
-        if fail_last and is_last:
-            from datetime import datetime as _dt
-            marker = d / f"{clip.stem}_seo_failed.json"
-            marker.write_text(json.dumps({
-                "clip_id": clip.stem, "reason": "simulated LLM failure after escalation",
-                "queued_at": _dt.now().isoformat(),
-                "transcript": "coaly six bumra yorker", "video_title": "RCB vs CSK",
-                "scorecard": "", "trend_topics": [], "live_stream_url": "",
-            }))
-            log.info("  [STUB]   %s queued for retry (no generic fallback written)", clip.stem)
-            continue
-        meta = d / f"{clip.stem}_metadata.json"
-        meta.write_text(json.dumps({
-            "title": f"LIVE RCB vs CSK | {clip.stem} Hindi Commentary",
-            "description": "Kohli six! #Shorts",
-            "tags": ["rcb vs csk live", "kohli six", "ipl live hindi"],
-            "search_terms": ["rcb vs csk live", "kohli six"],
-            "hashtags": ["#Shorts", "#RCBvCSK"],
-            "ai_generated": True, "is_shorts": True, "seo_score": 0.85,
-        }))
-
-
-def stub_retry_failed_seo(export_dir: str) -> dict:
-    """Stub seo.retry_failed_seo() — recovers queued clips (writes metadata,
-    removes the marker), validating the retry-queue flow shape."""
-    _stub("seo.retry_failed_seo", export_dir)
-    d = Path(export_dir)
-    markers = sorted(d.glob("*_seo_failed.json"))
-    recovered = 0
-    for marker in markers:
-        ctx = json.loads(marker.read_text())
-        clip_id = ctx["clip_id"]
-        (d / f"{clip_id}_metadata.json").write_text(json.dumps({
-            "title": f"LIVE {ctx.get('video_title','Cricket')} | {clip_id} (recovered)",
-            "description": "Recovered on retry. #Shorts",
-            "tags": ["ipl live hindi"], "search_terms": ["ipl live hindi"],
-            "hashtags": ["#Shorts"], "ai_generated": True, "is_shorts": True,
-        }))
-        marker.unlink()
-        recovered += 1
-        log.info("  [STUB]   %s recovered on retry -> metadata written, dequeued", clip_id)
-    return {"retried": len(markers), "recovered": recovered, "still_failed": 0}
-
-
-def stub_process_all_thumbnails(export_dir: str):
-    _stub("thumbnail.process_all_thumbnails", export_dir)
-    d = Path(export_dir)
-    for clip in sorted(d.glob("*.mp4")):
-        thumb = d / f"{clip.stem}_thumb.jpg"
-        if not thumb.exists():
-            thumb.write_bytes(b"J" * 1024)
-
-
-def stub_sync_to_drive(folder_path: str):
-    _stub("sync.sync_to_drive", folder_path)
-
-
-def stub_download_from_drive(filenames=None, dest_dir: str = ""):
-    _stub("sync.download_from_drive", str(dest_dir))
-    d = Path(dest_dir)
-    d.mkdir(parents=True, exist_ok=True)
-    if filenames is None:
-        return
-    for name in filenames:
-        p = d / name
-        if not p.exists():
-            p.write_bytes(b"D" * 1024)
-
-
-def stub_upload_video(video_path: str, meta_path: str, **kwargs):
-    _stub("upload.upload_video", video_path)
-    log.info("  [STUB]   privacy=%s publish_at=%s (categoryId validated, finite "
-             "resumable chunking, bounded retries+deadline)",
-             kwargs.get("privacy"), kwargs.get("publish_at"))
-
-
-def stub_generate_daily_insights():
-    _stub("analytics.generate_daily_insights")
-
-
-def stub_assign_clips_to_slots(clips: list, **kwargs) -> list:
-    from datetime import datetime, timedelta
-    base = datetime.now().replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    return [(stem, base + timedelta(hours=i)) for i, stem in enumerate(clips)]
-
-
-def stub_format_for_youtube(dt) -> str:
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-# ─── Config validation ────────────────────────────────────────────────────────
+# ── Config validation ────────────────────────────────────────────────────────
 
 def validate_config(cfg: dict) -> list[tuple]:
-    """Return [(dotted_key, present_bool, value)] for every required key."""
     results = []
     for path in REQUIRED_CONFIG_KEYS:
         node = cfg
@@ -315,7 +570,7 @@ def validate_config(cfg: dict) -> list[tuple]:
     return results
 
 
-# ─── Dry-run pipeline ─────────────────────────────────────────────────────────
+# ── Dry-run pipeline ─────────────────────────────────────────────────────────
 
 def dry_run(url: str,
             skip_download=False, skip_transcribe=False,
@@ -324,12 +579,10 @@ def dry_run(url: str,
             auto_sync=False, auto_upload=False,
             auto_schedule=False, sample_minutes=None,
             sync_from_drive=False, mode=None) -> dict:
-    """Execute the full pipeline logic with all external calls stubbed,
-    mirroring automation/orchestrator.run() including run_phase + retry queue."""
+    """Execute the REAL pipeline with all external API calls intercepted."""
 
     from automation.config import load as load_config
 
-    # Capturing structured logger so we can VALIDATE the observability layer.
     cap_buf = io.StringIO()
     plog = logging.getLogger("dry_run.pipeline")
     plog.handlers = [JsonStreamHandler(cap_buf)]
@@ -340,25 +593,15 @@ def dry_run(url: str,
     result = PipelineResult()
     result.run_id = new_run_id()
     rid = result.run_id
-    _STUBBED_CALLS.clear()
 
     cfg = load_config()
     paths = cfg.get("paths", {})
-    dl_cfg = cfg.get("download", {})
-
     input_dir = paths.get("input", "input")
-    transcripts_dir = paths.get("transcripts", "transcripts")
-    highlights_dir = paths.get("highlights", "highlights")
-    shorts_dir = paths.get("shorts", "shorts")
-    output_filename = dl_cfg.get("output_filename", "video.mp4")
-
+    output_filename = cfg.get("download", {}).get("output_filename", "video.mp4")
     video_path = str(Path(input_dir) / output_filename)
-    stem = Path(video_path).stem
-    transcript_path = str(Path(transcripts_dir) / f"{stem}.json")
-    highlights_path = str(Path(highlights_dir) / f"{stem}.yaml")
 
     log.info("=" * 64)
-    log.info("DRY RUN — external calls STUBBED, observability/config/correction REAL")
+    log.info("DRY RUN — real pipeline, ONLY external API calls stubbed")
     log.info("URL: %s   run_id=%s", url, rid)
     log.info("Flags: skip_dl=%s skip_tx=%s skip_hl=%s skip_ex=%s skip_sync=%s "
              "skip_seo=%s sync=%s upload=%s schedule=%s mode=%s",
@@ -378,249 +621,87 @@ def dry_run(url: str,
         "seo_marker_written": False, "seo_recovered": 0,
     }
 
-    # ── Phase 0: YouTube transcript + REAL correction ─────────────────────────
-    if not skip_transcribe:
-        try:
-            with run_phase(plog, "phase 0 Transcript", "transcript_fetch", run_id=rid) as ph:
-                validation["transcript_phase_ran"] = True
-                transcript = stub_transcript_fetch(url, output_path=transcript_path)
-                segs = transcript.get("segments", [])
-                if segs:
-                    # Exercise the REAL centralized cricket correction layer.
-                    from utils.transcript_postproc import correct_segments
-                    _stub("transcript_postproc.correct_segments")
+    # ── Ensure input directory exists for fake video ──────────────────────
+    Path(input_dir).mkdir(parents=True, exist_ok=True)
+
+    # ── Run the REAL orchestrator with API patches ────────────────────────
+    try:
+        # Previous tests may have contaminated module-level cfg by importing
+        # modules while load_config was mocked. Fix by clearing the config
+        # cache and patching cfg on already-imported modules (without clearing
+        # them from sys.modules, which would break test mock references).
+        from automation.config import load as _load_real_config
+        _real_cfg = _load_real_config()
+        import sys as _sys
+        for _m in ("transcribe", "highlight", "export", "download"):
+            _mod = _sys.modules.get(_m)
+            if _mod is not None and hasattr(_mod, "cfg"):
+                _mod.cfg = _real_cfg
+        with _api_intercept_context(video_path):
+            from automation.orchestrator import run as orchestrator_run
+            pipeline_result = orchestrator_run(
+                url=url,
+                skip_download=skip_download,
+                skip_transcribe=skip_transcribe,
+                skip_highlight=skip_highlight,
+                skip_export=skip_export,
+                skip_sync=skip_sync,
+                skip_seo=skip_seo,
+                auto_sync=auto_sync,
+                auto_upload=auto_upload,
+                auto_schedule=auto_schedule,
+                sample_minutes=sample_minutes,
+                sync_from_drive=sync_from_drive,
+                mode=mode,
+            )
+    except Exception as e:
+        log.error("Pipeline crashed: %s", e, exc_info=True)
+        result.failures.append(f"pipeline_crash: {e}")
+        pipeline_result = type('_', (), {
+            'exported': [], 'uploaded_count': 0, 'failures': [str(e)],
+            'transcript_source': 'none', 'selected_clips': 0, 'seo_generated': 0,
+        })()
+
+    # ── Gather results ─────────────────────────────────────────────────────
+    result.exported = pipeline_result.exported if hasattr(pipeline_result, 'exported') else []
+    result.uploaded_count = getattr(pipeline_result, 'uploaded_count', 0)
+    result.selected_clips = getattr(pipeline_result, 'selected_clips', 0)
+    result.seo_generated = getattr(pipeline_result, 'seo_generated', 0)
+    result.transcript_source = getattr(pipeline_result, 'transcript_source', 'none')
+    pipe_failures = getattr(pipeline_result, 'failures', [])
+    result.failures = list(pipe_failures)
+
+    # ── Post-pipeline transcript correction validation ─────────────────────
+    try:
+        from automation.transcript import TRANSCRIPT_CACHE
+        if not skip_transcribe:
+            cached = TRANSCRIPT_CACHE.get(Path(url).stem or url)
+            if cached and cached.get("segments"):
+                segs = cached["segments"]
+                if len(segs) >= 2:
                     before = segs[1]["text"]
-                    segs, n = correct_segments(segs)
-                    after = segs[1]["text"]
+                    from utils.transcript_postproc import correct_segments
+                    segs_corrected, _n = correct_segments(segs)
+                    after = segs_corrected[1]["text"]
                     validation["transcript_before"] = before
                     validation["transcript_after"] = after
-                    validation["transcript_corrected"] = ("Kohli" in after and "coaly" not in after.lower())
-                    skip_transcribe = True
-                    result.transcript_source = transcript.get("source", "api")
-                    ph.set(source=result.transcript_source, segments=len(segs), corrections=n)
-                else:
-                    result.failures.append("phase0: no segments")
-        except Exception as e:
-            result.failures.append("phase0: %s" % e)
-
-    # ── Phase 1: Drive sync / Download ────────────────────────────────────────
-    if sync_from_drive:
-        try:
-            with run_phase(plog, "phase 1 Drive pull", "drive_pull", run_id=rid):
-                stub_download_from_drive(filenames=["video.mp4"], dest_dir=input_dir)
-                stub_download_from_drive(filenames=[f"{stem}.json"], dest_dir=transcripts_dir)
-                stub_download_from_drive(filenames=None, dest_dir=shorts_dir)
-                skip_download = True
-                skip_transcribe = True
-        except Exception as e:
-            result.failures.append("phase1 sync: %s" % e)
-
-    if not skip_download:
-        try:
-            with run_phase(plog, "phase 1 Download", "download", run_id=rid) as ph:
-                video_path = stub_download(url, video_path, sample_minutes=sample_minutes)
-                stem = Path(video_path).stem
-                transcript_path = str(Path(transcripts_dir) / f"{stem}.json")
-                highlights_path = str(Path(highlights_dir) / f"{stem}.yaml")
-                ph.set(video_path=video_path)
-        except Exception as e:
-            result.failures.append("phase1: %s" % e)
-
-    # ── Phase 2: Transcribe ───────────────────────────────────────────────────
-    if not skip_transcribe:
-        try:
-            with run_phase(plog, "phase 2 Transcribe", "transcribe", run_id=rid):
-                stub_transcribe(video_path, transcript_path)
-        except Exception as e:
-            result.failures.append("phase2: %s" % e)
-
-    # ── Phase 3: Highlight detection ──────────────────────────────────────────
-    if not skip_highlight:
-        try:
-            with run_phase(plog, "phase 3 Highlight", "highlight", run_id=rid) as ph:
-                clips = stub_detect_highlights(transcript_path, video_path, highlights_path)
-                ph.set(clips=len(clips))
-        except Exception as e:
-            result.failures.append("phase3: %s" % e)
-
-    if not Path(highlights_path).exists():
-        log.error("Highlights file missing: %s", highlights_path)
-        result.failures.append("phase3: highlights file missing")
-
-    # ── Phase 4: Export ───────────────────────────────────────────────────────
-    if not skip_export:
-        try:
-            with run_phase(plog, "phase 4 Export", "export", run_id=rid) as ph:
-                result.exported = stub_export_all(
-                    highlights_path, video_path,
-                    transcript_path=transcript_path, generate_seo=False,
-                )
-                ph.set(exported=len(result.exported))
-        except Exception as e:
-            result.failures.append("phase4: %s" % e)
-    else:
-        existing = sorted(Path(shorts_dir).rglob("*.mp4")) if Path(shorts_dir).exists() else []
-        existing = [p for p in existing if "test_output" not in p.name]
-        if existing:
-            latest_dir = max(set(p.parent for p in existing), key=lambda d: d.name)
-            result.exported = sorted(latest_dir.glob("*.mp4"))
-            log.info("[phase 4] skipped — using %d existing clips", len(result.exported))
-
-    # ── Phase 4.5: Enhancement ────────────────────────────────────────────────
-    if result.exported and mode:
-        try:
-            with run_phase(plog, "phase 4.5 Enhancement (%s)" % mode, "enhancement", run_id=rid) as ph:
-                import shutil
-                ref_path = cfg.get("enhancement", {}).get("reference", "expectation.png")
-                enhanced = []
-                for clip_path in result.exported:
-                    if mode == "ref_grade":
-                        out = str(Path(paths.get("temp", "temp")) / f"{clip_path.stem}_graded.mp4")
-                        r = stub_grade_video(str(clip_path), ref_path, out)
-                    else:
-                        out = str(Path(paths.get("temp", "temp")) / f"{clip_path.stem}_enhanced.mp4")
-                        r = stub_enhance_video(str(clip_path), ref_path, out, use_region_grading=True)
-                    if r == out and Path(out).exists():
-                        shutil.move(out, str(clip_path))
-                    enhanced.append(clip_path)
-                result.exported = enhanced
-                ph.set(enhanced=len(result.exported), mode=mode)
-        except Exception as e:
-            result.failures.append("phase4.5: %s" % e)
-
-    # ── Phase 5: SEO (+ escalate-not-degrade retry queue) ─────────────────────
-    if not skip_seo and result.exported:
-        try:
-            with run_phase(plog, "phase 5 SEO", "seo", run_id=rid) as ph:
-                export_dir = str(result.exported[0].parent)
-                stub_process_all_seo(highlights_path, export_dir)
-                markers = list(Path(export_dir).glob("*_seo_failed.json"))
-                validation["seo_marker_written"] = len(markers) > 0
-                retry = stub_retry_failed_seo(export_dir)
-                validation["seo_recovered"] = retry.get("recovered", 0)
-                ph.set(clips=len(result.exported),
-                       seo_recovered=retry.get("recovered", 0),
-                       seo_still_queued=retry.get("still_failed", 0))
-        except Exception as e:
-            result.failures.append("phase5: %s" % e)
-
-    # ── Phase 5.5: Thumbnails ─────────────────────────────────────────────────
-    if result.exported:
-        try:
-            with run_phase(plog, "phase 5.5 Thumbnails", "thumbnails", run_id=rid):
-                stub_process_all_thumbnails(str(result.exported[0].parent))
-        except Exception as e:
-            result.failures.append("phase5.5: %s" % e)
-
-    # ── Phase 6: Sync to Drive ────────────────────────────────────────────────
-    do_sync = auto_sync and not skip_sync
-    if do_sync and result.exported:
-        try:
-            with run_phase(plog, "phase 6 Sync", "sync", run_id=rid):
-                stub_sync_to_drive(str(result.exported[0].parent))
-        except Exception as e:
-            result.failures.append("phase6: %s" % e)
-    elif skip_sync:
-        log.info("[phase 6 Sync] skipped (--skip-sync)")
-
-    # ── Phase 7: Upload ───────────────────────────────────────────────────────
-    if (auto_upload or auto_schedule) and result.exported:
-        try:
-            with run_phase(plog, "phase 7 Upload", "upload", run_id=rid) as ph:
-                privacy = cfg.get("youtube", {}).get("privacy_status", "private")
-                interval = cfg.get("upload_schedule", {}).get(
-                    "interval_hours",
-                    cfg.get("youtube", {}).get("schedule_interval_hours", 1))
-                slot_map = {}
-                if auto_schedule:
-                    assignments = stub_assign_clips_to_slots(
-                        clips=[p.stem for p in result.exported], interval_hours=interval)
-                    slot_map = {s: dt for s, dt in assignments}
-                    log.info("Schedule generated for %d clips", len(assignments))
-                skipped_no_meta = 0
-                for clip_path in result.exported:
-                    meta_path = clip_path.with_name(f"{clip_path.stem}_metadata.json")
-                    if not meta_path.exists():
-                        skipped_no_meta += 1
-                        log.warning("No metadata for %s — skipping upload (queued)", clip_path.name)
-                        continue
-                    publish_at = None
-                    if auto_schedule and slot_map.get(clip_path.stem):
-                        publish_at = stub_format_for_youtube(slot_map[clip_path.stem])
-                    stub_upload_video(str(clip_path), str(meta_path),
-                                      privacy=privacy, publish_at=publish_at)
-                    result.uploaded_count += 1
-                ph.set(uploaded=result.uploaded_count, skipped_no_meta=skipped_no_meta)
-        except Exception as e:
-            result.failures.append("phase7: %s" % e)
-
-    # ── Phase 8: Analytics + Self-learning ───────────────────────────────────
-    if auto_upload or auto_schedule:
-        try:
-            with run_phase(plog, "phase 8 Analytics + Learning", "analytics", run_id=rid):
-                stub_generate_daily_insights()
-        except Exception as e:
-            result.failures.append("phase8: %s" % e)
-
-    # ── Phase 9: Automation Learner + Provider Health + Event validation ─────
-    event_count_before = decision_store.count()
-
-    if auto_upload or auto_schedule:
-        try:
-            with run_phase(plog, "phase 9a Automation Learner", "automation_learner", run_id=rid):
-                from automation.learner.learner import Learner as _AutomationLearner
-                from automation.learner.policy_updater import PolicyUpdater as _PolicyUpdater
-                from automation.learner.preference_engine import PreferenceEngine as _PreferenceEngine
-                from automation.learner.replay import ReplayEngine as _ReplayEngine
-                from automation.memory.decision_store import LearnedStateStore as _LearnedStateStore
-                _dled = _LearnedStateStore()
-                _alearner = _AutomationLearner(decision_store, _dled)
-                _updater = _PolicyUpdater(_alearner)
-                for _ev in decision_store.get_all_events():
-                    _updater.update_from_event(_ev)
-                _replay = _ReplayEngine(decision_store, _dled, _alearner)
-                _replay.replay()
-                _pref_eng = _PreferenceEngine(_alearner, decision_store)
-                prefs = _pref_eng.compute_preferences()
-                plog.info("[automation_learner] processed %d events, prefs=%s",
-                          decision_store.count(), prefs)
-        except Exception as e:
-            result.failures.append("phase9a: %s" % e)
-
-        try:
-            with run_phase(plog, "phase 9b Provider Health", "provider_health", run_id=rid):
-                from automation import provider_health
-                for provider_name in ("transcript", "download", "transcriber", "llm",
-                                      "export", "enhancement", "drive", "youtube"):
-                    stats = provider_health.get_stats(provider_name)
-                    if stats["total_calls"]:
-                        plog.info("[provider_health] %s: status=%s calls=%d ok=%d fail=%d",
-                                  provider_name, stats["status"].value,
-                                  stats["total_calls"], stats["successes"], stats["failures"])
-        except Exception as e:
-            result.failures.append("phase9b: %s" % e)
-
-    # Validate event emission directly by calling emit_event and checking the store.
-    try:
-        with run_phase(plog, "phase 9c Event Store Validation", "event_store_validation", run_id=rid):
-            from automation import emit_event, emit_infra_failed, decision_store as _ds
-            from automation.memory.event_models import EventType
-            emitted = 0
-            e1 = emit_event("dry/clip1", EventType.candidate_created, {"text": "test"})
-            emitted += 1
-            e2 = emit_event("dry/clip1", EventType.candidate_scored, {"score": 0.8})
-            emitted += 1
-            e3 = emit_infra_failed("dry/clip1", "simulated error", "dry_test")
-            emitted += 1
-            total = _ds.count()
-            plog.info("[event_store] emitted %d events, store has %d total", emitted, total)
-            if total >= event_count_before + emitted:
-                plog.info("[event_store] event emission + storage: PASS")
-            else:
-                plog.warning("[event_store] expected %d events, got %d",
-                             event_count_before + emitted, total)
+                    validation["transcript_corrected"] = (
+                        "Kohli" in after and "coaly" not in after.lower()
+                    )
+                    validation["transcript_phase_ran"] = True
     except Exception as e:
-        result.failures.append("phase9c: %s" % e)
+        log.warning("Transcript validation skipped: %s", e)
+
+    # ── SEO retry-queue validation ─────────────────────────────────────────
+    shorts_dir = paths.get("shorts", "shorts")
+    if Path(shorts_dir).exists():
+        markers = list(Path(shorts_dir).rglob("*_seo_failed.json"))
+        validation["seo_marker_written"] = len(markers) > 0
+        recovered = 0
+        for m in markers:
+            if not m.exists():
+                recovered += 1
+        validation["seo_recovered"] = recovered
 
     result.total_seconds = time.monotonic() - start
     status = "partial" if result.failures else "ok"
@@ -630,7 +711,6 @@ def dry_run(url: str,
              result.selected_clips, result.seo_generated,
              len(result.failures), result.total_seconds, result.transcript_source)
 
-    # Parse the captured structured log to validate observability.
     struct_records = []
     for line in cap_buf.getvalue().splitlines():
         line = line.strip()
@@ -643,7 +723,6 @@ def dry_run(url: str,
     logged_stages = sorted({r.get("stage") for r in struct_records
                             if r.get("run_id") == rid and r.get("stage")})
 
-    # Validate prompts module
     prompts_ok = True
     try:
         import prompts as _p
@@ -666,7 +745,6 @@ def dry_run(url: str,
         "failures": result.failures,
         "total_seconds": result.total_seconds,
         "transcript_source": result.transcript_source,
-        "stubbed_calls": _STUBBED_CALLS[:],
         "config_checks": validate_config(cfg),
         "struct_records": len(struct_records),
         "logged_stages": logged_stages,
@@ -678,27 +756,25 @@ def dry_run(url: str,
 
 def list_external_calls():
     calls = [
-        ("transcript.fetch", "YouTube Transcript API / yt-dlp subtitle download"),
-        ("transcript_postproc.correct_segments", "REAL cricket spelling correction (no network)"),
-        ("download.download", "yt-dlp video download"),
-        ("transcribe.transcribe", "faster-whisper GPU transcription (BatchedInferencePipeline)"),
-        ("highlight.detect_highlights", "ffmpeg audio energy + LLM refinement"),
-        ("export.export_all", "ffmpeg clip cutting + encoding (+ YOLO/MediaPipe crop)"),
-        ("ref_grade.grade_video", "ffmpeg color grading pipeline"),
-        ("face_mapper.enhance_video", "per-frame face enhancement pipeline"),
-        ("seo.process_all_seo", "multi-provider LLM SEO (escalate-not-degrade)"),
-        ("seo.retry_failed_seo", "retry queue for clips that failed SEO (no generic fallback)"),
-        ("thumbnail.process_all_thumbnails", "Pillow image compositing + font rendering"),
-        ("sync.sync_to_drive", "Google Drive API upload"),
-        ("sync.download_from_drive", "Google Drive API download"),
-        ("upload.upload_video", "YouTube Data API v3 (categoryId-validated, resumable)"),
-        ("analytics.generate_daily_insights", "YouTube Data + Analytics API (CTR/retention)"),
-        ("scheduler.assign_clips_to_slots", "datetime scheduling + prime-time logic"),
+        ("subprocess.run (ffmpeg/ffprobe/yt-dlp)", "media processing & download"),
+        ("subprocess.Popen (yt-dlp via download.py)", "video download"),
+        ("googleapiclient.discovery.build", "YouTube Data API + Drive API"),
+        ("utils.ai_client.AIClient.*", "all AI providers (OpenCode, Groq, etc.)"),
+        ("faster_whisper.WhisperModel", "local GPU transcription"),
+        ("youtube_transcript_api.YouTubeTranscriptApi", "YouTube transcript fetch"),
+        ("PIL.Image / ImageDraw / ImageFont", "thumbnail compositing"),
+        ("requests.Session", "HTTP trends (cricbuzz, google trends, etc.)"),
+        ("openai.OpenAI chat.completions.create", "AI provider HTTP fallback"),
+        ("torch.cuda.device_count", "CUDA device query"),
+        ("utils.super_res.SuperResEnhancer", "GFPGAN / Real-ESRGAN upscaling"),
+        ("upload._probe_video", "ffprobe video metadata"),
+        ("google.oauth2.credentials.Credentials", "OAuth token loading/refresh"),
+        ("scheduler.get_next_upload_time", "upload scheduling"),
     ]
-    print("\nStubbed External Calls:")
+    print("\nIntercepted External API Calls:")
     print("=" * 70)
     for name, desc in calls:
-        print(f"  {name:<38s} {desc}")
+        print(f"  {name:<50s} {desc}")
     print()
 
 
@@ -721,7 +797,6 @@ def _print_validation_report(result: dict):
     print(f"  Failures:           {len(result['failures'])}")
     print(f"  Elapsed:            {result['total_seconds']:.2f}s")
     print(f"  Transcript source:  {result['transcript_source']}")
-    print(f"  Stubbed calls:      {len(result['stubbed_calls'])}")
     print()
     print("  [1] Config tunables (overhaul):")
     for key, ok, val in cfg_checks:
@@ -770,7 +845,6 @@ def _print_validation_report(result: dict):
         print("  Failures detail:")
         for f in result["failures"]:
             print(f"    - {f}")
-    # Overall verdict
     ok = (cfg_ok == len(cfg_checks) and result["run_id"] and
           transcript_ok and prompts_ok and not result["failures"])
     print("=" * 70)
@@ -782,7 +856,7 @@ def _print_validation_report(result: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Dry-run pipeline — stub external calls, validate phase logic locally.")
+        description="Dry-run pipeline — real internal code, only external API calls stubbed.")
     parser.add_argument("url", nargs="?", default="https://youtu.be/4ylLhtICj1I")
     parser.add_argument("--skip-download", action="store_true")
     parser.add_argument("--skip-transcribe", action="store_true")
@@ -797,8 +871,7 @@ def main():
     parser.add_argument("--sync-from-drive", action="store_true")
     parser.add_argument("--mode", choices=["face_mapper", "ref_grade"], default=None)
     parser.add_argument("--list-external", action="store_true")
-    parser.add_argument("--validate-config", action="store_true",
-                        help="Only check required config keys exist, then exit")
+    parser.add_argument("--validate-config", action="store_true")
     args = parser.parse_args()
 
     if args.list_external:

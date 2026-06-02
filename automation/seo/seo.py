@@ -639,6 +639,7 @@ def generate_seo_for_exported_clip(
     live_stream_url: str = "",
     teams: Optional[List[str]] = None,
     is_shorts: bool = True,
+    **kwargs,
 ) -> Dict:
     """Generate SEO for an already-exported clip and write metadata to disk.
 

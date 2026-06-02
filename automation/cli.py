@@ -3,26 +3,36 @@
 import argparse
 import sys
 
-_PIPELINE_ARGS = [
-    "download", "transcribe", "score", "rank",
-    "export", "seo", "upload", "cleanup",
-]
-
 
 def setup_argparse():
     parser = argparse.ArgumentParser(
         description="YouTube clip automation pipeline",
     )
     parser.add_argument("url", nargs="?", default=None, help="YouTube video URL")
-    for arg in _PIPELINE_ARGS:
-        parser.add_argument(
-            f"--{arg}", action="store_true", dest=arg, default=None,
-            help=f"Enable {arg} stage",
-        )
-        parser.add_argument(
-            f"--no-{arg}", action="store_false", dest=arg, default=None,
-            help=f"Disable {arg} stage",
-        )
+    parser.add_argument(
+        "--upload", action="store_true", default=False,
+        help="Enable YouTube upload after export",
+    )
+    parser.add_argument(
+        "--sync", action="store_true", default=False,
+        help="Enable Drive sync after export",
+    )
+    parser.add_argument(
+        "--schedule", action="store_true", default=False,
+        help="Enable scheduled upload with time slots",
+    )
+    parser.add_argument(
+        "--learn", action="store_true", default=False,
+        help="Run self-learning stages only (skip download/export)",
+    )
+    parser.add_argument(
+        "--sample-minutes", type=int, default=None,
+        help="Download only first N minutes of video",
+    )
+    parser.add_argument(
+        "--mode", type=str, default=None,
+        help="Enhancement mode: ref_grade or face_mapper",
+    )
     parser.add_argument(
         "--dry-run", action="store_true", default=False,
         help="Print what would be done without executing",
@@ -42,10 +52,6 @@ def setup_argparse():
     parser.add_argument(
         "--status", action="store_true", default=False,
         help="Print pipeline status",
-    )
-    parser.add_argument(
-        "--config", type=str, default=None,
-        help="Path to configuration file",
     )
     parser.add_argument(
         "--version", action="store_true", default=False,
@@ -75,29 +81,36 @@ def main(args=None):
     if parsed.dry_run:
         print("Dry run: no pipeline execution")
         return 0
-    from automation.memory.decision_store import DecisionStore
-    from automation.orchestrator import Orchestrator
-    store = DecisionStore()
-    orch = Orchestrator(decision_store=store)
     if parsed.override is not None:
+        from automation.memory.decision_store import DecisionStore
+        from automation.orchestrator import Orchestrator
         clip_id = parsed.override_clip_id or "unknown"
+        orch = Orchestrator(decision_store=DecisionStore())
         orch.emit_event(clip_id, "manual_override", {"override": parsed.override})
         print(f"Override {parsed.override} recorded for clip {clip_id}")
         return 0
     if parsed.url is None:
         parser.print_help()
         return 0
-    stages = {}
-    for s in _PIPELINE_ARGS:
-        val = getattr(parsed, s, None)
-        if val is not None:
-            stages[s] = val
-    result = orch.run_pipeline(parsed.url, stages=stages)
-    print(
-        f"Pipeline completed: {len(result['stages_completed'])} stages, "
-        f"{result['events_emitted']} events"
+
+    from automation.orchestrator import run
+    result = run(
+        url=parsed.url,
+        auto_sync=parsed.sync,
+        auto_upload=parsed.upload,
+        auto_schedule=parsed.schedule,
+        sample_minutes=parsed.sample_minutes,
+        mode=parsed.mode,
+        learn_only=parsed.learn,
     )
-    return 0
+    n = len(result.exported)
+    f = len(result.failures)
+    print(
+        f"Pipeline done: {n} clips exported, "
+        f"{result.uploaded_count} uploaded, "
+        f"{f} failure(s) in {result.total_seconds:.1f}s"
+    )
+    return 1 if f else 0
 
 
 if __name__ == "__main__":
