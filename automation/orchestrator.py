@@ -490,8 +490,24 @@ def run(
         try:
             with run_phase(log, "stage 9b Self-Learner",
                            "self_learner", run_id=rid):
-                from self_learner import Learner as SelfLearner
+                from self_learner import (
+                    Learner as SelfLearner,
+                    SEOLearner,
+                    TrendAnalyzer,
+                    TrendPoint,
+                    RecommendationEngine,
+                )
+
+                # Initialize all learners
                 learner = SelfLearner()
+                seo_learner = SEOLearner()
+                trend_analyzer = TrendAnalyzer()
+                rec_engine = RecommendationEngine(
+                    seo_learner=seo_learner,
+                    trend_analyzer=trend_analyzer,
+                )
+
+                # Record pipeline observation
                 learner.observe("pipeline_run", {
                     "duration": result.total_seconds,
                     "exported": len(result.exported),
@@ -501,6 +517,48 @@ def run(
                     "transcript_source": result.transcript_source,
                 })
                 log.info("[self_learner] observed pipeline_run %s", rid)
+
+                # Record trends
+                trend_analyzer.record_metric(TrendPoint(
+                    metric="duration",
+                    value=result.total_seconds,
+                ))
+                trend_analyzer.record_metric(TrendPoint(
+                    metric="exported_count",
+                    value=float(len(result.exported)),
+                ))
+                trend_analyzer.record_metric(TrendPoint(
+                    metric="failures_count",
+                    value=float(len(result.failures)),
+                ))
+                trend_analyzer.record_metric(TrendPoint(
+                    metric="selected_clips",
+                    value=float(result.selected_clips),
+                ))
+
+                # Analyze trends and log insights
+                for trend in trend_analyzer.get_all_trends():
+                    if trend.direction != "stable":
+                        log.info("[self_learner] trend: %s is %s (slope=%.3f, confidence=%.2f)",
+                                 trend.metric, trend.direction, trend.slope, trend.confidence)
+
+                # Detect anomalies
+                for metric in ("duration", "failures_count"):
+                    anomalies = trend_analyzer.detect_anomalies(metric)
+                    if anomalies:
+                        log.warning("[self_learner] anomaly in %s: %d unusual values detected",
+                                    metric, len(anomalies))
+
+                # Generate and log recommendations
+                recommendations = rec_engine.generate_recommendations()
+                for rec in recommendations[:3]:  # Log top 3
+                    log.info("[self_learner] recommendation [%s/%s]: %s -> %s",
+                             rec.category, rec.priority, rec.title, rec.action)
+
+                # Close resources
+                rec_engine.close()
+                trend_analyzer.close()
+                seo_learner.close()
                 learner.close()
         except Exception as e:
             result.failures.append(f"stage9b: {e}")

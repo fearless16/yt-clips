@@ -810,7 +810,7 @@ class TestCoverageEdgeCases:
     def test_init_py_no_side_effects(self):
         """__init__.py does not mutate sys.path."""
         import subprocess
-        code = "import sys; before = list(sys.path); from self_learner import VERSION; assert VERSION == '1.0.0'; assert sys.path == before, 'sys.path was mutated'"
+        code = "import sys; before = list(sys.path); from self_learner import VERSION; assert VERSION == '2.0.0'; assert sys.path == before, 'sys.path was mutated'"
         result = subprocess.run(
             [sys.executable, "-c", code],
             capture_output=True, text=True,
