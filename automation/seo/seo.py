@@ -90,15 +90,17 @@ ENGAGING_CTAS = [
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
 _SYSTEM = (
-    "You are an elite YouTube Shorts SEO expert for Indian cricket. "
-    "Your goal: Maximize CTR (Click-Through Rate) and watch time. "
+    "You are a desi YouTube SEO expert specializing in viral cricket shorts "
+    "for Indian and Pakistani audiences. "
+    "Generate high-CTR titles, engaging descriptions, and optimized tags. "
+    "Use emojis and full-on desi cricket discussion style — no boring English commentary. "
+    "Focus on Indian and Pakistani cricket audience with drawing-room style banter. "
     "CRITICAL: Only use player names, teams, and events that appear in the transcript. "
     "NEVER invent or hallucinate player names or match events. "
     "Return ONLY valid JSON — no markdown, no explanation."
 )
 
-_PROMPT_TMPL = """
-CONTEXT:
+_PROMPT_TMPL = """CONTEXT:
   Match: {video_title}
   Scorecard (with venue, player stats, match situation): {scorecard}
   Live Trending / Search Spikes: {trend_topics}
@@ -111,33 +113,31 @@ TASK: Generate YouTube Shorts SEO for this specific clip.
 
 You MUST return valid JSON (no markdown, no other text):
 {{
-  "title": "<max 80 chars, click-driving Hindi/English hook that describes THIS CLIP>",
-  "description": "<rich description: what happened in THIS CLIP, then context, then CTA. Max 800 chars. No line breaks in description text>",
+  "title": "<max 80 chars, Hinglish hook that describes THIS CLIP>",
+  "description": "<English description of what happened. Max 800 chars. No line breaks>",
   "hashtags": ["<max 5 hashtags>"],
   "search_terms": ["<max 10 search terms for this clip>"]
 }}
 
-TITLE REQUIREMENTS (Hindi + English mix, Hinglish):
-- CRITICAL: Start with the MOST IMPORTANT event of THIS CLIP (e.g., "Kohli ne maara SIX! 😱" or "Bumrah ki deadly YORKER! 🔥")
+TITLE REQUIREMENTS (Hinglish only — Hindi + English mix):
+- CRITICAL: Start with the MOST IMPORTANT event of THIS CLIP
+  (e.g., "Kohli ne maara SIX!" or "Bumrah ki deadly YORKER!")
 - NOT just the match title. Make it specific to the clip's content.
 - Use Hindi/English mix (Hinglish) for Indian audience
 - Include the most dramatic moment of the clip
-- End with relevant emojis (🔥, 😱, 🏏, 💥, 👑, 🤯, 🎯)
+- End with relevant emojis
 - Max 80 characters
-- Examples: "Kohli ka BACK FOOT SIX! Wankhede mein kamaal! 🔥"
-  Examples: "Bumrah ki REVERSE SWING yorker - Dekhte hi the! 😱"
-  Examples: "Match ka sabse exciting OVER - 24 runs! 🏏"
 
-DESCRIPTION REQUIREMENTS (Hindi + English mix, Hinglish):
+DESCRIPTION REQUIREMENTS (Full English):
+- Write in English — casual, engaging, not corporate
 - First 2 lines: What happened in this specific clip
 - Then: Context of the match situation
 - Then: Player stats/achievements if relevant
-- At the end: A CTA (Call to Action) in Hinglish
+- End with a CTA (Call to Action)
 - For Shorts: Short and punchy (max 300 chars)
 - For Regular videos: Full detailed match coverage (max 800 chars)
-- Also ADD: "MY SOCIAL 24/7 LIVE cricket coverage, Full match analysis and Shorts." at the end
 
-SEARCH TERMS: Focus on this clip's content:
+SEARCH TERMS (English):
 - Primary: Player name + action (e.g., "virat kohli six wankhede")
 - Secondary: Match context + clip type
 - Don't use generic terms like "cricket video" or "sports video"
@@ -149,16 +149,22 @@ HASHTAGS:
 - Max 5 hashtags
 """
 
-_SALVAGE_TMPL = """You are a YouTube SEO expert. Generate SEO for this cricket clip.
+_SALVAGE_TMPL = """Generate YouTube Shorts SEO for this cricket clip.
 
 Match: {video_title}
 Clip: {transcript}
 
+Requirements:
+- Title: Hinglish (Hindi+English mix), max 80 chars, with emojis
+- Description: English, casual tone, max 500 chars
+- Hashtags: max 5, include #Shorts
+- Search terms: 3-5 English terms
+
 Return valid JSON ONLY:
 {{
-  "title": "clip-specific title max 80 chars",
-  "description": "clip-specific description max 500 chars",
-  "hashtags": ["#Shorts", "#Cricket", "#IPL2026"],
+  "title": "Hinglish clip-specific title max 80 chars with emojis",
+  "description": "English description of the clip, casual and engaging, max 500 chars",
+  "hashtags": ["#Shorts", "#Cricket"],
   "search_terms": ["term1", "term2", "term3"]
 }}
 """
@@ -533,7 +539,9 @@ def generate_clip_seo(
 
     # Call AI with parallel fastest-first
     result = _attempt_seo_generation(clip_id, user_prompt, transcript, video_title,
-                                     is_shorts)
+                                     is_shorts,
+                                     provider_override=provider_override,
+                                     model_override=model_override)
 
     return result
 
@@ -544,6 +552,8 @@ def _attempt_seo_generation(
     transcript: str,
     video_title: str,
     is_shorts: bool,
+    provider_override: Optional[str] = None,
+    model_override: Optional[str] = None,
 ) -> Dict:
     """Attempt AI SEO with two-tier escalation.
 
@@ -552,12 +562,15 @@ def _attempt_seo_generation(
 
     Never degrades to keyword fallback — raises on total failure.
     """
-    ai_result = _generate_ai_seo(clip_id, user_prompt, transcript, is_shorts)
+    ai_result = _generate_ai_seo(clip_id, user_prompt, transcript, is_shorts,
+                                  provider_override=provider_override,
+                                  model_override=model_override)
     if ai_result:
         ai_result["ai_generated"] = True
         return ai_result
 
-    esc_result = _escalation_seo(clip_id, user_prompt, transcript, video_title, is_shorts)
+    esc_result = _escalation_seo(clip_id, user_prompt, transcript, video_title, is_shorts,
+                                  model_override=model_override)
     if esc_result:
         esc_result["ai_generated"] = True
         return esc_result
@@ -568,7 +581,9 @@ def _attempt_seo_generation(
 
 
 def _generate_ai_seo(clip_id: str, user_prompt: str,
-                     transcript: str, is_shorts: bool) -> Optional[Dict]:
+                     transcript: str, is_shorts: bool,
+                     provider_override: Optional[str] = None,
+                     model_override: Optional[str] = None) -> Optional[Dict]:
     """Parallel fastest-first AI generation.
 
     Fires available models concurrently, returns first valid JSON.
@@ -577,6 +592,8 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
         response = ai.generate_fastest_first(
             prompt=user_prompt,
             system_instruction=_SYSTEM,
+            prefer_provider=provider_override,
+            prefer_model=model_override,
         )
         if not response or not response.strip():
             log.warning("[%s] AI returned empty response", clip_id)
@@ -600,7 +617,8 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
 
 def _escalation_seo(clip_id: str, user_prompt: str,
                     transcript: str, video_title: str,
-                    is_shorts: bool) -> Optional[Dict]:
+                    is_shorts: bool,
+                    model_override: Optional[str] = None) -> Optional[Dict]:
     """Escalation SEO: stricter prompt with more context.
 
     Called when Tier 1 fails. Uses a different model/provider if available.
@@ -613,7 +631,8 @@ def _escalation_seo(clip_id: str, user_prompt: str,
     try:
         response = ai.generate_text(
             prompt=salvage_prompt,
-            system_instruction="You are a YouTube SEO expert. Return ONLY valid JSON.",
+            system_instruction=_SYSTEM,
+            prefer_model=model_override,
         )
         if not response:
             return None
@@ -639,6 +658,8 @@ def generate_seo_for_exported_clip(
     live_stream_url: str = "",
     teams: Optional[List[str]] = None,
     is_shorts: bool = True,
+    provider_override: Optional[str] = None,
+    model_override: Optional[str] = None,
     **kwargs,
 ) -> Dict:
     """Generate SEO for an already-exported clip and write metadata to disk.
@@ -659,6 +680,8 @@ def generate_seo_for_exported_clip(
             live_stream_url=live_stream_url,
             teams=teams,
             is_shorts=is_shorts,
+            provider_override=provider_override,
+            model_override=model_override,
         )
         if result.get("ai_generated") is False:
             log.warning("[%s] AI SEO failed — writing failure marker", clip_id)
