@@ -90,15 +90,19 @@ class AIClient:
     _provider_token_buckets = {}
 
     PROVIDER_MODELS = {
-        "opencode": ["mimo-v2.5-pro", "mimo-v2.5", "kimi-k2.5", "kimi-k2.6", "glm-5", "glm-5.1",
+        "opencode": ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2.5-mini", "mimo-v2.5-flash",
+                     "kimi-k2.5", "kimi-k2.6", "glm-5", "glm-5.1",
                      "deepseek-v4-flash", "deepseek-v4-pro", "minimax-m2.7", "qwen3.6-plus", "qwen3.7-max"],
-        "nvidia": ["nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct"],
+        "nvidia": ["nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct",
+                   "xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5"],
     }
 
     # Per-model timeouts (seconds) for non-blocking race.
     # qwen3.7-max is slow (~20-120s); others return in 1-10s.
     MODEL_TIMEOUTS = {
         "qwen3.7-max": 180.0,
+        "mimo-v2.5-mini": 30.0,
+        "mimo-v2.5-flash": 30.0,
     }
 
     def __init__(self):

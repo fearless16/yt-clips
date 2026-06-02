@@ -119,11 +119,13 @@ You MUST return valid JSON (no markdown, no other text):
   "search_terms": ["<max 10 search terms for this clip>"]
 }}
 
-TITLE REQUIREMENTS (Hinglish only — Hindi + English mix):
+TITLE REQUIREMENTS (Hinglish only — Hindi written in English/Roman letters, NOT Devanagari script):
 - CRITICAL: Start with the MOST IMPORTANT event of THIS CLIP
   (e.g., "Kohli ne maara SIX!" or "Bumrah ki deadly YORKER!")
 - NOT just the match title. Make it specific to the clip's content.
-- Use Hindi/English mix (Hinglish) for Indian audience
+- Hinglish = Hindi words written in ENGLISH LETTERS (Roman alphabet). NEVER use Devanagari/Hindi script (अ, ब, क etc.)
+  - CORRECT: "Kohli ne maara six!" / "Dhoni ka last over thriller"
+  - WRONG: "कोहली ने मारा सिक्स!" / "धोनी का लास्ट ओवर"
 - Include the most dramatic moment of the clip
 - End with relevant emojis
 - Max 80 characters
@@ -155,14 +157,14 @@ Match: {video_title}
 Clip: {transcript}
 
 Requirements:
-- Title: Hinglish (Hindi+English mix), max 80 chars, with emojis
+- Title: Hinglish (Hindi words in English/Roman letters, NO Devanagari script), max 80 chars, with emojis
 - Description: English, casual tone, max 500 chars
 - Hashtags: max 5, include #Shorts
 - Search terms: 3-5 English terms
 
 Return valid JSON ONLY:
 {{
-  "title": "Hinglish clip-specific title max 80 chars with emojis",
+  "title": "Hinglish (English letters only, NO Devanagari) clip-specific title max 80 chars with emojis",
   "description": "English description of the clip, casual and engaging, max 500 chars",
   "hashtags": ["#Shorts", "#Cricket"],
   "search_terms": ["term1", "term2", "term3"]

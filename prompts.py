@@ -171,6 +171,11 @@ Constraints:
 - Keep description concise and natural.
 - Match the clip's actual content.
 - Avoid generating SEO for rejected clips.
+- CRITICAL: If the audience is Indian, use Hinglish for the title.
+  Hinglish = Hindi words written in ENGLISH/Roman letters. NEVER use Devanagari/Hindi script.
+  - CORRECT: "Kohli ne maara SIX!" / "Dhoni ka last over thriller!"
+  - WRONG: "कोहली ने मारा सिक्स!" / "धोनी का लास्ट ओवर"
+- Description should be in English.
 
 Return only JSON."""
 
