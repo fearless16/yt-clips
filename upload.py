@@ -333,110 +333,90 @@ def upload_video(
         body["status"]["publishAt"] = publish_at
 
     thumb_path = Path(video_path).with_name(f"{Path(video_path).stem}_thumb.jpg")
-    
-    # ── Single-token auth ─────────────────────────────────────────────────────────
-    youtube = get_authenticated_service()
-    if not youtube:
-        log.error("Could not get YouTube service (check yt_channel_token.json)")
-        return None
 
     log.info(f"🚀 Uploading to YouTube: {title[:80]}...")
 
-        # Finite chunk size enables real progress + resumable recovery (a single
-        # -1 chunk uploads the whole file in one shot with no resume on failure).
-        chunk_mb = int(cfg.get("youtube", {}).get("upload_chunk_size_mb", 8))
-        media_body = MediaFileUpload(video_path, chunksize=chunk_mb * 1024 * 1024, resumable=True)
-        insert_request = youtube.videos().insert(
-            part=",".join(body.keys()),
-            body=body,
-            media_body=media_body,
-            notifySubscribers=cfg.get("youtube", {}).get("notify_subscribers", True),
-        )
+    chunk_mb = int(cfg.get("youtube", {}).get("upload_chunk_size_mb", 8))
+    media_body = MediaFileUpload(video_path, chunksize=chunk_mb * 1024 * 1024, resumable=True)
+    insert_request = youtube.videos().insert(
+        part=",".join(body.keys()),
+        body=body,
+        media_body=media_body,
+        notifySubscribers=cfg.get("youtube", {}).get("notify_subscribers", True),
+    )
 
-        response = None
-        last_progress = -10
-        last_progress_time = time.monotonic()
-        retry_sleep = 5
-        max_sleep = 60
-        # Bounded retries: cap attempts AND wall-clock so a flapping connection
-        # can no longer hang the pipeline indefinitely.
-        max_retries = int(cfg.get("youtube", {}).get("upload_max_retries", 6))
-        deadline = time.monotonic() + float(cfg.get("youtube", {}).get("upload_deadline_seconds", 1800))
-        transient_retries = 0
+    response = None
+    last_progress = -10
+    last_progress_time = time.monotonic()
+    retry_sleep = 5
+    max_sleep = 60
+    max_retries = int(cfg.get("youtube", {}).get("upload_max_retries", 6))
+    deadline = time.monotonic() + float(cfg.get("youtube", {}).get("upload_deadline_seconds", 1800))
+    transient_retries = 0
+
+    try:
+        while response is None:
+            try:
+                status, response = insert_request.next_chunk()
+                if status:
+                    retry_sleep = 5
+                    transient_retries = 0
+                    progress = int(status.progress() * 100)
+                    now = time.monotonic()
+                    if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
+                        log.info(f"   Upload Progress: {progress}%")
+                        last_progress = progress
+                        last_progress_time = now
+            except Exception as chunk_err:
+                import http.client
+                from googleapiclient.errors import HttpError
+                is_transient = (isinstance(chunk_err, HttpError) and chunk_err.resp.status in [500, 502, 503, 504]) or \
+                    isinstance(chunk_err, (http.client.IncompleteRead, http.client.CannotSendRequest, ConnectionError))
+                if is_transient:
+                    transient_retries += 1
+                    if transient_retries > max_retries or time.monotonic() > deadline:
+                        log.error("Giving up on %s after %d transient retries / deadline",
+                                  video_path, transient_retries)
+                        raise
+                    log.warning("Transient error (%d/%d): %s — retrying in %ds...",
+                                transient_retries, max_retries, chunk_err, retry_sleep)
+                    time.sleep(retry_sleep)
+                    retry_sleep = min(retry_sleep * 2, max_sleep)
+                    continue
+                else:
+                    raise chunk_err
+
+        video_id = response["id"]
+        log.info(f"✅ Upload successful! Video ID: {video_id}")
 
         try:
-            while response is None:
-                try:
-                    status, response = insert_request.next_chunk()
-                    if status:
-                        retry_sleep = 5  # Reset backoff on progress
-                        transient_retries = 0  # progress => reset retry budget
-                        progress = int(status.progress() * 100)
-                        now = time.monotonic()
-                        if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
-                            log.info(f"   Upload Progress: {progress}%")
-                            last_progress = progress
-                            last_progress_time = now
-                except Exception as e:
-                    import http.client
-                    from googleapiclient.errors import HttpError
-                    is_transient = (isinstance(e, HttpError) and e.resp.status in [500, 502, 503, 504]) or \
-                        isinstance(e, (http.client.IncompleteRead, http.client.CannotSendRequest, ConnectionError))
-                    if is_transient:
-                        transient_retries += 1
-                        if transient_retries > max_retries or time.monotonic() > deadline:
-                            log.error("Giving up on %s after %d transient retries / deadline",
-                                      video_path, transient_retries)
-                            raise
-                        log.warning("Transient error (%d/%d): %s — retrying in %ds...",
-                                    transient_retries, max_retries, e, retry_sleep)
-                        time.sleep(retry_sleep)
-                        retry_sleep = min(retry_sleep * 2, max_sleep)
-                        continue
-                    else:
-                        raise e
-
-            video_id = response["id"]
-            log.info(f"✅ Upload successful! Video ID: {video_id}")
-
-            # Save the YouTube video ID to the metadata file
-            try:
-                if Path(metadata_path).exists():
-                    with open(metadata_path, "r") as f:
-                        meta_data = json.load(f)
-                    meta_data["youtube_video_id"] = video_id
-                    with open(metadata_path, "w") as f:
-                        json.dump(meta_data, f, indent=2)
-                    log.info(f"📝 Saved youtube_video_id: {video_id} to {Path(metadata_path).name}")
-            except Exception as e:
-                log.warning(f"Failed to write video_id to metadata: {e}")
-
-            # ── Upload Thumbnail ──────────────────────────────────────────────────────
-            if thumb_path.exists():
-                try:
-                    log.info(f"🖼️ Uploading thumbnail: {thumb_path.name}...")
-                    youtube.thumbnails().set(
-                        videoId=video_id,
-                        media_body=MediaFileUpload(str(thumb_path))
-                    ).execute()
-                    log.info("✅ Thumbnail uploaded!")
-                except Exception as e:
-                    log.warning(f"Failed to upload thumbnail: {e}")
-                    
-            log.info(f"🔗 URL: https://youtu.be/{video_id}")
-            return video_id
-            
+            if Path(metadata_path).exists():
+                with open(metadata_path, "r") as f:
+                    meta_data = json.load(f)
+                meta_data["youtube_video_id"] = video_id
+                with open(metadata_path, "w") as f:
+                    json.dump(meta_data, f, indent=2)
+                log.info(f"📝 Saved youtube_video_id: {video_id} to {Path(metadata_path).name}")
         except Exception as e:
-            err_str = str(e)
-            if "quotaExceeded" in err_str or "rateLimitExceeded" in err_str or "429" in err_str:
-                log.warning("⚠️ Quota exceeded on token %d. Seamlessly rotating to next token...", token_idx)
-                continue  # Try the next token in the loop
-            else:
-                log.error("❌ Error uploading %s: %s", video_path, e)
-                return None
-                
-    log.error("[EXIT] All available tokens exhausted their quotas.")
-    return None
+            log.warning(f"Failed to write video_id to metadata: {e}")
+
+        if thumb_path.exists():
+            try:
+                log.info(f"🖼️ Uploading thumbnail: {thumb_path.name}...")
+                youtube.thumbnails().set(
+                    videoId=video_id,
+                    media_body=MediaFileUpload(str(thumb_path))
+                ).execute()
+                log.info("✅ Thumbnail uploaded!")
+            except Exception as e:
+                log.warning(f"Failed to upload thumbnail: {e}")
+
+        log.info(f"🔗 URL: https://youtu.be/{video_id}")
+        return video_id
+
+    except Exception as e:
+        log.error("❌ Error uploading %s: %s", video_path, e)
+        return None
 
 
 if __name__ == "__main__":

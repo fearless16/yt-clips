@@ -10,17 +10,18 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.oauth2.credentials import Credentials
 
 SCOPES_MAP = {
-    "yt_channel_token.json": [
-        "https://www.googleapis.com/auth/youtube.upload",
+    "drive_token.json": ["https://www.googleapis.com/auth/drive.file"],
+    "yt_channel_token.json": ["https://www.googleapis.com/auth/youtube.upload"],
+    "yt_analytics_token.json": [
         "https://www.googleapis.com/auth/youtube.readonly",
         "https://www.googleapis.com/auth/yt-analytics.readonly",
     ],
-    "drive_token.json": ["https://www.googleapis.com/auth/drive.file"],
 }
 
 PROMPTS = {
-    "yt_channel_token.json": "Select your YOUTUBE CHANNEL's Google account",
-    "drive_token.json": "Select your PERSONAL Google account (for Drive)",
+    "drive_token.json": "PERSONAL Google account — for Google Drive access",
+    "yt_channel_token.json": "YOUTUBE CHANNEL's Google account — for uploading videos",
+    "yt_analytics_token.json": "YOUTUBE CHANNEL's Google account (same as above) — for analytics",
 }
 
 
