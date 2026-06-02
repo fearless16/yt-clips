@@ -344,12 +344,13 @@ def _consolidate_seo(title: str, description: str, hashtags: List[str],
     }
 
 
-def _enforce_limits(item: Dict, fallback_terms: List[str] = None) -> Dict:
+def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: bool = True) -> Dict:
     """Ensure title length, description length, hashtag count, search term count.
 
     Enforces strict caps: title≤80, description≤800, hashtags≤5, terms≤10.
     """
     out = dict(item)
+    out["is_shorts"] = is_shorts
     out["title"] = (out.get("title") or "")[:80]
     out["description"] = (out.get("description") or "")[:800]
 
@@ -500,6 +501,8 @@ def generate_clip_seo(
     teams: Optional[List[str]] = None,
     is_shorts: bool = True,
     fallback_terms: Optional[List[str]] = None,
+    provider_override: Optional[str] = None,
+    model_override: Optional[str] = None,
 ) -> Dict:
     """Generate SEO metadata for a single clip using fastest-first parallel model racing.
 
@@ -589,7 +592,7 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
                        clip_id, list(parsed.keys()))
             return None
 
-        return _enforce_limits(parsed)
+        return _enforce_limits(parsed, is_shorts=is_shorts)
     except Exception as e:
         log.warning("[%s] AI generation failed: %s", clip_id, e)
         return None
@@ -616,8 +619,9 @@ def _escalation_seo(clip_id: str, user_prompt: str,
             return None
         parsed = _parse_json_response(response)
         if parsed and "title" in parsed:
-            return _enforce_limits(parsed)
+            return _enforce_limits(parsed, is_shorts=is_shorts)
         return None
+
     except Exception as e:
         log.warning("[%s] Escalation SEO failed: %s", clip_id, e)
         return None
@@ -784,6 +788,56 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
 
     log.info("SEO complete: %d clips → %s", len(all_results), output_dir)
     return str(combined_path)
+
+
+def retry_failed_seo(output_dir: str) -> dict:
+    """Retry SEO generation for clips with ``*_seo_failed.json`` markers.
+
+    Scans *output_dir* for failure markers, re-generates SEO via
+    ``generate_seo_for_exported_clip``, and removes the marker on success.
+
+    Returns:
+        Dict with ``recovered`` count and ``total`` markers found.
+    """
+    from pathlib import Path as _Path
+    out = _Path(output_dir)
+    if not out.is_dir():
+        log.warning("retry_failed_seo: output_dir %s not found", output_dir)
+        return {"recovered": 0, "total": 0}
+
+    markers = sorted(out.glob("*_seo_failed.json"))
+    total = len(markers)
+    if not total:
+        return {"recovered": 0, "total": 0}
+
+    recovered = 0
+    for m in markers:
+        try:
+            data = json.loads(m.read_text())
+            clip_id = data.get("clip_id", m.stem.replace("_seo_failed", ""))
+            transcript = data.get("transcript", "")
+            video_title = data.get("video_title", "")
+            is_shorts = data.get("is_shorts", True)
+            result = generate_clip_seo(
+                clip_id=clip_id,
+                transcript=transcript,
+                video_title=video_title,
+                is_shorts=is_shorts,
+            )
+            if result and not result.get("_seo_failed"):
+                meta_path = out / f"{clip_id}_metadata.json"
+                meta_path.write_text(
+                    json.dumps(result, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                m.unlink()
+                recovered += 1
+                log.info("[retry] %s recovered", clip_id)
+            else:
+                log.warning("[retry] %s still failing", clip_id)
+        except Exception as e:
+            log.error("[retry] %s error: %s", m.name, e)
+    return {"recovered": recovered, "total": total}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

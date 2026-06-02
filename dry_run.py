@@ -568,11 +568,20 @@ def dry_run(url: str,
     if auto_upload or auto_schedule:
         try:
             with run_phase(plog, "phase 9a Automation Learner", "automation_learner", run_id=rid):
-                from automation import policy_updater, preference_engine, replay_engine
-                policy_updater.update_from_events(decision_store.get_all_events())
-                if not replay_engine.verify():
-                    replay_engine.replay()
-                prefs = preference_engine.compute_preferences()
+                from automation.learner.learner import Learner as _AutomationLearner
+                from automation.learner.policy_updater import PolicyUpdater as _PolicyUpdater
+                from automation.learner.preference_engine import PreferenceEngine as _PreferenceEngine
+                from automation.learner.replay import ReplayEngine as _ReplayEngine
+                from automation.memory.decision_store import LearnedStateStore as _LearnedStateStore
+                _dled = _LearnedStateStore()
+                _alearner = _AutomationLearner(decision_store, _dled)
+                _updater = _PolicyUpdater(_alearner)
+                for _ev in decision_store.get_all_events():
+                    _updater.update_from_event(_ev)
+                _replay = _ReplayEngine(decision_store, _dled, _alearner)
+                _replay.replay()
+                _pref_eng = _PreferenceEngine(_alearner, decision_store)
+                prefs = _pref_eng.compute_preferences()
                 plog.info("[automation_learner] processed %d events, prefs=%s",
                           decision_store.count(), prefs)
         except Exception as e:

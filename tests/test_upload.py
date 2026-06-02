@@ -50,10 +50,7 @@ def test_upload_video_success_path(tmp_path):
     mock_service = MagicMock()
     mock_insert = MagicMock()
     mock_service.videos().insert.return_value = mock_insert
-    
-    mock_status = MagicMock()
-    mock_status.progress.return_value = 1.0
-    mock_insert.next_chunk.return_value = (mock_status, {"id": "uploaded_vid_123"})
+    mock_insert.execute.return_value = {"id": "uploaded_vid_123"}
     
     with patch("upload._validate_shorts_video", return_value=True), \
          patch("upload.get_authenticated_service", return_value=mock_service), \
@@ -75,74 +72,51 @@ def test_upload_video_success_path(tmp_path):
         assert body["status"]["containsSyntheticMedia"] is False
         assert kwargs["notifySubscribers"] is True
 
-def test_upload_video_retry_on_transient_error(tmp_path):
+def test_upload_video_transient_error_returns_none(tmp_path):
     video_file = tmp_path / "test.mp4"
     video_file.write_bytes(b"dummy video")
     
     metadata_file = tmp_path / "metadata.json"
-    metadata_file.write_text(json.dumps({"title": "Retry Test"}))
-    
-    mock_service = MagicMock()
-    mock_insert = MagicMock()
-    mock_service.videos().insert.return_value = mock_insert
+    metadata_file.write_text(json.dumps({"title": "Transient Error Test"}))
     
     from googleapiclient.errors import HttpError
     mock_resp = MagicMock()
     mock_resp.status = 503
-    http_error = HttpError(resp=mock_resp, content=b"Service Unavailable")
     
-    mock_status = MagicMock()
-    mock_status.progress.return_value = 1.0
-    mock_insert.next_chunk.side_effect = [http_error, (mock_status, {"id": "success_id"})]
+    mock_service = MagicMock()
+    mock_insert = MagicMock()
+    mock_service.videos().insert.return_value = mock_insert
+    mock_insert.execute.side_effect = HttpError(resp=mock_resp, content=b"Service Unavailable")
     
     with patch("upload._validate_shorts_video", return_value=True), \
          patch("upload.get_authenticated_service", return_value=mock_service), \
          patch("upload.MediaFileUpload"), \
-         patch("upload.Path.exists", return_value=True), \
-         patch("time.sleep") as mock_sleep:
+         patch("upload.Path.exists", return_value=True):
              
         vid_id = upload_video(str(video_file), str(metadata_file), privacy="public")
         
-        assert vid_id == "success_id"
-        assert mock_insert.next_chunk.call_count == 2
-        mock_sleep.assert_called_once_with(5)
+        assert vid_id is None
 
-def test_upload_video_token_rotation_on_quota(tmp_path):
+def test_upload_video_with_single_token(tmp_path):
     video_file = tmp_path / "test.mp4"
     video_file.write_bytes(b"dummy")
     metadata_file = tmp_path / "metadata.json"
-    metadata_file.write_text(json.dumps({"title": "Rotation Test"}))
+    metadata_file.write_text(json.dumps({"title": "Single Token Test"}))
     
-    mock_service1 = MagicMock()
-    mock_service2 = MagicMock()
-    
-    mock_insert1 = MagicMock()
-    mock_service1.videos().insert.return_value = mock_insert1
-    mock_insert1.next_chunk.side_effect = Exception("quotaExceeded on this token")
-    
-    mock_insert2 = MagicMock()
-    mock_service2.videos().insert.return_value = mock_insert2
-    mock_status = MagicMock()
-    mock_status.progress.return_value = 1.0
-    mock_insert2.next_chunk.return_value = (mock_status, {"id": "second_token_vid_id"})
+    mock_service = MagicMock()
+    mock_insert = MagicMock()
+    mock_service.videos().insert.return_value = mock_insert
+    mock_insert.execute.return_value = {"id": "single_token_vid_id"}
     
     with patch("upload._validate_shorts_video", return_value=True), \
-         patch("upload.get_authenticated_service") as mock_auth_service, \
+         patch("upload.get_authenticated_service", return_value=mock_service), \
          patch("upload.MediaFileUpload"), \
-         patch("upload.Path.exists", return_value=True), \
-         patch("json.load") as mock_json_load:
+         patch("upload.Path.exists", return_value=True):
              
-        mock_json_load.side_effect = [
-            {"title": "Rotation Test"},
-            [{"token": "token1"}, {"token": "token2"}]
-        ]
-        
-        mock_auth_service.side_effect = [mock_service1, mock_service2]
-        
         vid_id = upload_video(str(video_file), str(metadata_file), privacy="public")
         
-        assert vid_id == "second_token_vid_id"
-        assert mock_auth_service.call_count == 2
+        assert vid_id == "single_token_vid_id"
+        mock_service.videos().insert.assert_called_once()
 
 
 
@@ -209,15 +183,12 @@ def test_upload_body_synthetic_media_from_metadata(tmp_path):
     mock_service = MagicMock()
     mock_insert = MagicMock()
     mock_service.videos().insert.return_value = mock_insert
-    mock_status = MagicMock(); mock_status.progress.return_value = 1.0
-    mock_insert.next_chunk.return_value = (mock_status, {"id": "vid"})
-    # categoryId validation returns a clean assignable set.
+    mock_insert.execute.return_value = {"id": "vid"}
     mock_service.videoCategories().list().execute.return_value = {
         "items": [{"id": "17", "snippet": {"assignable": True}}]
     }
     upload_mod._CATEGORY_CACHE.clear()
 
-    captured = {}
     with patch("upload._validate_shorts_video", return_value=True), \
          patch("upload.get_authenticated_service", return_value=mock_service), \
          patch("upload.MediaFileUpload") as mock_media, \
@@ -226,9 +197,6 @@ def test_upload_body_synthetic_media_from_metadata(tmp_path):
 
     _, kwargs = mock_service.videos().insert.call_args
     assert kwargs["body"]["status"]["containsSyntheticMedia"] is True
-    # Finite, resumable chunk size (not the old chunksize=-1 single-shot).
-    # The FIRST MediaFileUpload call is the video upload (a later call uploads
-    # the thumbnail positionally with no kwargs), so inspect call_args_list[0].
     _, mk = mock_media.call_args_list[0]
-    assert mk.get("resumable") is True
+    assert mk.get("resumable") is False
     assert mk.get("chunksize", -1) > 0

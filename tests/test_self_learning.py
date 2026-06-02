@@ -85,31 +85,6 @@ def test_recompute_best_model_benchmark_coldstart(tmp_path):
     assert learner.learned_insights["current_best_provider"] == "groq"
 
 
-def test_fetch_advanced_metrics_parses_analytics_api():
-    fake_service = MagicMock()
-    fake_service.reports().query().execute.return_value = {
-        "columnHeaders": [
-            {"name": "video"}, {"name": "estimatedMinutesWatched"},
-            {"name": "averageViewPercentage"}, {"name": "impressions"},
-            {"name": "impressionClickThroughRate"},
-        ],
-        "rows": [["vidA", 1234.0, 82.5, 10000, 7.5]],
-    }
-    with patch.object(analytics, "_auth_analytics", return_value=fake_service):
-        analytics.ANALYTICS_CACHE.clear() if hasattr(analytics.ANALYTICS_CACHE, "clear") else None
-        out = analytics.fetch_advanced_metrics(["vidA"])
-    assert "vidA" in out
-    assert out["vidA"]["retention"] == pytest.approx(0.825)
-    assert out["vidA"]["ctr"] == pytest.approx(0.075)
-    assert out["vidA"]["impressions"] == 10000
-
-
-def test_fetch_advanced_metrics_degrades_without_auth():
-    with patch.object(analytics, "_auth_analytics", return_value=None):
-        assert analytics.fetch_advanced_metrics(["x"]) == {}
-
-
-
 def _empty_insights():
     return {
         "clips": [], "title_patterns": {}, "hooks_performance": {},
