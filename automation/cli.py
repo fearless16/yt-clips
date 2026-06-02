@@ -30,6 +30,10 @@ def setup_argparse():
         help="Skip video download (use existing file)",
     )
     parser.add_argument(
+        "--skip-transcribe", action="store_true", default=False,
+        help="Skip transcript fetch (use cached transcript)",
+    )
+    parser.add_argument(
         "--sample-minutes", type=int, default=None,
         help="Download only first N minutes of video",
     )
@@ -101,6 +105,7 @@ def main(args=None):
     result = run(
         url=parsed.url,
         skip_download=parsed.skip_download,
+        skip_transcribe=parsed.skip_transcribe,
         auto_sync=parsed.sync,
         auto_upload=parsed.upload,
         auto_schedule=parsed.schedule,
