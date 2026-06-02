@@ -248,11 +248,12 @@ def run(
                 _emit_infra_failed(stem, str(e), stage="stage3-5")
                 result.failures.append(f"stage3-5: {e}")
 
-        # ── Stage 6: Export ─────────────────────────────────────
+        # ── Stage 6: Export + SEO (merged — SEO runs immediately after export) ──
         if not skip_export:
             try:
-                with run_phase(log, "stage 6 Export", "export", run_id=rid) as ph:
+                with run_phase(log, "stage 6 Export + SEO", "export", run_id=rid) as ph:
                     from export import export_all
+                    from automation.seo.seo import process_all_seo
                     result.exported = export_all(
                         highlights_path, video_path,
                         transcript_path=transcript_path,
@@ -262,8 +263,14 @@ def run(
                         _emit_event(f"{stem}/{clip_path.stem}", EventType.exported, {
                             "path": str(clip_path),
                         })
+                    # SEO runs immediately after export
+                    if not skip_seo and result.exported:
+                        export_dir = str(result.exported[0].parent)
+                        process_all_seo(highlights_path, export_dir)
+                        result.seo_generated = len(result.exported)
                     _PROVIDER_HEALTH.record_success("export")
-                    ph.set(exported=len(result.exported))
+                    ph.set(exported=len(result.exported),
+                           seo_generated=result.seo_generated)
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("export")
                 _emit_infra_failed(stem, str(e), stage="stage6")
@@ -338,24 +345,6 @@ def run(
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("enhancement")
                 result.failures.append(f"stage6b: {e}")
-
-        # ── Stage 7: SEO ────────────────────────────────────────
-        if not skip_seo and result.exported:
-            try:
-                with run_phase(log, "stage 7 SEO (selected only)",
-                               "seo", run_id=rid) as ph:
-                    from automation.seo.seo import process_all_seo
-                    export_dir = str(result.exported[0].parent)
-                    process_all_seo(highlights_path, export_dir)
-                    result.seo_generated = len(result.exported)
-                    ph.set(
-                        clips=len(result.exported),
-                        seo_generated=result.seo_generated,
-                    )
-                _PROVIDER_HEALTH.record_success("llm")
-            except Exception as e:
-                _PROVIDER_HEALTH.record_failure("llm")
-                result.failures.append(f"stage7: {e}")
 
         # ── Stage 7b: Thumbnails ────────────────────────────────
         if result.exported:

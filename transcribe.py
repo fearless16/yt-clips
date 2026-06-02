@@ -192,7 +192,7 @@ def correct_segments_with_llm(segments: list[dict]) -> list[dict]:
     except Exception:
         return segments
 
-    if not (ai.groq_api_key or ai.openrouter_api_key or ai.nvidia_api_key):
+    if not (ai.opencode_api_key or ai.nvidia_api_key):
         return segments
 
     log.info("Running LLM transcript correction pass...")

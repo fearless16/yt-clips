@@ -106,22 +106,21 @@ class TestLLMOrchestration:
             status_code = 429
             response = MagicMock(headers={"retry-after": "60"})
 
-        AIClient._note_provider_error("groq", FakeExc())
-        assert AIClient._in_cooldown("groq")
+        AIClient._note_provider_error("opencode", FakeExc())
+        assert AIClient._in_cooldown("opencode")
 
     def test_racer_returns_empty_on_total_failure_not_generic(self):
         from utils.ai_client import AIClient
         self._reset()
         ai = AIClient()
-        ai.opencode_api_key = None
-        ai.groq_api_key = "k"
-        ai.openrouter_api_key = ai.nvidia_api_key = None
+        ai.opencode_api_key = "k"
+        ai.nvidia_api_key = None
 
         class FakeExc(Exception):
             status_code = 429
             response = MagicMock(headers={"retry-after": "120"})
 
-        with patch.object(AIClient, "generate_groq", side_effect=FakeExc()):
+        with patch.object(AIClient, "generate_opencode", side_effect=FakeExc()):
             out = ai.generate_fastest_first("p", "s")
         assert out == ""  # escalation signal, NOT generic text
 
@@ -129,13 +128,12 @@ class TestLLMOrchestration:
         from utils.ai_client import AIClient
         self._reset()
         ai = AIClient()
-        ai.opencode_api_key = None
-        ai.groq_api_key = "k"
-        ai.openrouter_api_key = ai.nvidia_api_key = None
-        with patch.object(AIClient, "generate_groq", return_value="OK"):
+        ai.opencode_api_key = "k"
+        ai.nvidia_api_key = None
+        with patch.object(AIClient, "generate_opencode", return_value="OK"):
             out = ai.generate_fastest_first("p", "s")
         assert out == "OK"
-        assert not AIClient._in_cooldown("groq")
+        assert not AIClient._in_cooldown("opencode")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -468,47 +466,26 @@ class TestModelDiversity:
     def test_available_plan_shuffles_within_tiers(self):
         from utils.ai_client import AIClient
         ai = AIClient()
-        ai.groq_api_key = "k"
-        ai.openrouter_api_key = "k"
-        ai.nvidia_api_key = "k"
         ai.opencode_api_key = "k"
-        # Find a multi-model tier and verify shuffling
-        orderings = set()
-        for _ in range(20):
-            plan = ai._available_plan()
-            # Pick the first tier with ≥2 available models
-            multi_tier = None
-            for t in plan:
-                if len(t) >= 2:
-                    multi_tier = t
-                    break
-            if multi_tier:
-                orderings.add(tuple(multi_tier))
-        # At least one multi-model tier should be available; verify >1 ordering
-        found_multi = any(len(t) >= 2 for t in ai.FASTEST_TIERS)
-        if found_multi and orderings:
-            assert len(orderings) > 1, "Models should be shuffled for diversity"
+        ai.nvidia_api_key = "k"
+        # Verify _all_models shuffles across all models
+        seen_first = set()
+        for _ in range(40):
+            models = ai._all_models()
+            if models:
+                seen_first.add(models[0])
+        assert len(seen_first) > 1, f"_all_models not shuffling: only saw {seen_first}"
 
     def test_prefer_provider_boosts_to_front(self):
         from utils.ai_client import AIClient
         ai = AIClient()
-        ai.groq_api_key = "k"
-        ai.openrouter_api_key = "k"
+        ai.opencode_api_key = "k"
         ai.nvidia_api_key = "k"
-        # Tier 2 has nvidia + openrouter mixed
-        # With prefer_provider="nvidia", nvidia should be first in tier 2
-        found_nvidia_first = False
+        # With prefer_provider="nvidia", nvidia should be first
         for _ in range(10):
-            plan = ai._available_plan(prefer_provider="nvidia")
-            # Find the tier containing nvidia
-            for tier in plan:
-                nvidia_in_tier = [x for x in tier if x[0] == "nvidia"]
-                if nvidia_in_tier:
-                    assert tier[0][0] == "nvidia", \
-                        f"nvidia should be first in its tier but got {tier[0]}"
-                    found_nvidia_first = True
-                    break
-        assert found_nvidia_first
+            models = ai._all_models(prefer_provider="nvidia")
+            assert models[0][0] == "nvidia", \
+                f"nvidia should be first but got {models[0]}"
 
     def test_seo_does_not_mutate_shared_ai_singleton(self):
         """generate_clip_seo must NOT mutate ai._provider/_model (bug #1 fix)."""
