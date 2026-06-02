@@ -26,6 +26,10 @@ def setup_argparse():
         help="Run self-learning stages only (skip download/export)",
     )
     parser.add_argument(
+        "--skip-download", action="store_true", default=False,
+        help="Skip video download (use existing file)",
+    )
+    parser.add_argument(
         "--sample-minutes", type=int, default=None,
         help="Download only first N minutes of video",
     )
@@ -96,6 +100,7 @@ def main(args=None):
     from automation.orchestrator import run
     result = run(
         url=parsed.url,
+        skip_download=parsed.skip_download,
         auto_sync=parsed.sync,
         auto_upload=parsed.upload,
         auto_schedule=parsed.schedule,
