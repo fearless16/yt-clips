@@ -202,7 +202,7 @@ def process_queue():
         url = job.get("url", "")
         flags = job.get("flags", [])
 
-        cmd = [sys.executable, "-m", "automation.cli", url, "--learn"] + flags
+        cmd = [sys.executable, "-m", "automation.cli", url] + flags
 
         log.info(f"{'='*55}")
         log.info(f"  PROCESSING: {url}")
