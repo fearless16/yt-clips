@@ -68,8 +68,12 @@ def test_fetch_unified_path_fallback(tmp_path):
     video_path.write_bytes(b"dummy video content")
     
     output_path = tmp_path / "fetched_transcript.json"
-    
-    with patch("automation.transcript._fetch_via_api", return_value=None), \
+
+    from automation.transcript import TRANSCRIPT_CACHE
+    TRANSCRIPT_CACHE.clear()
+
+    with patch("automation.transcript._fetch_via_youtube_data_api", return_value=None), \
+         patch("automation.transcript._fetch_via_api", return_value=None), \
          patch("automation.transcript._fetch_via_ytdlp", return_value=None), \
          patch("transcribe.WhisperModel") as MockWhisperModel, \
          patch("transcribe.correct_segments_with_llm", side_effect=lambda x: x):
