@@ -355,8 +355,8 @@ def run(
             from automation.seo.analytics import generate_daily_insights
             generate_daily_insights()
         except FileNotFoundError as e:
-            if "yt_analytics_token.json" in str(e) or "client_secrets" in str(e):
-                log.warning("Analytics skipped — need yt_analytics_token.json with youtube.readonly scope")
+            if "yt_channel_token.json" in str(e) or "client_secrets" in str(e):
+                log.warning("Analytics skipped — need yt_channel_token.json with youtube.readonly scope")
             else:
                 log.warning("Analytics failed: %s", e)
         except Exception as e:

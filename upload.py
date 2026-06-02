@@ -4,7 +4,7 @@ upload.py — Phase 7: Automated YouTube Shorts Uploader.
 Uploads videos to YouTube with metadata generated in Phase 6.
 
 NOTE: This uses YouTube Data API (not Drive API), so it has its own
-auth via yt_token.json + client_secrets.json. This is intentionally
+auth via yt_channel_token.json + client_secrets.json. This is intentionally
 separate from the Drive auth in utils/drive_auth.py.
 """
 import os
@@ -203,61 +203,42 @@ def _is_colab() -> bool:
 def get_authenticated_service(token_index=0):
     """
     Authenticate with YouTube Data API using token array rotation.
-    Reads from yt_tokens.json which contains an array of token objects.
+    Reads from yt_channel_token.json which contains YouTube OAuth token.
     """
     creds = None
-    tokens_path = Path("yt_tokens.json")
-    
-    # Fallback to standard yt_token.json if array doesn't exist
+    tokens_path = Path("yt_channel_token.json")
     if not tokens_path.exists():
-        tokens_path = Path("yt_token.json")
-        if not tokens_path.exists():
-            log.error("No yt_tokens.json or yt_token.json found.")
-            return None
-            
+        log.error("No yt_channel_token.json found.")
+        return None
+
     try:
         with open(tokens_path, "r") as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                tokens_array = data
-            else:
-                tokens_array = [data] # Wrap single token in list
+            token_data = json.load(f)
     except Exception as e:
         log.error("Failed to parse %s: %s", tokens_path, e)
         return None
-        
-    if token_index >= len(tokens_array):
-        log.error("Token index %d is out of bounds (array length %d)", token_index, len(tokens_array))
-        return None
-        
-    token_data = tokens_array[token_index]
-    
+
     try:
         creds = Credentials.from_authorized_user_info(token_data, SCOPES)
-        log.info("Loaded token %d (expired=%s, has_refresh=%s)",
-                 token_index,
+        log.info("Loaded token (expired=%s, has_refresh=%s)",
                  not creds.valid if creds else "N/A",
                  bool(creds.refresh_token) if creds else "N/A")
     except Exception as e:
-        log.warning("Failed to construct credentials for token %d: %s", token_index, e)
+        log.warning("Failed to construct credentials: %s", e)
         return None
 
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            log.info("YouTube token %d refreshed successfully", token_index)
-            tokens_array[token_index] = json.loads(creds.to_json())
-            
-            # If we were using the single token fallback, overwrite it as an array to migrate seamlessly
-            with open("yt_tokens.json", "w") as f:
-                json.dump(tokens_array, f, indent=2)
-                
+            log.info("YouTube token refreshed successfully")
+            with open("yt_channel_token.json", "w") as f:
+                f.write(creds.to_json())
         except Exception as e:
-            log.warning("Token %d refresh failed: %s", token_index, e)
+            log.warning("Token refresh failed: %s", e)
             return None
 
     if not creds or not creds.valid:
-        log.error("Token %d is invalid and could not be refreshed.", token_index)
+        log.error("Token is invalid and could not be refreshed.")
         return None
 
     base_http = httplib2.Http(timeout=60)
@@ -297,7 +278,7 @@ def upload_video(
 
     youtube = get_authenticated_service()
     if not youtube:
-        log.error("[EXIT] upload_video failed: no YouTube service (check yt_token.json)")
+        log.error("[EXIT] upload_video failed: no YouTube service (check yt_channel_token.json)")
         return None
 
     # Load and validate SEO metadata
@@ -353,24 +334,13 @@ def upload_video(
 
     thumb_path = Path(video_path).with_name(f"{Path(video_path).stem}_thumb.jpg")
     
-    # ── Token Rotation Loop ──────────────────────────────────────────────────────
-    tokens_path = Path("yt_tokens.json")
-    max_tokens = 1
-    if tokens_path.exists():
-        try:
-            data = json.load(open(tokens_path))
-            if isinstance(data, list):
-                max_tokens = len(data)
-        except Exception:
-            pass
+    # ── Single-token auth ─────────────────────────────────────────────────────────
+    youtube = get_authenticated_service()
+    if not youtube:
+        log.error("Could not get YouTube service (check yt_channel_token.json)")
+        return None
 
-    for token_idx in range(max_tokens):
-        youtube = get_authenticated_service(token_index=token_idx)
-        if not youtube:
-            log.warning("Could not get YouTube service for token %d. Trying next...", token_idx)
-            continue
-            
-        log.info(f"🚀 Uploading to YouTube: {title[:80]}... (using token {token_idx})")
+    log.info(f"🚀 Uploading to YouTube: {title[:80]}...")
 
         # Finite chunk size enables real progress + resumable recovery (a single
         # -1 chunk uploads the whole file in one shot with no resume on failure).

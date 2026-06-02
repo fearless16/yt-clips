@@ -82,6 +82,7 @@ from face_os.renderer_mode import RendererMode, RendererModeState
 from face_os.state_evolution import StateEvolution
 from face_os.energy_scaling import EnergyScaler
 from face_os.observation_model import compute_observation_residual
+from face_os.reconstruction_confidence import compute_reconstruction_confidence
 
 # D-10: Subsystem wrappers (thin delegation, boundary enforcement)
 from face_os.subsystems import IdentityEstimator, TemporalEstimator, FaceRenderer, GeometryEstimator
@@ -123,7 +124,7 @@ class FaceOSPipeline:
       10. Composite (confidence-weighted)
     """
 
-    def __init__(self, use_bidirectional: bool = True):
+    def __init__(self, use_bidirectional: bool = True, use_c_recon_gate: bool = True):
         # Core modules
         self.tracker: Optional[detect_track.FaceTracker] = None
         self.appearance_builder: Optional[canonical_map.AppearanceFieldBuilder] = None
@@ -137,6 +138,9 @@ class FaceOSPipeline:
         # NEW: Bidirectional solver
         self.use_bidirectional = use_bidirectional
         self.temporal_solver: Optional[TemporalRepairEngine] = None
+
+        # Phase 2B (§19): gate consumes §16.8 C_recon instead of raw C_obs
+        self.use_c_recon_gate: bool = bool(use_c_recon_gate)
 
         # Identity profile
         self.identity: Optional[IdentityProfile] = None
@@ -1345,14 +1349,38 @@ class FaceOSPipeline:
                     ),
                 )
                 self._last_transform_graph = geom_state.transform_graph.to_dict()
+                # Phase 2B (§19): compute §16.8 C_recon at gating time using
+                # PRIOR coverage (this frame's update hasn't been recorded yet).
+                # Trust the composite = C_obs · cov_pose · cov_light · vis
+                # instead of the raw observation quality alone.
+                raw_c_obs = float(np.mean(masked_quality)) if masked_quality is not None else 0.0
+                if self.use_c_recon_gate and self.patch_memory is not None:
+                    cov_pose = float(self.patch_memory.coverage_pose())
+                    cov_light = float(self.patch_memory.coverage_light())
+                    # Cold-start guard: at the very first frame, both coverage
+                    # ratios are 0 → C_recon = 0 → gate rejects everything →
+                    # coverage never grows. Skip the C_recon path until the
+                    # pipeline has observed at least 1 pose AND 1 lighting
+                    # bin. Falls through to the legacy C_obs check.
+                    if cov_pose > 0.0 and cov_light > 0.0:
+                        mv = float(
+                            getattr(self._identity_estimator, "last_mean_visibility", 1.0)
+                            if self._identity_estimator is not None else 1.0
+                        )
+                        c_recon_gate = compute_reconstruction_confidence(
+                            raw_c_obs, cov_pose, cov_light, mv
+                        )
+                    else:
+                        c_recon_gate = None
+                else:
+                    c_recon_gate = None
                 self._last_accept_decision = evaluate_acceptance(
                     geom_state,
-                    identity_confidence=(
-                        float(np.mean(masked_quality))
-                        if masked_quality is not None else 0.0
-                    ),
+                    identity_confidence=raw_c_obs,
                     temporal=None,
                     lighting=None,
+                    c_recon=c_recon_gate,
+                    use_c_recon_gate=self.use_c_recon_gate,
                 )
 
                 identity_updated = False
@@ -1830,6 +1858,8 @@ class FaceOSPipeline:
                     observation_residual_mean=float(self._last_obs_residual_mean),
                     observation_noise_mean=float(self._last_obs_noise_mean),
                     observation_confidence=float(self._last_obs_confidence),
+                    gate_trust_source=str(self._last_accept_decision.trust_source),
+                    gate_decision_accept=bool(self._last_accept_decision.accept),
                 )
                 latent_dict = latent_render.to_dict()
                 # Embed in the frame record AND append to the dedicated log.
@@ -1855,6 +1885,8 @@ class FaceOSPipeline:
                     "observation_residual_mean": 0.0,
                     "observation_noise_mean": 0.0,
                     "observation_confidence": 0.0,
+                    "gate_trust_source": str(self._last_accept_decision.trust_source),
+                    "gate_decision_accept": bool(self._last_accept_decision.accept),
                 }
                 record["latent"] = fallback_latent
                 self._latent_telemetry_log.append(fallback_latent)

@@ -68,7 +68,7 @@ def fetch_own_live_stream_url(channel_id: str = "") -> str:
         from google.auth.transport.requests import Request
         from google.oauth2.credentials import Credentials
         from pathlib import Path
-        token_path = cfg.get("youtube", {}).get("token_path", "yt_token.json")
+        token_path = cfg.get("youtube", {}).get("token_path", "yt_channel_token.json")
         if not Path(token_path).exists():
             return ""
         creds = Credentials.from_authorized_user_file(token_path)

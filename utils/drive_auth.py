@@ -29,7 +29,7 @@ def get_drive_service():
       0. Google Colab filesystem mount (fastest, most reliable)
       0b. Kaggle — use client_secrets.json delivered via tunnel
       1. Application Default Credentials (gcloud auth)
-      2. Saved OAuth token.json
+       2. Saved OAuth drive_token.json
       3. Returns None if all fail
 
     Returns:
@@ -62,7 +62,7 @@ def get_drive_service():
     # ─── Method 0b: Kaggle — use delivered client_secrets.json ──────────────
     is_kaggle = bool(os.environ.get("KAGGLE_KERNEL_RUN_TYPE") or Path("/kaggle").exists())
     if is_kaggle:
-        kaggle_token = Path("yt_token.json")
+        kaggle_token = Path("yt_channel_token.json")
         kaggle_secrets = Path("client_secrets.json")
         if kaggle_token.exists():
             try:
@@ -75,7 +75,7 @@ def get_drive_service():
                 if credentials and credentials.expired and credentials.refresh_token:
                     credentials.refresh(Request())
                 if credentials and credentials.valid:
-                    log.info("✅ Kaggle: Using delivered yt_token.json")
+                    log.info("✅ Kaggle: Using delivered yt_channel_token.json")
                     base_http = httplib2.Http(timeout=60)
                     auth_http = google_auth_httplib2.AuthorizedHttp(credentials, http=base_http)
                     return build("drive", "v3", http=auth_http)
@@ -102,9 +102,9 @@ def get_drive_service():
                 log.warning("Kaggle OAuth failed: %s", e)
 
     credentials = None
+    # ─── Method 1: Saved OAuth drive_token.json ──────────────────────────────
 
-    # ─── Method 1: Saved OAuth token.json ────────────────────────────────────
-    token_path = Path("token.json")
+    token_path = Path("drive_token.json")
     if token_path.exists():
         try:
             from google.oauth2.credentials import Credentials

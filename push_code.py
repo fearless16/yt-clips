@@ -187,8 +187,8 @@ def push(include_data: bool = False, config_only: bool = False) -> bool:
         for special_file in [
             "channel_logo.png",
             "client_secrets.json",
-            "yt_token.json",
-            "yt_analytics_token.json",
+            "yt_channel_token.json",
+            "drive_token.json",
             ".env",
             "cookies.txt",
             "remote_job.json",
