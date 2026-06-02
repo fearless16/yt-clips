@@ -6,6 +6,13 @@ Usage:
     python -m self_learner.runner predict pipeline_run
     python -m self_learner.runner insights
     python -m self_learner.runner stats
+    python -m self_learner.runner trends
+    python -m self_learner.runner anomalies <metric>
+    python -m self_learner.runner seo_keywords [shorts|long_form]
+    python -m self_learner.runner seo_patterns [shorts|long_form]
+    python -m self_learner.runner providers
+    python -m self_learner.runner content_types
+    python -m self_learner.runner recommendations
     python -m self_learner.runner daemon
 """
 
@@ -15,6 +22,9 @@ import time
 from typing import Any, Optional
 
 from self_learner.learner import Learner
+from self_learner.seo_learner import SEOLearner
+from self_learner.trends import TrendAnalyzer
+from self_learner.recommend import RecommendationEngine
 
 
 def _format_prediction(pred) -> str:
@@ -78,6 +88,152 @@ def cmd_stats(learner: Learner, args: list[str]) -> int:
     return 0
 
 
+def cmd_trends(learner: Learner, args: list[str]) -> int:
+    """Print trend analysis."""
+    trend_analyzer = TrendAnalyzer()
+    trends = trend_analyzer.get_all_trends()
+
+    if not trends:
+        print("no trend data yet")
+        return 0
+
+    print("Metric Trends (last 7 days):")
+    print("-" * 60)
+    for trend in trends:
+        arrow = "↑" if trend.direction == "improving" else "↓" if trend.direction == "degrading" else "→"
+        print(f"{trend.metric:20s} {arrow} {trend.direction:12s} "
+              f"slope={trend.slope:+.3f} conf={trend.confidence:.2f}")
+
+    trend_analyzer.close()
+    return 0
+
+
+def cmd_anomalies(learner: Learner, args: list[str]) -> int:
+    """Print anomalies for a metric."""
+    if not args:
+        print("usage: anomalies <metric>", file=sys.stderr)
+        print("metrics: duration, exported_count, failures_count, selected_clips", file=sys.stderr)
+        return 1
+
+    metric = args[0]
+    trend_analyzer = TrendAnalyzer()
+    anomalies = trend_analyzer.detect_anomalies(metric)
+
+    if not anomalies:
+        print(f"no anomalies detected for {metric}")
+        return 0
+
+    print(f"Anomalies in {metric}:")
+    print("-" * 40)
+    for a in anomalies:
+        ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(a["timestamp"]))
+        print(f"  {ts}: {a['value']:.2f} ({a['deviation']} by {a['z_score']:.1f} stdev)")
+
+    trend_analyzer.close()
+    return 0
+
+
+def cmd_seo_keywords(learner: Learner, args: list[str]) -> int:
+    """Print best SEO keywords."""
+    content_type = args[0] if args else "all"
+    seo_learner = SEOLearner()
+    keywords = seo_learner.get_best_keywords(content_type, limit=10)
+
+    if not keywords:
+        print(f"no keyword data yet for {content_type}")
+        return 0
+
+    print(f"Best Keywords ({content_type}):")
+    print("-" * 50)
+    for kw in keywords:
+        print(f"  {kw['keyword']:20s} engagement={kw['avg_engagement']:.3f} "
+              f"count={kw['count']}")
+
+    seo_learner.close()
+    return 0
+
+
+def cmd_seo_patterns(learner: Learner, args: list[str]) -> int:
+    """Print best SEO title patterns."""
+    content_type = args[0] if args else "all"
+    seo_learner = SEOLearner()
+    patterns = seo_learner.get_best_title_patterns(content_type, limit=5)
+
+    if not patterns:
+        print(f"no pattern data yet for {content_type}")
+        return 0
+
+    print(f"Best Title Patterns ({content_type}):")
+    print("-" * 50)
+    for p in patterns:
+        print(f"  {p['pattern']:20s} engagement={p['avg_engagement']:.3f} "
+              f"count={p['count']}")
+
+    seo_learner.close()
+    return 0
+
+
+def cmd_providers(learner: Learner, args: list[str]) -> int:
+    """Print provider performance."""
+    seo_learner = SEOLearner()
+    providers = seo_learner.get_provider_performance()
+
+    if not providers:
+        print("no provider data yet")
+        return 0
+
+    print("Provider Performance:")
+    print("-" * 50)
+    for provider, stats in providers.items():
+        print(f"  {provider:15s} success={stats['success_rate']:.0%} "
+              f"engagement={stats['avg_engagement']:.3f} "
+              f"uses={stats['total_uses']}")
+
+    seo_learner.close()
+    return 0
+
+
+def cmd_content_types(learner: Learner, args: list[str]) -> int:
+    """Print content type performance."""
+    seo_learner = SEOLearner()
+    types = seo_learner.get_content_type_stats()
+
+    if not types:
+        print("no content type data yet")
+        return 0
+
+    print("Content Type Performance:")
+    print("-" * 50)
+    for ctype, stats in types.items():
+        print(f"  {ctype:12s} count={stats['count']} "
+              f"success={stats['success_rate']:.0%} "
+              f"engagement={stats['avg_engagement']:.3f}")
+
+    seo_learner.close()
+    return 0
+
+
+def cmd_recommendations(learner: Learner, args: list[str]) -> int:
+    """Print recommendations."""
+    rec_engine = RecommendationEngine()
+    recommendations = rec_engine.generate_recommendations()
+
+    if not recommendations:
+        print("no recommendations yet")
+        return 0
+
+    print("Recommendations:")
+    print("=" * 60)
+    for i, rec in enumerate(recommendations, 1):
+        print(f"{i}. [{rec.priority.upper()}] {rec.title}")
+        print(f"   {rec.description}")
+        print(f"   Action: {rec.action}")
+        print()
+
+    rec_engine.close()
+    return 0
+
+
 def cmd_daemon(learner: Learner, args: list[str]) -> int:
     """Run as a daemon, observing and learning continuously.
 
@@ -113,6 +269,13 @@ _COMMANDS: dict[str, Any] = {
     "predict": cmd_predict,
     "insights": cmd_insights,
     "stats": cmd_stats,
+    "trends": cmd_trends,
+    "anomalies": cmd_anomalies,
+    "seo_keywords": cmd_seo_keywords,
+    "seo_patterns": cmd_seo_patterns,
+    "providers": cmd_providers,
+    "content_types": cmd_content_types,
+    "recommendations": cmd_recommendations,
     "daemon": cmd_daemon,
 }
 
@@ -150,7 +313,7 @@ class Runner:
         return cmd_fn(self._learner, args[1:])
 
     def _show_help(self):
-        print("self_learner v1.0.0 -- persistent-memory learning engine",
+        print("self_learner v2.0.0 -- persistent-memory learning engine",
               file=sys.stderr)
         print(file=sys.stderr)
         print("commands:", file=sys.stderr)
@@ -164,6 +327,13 @@ class Runner:
               file=sys.stderr)
         print("  python -m self_learner.runner insights", file=sys.stderr)
         print("  python -m self_learner.runner stats", file=sys.stderr)
+        print("  python -m self_learner.runner trends", file=sys.stderr)
+        print("  python -m self_learner.runner anomalies duration", file=sys.stderr)
+        print("  python -m self_learner.runner seo_keywords shorts", file=sys.stderr)
+        print("  python -m self_learner.runner seo_patterns shorts", file=sys.stderr)
+        print("  python -m self_learner.runner providers", file=sys.stderr)
+        print("  python -m self_learner.runner content_types", file=sys.stderr)
+        print("  python -m self_learner.runner recommendations", file=sys.stderr)
         print("  python -m self_learner.runner daemon", file=sys.stderr)
 
 

@@ -761,6 +761,14 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     all_results = []
 
+    # Initialize SEO learner for tracking
+    seo_learner = None
+    try:
+        from self_learner import SEOLearner
+        seo_learner = SEOLearner()
+    except Exception:
+        pass
+
     clips = list(highlights.items())
     failures = []
     for idx, (clip_id, info) in enumerate(clips, start=1):
@@ -778,6 +786,21 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
                 teams=teams,
             )
             all_results.append(result)
+
+            # Track SEO outcome
+            if seo_learner and result.get("ai_generated"):
+                from self_learner import SEOPerformance
+                seo_learner.record_seo_outcome(SEOPerformance(
+                    clip_id=clip_id,
+                    title=result.get("title", ""),
+                    description=result.get("description", ""),
+                    hashtags=result.get("hashtags", []),
+                    tags=result.get("tags", []),
+                    is_shorts=result.get("is_shorts", True),
+                    provider=result.get("provider", "unknown"),
+                    model=result.get("model", "unknown"),
+                    upload_success=True,
+                ))
 
             # Save individual file immediately
             per_clip_path = Path(output_dir) / f"{clip_id}_metadata.json"
@@ -797,10 +820,32 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
                 json.dump(marker_data, f)
             all_results.append({"_seo_failed": True, "clip_id": clip_id})
 
+            # Track failed SEO
+            if seo_learner:
+                from self_learner import SEOPerformance
+                seo_learner.record_seo_outcome(SEOPerformance(
+                    clip_id=clip_id,
+                    title="",
+                    description="",
+                    hashtags=[],
+                    tags=[],
+                    is_shorts=True,
+                    provider="unknown",
+                    model="unknown",
+                    upload_success=False,
+                ))
+
         # Breathing room between clips (skip after last)
         if idx < len(clips):
             log.debug("Sleeping 5s before next SEO call...")
             time.sleep(5)
+
+    # Close SEO learner
+    if seo_learner:
+        try:
+            seo_learner.close()
+        except Exception:
+            pass
 
     if failures:
         log.warning("SEO failures for %d clip(s): %s", len(failures), failures)
