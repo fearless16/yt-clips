@@ -380,8 +380,9 @@ def run(
                 _PROVIDER_HEALTH.record_failure("drive")
                 result.failures.append(f"stage8a: {e}")
 
-        # ── Stage 8b: Upload ────────────────────────────────────
-        if (auto_upload or auto_schedule) and result.exported:
+        # ── Stage 8b: Upload (auto when auth exists) ─────────────
+        has_auth = Path("cookies.txt").exists() or Path("yt_channel_token.json").exists()
+        if result.exported and not skip_sync and has_auth:
             try:
                 with run_phase(log, "stage 8b Upload", "upload",
                                run_id=rid) as ph:
@@ -474,6 +475,8 @@ def run(
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("youtube")
                 result.failures.append(f"stage8b: {e}")
+        elif result.exported and not has_auth:
+            log.info("[stage 8b] Upload skipped — no auth (cookies.txt or yt_channel_token.json)")
 
     # ── Stage 9: Self-learning ──────────────────────────────────────────
     result.total_seconds = time.monotonic() - start
