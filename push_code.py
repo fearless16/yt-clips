@@ -188,6 +188,7 @@ def push(include_data: bool = False, config_only: bool = False) -> bool:
             "channel_logo.png",
             "client_secrets.json",
             "yt_channel_token.json",
+            "yt_analytics_token.json",
             "drive_token.json",
             ".env",
             "cookies.txt",

@@ -103,7 +103,8 @@ class JobHandler(BaseHTTPRequestHandler):
 
                 # ─── Save all credentials delivered via tunnel ──────────────
                 CRED_FILES = {"cookies.txt", ".env", "client_secrets.json",
-                              "yt_channel_token.json", "drive_token.json"}
+                              "yt_channel_token.json", "yt_analytics_token.json",
+                              "drive_token.json"}
                 for key in list(job.keys()):
                     if key in CRED_FILES and isinstance(job[key], str):
                         Path(key).write_text(job[key], encoding="utf-8")
@@ -266,7 +267,8 @@ def poll_job_file():
                 if url:
                     # ─── Extract all credentials delivered via Drive job ─────
                     CRED_FILES = {"cookies.txt", ".env", "client_secrets.json",
-                                  "yt_channel_token.json", "drive_token.json"}
+                                  "yt_channel_token.json", "yt_analytics_token.json",
+                                  "drive_token.json"}
                     for secret_file in CRED_FILES:
                         if secret_file in job and job[secret_file]:
                             Path(secret_file).write_text(job[secret_file], encoding="utf-8")

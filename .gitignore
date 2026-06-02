@@ -27,6 +27,7 @@ yt_tokens.json
 yt_token_*.json
 token.json
 yt_channel_token.json
+yt_analytics_token.json
 drive_token.json
 client_secrets.json
 client_secret_*.json
