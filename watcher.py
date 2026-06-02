@@ -202,6 +202,19 @@ def process_queue():
         url = job.get("url", "")
         flags = job.get("flags", [])
 
+        # ── Git pull before every job — ensures latest code ──
+        try:
+            result = subprocess.run(
+                ["git", "pull"],
+                capture_output=True, text=True, timeout=30, cwd=project_root
+            )
+            if result.returncode == 0:
+                log.info("Git pull: %s", result.stdout.strip() or "up to date")
+            else:
+                log.warning("Git pull failed: %s", result.stderr.strip()[:200])
+        except Exception as e:
+            log.warning("Git pull error: %s", e)
+
         cmd = [sys.executable, "-m", "automation.cli", url] + flags
 
         log.info(f"{'='*55}")
