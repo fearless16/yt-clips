@@ -73,7 +73,7 @@ pip install -q \
     rich PyYAML opencv-python-headless numpy \
     filterpy scipy openai python-dotenv Pillow requests \
     ultralytics gfpgan basicsr realesrgan \
-    google-api-python-client google-auth-httplib2 google-auth-oauthlib 2>&1 | tail -1
+    google-api-python-client google-auth-httplib2 google-auth-oauthlib face_recognition 2>&1 | tail -1
 
 # ── Start Watcher + Tunnel ───────────────────────────────────────────
 echo ""

@@ -152,7 +152,11 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
     except Exception:
         pass
 
-    import face_recognition
+    try:
+        import face_recognition
+    except ImportError:
+        log.warning("face_recognition not installed — skipping face matching")
+        return None
 
     best_face = None
     best_score = -1.0
