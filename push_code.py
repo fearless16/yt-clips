@@ -1,6 +1,11 @@
 """
 push_code.py — Push tokens and .env to Google Drive.
 Code is synced via git + tunnel; Drive only stores credentials.
+
+Persistent files (e.g. self_learner.db) use a separate list with locked
+upload semantics: NEVER delete, only create-once / update-in-place. If the
+local copy is missing, restore from Drive rather than treating absence as
+"the new state".
 """
 import sys
 import json
@@ -22,6 +27,12 @@ TOKEN_FILES = [
     "yt_analytics_token.json",
     "client_secrets.json",
     ".env",
+]
+
+# Persistent files: never deleted, only create-once / update-in-place.
+# If missing locally but present on Drive, restore (don't push "missing").
+PERSISTENT_FILES = [
+    "self_learner.db",
 ]
 
 try:
@@ -108,10 +119,15 @@ def push(**_kwargs) -> bool:
 
         folder_id = find_or_create_folder(service, "yt-clips")
 
+        # ── Persistent files: locked, never deleted, restore if missing locally ──
+        for fname in PERSISTENT_FILES:
+            fp = Path(fname)
+            _sync_persistent(service, fp, folder_id)
+
         files_to_sync = [Path(f) for f in TOKEN_FILES if Path(f).exists()]
         if not files_to_sync:
             log.warning("No token/.env files found to push.")
-            return False
+            return True
 
         log.info(f"Checking {len(files_to_sync)} credential files...")
 
@@ -170,6 +186,71 @@ def push(**_kwargs) -> bool:
 
     except Exception as e:
         log.error(f"Error during push: {e}")
+        return False
+
+
+def _sync_persistent(service, fp: Path, folder_id: str) -> bool:
+    """Sync a persistent (locked) file: never delete, restore if local is missing.
+
+    Rules:
+      - If local file is missing but Drive has it: restore from Drive (safety net).
+      - If local exists: push (create-once / update-in-place). No delete ever.
+    """
+    try:
+        drive_file_id = _find_file_by_name(service, fp.name, folder_id)
+
+        if not fp.exists():
+            if drive_file_id:
+                log.warning(
+                    f"[LOCKED] {fp.name} missing locally but exists on Drive — "
+                    f"restoring from Drive (NEVER treated as 'delete')."
+                )
+                # Drive has no native "download to path" for binary files in
+                # our stack; signal via return so the caller can handle.
+                # In filesystem mode (Colab), this is just a copy.
+                return _restore_from_drive(service, drive_file_id, fp)
+            else:
+                log.info(f"[LOCKED] {fp.name} does not exist locally or on Drive — skip.")
+                return True
+
+        # Local file exists: push update (or create on first run).
+        media = MediaFileUpload(str(fp), mimetype="application/x-sqlite3",
+                                resumable=True)
+        if drive_file_id:
+            service.files().update(fileId=drive_file_id, media_body=media).execute()
+            log.info(f"[LOCKED] Updated: {fp.name} (in-place, no delete)")
+        else:
+            file_metadata = {
+                "name": fp.name,
+                "parents": [folder_id],
+                "description": "LOCKED — synced by push_code.py. Never delete manually; updated in place.",
+            }
+            service.files().create(body=file_metadata, media_body=media).execute()
+            log.info(f"[LOCKED] Created: {fp.name} (locked, will only be updated in future)")
+        return True
+
+    except Exception as e:
+        log.error(f"[LOCKED] Sync failed for {fp.name}: {e}")
+        return False
+
+
+def _restore_from_drive(service, drive_file_id: str, dest: Path) -> bool:
+    """Restore a locked file from Drive to local path. Used when local copy
+    is missing (e.g. accidental `rm`)."""
+    try:
+        from googleapiclient.http import MediaIoBaseDownload
+        import io
+        request = service.files().get_media(fileId=drive_file_id)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        dest.write_bytes(fh.getvalue())
+        log.info(f"[LOCKED] Restored {dest} ({dest.stat().st_size} bytes) from Drive")
+        return True
+    except Exception as e:
+        log.error(f"[LOCKED] Restore failed for {dest}: {e}")
         return False
 
 

@@ -1,5 +1,5 @@
 """
-watcher.py — Colab Worker: Listens for pipeline jobs via HTTP tunnel + file poll.
+watcher.py — Colab Worker: Listens for pipeline jobs via HTTP tunnel.
 """
 import json
 import logging
@@ -265,54 +265,11 @@ def process_queue():
         log.info(f"[EXIT] Job {status_label} url={url} exit={result.returncode} elapsed={elapsed:.0f}s\n")
 
 
-def poll_job_file():
-    job_path = Path(JOB_FILE)
-    while True:
-        if job_path.exists():
-            with processing_lock:
-                if currently_processing:
-                    time.sleep(5)
-                    continue
-            try:
-                with open(job_path) as f:
-                    job = json.load(f)
-                url = job.get("url", "")
-                if url:
-                    # ─── Extract all credentials delivered via Drive job ─────
-                    CRED_FILES = {"cookies.txt", ".env", "client_secrets.json",
-                                  "yt_channel_token.json", "yt_analytics_token.json",
-                                  "drive_token.json"}
-                    for secret_file in CRED_FILES:
-                        if secret_file in job and job[secret_file]:
-                            Path(secret_file).write_text(job[secret_file], encoding="utf-8")
-                            log.info(f"Saved {secret_file} ({len(job[secret_file])} bytes) from Drive job")
-                            del job[secret_file]
-                    log.info(f"Queued: {url}")
-                    write_status("queued", url, "Job detected on Drive, queued for processing")
-                    with processing_lock:
-                        job_queue.append(job)
-                    threading.Thread(target=process_queue, daemon=True).start()
-                else:
-                    log.info("Skipping job file: missing 'url' field")
-                job_path.unlink(missing_ok=True)
-            except json.JSONDecodeError as e:
-                log.info(f"Invalid JSON in job file: {e}")
-                job_path.unlink(missing_ok=True)
-            except Exception as e:
-                log.info(f"File poll error: {e}")
-                job_path.unlink(missing_ok=True)
-        time.sleep(10)
-
-
 if __name__ == "__main__":
     log.info(f"Starting watcher on port {PORT}...")
     log.info(f"Job timeout: {JOB_TIMEOUT}s (set JOB_TIMEOUT env to change)")
-    log.info(f"Polling: {JOB_FILE} every 10s")
     log.info(f"Status file: {STATUS_FILE}")
     write_status("idle", "", "Watcher started")
-
-    poller = threading.Thread(target=poll_job_file, daemon=True)
-    poller.start()
 
     server = HTTPServer(("0.0.0.0", PORT), JobHandler)
     log.info(f"HTTP server: http://0.0.0.0:{PORT}")
