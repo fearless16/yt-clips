@@ -1,7 +1,60 @@
 """CLI — command-line interface for the orchestration pipeline."""
 
 import argparse
+import json
 import sys
+from pathlib import Path
+
+
+CRED_FILES = {
+    "cookies.txt", ".env", "client_secrets.json",
+    "yt_channel_token.json", "yt_analytics_token.json",
+    "drive_token.json",
+}
+
+
+def _submit_remote(url: str, tunnel_url: str, dry_run: bool = False) -> int:
+    """Submit a pipeline job to a remote Colab instance via tunnel."""
+    import ssl
+    import urllib.request
+
+    ctx = ssl._create_unverified_context()
+
+    job = {"url": url, "flags": []}
+
+    if dry_run:
+        for cred_file in CRED_FILES:
+            p = Path(cred_file)
+            if p.exists():
+                job[cred_file] = f"<{p.stat().st_size} bytes>"
+        print(f"[DRY RUN] Would POST to {tunnel_url}/job")
+        print(f"Payload ({len(job)} keys):")
+        for k, v in job.items():
+            if k == "url":
+                print(f"  {k}: {v}")
+            else:
+                print(f"  {k}: {v}")
+        return 0
+
+    for cred_file in CRED_FILES:
+        p = Path(cred_file)
+        if p.exists():
+            job[cred_file] = p.read_text(encoding="utf-8")
+
+    body = json.dumps(job).encode()
+    try:
+        r = urllib.request.urlopen(
+            f"{tunnel_url}/job", data=body, timeout=30, context=ctx,
+        )
+        if r.status == 202:
+            print(f"Job submitted to {tunnel_url}")
+            return 0
+        resp = json.loads(r.read().decode())
+        print(f"Tunnel returned {r.status}: {resp.get('error', 'unknown')}")
+        return 1
+    except Exception as e:
+        print(f"Failed to submit via tunnel: {e}")
+        return 1
 
 
 def setup_argparse():
@@ -65,6 +118,14 @@ def setup_argparse():
         "--version", action="store_true", default=False,
         help="Print version and exit",
     )
+    parser.add_argument(
+        "--remote", action="store_true", default=False,
+        help="Send job to remote Colab instance via tunnel",
+    )
+    parser.add_argument(
+        "--tunnel-url", type=str, default=None,
+        help="Public tunnel URL of the Colab watcher (required with --remote)",
+    )
     return parser
 
 
@@ -86,6 +147,12 @@ def main(args=None):
     if parsed.status:
         print("Pipeline: idle")
         return 0
+    if parsed.remote:
+        if not parsed.tunnel_url:
+            print("--remote requires --tunnel-url <URL>")
+            return 1
+        return _submit_remote(parsed.url, parsed.tunnel_url, dry_run=parsed.dry_run)
+
     if parsed.dry_run:
         print("Dry run: no pipeline execution")
         return 0
@@ -97,6 +164,7 @@ def main(args=None):
         orch.emit_event(clip_id, "manual_override", {"override": parsed.override})
         print(f"Override {parsed.override} recorded for clip {clip_id}")
         return 0
+
     if parsed.url is None:
         parser.print_help()
         return 0

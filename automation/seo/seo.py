@@ -23,7 +23,21 @@ TREND_CACHE = TTLCache(maxsize=4, ttl=300)
 
 cfg = load_config()
 log = get_logger("seo", cfg["logging"]["log_file"], cfg["logging"]["level"])
-ai = AIClient()
+
+# Lazy singleton — do NOT call AIClient() at module level (violates no-side-effects rule)
+_ai_instance = None
+_ai_lock = __import__("threading").Lock()
+
+
+def _get_ai() -> "AIClient":
+    """Thread-safe lazy AIClient singleton."""
+    global _ai_instance
+    if _ai_instance is not None:
+        return _ai_instance
+    with _ai_lock:
+        if _ai_instance is None:
+            _ai_instance = AIClient()
+    return _ai_instance
 
 
 def _maybe_auto_benchmark():
@@ -38,13 +52,87 @@ def _maybe_auto_benchmark():
                 best_provider, best_model = get_best_model()
                 if best_provider and best_model:
                     log.info("Applying best model: %s/%s", best_provider, best_model)
-                    ai._provider = best_provider
-                    ai._model = best_model
+                    _get_ai()._provider = best_provider
+                    _get_ai()._model = best_model
             except Exception as e:
                 log.warning("Auto-benchmark failed: %s", e)
 
 class SEOGenerationError(Exception):
     """Raised when all AI providers fail during SEO generation."""
+
+
+def _load_learner_state() -> Optional[Dict]:
+    """Load learned entity/format scores from self_learner.db.
+
+    Returns:
+        Dict with entity_scores and format_scores JSON, or None on failure.
+    """
+    try:
+        import sqlite3
+        db_path = Path("self_learner.db")
+        if not db_path.exists():
+            return None
+        conn = sqlite3.connect(str(db_path))
+        try:
+            c = conn.cursor()
+            result = {}
+            for key in ("entity_scores", "format_scores"):
+                row = c.execute(
+                    "SELECT value_json FROM learned_state WHERE state_key=?", (key,)
+                ).fetchone()
+                if row:
+                    result[key] = row[0]
+            return result if result else None
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
+def _get_learner_context() -> str:
+    """Build a context string from learner data for SEO prompt injection.
+
+    Gives the AI knowledge of what entities and formats perform best
+    on THIS channel, so titles/tags are biased toward proven winners.
+
+    Returns:
+        Multi-line context string, or empty string if no data.
+    """
+    state = _load_learner_state()
+    if not state:
+        return ""
+
+    lines = []
+    try:
+        if "entity_scores" in state:
+            data = json.loads(state["entity_scores"])
+            players = data.get("players", {})
+            if players:
+                top = sorted(players.items(), key=lambda x: x[1].get("score", 0), reverse=True)[:5]
+                avoid = [name for name, info in players.items()
+                         if info.get("n", 0) > 10 and info.get("avg_views", 0) < 150]
+                player_strs = [f"{name}({info['avg_views']:.0f} avg views)" for name, info in top]
+                lines.append(f"TOP PLAYERS: {', '.join(player_strs)}")
+                if avoid:
+                    lines.append(f"AVOID (low ROI): {', '.join(avoid)}")
+
+            teams = data.get("teams", {})
+            if teams:
+                top_t = sorted(teams.items(), key=lambda x: x[1].get("score", 0), reverse=True)[:3]
+                team_strs = [f"{name}({info['avg_views']:.0f} avg)" for name, info in top_t]
+                lines.append(f"TOP TEAMS: {', '.join(team_strs)}")
+
+        if "format_scores" in state:
+            fdata = json.loads(state["format_scores"])
+            hooks = fdata.get("hook_types", {})
+            if hooks:
+                top_h = sorted(hooks.items(), key=lambda x: x[1].get("score", 0), reverse=True)[:3]
+                hook_strs = [f"{name}({info['avg_views']:.0f} avg)" for name, info in top_h]
+                lines.append(f"BEST HOOKS: {', '.join(hook_strs)}")
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+
+    return "\n".join(lines)
 
 
 STOP_WORDS = {
@@ -59,6 +147,22 @@ STOP_WORDS = {
 GENERIC_TAGS = {
     "cricket","shorts","viral","trending","youtube","video","sports",
     "highlight","highlights","amazing","awesome","incredible","wow",
+}
+
+# Generic search terms that kill channel performance — NEVER let these through
+GENERIC_POISON_TERMS = {
+    "cricket highlights", "cricket live match", "ipl match video",
+    "t20 cricket live", "best cricket moments", "cricket video",
+    "sports video", "sports highlights", "cricket live",
+    "ipl highlights", "cricket match", "live cricket",
+    "cricket best moments", "ipl live",
+}
+
+# Generic titles that signal low-effort SEO
+GENERIC_TITLES = {
+    "cricket highlights", "highlights", "cricket match",
+    "ipl highlights", "live cricket", "cricket video",
+    "sports highlights", "match highlights",
 }
 
 # ── Viral Hooks & CTAs ──────────────────────────────────────────────────────────
@@ -235,16 +339,18 @@ def _inject_viral_elements(title: str, description: str, hashtags: List[str],
                  "Mahi maar rahe hain - dhoni finish! 🎯",
                  "SKY high! Suryakumar ka 360 degree show! 🤯"] + hooks
 
-    viral_title = random.choice(hooks) if random.random() < 0.2 else title
+    # NEVER randomly override a good AI-generated title — that creates bias
+    # and destroys clip-specific SEO. Hooks are for CTA/description only.
+    viral_title = title
     text_lower = description.lower()
-    cta = EXTRA_CTA = ""
-    if any(word in text_lower for word in ["subscribe", "follow", "share", "like"]):
-        cta = ""
-    else:
-        cta = random.choice(ENGAGING_CTAS)
+    already_has_cta = any(
+        word in text_lower for word in ["subscribe", "follow", "share", "like"]
+    )
+    cta = "" if already_has_cta else random.choice(ENGAGING_CTAS)
+    extra_cta = ""
     if is_record or has_star:
-        EXTRA_CTA = "\n\n🔔 Hurry up! Subscribe for non-stop cricket action 🔔"
-    description = description.rstrip() + "\n\n" + cta + EXTRA_CTA
+        extra_cta = "\n\n🔔 Hurry up! Subscribe for non-stop cricket action 🔔"
+    description = description.rstrip() + ("\n\n" + cta if cta else "") + extra_cta
 
     team_names = extra.get("teams", [])
     player_match = re.search(r"Player:\s*(\w+)", description)
@@ -273,7 +379,7 @@ def _rank_and_optimize_tags(
     uniqueness, and trend potential. Returns top-N ordered by score.
     """
     if not tags:
-        return ["#Shorts", "#Cricket", "#IPL2026"]
+        return []  # NEVER return generic fallback tags — empty is better than generic
 
     seen: set = set()
     scored: list[tuple[float, str]] = []
@@ -356,6 +462,7 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     """Ensure title length, description length, hashtag count, search term count.
 
     Enforces strict caps: title≤80, description≤800, hashtags≤5, terms≤10.
+    Strips generic poison terms from search_terms.
     """
     out = dict(item)
     out["is_shorts"] = is_shorts
@@ -381,12 +488,44 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     deduped_t = []
     for st in terms:
         st_clean = st.strip()
+        # Strip generic poison terms that kill channel performance
+        if st_clean.lower() in GENERIC_POISON_TERMS:
+            continue
         if st_clean.lower() not in seen:
             seen.add(st_clean.lower())
             deduped_t.append(st_clean)
     out["search_terms"] = deduped_t[:10]
 
     return out
+
+
+def _validate_seo_quality(item: Dict) -> bool:
+    """Quality gate: reject SEO that would hurt channel performance.
+
+    Returns True if the SEO output is clip-specific and worth uploading.
+    Returns False if it's generic garbage that should be dropped.
+    """
+    title = (item.get("title") or "").strip()
+    description = (item.get("description") or "").strip()
+
+    # 1. Title must exist and be meaningful
+    if not title or len(title) < 10:
+        return False
+
+    # 2. Title must not be a known generic pattern
+    if title.lower().rstrip("!.?") in GENERIC_TITLES:
+        return False
+
+    # 3. Description must have substance (at least 20 chars)
+    if len(description) < 20:
+        return False
+
+    # 4. Title must not contain Devanagari script (kills discoverability)
+    # Unicode range: \u0900-\u097F (Devanagari block)
+    if re.search(r'[\u0900-\u097F]', title):
+        return False
+
+    return True
 
 
 def _parse_json_response(text: str) -> Optional[Dict]:
@@ -420,14 +559,46 @@ def _parse_json_response(text: str) -> Optional[Dict]:
         if result is not None:
             return result
 
-    # 3. Look for { onwards
+    # 3. Look for { onwards — first try full string from first brace,
+    #    then try to find a balanced {…} object (handles prose wrappers like
+    #    "Here is the result: {...} — done.")
     brace_start = text.find("{")
     if brace_start >= 0:
+        # 3a. Full candidate from first brace
         candidate = text[brace_start:]
         result = _try_parse(candidate)
         if result is not None:
             return result
-        # 3b. Try truncation repair: close all open braces/brackets, trim trailing garbage
+
+        # 3b. Try to find balanced brace span (handles trailing prose)
+        depth = 0
+        in_str = False
+        esc = False
+        end_pos = None
+        for i, ch in enumerate(candidate):
+            if esc:
+                esc = False
+                continue
+            if ch == "\\":
+                esc = True
+                continue
+            if ch == '"' and not esc:
+                in_str = not in_str
+            if not in_str:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end_pos = i + 1
+                        break
+        if end_pos is not None:
+            balanced = candidate[:end_pos]
+            result = _try_parse(balanced)
+            if result is not None:
+                return result
+
+        # 3c. Truncation repair on full candidate
         fixed = _repair_truncated_json(candidate)
         if fixed is not None:
             return fixed
@@ -539,6 +710,28 @@ def generate_clip_seo(
         transcript=transcript,
     )
 
+    # Inject learner intelligence into the prompt
+    learner_ctx = _get_learner_context()
+    if learner_ctx:
+        # Get dynamic video count from DB
+        try:
+            import sqlite3
+            db_path = Path("self_learner.db")
+            if db_path.exists():
+                conn = sqlite3.connect(str(db_path))
+                try:
+                    n_videos = conn.execute(
+                        "SELECT COUNT(DISTINCT event_id) FROM processed_events"
+                    ).fetchone()[0] // 4  # 4 learners per event
+                finally:
+                    conn.close()
+            else:
+                n_videos = 0
+        except Exception:
+            n_videos = 0
+        count_label = f"{n_videos}" if n_videos > 0 else "recent"
+        user_prompt += f"\n\nCHANNEL INTELLIGENCE (from past {count_label} videos):\n{learner_ctx}\nUse this data to bias titles/tags toward proven winners."
+
     # Call AI with parallel fastest-first
     result = _attempt_seo_generation(clip_id, user_prompt, transcript, video_title,
                                      is_shorts,
@@ -591,7 +784,7 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
     Fires available models concurrently, returns first valid JSON.
     """
     try:
-        response = ai.generate_fastest_first(
+        response = _get_ai().generate_fastest_first(
             prompt=user_prompt,
             system_instruction=_SYSTEM,
             prefer_provider=provider_override,
@@ -611,7 +804,15 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
                        clip_id, list(parsed.keys()))
             return None
 
-        return _enforce_limits(parsed, is_shorts=is_shorts)
+        result = _enforce_limits(parsed, is_shorts=is_shorts)
+
+        # Quality gate: reject generic garbage from AI
+        if not _validate_seo_quality(result):
+            log.warning("[%s] AI SEO failed quality gate — dropping: title='%s'",
+                       clip_id, result.get('title', '')[:60])
+            return None
+
+        return result
     except Exception as e:
         log.warning("[%s] AI generation failed: %s", clip_id, e)
         return None
@@ -631,7 +832,7 @@ def _escalation_seo(clip_id: str, user_prompt: str,
         transcript=transcript,
     )
     try:
-        response = ai.generate_text(
+        response = _get_ai().generate_text(
             prompt=salvage_prompt,
             system_instruction=_SYSTEM,
             prefer_model=model_override,
@@ -640,7 +841,12 @@ def _escalation_seo(clip_id: str, user_prompt: str,
             return None
         parsed = _parse_json_response(response)
         if parsed and "title" in parsed:
-            return _enforce_limits(parsed, is_shorts=is_shorts)
+            result = _enforce_limits(parsed, is_shorts=is_shorts)
+            # Quality gate on escalation too — no generic garbage
+            if not _validate_seo_quality(result):
+                log.warning("[%s] Escalation SEO failed quality gate", clip_id)
+                return None
+            return result
         return None
 
     except Exception as e:
@@ -837,10 +1043,11 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
                     upload_success=False,
                 ))
 
-        # Breathing room between clips (skip after last)
+        # Breathing room between clips — configurable, default 5s
         if idx < len(clips):
-            log.debug("Sleeping 5s before next SEO call...")
-            time.sleep(5)
+            sleep_s = cfg.get("seo", {}).get("inter_clip_sleep_s", 5)
+            log.debug("Sleeping %.1fs before next SEO call...", sleep_s)
+            time.sleep(sleep_s)
 
     # Close SEO learner
     if seo_learner:

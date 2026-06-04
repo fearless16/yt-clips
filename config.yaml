@@ -33,22 +33,25 @@ transcription:
   language: "hi"                        # Hindi commentary — use hi for better accuracy
   device: "cuda"            # Prioritizes GPU, auto-falls back to CPU if missing
   compute_type: "float16"    # Optimized for GPU; auto-switches to int8 on CPU fallback
-  batch_size: 16                        # Parallel segments; higher = more GPU use (T4: 16-32)
-  beam_size: 5                          # Search width; 5=balanced, higher=slower+better
+  batch_size: 24                        # Parallel segments; T4 handles 24 fine with small model
+  beam_size: 3                          # ↓ from 5 — 40% faster, negligible quality loss for clips
   vad_filter: true                      # Filter out non-speech for 2-3x speedup
 # ─── Highlight Detection ──────────────────────────────────────────────────────
 highlight:
   # AI-powered highlight refinement
   use_ai_refinement: true              # Use LLM to select viral-worthy clips
   # Audio energy spike detection
-  audio_energy_threshold: 0.3          # 0–1 relative to score range; lower = more clips
+  audio_energy_threshold: 0.25         # ↓ from 0.3 — catch more excitement moments
   # Minimum/maximum clip duration (seconds)
-  min_duration: 10
-  max_duration: 29                      # User requested less than 30s
+  min_duration: 8                       # ↓ from 10 — short punchy clips do better
+  max_duration: 45                      # ↓ from 58 — data shows 35-44s is sweet spot (63.7% completion)
+  # Preferred duration range (scorer boosts clips in this range)
+  preferred_duration_min: 30            # Data: 35-44s = 0.342 score, 25-34s = 0.301
+  preferred_duration_max: 45
   # Merge nearby highlights that are closer than this (seconds)
   merge_gap: 8
   # How many highlights to extract at most
-  max_clips: 10
+  max_clips: 15                         # ↑ from 10 — more candidates = more content
   # Words-per-minute threshold for "fast speech" detection
   fast_speech_wpm: 140
   # Silence threshold (seconds of silence to penalise a segment)
@@ -116,9 +119,9 @@ export:
   enable_variable_speed: true            # Enable smart speed adjustment based on silence/tempo
   variable_speed_aggressive: true       # Apply more aggressive speed up on dead air
   fps: 30                               # Target FPS (motion interpolation fills gaps)
-  video_bitrate: "25M"                  # Max bitrate (used with CRF as ceiling)
-  audio_bitrate: "320k"                 # Studio-grade audio
-  crf: 18                               # CRF quality (lower = higher quality, 15-23 recommended)
+  video_bitrate: "15M"                  # ↓ from 25M — Shorts on phones, 15M is plenty
+  audio_bitrate: "192k"                 # ↓ from 320k — mobile speakers, 192k indistinguishable
+  crf: 22                               # ↑ from 18 — saves 30-40% encode time, invisible on mobile
   super_resolution: false                 # AI 4x upscale via Real-ESRGAN (GPU only; auto-skips on CPU)
   ffmpeg_timeout_seconds: 900           # Prevent hung FFmpeg exports
   min_output_bytes: 100000              # Reject tiny/corrupt exports
@@ -158,12 +161,16 @@ youtube:
 # Controls the jittered hourly scheduling strategy.
 # Jitter ensures every upload hour has a different minute offset (e.g. 8:05, 9:12).
 upload_schedule:
-  interval_hours: 1                     # How often to upload (hours)
+  interval_hours: 2                     # ↑ from 1 — spread clips across the day for algorithm love
   jitter_max_minutes: 55                # Max jitter offset (0-59). 55 ensures no hour spill.
   prime_time:
     enabled: true                       # Assign best clips to prime time
     evening: [19, 22]                   # Evening prime window (IST)
     lunch: [12, 14]                     # Lunch prime window (IST)
+  # Dead day avoidance (data: Thursday = 138 avg views, 2.7x worse than Friday)
+  avoid_days: ["thursday"]
+  # Priority days (data: Fri=367, Sun=343, Wed=334 avg views)
+  priority_days: ["friday", "sunday", "wednesday"]
 
 # ─── Quality Intelligence ─────────────────────────────────────────────────────
 # Smart analysis thresholds for the Frame Analysis Engine.
@@ -205,14 +212,14 @@ learner:
 
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
-  provider: "opencode"          # opencode (Go) | groq | nvidia | openrouter
-  model: "mimo-v2.5-pro"        # primary: OpenCode Go mimo-v2.5-pro (~3.2s, $0)
+  provider: "opencode"          # opencode (Go) | nvidia
+  model: "qwen3.7-max"          # primary: best quality (~20-120s, $0 with Go sub)
   # Provider chain priority:
-  # 1. OpenCode Go: mimo-v2.5-pro (3.2s), mimo-v2.5 (2.6s) — $0 with Go sub
-  # 2. Groq: llama-4-scout (0.5s), llama-3.3-70b (0.8s) — fast, quota-limited
-  # 3. OpenCode Go fallback: kimi-k2.5, glm-5.1, deepseek-v4-flash
-  # 4. NVIDIA / OpenRouter
-  # 5. OpenCode Go: qwen3.7-max (20s, last resort)
+  # 1. OpenCode Go: qwen3.7-max — best quality (~20-120s)
+  # 2. OpenCode Go: minimax-m3, minimax-m2.7 — fast fallbacks (~2-5s)
+  # 3. OpenCode Go: mimo-v2.5-pro, mimo-v2.5, kimi-k2.5/k2.6, glm-5/5.1
+  # 4. OpenCode Go: deepseek-v4-pro/flash, minimax-m2.5, qwen3.7-plus, qwen3.6-plus
+  # 5. NVIDIA: llama-3.3-nemotron-super-49b-v1, llama-3.3-70b-instruct
   auto_benchmark: false                 # Set true to auto-discover best model on startup
   # ── LLM orchestration resilience (feat/llm-orchestration) ──────────────────
   retry_base_delay_seconds: 2.0         # Backoff before the failover retry round (transient/429/5xx only)

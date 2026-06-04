@@ -432,8 +432,10 @@ def run(
                             import random
                             slot = slot_map.get(clip_path.stem)
                             if slot:
+                                # Small uniform jitter (2-3h) per clip — NOT multiplied by
+                                # clip_idx which caused clips 10+ to be 20-30h out.
                                 jitter = random.uniform(2, 3)
-                                slot += timedelta(hours=jitter * (clip_idx - 1))
+                                slot += timedelta(hours=jitter)
                                 publish_at = format_for_youtube(slot)
                         try:
                             upload_video(
@@ -574,6 +576,54 @@ def run(
                          _DECISION_STORE.count(), prefs)
         except Exception as e:
             result.failures.append(f"stage9c: {e}")
+
+        try:
+            with run_phase(log, "stage 9e Cricket Learning Engine",
+                           "cricket_learner", run_id=rid):
+                from automation.learner import (
+                    PersistentStateStore, ProcessedEventLog, LearningDispatcher,
+                    FormatLearner, EntityLearner, TrendEngine, TimingLearner,
+                    DurationLearner, CricketScorer, CricketRecommendationEngine,
+                )
+                _cricket_state = PersistentStateStore()
+                try:
+                    _cricket_log = ProcessedEventLog(_cricket_state._conn)
+                    _fmt = FormatLearner(_cricket_state)
+                    _ent = EntityLearner(_cricket_state)
+                    _trend = TrendEngine(_cricket_state)
+                    _tim = TimingLearner(_cricket_state)
+                    _dur = DurationLearner(_cricket_state)
+                    _dispatcher = LearningDispatcher(
+                        _fmt, _ent, _tim, _dur, _trend, _cricket_log
+                    )
+                    all_events = _DECISION_STORE.get_all_events()
+                    updated = _dispatcher.dispatch_batch(all_events)
+                    _trend.decay_all()
+                    _trend.prune_expired()
+                    _scorer = CricketScorer(_fmt, _ent, _trend, _tim, _dur, _cricket_state)
+                    _recs = CricketRecommendationEngine(
+                        _fmt, _ent, _trend, _tim, _dur, _cricket_state
+                    )
+                    recommendations = _recs.generate_all()
+                    for rec in recommendations[:5]:
+                        log.info("[cricket_learner] [%s/%s] %s — %s",
+                                 rec.priority, rec.category,
+                                 rec.recommendation, rec.reason)
+                    metrics_events = _DECISION_STORE.get_events(
+                        event_type=EventType.metrics_received
+                    )
+                    if len(metrics_events) >= 20:
+                        _scorer.recalibrate_weights(metrics_events[-20:])
+                        log.info("[cricket_learner] weights recalibrated: %s",
+                                 _scorer.get_weights())
+                    log.info("[cricket_learner] dispatched %d updates from %d events, "
+                             "%d active trends, %d recommendations",
+                             updated, len(all_events),
+                             len(_trend.get_active()), len(recommendations))
+                finally:
+                    _cricket_state.close()
+        except Exception as e:
+            result.failures.append(f"stage9e: {e}")
 
         try:
             with run_phase(log, "stage 9d Provider Health",
