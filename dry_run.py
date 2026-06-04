@@ -423,7 +423,8 @@ def _api_intercept_context(video_path: str):
     # ── 10. Pillow ImageFilter ─────────────────────────────────────────────
 
     class _FakeFilter:
-        pass
+        def __init__(self, *args, **kwargs):
+            pass
 
     # ── 11. requests — HTTP for trends ─────────────────────────────────────
 
@@ -480,7 +481,9 @@ def _api_intercept_context(video_path: str):
 
     # ── 17. OAuth token refresh ────────────────────────────────────────────
 
-    class _FakeCredentials:
+    from google.oauth2.credentials import Credentials as RealCredentials
+
+    class _FakeCredentials(RealCredentials):
         valid = True
         expired = False
         refresh_token = "fake_refresh"
@@ -488,14 +491,18 @@ def _api_intercept_context(video_path: str):
             pass
         def refresh(self, request):
             pass
-        @classmethod
-        def from_authorized_user_file(cls, *args, **kwargs):
-            log.info("  [FAKE OAuth] Credentials.from_authorized_user_file")
-            return cls()
         def to_json(self):
             return '{"token": "fake"}'
 
-    _fake_creds = _FakeCredentials()
+    @classmethod
+    def _fake_from_authorized_user_file(cls, *args, **kwargs):
+        log.info("  [FAKE OAuth] Credentials.from_authorized_user_file")
+        return _FakeCredentials()
+
+    @classmethod
+    def _fake_from_authorized_user_info(cls, *args, **kwargs):
+        log.info("  [FAKE OAuth] Credentials.from_authorized_user_info")
+        return _FakeCredentials()
 
     # ── 18. scheduler ──────────────────────────────────────────────────────
 
@@ -542,7 +549,8 @@ def _api_intercept_context(video_path: str):
         # Upload probe
         patch("upload._probe_video", _fake_probe_video),
         # OAuth credential loading
-        patch("google.oauth2.credentials.Credentials", _FakeCredentials),
+        patch("google.oauth2.credentials.Credentials.from_authorized_user_file", _fake_from_authorized_user_file),
+        patch("google.oauth2.credentials.Credentials.from_authorized_user_info", _fake_from_authorized_user_info),
         # scheduler
         patch("scheduler.get_next_upload_time", _fake_get_next_upload_time),
     ]

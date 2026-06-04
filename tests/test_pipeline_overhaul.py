@@ -115,6 +115,7 @@ class TestLLMOrchestration:
         ai = AIClient()
         ai.opencode_api_key = "k"
         ai.nvidia_api_key = None
+        ai.groq_api_key = None
 
         class FakeExc(Exception):
             status_code = 429
@@ -197,9 +198,10 @@ class TestSEOContract:
         ctx = json.loads((tmp_path / "clipQ_seo_failed.json").read_text())
         assert ctx["transcript"] == "kohli six"
 
-        # Now recover
-        good = json.dumps({"title": "T", "description": "D",
-                           "search_terms": ["a b"], "hashtags": ["#S"]})
+        # Now recover — must pass quality gate (title≥10, desc≥20)
+        good = json.dumps({"title": "Kohli ne maara CHHAKKA! 🔥",
+                           "description": "Virat Kohli smashes massive six over long-on in IPL 2026",
+                           "search_terms": ["kohli six wankhede"], "hashtags": ["#Shorts"]})
         with patch("utils.ai_client.AIClient.generate_fastest_first",
                    return_value=good):
             r = retry_failed_seo(str(tmp_path))
@@ -488,12 +490,14 @@ class TestModelDiversity:
                 f"nvidia should be first but got {models[0]}"
 
     def test_seo_does_not_mutate_shared_ai_singleton(self):
-        """generate_clip_seo must NOT mutate ai._provider/_model (bug #1 fix)."""
-        from automation.seo.seo import generate_clip_seo, ai as seo_ai
+        """generate_clip_seo must NOT mutate the lazy-loaded AI singleton."""
+        from automation.seo.seo import generate_clip_seo, _get_ai
+        seo_ai = _get_ai()
         original_provider = seo_ai._provider
         original_model = seo_ai._model
-        good = json.dumps({"title": "T #Shorts", "description": "D #Shorts",
-                           "search_terms": ["a b"], "hashtags": ["#Shorts"]})
+        good = json.dumps({"title": "Kohli ne maara CHHAKKA! 🔥 #Shorts",
+                           "description": "Virat Kohli smashes massive six over long-on in IPL 2026",
+                           "search_terms": ["kohli six wankhede"], "hashtags": ["#Shorts"]})
         with patch("utils.ai_client.AIClient.generate_fastest_first",
                    return_value=good):
             generate_clip_seo("c1", "kohli six", "RCB vs CSK",

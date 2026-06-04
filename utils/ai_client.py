@@ -90,19 +90,28 @@ class AIClient:
     _provider_token_buckets = {}
 
     PROVIDER_MODELS = {
-        "opencode": ["mimo-v2.5-pro", "mimo-v2.5", "mimo-v2.5-mini", "mimo-v2.5-flash",
-                     "kimi-k2.5", "kimi-k2.6", "glm-5", "glm-5.1",
-                     "deepseek-v4-flash", "deepseek-v4-pro", "minimax-m2.7", "qwen3.6-plus", "qwen3.7-max"],
+        "opencode": ["mimo-v2.5-pro", "mimo-v2.5",
+                     "kimi-k2.5", "kimi-k2.6",
+                     "glm-5", "glm-5.1",
+                     "deepseek-v4-pro", "deepseek-v4-flash",
+                     "minimax-m2.5", "minimax-m2.7", "minimax-m3",
+                     "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"],
         "nvidia": ["nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct",
                    "xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5"],
+        "groq": ["llama-3.3-70b-versatile", "gemma2-9b-it"],
+    }
+
+    # Per-provider rate limit overrides. Groq has strict TPM limits.
+    PROVIDER_RATE_LIMITS = {
+        "opencode": {"capacity": 30.0, "refill_per_sec": 0.5},
+        "nvidia": {"capacity": 30.0, "refill_per_sec": 0.5},
+        "groq": {"capacity": 10.0, "refill_per_sec": 0.15},  # ~6K TPM limit
     }
 
     # Per-model timeouts (seconds) for non-blocking race.
     # qwen3.7-max is slow (~20-120s); others return in 1-10s.
     MODEL_TIMEOUTS = {
         "qwen3.7-max": 180.0,
-        "mimo-v2.5-mini": 30.0,
-        "mimo-v2.5-flash": 30.0,
     }
 
     def __init__(self):
@@ -110,6 +119,8 @@ class AIClient:
         self.nvidia_base_url = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
         self.opencode_api_key = os.getenv("OPENCODE_ZEN_API_KEY")
         self.opencode_base_url = os.getenv("OPENCODE_ZEN_BASE_URL", "https://opencode.ai/zen/go/v1")
+        self.groq_api_key = os.getenv("GROQ_API_KEY")
+        self.groq_base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
         self.ollama_url = "http://localhost:11434/api/generate"
         ai_cfg = _cfg.get("ai", {})
         self._provider = ai_cfg.get("provider", "opencode")
@@ -122,7 +133,11 @@ class AIClient:
         return f"{provider}:{model}" if model else provider
 
     @classmethod
-    def _rate_limit_cfg(cls) -> tuple:
+    def _rate_limit_cfg(cls, provider: str = None) -> tuple:
+        """Get rate limit config for a provider. Uses per-provider overrides if available."""
+        if provider and provider in cls.PROVIDER_RATE_LIMITS:
+            rl = cls.PROVIDER_RATE_LIMITS[provider]
+            return float(rl.get("capacity", 30.0)), float(rl.get("refill_per_sec", 0.5))
         rl = _cfg.get("ai", {}).get("rate_limit", {})
         capacity = float(rl.get("capacity", 30.0))
         refill = float(rl.get("refill_per_sec", 0.5))
@@ -131,7 +146,7 @@ class AIClient:
     @classmethod
     def _check_and_consume_token(cls, provider: str, model: Optional[str] = None) -> bool:
         key = cls._bucket_key(provider, model)
-        capacity, refill_rate = cls._rate_limit_cfg()
+        capacity, refill_rate = cls._rate_limit_cfg(provider)
         with cls._shared_lock:
             now = time.time()
             cooldown = cls._provider_cooldown_until.get(provider, 0.0)
@@ -206,7 +221,7 @@ class AIClient:
             return cls._provider_cooldown_until.get(provider, 0.0) > time.time()
 
     def _get_failover_chain(self, start_provider: str) -> List[str]:
-        chain = ["opencode", "nvidia"]
+        chain = ["opencode", "nvidia", "groq"]
         if start_provider in chain:
             chain.remove(start_provider)
             chain.insert(0, start_provider)
@@ -236,6 +251,8 @@ class AIClient:
                 return self.generate_opencode(prompt, system_instruction)
             elif provider == "nvidia":
                 return self.generate_nvidia(prompt, system_instruction)
+            elif provider == "groq":
+                return self.generate_groq(prompt, system_instruction)
             else:
                 raise ValueError(f"Unknown provider {provider}")
         finally:
@@ -278,6 +295,8 @@ class AIClient:
             if p == "opencode" and self.opencode_api_key:
                 available_chain.append(p)
             elif p == "nvidia" and self.nvidia_api_key:
+                available_chain.append(p)
+            elif p == "groq" and self.groq_api_key:
                 available_chain.append(p)
 
         errors = []
@@ -355,6 +374,8 @@ class AIClient:
             if p == "opencode" and not self.opencode_api_key:
                 continue
             if p == "nvidia" and not self.nvidia_api_key:
+                continue
+            if p == "groq" and not self.groq_api_key:
                 continue
             for m in ms:
                 models.append((p, m))
@@ -483,6 +504,37 @@ class AIClient:
             raise ValueError(f"NVIDIA returned empty (finish_reason={response.choices[0].finish_reason})")
         return content.strip()
 
+    # --- GROQ ---
+
+    def generate_groq(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+        """Generate via Groq (fast inference, strict TPM limits).
+
+        Groq has ~6K TPM on free tier. Rate limit is handled by the
+        per-provider token bucket (capacity=10, refill=0.15/s).
+        """
+        if not self.groq_api_key:
+            raise ValueError("Groq API key missing")
+        client = OpenAI(api_key=self.groq_api_key, base_url=self.groq_base_url)
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+        self._last_provider = "groq"
+        self._last_model = self._model
+        t0 = time.monotonic()
+        response = client.chat.completions.create(
+            model=self._model, messages=messages, temperature=0.7, max_tokens=4096,
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
+        log.info("LLM: groq/%s (%dms, %d tokens)", self._model, duration_ms, tokens,
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms,
+                        "metadata": {"provider": "groq", "model": self._model, "tokens": tokens}})
+        content = response.choices[0].message.content
+        if content is None:
+            raise ValueError(f"Groq returned empty (finish_reason={response.choices[0].finish_reason})")
+        return content.strip()
+
     def get_used_provider(self) -> str:
         return self._last_provider or self._provider
 
@@ -495,6 +547,8 @@ class AIClient:
             available["opencode"] = self.PROVIDER_MODELS["opencode"]
         if self.nvidia_api_key:
             available["nvidia"] = self.PROVIDER_MODELS["nvidia"]
+        if self.groq_api_key:
+            available["groq"] = self.PROVIDER_MODELS["groq"]
         return available
 
     def generate_image(self, prompt: str, output_path: str) -> bool:

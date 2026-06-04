@@ -63,13 +63,21 @@ def populated_learner(learner):
 
 class TestPersistentMemory:
 
-    def test_init_default_path(self):
+    def test_init_default_path(self, tmp_db, monkeypatch):
         from self_learner.memory import PersistentMemory
+        # Redirect CWD so default "self_learner.db" resolves to a temp dir,
+        # not the production DB. This prevents the test from deleting real
+        # learning data on the dev workstation.
+        tmp_dir = Path(tmp_db).parent
+        monkeypatch.chdir(tmp_dir)
         mem = PersistentMemory()
         assert mem._db_path == "self_learner.db"
+        # The DB must be inside the temp dir, not the repo root.
+        assert Path(mem._db_path).resolve().parent == tmp_dir.resolve()
         mem.close()
-        if os.path.exists("self_learner.db"):
-            os.unlink("self_learner.db")
+        # Cleanup the temp DB
+        if Path(tmp_dir / "self_learner.db").exists():
+            Path(tmp_dir / "self_learner.db").unlink()
 
     def test_init_custom_path(self, tmp_db):
         from self_learner.memory import PersistentMemory

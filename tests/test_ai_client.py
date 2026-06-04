@@ -16,6 +16,7 @@ def test_provider_circuit_breaker():
     ai = AIClient()
     ai.opencode_api_key = "mock_oc"
     ai.nvidia_api_key = None
+    ai.groq_api_key = None
 
     with patch.object(ai, "generate_opencode", side_effect=RuntimeError("OC Down")), \
          patch.object(ai, "generate_ollama", side_effect=RuntimeError("Ollama Down")):
@@ -42,6 +43,7 @@ def test_rate_limit_token_bucket():
     ai = AIClient()
     ai.opencode_api_key = "mock_oc"
     ai.nvidia_api_key = None
+    ai.groq_api_key = None
 
     with patch.object(ai, "generate_opencode", return_value="OC Fallback") as mock_oc, \
          patch.object(ai, "generate_ollama", side_effect=RuntimeError("Ollama Down")):
@@ -85,6 +87,7 @@ def test_auth_failure_stops_retry():
     ai = AIClient()
     ai.opencode_api_key = "mock_oc"
     ai.nvidia_api_key = None
+    ai.groq_api_key = None
 
     auth_exc = Exception("Invalid API key")
     auth_exc.status_code = 401
@@ -98,6 +101,7 @@ def test_quota_exhaustion_skips_provider():
     ai = AIClient()
     ai.opencode_api_key = "mock_oc"
     ai.nvidia_api_key = "mock_nv"
+    ai.groq_api_key = None
     ai._model = "qwen3.6-plus"
 
     quota_exc = Exception("quota exceeded")
@@ -159,6 +163,7 @@ def test_fastest_first_returns_empty_when_all_fail():
     ai = AIClient()
     ai.opencode_api_key = "k"
     ai.nvidia_api_key = None
+    ai.groq_api_key = None
 
     with patch.object(AIClient, "generate_opencode", side_effect=FakeRateLimitError(retry_after=60)):
         out = ai.generate_fastest_first("p", "s")
@@ -171,6 +176,7 @@ def test_fastest_first_keeps_slow_but_valid_response():
     ai = AIClient()
     ai.opencode_api_key = "k"
     ai.nvidia_api_key = None
+    ai.groq_api_key = None
 
     def slow_ok(prompt, system_instruction=None):
         time.sleep(0.4)
@@ -254,7 +260,8 @@ def test_token_bucket_capacity_is_config_driven():
     reset_shared_state()
     fake_cfg = {"ai": {"rate_limit": {"capacity": 3, "refill_per_sec": 0.0}}, "logging": {}}
     with patch("utils.ai_client._cfg", fake_cfg):
-        prov, model = "opencode", "m"
+        # Use a provider NOT in PROVIDER_RATE_LIMITS to test config-driven path
+        prov, model = "test_prov", "m"
         ok = sum(1 for _ in range(10) if AIClient._check_and_consume_token(prov, model))
     assert ok == 3
 
@@ -320,21 +327,20 @@ def test_opencode_provider_models():
     assert "opencode" in AIClient.PROVIDER_MODELS
     assert "mimo-v2.5-pro" in AIClient.PROVIDER_MODELS["opencode"]
     assert "mimo-v2.5" in AIClient.PROVIDER_MODELS["opencode"]
-    assert "mimo-v2.5-mini" in AIClient.PROVIDER_MODELS["opencode"]
-    assert "mimo-v2.5-flash" in AIClient.PROVIDER_MODELS["opencode"]
+    assert "minimax-m2.5" in AIClient.PROVIDER_MODELS["opencode"]
+    assert "minimax-m3" in AIClient.PROVIDER_MODELS["opencode"]
     assert "qwen3.7-max" in AIClient.PROVIDER_MODELS["opencode"]
+    assert "qwen3.7-plus" in AIClient.PROVIDER_MODELS["opencode"]
 
 
 def test_model_timeouts_include_qwen37():
     assert "qwen3.7-max" in AIClient.MODEL_TIMEOUTS
     assert AIClient.MODEL_TIMEOUTS["qwen3.7-max"] == 180.0
-    assert AIClient.MODEL_TIMEOUTS["mimo-v2.5-mini"] == 30.0
-    assert AIClient.MODEL_TIMEOUTS["mimo-v2.5-flash"] == 30.0
+    assert len(AIClient.MODEL_TIMEOUTS) == 1
 
 
-def test_providers_only_opencode_nvidia():
-    assert set(AIClient.PROVIDER_MODELS.keys()) == {"opencode", "nvidia"}
-    assert "groq" not in AIClient.PROVIDER_MODELS
+def test_providers_only_opencode_nvidia_groq():
+    assert set(AIClient.PROVIDER_MODELS.keys()) == {"opencode", "nvidia", "groq"}
     assert "openrouter" not in AIClient.PROVIDER_MODELS
 
 
@@ -346,13 +352,12 @@ def test_xiaomi_mimo_in_nvidia():
 def test_xiaomi_mimo_in_opencode():
     assert "mimo-v2.5-pro" in AIClient.PROVIDER_MODELS["opencode"]
     assert "mimo-v2.5" in AIClient.PROVIDER_MODELS["opencode"]
-    assert "mimo-v2.5-mini" in AIClient.PROVIDER_MODELS["opencode"]
-    assert "mimo-v2.5-flash" in AIClient.PROVIDER_MODELS["opencode"]
+    assert "qwen3.7-plus" in AIClient.PROVIDER_MODELS["opencode"]
 
 
 def test_total_model_count():
     total = sum(len(v) for v in AIClient.PROVIDER_MODELS.values())
-    assert total == 17, f"Expected 17 models, got {total}"
+    assert total == 20, f"Expected 20 models, got {total}"
 
 
 def test_get_available_providers_only_enabled():
@@ -360,6 +365,7 @@ def test_get_available_providers_only_enabled():
     ai = AIClient()
     ai.opencode_api_key = "k"
     ai.nvidia_api_key = None
+    ai.groq_api_key = None
     avail = ai.get_available_providers()
     assert "opencode" in avail
     assert "nvidia" not in avail
