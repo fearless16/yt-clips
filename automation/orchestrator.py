@@ -412,6 +412,26 @@ def run(
                             clip_scores=clip_scores or None,
                         )
                         slot_map = {stem: dt for stem, dt in assignments}
+
+                        # Dead-day gating: if any slot lands on a dead day,
+                        # shift it to the next suitable upload day
+                        from automation.scheduling import is_dead_day, next_upload_day
+                        shifted = 0
+                        for stem, dt in list(slot_map.items()):
+                            day_name = dt.strftime("%A").lower()
+                            if is_dead_day(day_name):
+                                new_dt = next_upload_day(dt)
+                                slot_map[stem] = new_dt
+                                shifted += 1
+                                log.warning(
+                                    "Dead-day gate: %s shifted from %s (%s) → %s (%s)",
+                                    stem, day_name, dt.isoformat(),
+                                    new_dt.strftime("%A").lower(), new_dt.isoformat(),
+                                )
+                        if shifted:
+                            log.info("Dead-day gate shifted %d/%d clips",
+                                     shifted, len(slot_map))
+
                         log.info("Schedule generated for %d clips",
                                  len(assignments))
 

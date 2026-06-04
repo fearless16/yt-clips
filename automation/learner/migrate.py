@@ -403,6 +403,14 @@ def migrate(
     trend.decay_all()
     trend.prune_expired()
 
+    # Recalibrate scorer weights against actual channel data distribution
+    from automation.learner.scorer import CricketScorer
+    scorer = CricketScorer(fmt, ent, trend, tim, dur, state_store)
+    scorer.recalibrate_weights(events)
+    log.info("Scorer weights recalibrated: %s",
+             {k: round(v, 3) for k, v in scorer.get_weights().items()
+              if not k.startswith("last_")})
+
     summary = {
         "events_built": len(events),
         "events_dispatched": len(events),
@@ -420,6 +428,7 @@ def migrate(
         "best_hour": tim.best_hour(),
         "best_day": tim.best_day(),
         "active_trends": len(trend.get_active()),
+        "scoring_weights": scorer.get_weights(),
     }
 
     state_store.close()

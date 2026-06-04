@@ -72,7 +72,7 @@ class CricketScorer:
 
         hook_score = self._format.get_hook_score(hook_type)
         title_score = self._format.get_title_score(title_pattern)
-        format_score = hook_score * title_score
+        format_score = 0.6 * hook_score + 0.4 * title_score
 
         series = None
         format_tags = candidate.get("format_tags", [])
@@ -86,10 +86,13 @@ class CricketScorer:
         timing_score = schedule.get("confidence", 0.5)
 
         fatigue = 0.0
+        novelty = 0.0
         for p in players:
             fatigue = max(fatigue, self._entity.fatigue_penalty("players", p))
+            novelty = max(novelty, self._entity.novelty_bonus("players", p))
         for t in teams:
             fatigue = max(fatigue, self._entity.fatigue_penalty("teams", t))
+            novelty = max(novelty, self._entity.novelty_bonus("teams", t))
 
         w = self._weights
         raw_score = (
@@ -100,7 +103,7 @@ class CricketScorer:
             w["timing_weight"] * timing_score
         )
 
-        final = raw_score * (1.0 - fatigue)
+        final = raw_score * (1.0 - fatigue) + novelty
         return max(0.0, min(1.0, final))
 
     def score_many(self, candidates: list[dict]) -> list[tuple[dict, float]]:

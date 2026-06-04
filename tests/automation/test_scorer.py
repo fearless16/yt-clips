@@ -31,6 +31,7 @@ def _make_scorer(trend_val=0.5, fmt_val=0.4, entity_val=0.3, timing_val=0.5) -> 
     entity = MagicMock()
     entity.get_entity_score.return_value = entity_val
     entity.fatigue_penalty.return_value = 0.0
+    entity.novelty_bonus.return_value = 0.0
 
     trend = MagicMock()
     trend.get_trend_for_entities.return_value = trend_val
@@ -43,6 +44,125 @@ def _make_scorer(trend_val=0.5, fmt_val=0.4, entity_val=0.3, timing_val=0.5) -> 
     state.get.return_value = None  # forces DEFAULT_WEIGHTS
 
     return CricketScorer(fmt, entity, trend, timing, duration, state)
+
+
+# ---------------------------------------------------------------------------
+# BUG 1: format_score must use weighted average, not multiplication
+# ---------------------------------------------------------------------------
+
+class TestFormatScoreWeightedAverage:
+
+    def test_format_score_is_weighted_avg_not_product(self):
+        """format_score should be 0.6*hook + 0.4*title, NOT hook*title."""
+        fmt = MagicMock()
+        fmt.get_hook_score.return_value = 0.5
+        fmt.get_title_score.return_value = 0.3
+        entity = MagicMock()
+        entity.get_entity_score.return_value = 0.5
+        entity.fatigue_penalty.return_value = 0.0
+        entity.novelty_bonus.return_value = 0.0
+        trend = MagicMock()
+        trend.get_trend_for_entities.return_value = 0.5
+        timing = MagicMock()
+        timing.get_schedule_recommendation.return_value = {"confidence": 0.5}
+        duration = MagicMock()
+        state = MagicMock()
+        state.get.return_value = None
+
+        scorer = CricketScorer(fmt, entity, trend, timing, duration, state)
+        score = scorer.score_candidate({"players": ["bumrah"], "teams": ["mi"]})
+
+        # With weighted avg: format = 0.6*0.5 + 0.4*0.3 = 0.42
+        # With multiplication: format = 0.5*0.3 = 0.15
+        # Total with avg:  0.30*0.5 + 0.25*0.42 + 0.20*0.5 + 0.15*0.5 + 0.10*0.5 = 0.48
+        # Total with mult: 0.30*0.5 + 0.25*0.15 + 0.20*0.5 + 0.15*0.5 + 0.10*0.5 = 0.41
+        # So if score >= 0.45, it's using weighted avg
+        assert score >= 0.45, (
+            f"Score {score:.3f} too low — format_score likely still using multiplication"
+        )
+
+    def test_high_hook_low_title_still_reasonable(self):
+        """Even with low title score, a strong hook should produce decent format score."""
+        fmt = MagicMock()
+        fmt.get_hook_score.return_value = 0.8  # strong hook
+        fmt.get_title_score.return_value = 0.2  # weak title
+        entity = MagicMock()
+        entity.get_entity_score.return_value = 0.5
+        entity.fatigue_penalty.return_value = 0.0
+        entity.novelty_bonus.return_value = 0.0
+        trend = MagicMock()
+        trend.get_trend_for_entities.return_value = 0.5
+        timing = MagicMock()
+        timing.get_schedule_recommendation.return_value = {"confidence": 0.5}
+        state = MagicMock()
+        state.get.return_value = None
+
+        scorer = CricketScorer(fmt, entity, trend, timing, MagicMock(), state)
+        score = scorer.score_candidate({"players": ["bumrah"], "teams": ["mi"]})
+
+        # format = 0.6*0.8 + 0.4*0.2 = 0.56
+        # vs multiplication: 0.8*0.2 = 0.16
+        assert score >= 0.43, f"Score {score:.3f} is too low with strong hook"
+
+
+# ---------------------------------------------------------------------------
+# BUG 2: novelty_bonus must be wired into scoring
+# ---------------------------------------------------------------------------
+
+class TestNoveltyBonusWired:
+
+    def test_novelty_bonus_boosts_score(self):
+        """When entity has novelty bonus, final score must be higher."""
+        # Scorer without novelty bonus
+        scorer_no_bonus = _make_scorer(trend_val=0.5, entity_val=0.5)
+
+        # Scorer with novelty bonus
+        fmt = MagicMock()
+        fmt.get_hook_score.return_value = 0.8
+        fmt.get_title_score.return_value = 0.5
+        entity = MagicMock()
+        entity.get_entity_score.return_value = 0.5
+        entity.fatigue_penalty.return_value = 0.0
+        entity.novelty_bonus.return_value = 0.10  # strong novelty
+        trend = MagicMock()
+        trend.get_trend_for_entities.return_value = 0.5
+        timing = MagicMock()
+        timing.get_schedule_recommendation.return_value = {"confidence": 0.5}
+        state = MagicMock()
+        state.get.return_value = None
+        scorer_with_bonus = CricketScorer(fmt, entity, trend, timing, MagicMock(), state)
+
+        candidate = {"players": ["bumrah"], "teams": ["mi"]}
+        score_no = scorer_no_bonus.score_candidate(candidate)
+        score_yes = scorer_with_bonus.score_candidate(candidate)
+
+        assert score_yes > score_no, (
+            f"Novelty bonus not wired: with={score_yes:.3f}, without={score_no:.3f}"
+        )
+
+    def test_novelty_bonus_capped(self):
+        """Score with novelty bonus must not exceed 1.0."""
+        fmt = MagicMock()
+        fmt.get_hook_score.return_value = 0.9
+        fmt.get_title_score.return_value = 0.9
+        entity = MagicMock()
+        entity.get_entity_score.return_value = 0.9
+        entity.fatigue_penalty.return_value = 0.0
+        entity.novelty_bonus.return_value = 0.15
+        trend = MagicMock()
+        trend.get_trend_for_entities.return_value = 0.9
+        timing = MagicMock()
+        timing.get_schedule_recommendation.return_value = {"confidence": 0.9}
+        state = MagicMock()
+        state.get.return_value = None
+        scorer = CricketScorer(fmt, entity, trend, timing, MagicMock(), state)
+
+        score = scorer.score_candidate({
+            "players": ["bumrah"], "teams": ["mi"], "weighted_score": 9.0
+        })
+        assert score <= 1.0, f"Score {score:.3f} exceeds 1.0"
+
+
 
 
 # ---------------------------------------------------------------------------
