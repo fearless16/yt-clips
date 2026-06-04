@@ -34,13 +34,15 @@ class TestEventType:
             "infra_failed",
             "deferred",
             "policy_updated",
+            "trend_ingested",
+            "trend_decayed",
         }
         actual = {e.value for e in EventType}
         assert actual == expected
-        assert len(EventType) == 13
+        assert len(EventType) == 15
 
     def test_no_extra_members(self):
-        expected_count = 13
+        expected_count = 15
         assert len(EventType) == expected_count
 
 

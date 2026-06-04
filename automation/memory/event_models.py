@@ -19,6 +19,8 @@ class EventType(str, Enum):
     infra_failed = "infra_failed"
     deferred = "deferred"
     policy_updated = "policy_updated"
+    trend_ingested = "trend_ingested"
+    trend_decayed = "trend_decayed"
 
 
 @dataclass(frozen=True)

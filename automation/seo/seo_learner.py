@@ -234,7 +234,9 @@ class SEOLearner:
 
         self._dedup_clips(record)
         self._update_learned_patterns(features, performance_score, record["timestamp"])
-        self._update_model_performance(provider, model, performance_score)
+        self._update_model_performance(
+            provider, model, performance_score, timestamp=record["timestamp"]
+        )
         self._update_feature_importance()
         self._save_performance_data()
         log.info("Recorded SEO performance for %s: score=%.2f [%s/%s]",
@@ -355,16 +357,41 @@ class SEOLearner:
                 entry2 = f"{key}:{features[key]}"
                 self.learned_insights["hashtag_performance"].setdefault(entry2, []).append(performance_score)
 
-    def _update_model_performance(self, provider: str = None, model: str = None, performance_score: float = 0):
+    def _update_model_performance(self, provider: str = None, model: str = None,
+                                   performance_score: float = 0,
+                                   timestamp: str = None):
+        """Track per-model performance with time-decay weighting.
+
+        Stores both a raw ``avg_score`` (simple mean, for reference) and a
+        ``weighted_avg_score`` (exponentially time-decayed) so that recent
+        clip performance drives model selection rather than old history.
+        """
         if not provider and not model:
             return
         key = f"{provider or '?'}/{model or '?'}"
         mp = self.learned_insights["model_performance"]
         if key not in mp:
-            mp[key] = {"count": 0, "total_score": 0.0, "avg_score": 0.0, "provider": provider, "model": model}
+            mp[key] = {
+                "count": 0,
+                "total_score": 0.0,
+                "avg_score": 0.0,
+                "weighted_total_score": 0.0,
+                "weighted_total_weight": 0.0,
+                "weighted_avg_score": 0.0,
+                "provider": provider,
+                "model": model,
+            }
+        ts = timestamp or datetime.now().isoformat()
+        decay_w = _time_decay_weight(ts)
         mp[key]["count"] += 1
         mp[key]["total_score"] += performance_score
         mp[key]["avg_score"] = mp[key]["total_score"] / mp[key]["count"]
+        mp[key]["weighted_total_score"] += performance_score * decay_w
+        mp[key]["weighted_total_weight"] += decay_w
+        if mp[key]["weighted_total_weight"] > 0:
+            mp[key]["weighted_avg_score"] = (
+                mp[key]["weighted_total_score"] / mp[key]["weighted_total_weight"]
+            )
         self._update_best_model()
 
     def _update_best_model(self):
@@ -787,12 +814,19 @@ Return concise bullet points. Focus on what the user should START doing, STOP do
 # ─── Module-level convenience functions ─────────────────────────────────────
 
 _seo_learner_instance = None
+_seo_learner_lock = threading.Lock()
 
 
-def _get_learner() -> SEOLearner:
+def _get_learner() -> "SEOLearner":
+    """Thread-safe lazy singleton for SEOLearner."""
     global _seo_learner_instance
-    if _seo_learner_instance is None:
-        _seo_learner_instance = SEOLearner()
+    # Fast-path: already initialised (no lock needed after first creation)
+    if _seo_learner_instance is not None:
+        return _seo_learner_instance
+    with _seo_learner_lock:
+        # Double-checked locking: re-test after acquiring lock
+        if _seo_learner_instance is None:
+            _seo_learner_instance = SEOLearner()
     return _seo_learner_instance
 
 
