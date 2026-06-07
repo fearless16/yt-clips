@@ -87,6 +87,18 @@ def setup_argparse():
         help="Skip transcript fetch (use cached transcript)",
     )
     parser.add_argument(
+        "--skip-highlight", action="store_true", default=False,
+        help="Skip highlight detection (use cached highlights)",
+    )
+    parser.add_argument(
+        "--skip-export", action="store_true", default=False,
+        help="Skip clip export (use existing exported clips)",
+    )
+    parser.add_argument(
+        "--skip-seo", action="store_true", default=False,
+        help="Skip SEO generation (use existing metadata)",
+    )
+    parser.add_argument(
         "--sample-minutes", type=int, default=None,
         help="Download only first N minutes of video",
     )
@@ -174,6 +186,9 @@ def main(args=None):
         url=parsed.url,
         skip_download=parsed.skip_download,
         skip_transcribe=parsed.skip_transcribe,
+        skip_highlight=parsed.skip_highlight,
+        skip_export=parsed.skip_export,
+        skip_seo=parsed.skip_seo,
         auto_sync=parsed.sync,
         auto_upload=parsed.upload,
         auto_schedule=parsed.schedule,
