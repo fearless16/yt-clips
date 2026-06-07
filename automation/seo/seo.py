@@ -424,8 +424,11 @@ def _clean_dict_from_description(raw: str) -> str:
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```\s*$", "", text)
 
-    # If it's a Python dict representation, try to parse as JSON
-    if text.startswith("{") and not text.startswith("{\""):
+    # If it's a Python dict representation (single-quoted keys), convert to JSON.
+    # Only replace single quotes when the first value after { uses single quotes,
+    # so we don't corrupt valid double-quoted JSON that starts with "{ ".
+    stripped = text.lstrip()
+    if stripped.startswith("{'") or stripped.startswith("{ '"):
         text = re.sub(r"'", '"', text)
 
     return text.strip()

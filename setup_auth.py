@@ -11,7 +11,7 @@ from google.oauth2.credentials import Credentials
 
 SCOPES_MAP = {
     "drive_token.json": ["https://www.googleapis.com/auth/drive.file"],
-    "yt_channel_token.json": ["https://www.googleapis.com/auth/youtube.upload"],
+    "yt_channel_token.json": ["https://www.googleapis.com/auth/youtube.force-ssl"],
     "yt_analytics_token.json": [
         "https://www.googleapis.com/auth/youtube.readonly",
         "https://www.googleapis.com/auth/yt-analytics.readonly",
