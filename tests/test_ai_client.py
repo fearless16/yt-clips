@@ -344,9 +344,9 @@ def test_providers_only_opencode_nvidia_groq():
     assert "openrouter" not in AIClient.PROVIDER_MODELS
 
 
-def test_xiaomi_mimo_in_nvidia():
-    assert "xiaomi/mimo-v2.5-pro" in AIClient.PROVIDER_MODELS["nvidia"]
-    assert "xiaomi/mimo-v2.5" in AIClient.PROVIDER_MODELS["nvidia"]
+def test_nvidia_models():
+    assert "nvidia/llama-3.3-nemotron-super-49b-v1" in AIClient.PROVIDER_MODELS["nvidia"]
+    assert "meta/llama-3.3-70b-instruct" in AIClient.PROVIDER_MODELS["nvidia"]
 
 
 def test_xiaomi_mimo_in_opencode():
@@ -357,7 +357,7 @@ def test_xiaomi_mimo_in_opencode():
 
 def test_total_model_count():
     total = sum(len(v) for v in AIClient.PROVIDER_MODELS.values())
-    assert total == 20, f"Expected 20 models, got {total}"
+    assert total == 19, f"Expected 19 models, got {total}"
 
 
 def test_get_available_providers_only_enabled():

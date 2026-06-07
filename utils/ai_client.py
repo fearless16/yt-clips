@@ -97,8 +97,8 @@ class AIClient:
                      "minimax-m2.5", "minimax-m2.7", "minimax-m3",
                      "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"],
         "nvidia": ["nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct",
-                   "xiaomi/mimo-v2.5-pro", "xiaomi/mimo-v2.5"],
-        "groq": ["llama-3.3-70b-versatile", "gemma2-9b-it"],
+                   "nvidia/llama-3.3-nemotron-super-49b-v1.5"],
+        "groq": ["llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct"],
     }
 
     # Per-provider rate limit overrides. Groq has strict TPM limits.

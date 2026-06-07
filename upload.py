@@ -36,8 +36,8 @@ except ImportError:
     )
     sys.exit(1)
 
-# YouTube API scopes (intentionally different from Drive scope)
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+# YouTube API scopes — force-ssl covers upload + metadata update + caption read
+SCOPES = ["https://www.googleapis.com/auth/youtube.force-ssl"]
 SHORTS_MAX_SECONDS = 180.0
 
 

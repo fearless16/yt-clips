@@ -1,9 +1,12 @@
 """Analytics — aggregated metrics and trends from the event store."""
 
 import json
+import logging
 
 from automation.memory.event_models import EventType
 from automation.memory.decision_store import DecisionStore
+
+log = logging.getLogger("analytics")
 
 
 class Analytics:
@@ -70,3 +73,19 @@ class Analytics:
             et = event.event_type.value
             trends[et] = trends.get(et, 0) + 1
         return trends
+
+
+def generate_daily_insights() -> dict:
+    """Convenience function: instantiate Analytics and return summary.
+
+    Called by pipeline.py and worker.py for analytics cycle.
+    """
+    try:
+        store = DecisionStore()
+        analytics = Analytics(store)
+        summary = analytics.get_summary()
+        log.info("analytics summary: %s", summary)
+        return summary
+    except Exception as e:
+        log.warning("Analytics unavailable: %s", e)
+        return {}
