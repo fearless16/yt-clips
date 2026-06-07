@@ -204,6 +204,152 @@ def sync_to_drive(
     return uploaded_ids
 
 
+# ─── DB Persistence (self-learner.db + automation.db) ─────────────────────────
+
+DB_FOLDER = "db"  # Google Drive subfolder for database files
+DB_FILES = ["self_learner.db", "automation.db"]
+
+
+def _drive_service():
+    """Get Drive API service, handling both API and filesystem modes."""
+    from utils.drive_auth import get_drive_service, FILESYSTEM_MODE
+    service = get_drive_service()
+    if not service:
+        log.warning("Drive API not available — DB persistence disabled")
+        return None, FILESYSTEM_MODE
+    return service, service if service != FILESYSTEM_MODE else FILESYSTEM_MODE
+
+
+def sync_db_to_drive() -> bool:
+    """Upload self_learner.db and automation.db to Google Drive.
+
+    Stores under yt-clips/db/ so it doesn't mix with shortcut videos.
+    Returns True if at least one file was uploaded.
+    """
+    from utils.drive_auth import get_drive_service, find_or_create_folder, FILESYSTEM_MODE
+
+    db_files = [p for p in DB_FILES if Path(p).exists()]
+    if not db_files:
+        log.info("[db_sync] No database files found to sync")
+        return False
+
+    service = get_drive_service()
+    if not service:
+        log.warning("[db_sync] Drive API not available")
+        return False
+
+    # Filesystem mode (Colab mount) — just copy
+    if service == FILESYSTEM_MODE:
+        colab_base = Path(os.environ.get("COLAB_SYNC_PATH", "/content/drive/MyDrive/yt-clips"))
+        dest_dir = colab_base / DB_FOLDER
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for fname in db_files:
+            shutil.copy2(fname, dest_dir / fname)
+            log.info("[db_sync] Copied %s to Drive mount", fname)
+        return True
+
+    # API mode
+    root_id = find_or_create_folder(service, "yt-clips")
+    db_folder_id = find_or_create_folder(service, DB_FOLDER, root_id)
+
+    for fname in db_files:
+        local_path = Path(fname)
+        try:
+            # If file already exists on Drive, update it instead of creating duplicate
+            query = f"'{db_folder_id}' in parents and name = '{fname}' and trashed = false"
+            existing = service.files().list(q=query, spaces="drive", fields="files(id)").execute()
+            existing_files = existing.get("files", [])
+
+            from googleapiclient.http import MediaFileUpload
+            media = MediaFileUpload(str(local_path), resumable=True)
+
+            if existing_files:
+                file_id = existing_files[0]["id"]
+                service.files().update(fileId=file_id, media_body=media).execute()
+            else:
+                metadata = {"name": fname, "parents": [db_folder_id]}
+                service.files().create(body=metadata, media_body=media).execute()
+
+            log.info("[db_sync] Uploaded %s (%.1f KB)", fname, local_path.stat().st_size / 1024)
+        except Exception as e:
+            log.warning("[db_sync] Failed to upload %s: %s", fname, e)
+
+    return True
+
+
+def restore_db_from_drive() -> bool:
+    """Download self_learner.db and automation.db from Google Drive.
+
+    Only overwrites if the local file is missing or older.
+    Returns True if at least one file was restored.
+    """
+    from utils.drive_auth import get_drive_service, find_folder, FILESYSTEM_MODE
+
+    service = get_drive_service()
+    if not service:
+        log.warning("[db_restore] Drive API not available")
+        return False
+
+    # Filesystem mode (Colab mount)
+    if service == FILESYSTEM_MODE:
+        colab_base = Path(os.environ.get("COLAB_SYNC_PATH", "/content/drive/MyDrive/yt-clips"))
+        src_dir = colab_base / DB_FOLDER
+        if not src_dir.exists():
+            log.info("[db_restore] No db/ folder on Drive mount")
+            return False
+        for fname in DB_FILES:
+            src = src_dir / fname
+            if src.exists():
+                shutil.copy2(src, fname)
+                log.info("[db_restore] Restored %s from Drive mount", fname)
+        return True
+
+    # API mode
+    root_id = find_folder(service, "yt-clips")
+    if not root_id:
+        log.info("[db_restore] No yt-clips folder on Drive — nothing to restore")
+        return False
+
+    db_folder_id = find_folder(service, DB_FOLDER, root_id)
+    if not db_folder_id:
+        log.info("[db_restore] No db/ folder on Drive — nothing to restore")
+        return False
+
+    query = f"'{db_folder_id}' in parents and trashed = false"
+    files = service.files().list(q=query, spaces="drive", fields="files(id, name, modifiedTime, size)").execute()
+    items = files.get("files", [])
+
+    if not items:
+        log.info("[db_restore] No DB files on Drive")
+        return False
+
+    for item in items:
+        fname = item["name"]
+        if fname not in DB_FILES:
+            continue
+        file_id = item["id"]
+        file_size = int(item.get("size", 0))
+        local_path = Path(fname)
+
+        # Skip if local file is same size (assume unchanged)
+        if local_path.exists() and local_path.stat().st_size == file_size:
+            log.info("[db_restore] %s already up-to-date (%.1f KB)", fname, file_size / 1024)
+            continue
+
+        log.info("[db_restore] Downloading %s (%.1f KB)...", fname, file_size / 1024)
+        request = service.files().get_media(fileId=file_id)
+        from googleapiclient.http import MediaIoBaseDownload
+        import io
+        with open(local_path, "wb") as f:
+            downloader = MediaIoBaseDownload(f, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+        log.info("[db_restore] Restored %s (%.1f KB)", fname, local_path.stat().st_size / 1024)
+
+    return True
+
+
 # ─── Download from Drive ─────────────────────────────────────────────────────
 
 def download_from_drive(
