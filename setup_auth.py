@@ -32,23 +32,22 @@ class ReuseAddrWSGIServer(WSGIServer):
 
 def reauth(token_file: str, scopes: list[str]) -> bool:
     path = Path(token_file)
-    if not path.exists():
-        print(f"[SKIP] {token_file} not found")
-        return True
-
-    try:
-        creds = Credentials.from_authorized_user_file(str(path), scopes)
-        if creds and creds.valid:
-            print(f"[OK]   {token_file} — still valid")
-            return True
-        if creds and creds.expired and creds.refresh_token:
-            from google.auth.transport.requests import Request
-            creds.refresh(Request())
-            path.write_text(creds.to_json(), encoding="utf-8")
-            print(f"[OK]   {token_file} — refreshed")
-            return True
-    except Exception:
-        pass
+    if path.exists():
+        try:
+            creds = Credentials.from_authorized_user_file(str(path), scopes)
+            if creds and creds.valid:
+                print(f"[OK]   {token_file} — still valid")
+                return True
+            if creds and creds.expired and creds.refresh_token:
+                from google.auth.transport.requests import Request
+                creds.refresh(Request())
+                path.write_text(creds.to_json(), encoding="utf-8")
+                print(f"[OK]   {token_file} — refreshed")
+                return True
+        except Exception:
+            pass
+    else:
+        print(f"[NEW]  {token_file} — not found, will create via browser")
 
     prompt = PROMPTS.get(token_file, f"Authorize for {token_file}")
     print(f"[REAUTH] {token_file} — {prompt}")
