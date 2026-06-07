@@ -661,6 +661,13 @@ def run(
         except Exception as e:
             result.failures.append(f"stage9d: {e}")
 
+        # ── Stage 9e: DB Persistence ─────────────────────────────
+        try:
+            from sync import sync_db_to_drive
+            sync_db_to_drive()
+        except Exception as e:
+            log.warning("[db_sync] Failed: %s", e)
+
     status = "partial" if result.failures else "ok"
     log.info(
         "[EXIT] pipeline run_id=%s url=%s exported=%d uploaded=%d "

@@ -260,6 +260,13 @@ def process_queue():
                 "url": url,
             }, f, indent=2)
 
+        # Sync learning DB to Drive after every job
+        try:
+            from sync import sync_db_to_drive
+            sync_db_to_drive()
+        except Exception as e:
+            log.warning("DB sync after job failed: %s", e)
+
         status_label = "OK" if result.returncode == 0 else "FAILED"
         write_status(status, url, f"Exit code {result.returncode} ({elapsed:.0f}s)")
         log.info(f"[EXIT] Job {status_label} url={url} exit={result.returncode} elapsed={elapsed:.0f}s\n")
@@ -269,6 +276,14 @@ if __name__ == "__main__":
     log.info(f"Starting watcher on port {PORT}...")
     log.info(f"Job timeout: {JOB_TIMEOUT}s (set JOB_TIMEOUT env to change)")
     log.info(f"Status file: {STATUS_FILE}")
+
+    # Restore learning DB from Drive (persistent across sessions)
+    try:
+        from sync import restore_db_from_drive
+        restore_db_from_drive()
+    except Exception as e:
+        log.info("DB restore skipped (first run or no Drive access): %s", e)
+
     write_status("idle", "", "Watcher started")
 
     server = HTTPServer(("0.0.0.0", PORT), JobHandler)
