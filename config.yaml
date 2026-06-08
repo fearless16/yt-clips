@@ -251,6 +251,14 @@ thumbnail:
   variants_count: 3
 
 # ── Logging ──────────────────────────────────────────────────────────────────
+# ── Clip Selection (7-Agent System) ─────────────────────────────────────────
+clip_selection:
+  enabled: true                        # Use 7-agent clip selector (false = old heuristic)
+  use_llm_arbiter: true                # Run LLM Final Arbiter pass
+  min_quality: 20.0                    # Min weighted score (0-100) to keep a clip
+  max_selected: 10                     # Max clips to select
+
+# ── Logging ──────────────────────────────────────────────────────────────────
 logging:
   level: "INFO"                         # DEBUG | INFO | WARNING | ERROR
   log_file: "logs/pipeline.log"

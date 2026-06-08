@@ -53,6 +53,19 @@ automation/
 │   ├── ranker.py           ClipRanker: rank by score, top_k, select_best
 │   └── llm_scoring.py      score_seo_output, format_score_table, score_latency_penalty
 │
+├── clip_selection/   7-Agent Clip Selector + Hook Auditor + Learning (v1.0)
+│   ├── __init__.py         Module exports: ClipSelector, HookAuditor, Agent, ALL_AGENTS
+│   ├── agent_base.py       Abstract Agent base class (name, weight, score())
+│   ├── agents.py           7 agents: HookExpert(35%), EmotionExpert(20%),
+│   │                        CricketContextExpert(10%), ViralPotentialExpert(15%),
+│   │                        ViewerPsychologyExpert(10%), RetentionExpert(5%),
+│   │                        BrutalRejectionAgent(0%) penalty-only
+│   ├── arbiter.py          compute_weighted_score() + optional LLM arbiter refinement
+│   ├── selector.py         ClipSelector: score_candidates() (parallel) + select()
+│   ├── pipeline.py         detect_highlights() drop-in replacement for highlight.py
+│   ├── hook_auditor.py     analyze_clip_hook(): first 3s hook quality analysis
+│   └── clip_learner.py     Phase 4 SQLite persistence (clip_performance + hook_analysis)
+│
 └── seo/              SEO subpackage
     ├── __init__.py   Re-exports: process_all_seo, SEOLearner, generate_daily_insights, trends
     ├── seo.py        SEO generation + SUGGEST_CACHE + TREND_CACHE
@@ -169,8 +182,75 @@ Key APIs:
 
 ### `orchestrator.py` — Pipeline Runner
 
-8 phases, each lazy-imported:
-1. download → 2. transcribe → 3. highlight → 4. export → 5. seo → 6. sync → 7. upload → 8. cleanup
+9 stages, each lazy-imported:
+1. download → 2. transcribe → 3-5. highlight + score + rank → 6. export → 7. thumbnails → 8. upload → 9. self-learning
+
+### `clip_selection/` — 7-Agent Clip Selector (v1.0)
+
+Replaces the old 6-dimension heuristic scorer in `highlight.py`. Activated by config:
+
+```yaml
+clip_selection:
+  enabled: true
+  use_llm_arbiter: true
+  min_quality: 20.0
+  max_selected: 10
+```
+
+#### Architecture
+
+```
+clip_selection/
+├── agent_base.py       Agent base class (name, weight, score())
+├── agents.py           7 stateless Python scorers
+├── arbiter.py          compute_weighted_score() + optional LLM refinement
+├── selector.py         ClipSelector: parallel scoring + rejection filter + ranking
+├── pipeline.py         detect_highlights() — drop-in replacement for highlight.py
+├── hook_auditor.py     First 3s hook quality analysis
+└── clip_learner.py     Phase 4 SQLite persistence
+```
+
+#### 7 Agents
+
+| Agent | Weight | Role |
+|-------|--------|------|
+| HookExpert | 35% | Audio spike + reaction words in first 3s |
+| EmotionExpert | 20% | Energy level + spikes + emotion word density |
+| ViralPotentialExpert | 15% | Rare events, eruption peaks, controversy |
+| CricketContextExpert | 10% | Player mentions, action terms, rivalry boost |
+| ViewerPsychologyExpert | 10% | Cliffhangers, identity triggers, share triggers |
+| RetentionExpert | 5% | Duration sweet spot, pacing, payoff energy |
+| BrutalRejectionAgent | 0% | Penalty only — finds reasons to reject |
+
+All agents run in parallel (ThreadPoolExecutor, 8 workers). Zero per-candidate LLM cost.
+Optional single LLM call = Final Arbiter refinement on top-k candidates.
+
+#### Rejection Logic
+- Each agent independently flags `should_reject`
+- 2+ agents flagging → autonomous rejection
+- BrutalRejectionAgent checks: too short, too long, low energy, no emotion, no cricket, duplicate, high silence
+- Rejection penalty: weighted score × 0.5
+
+#### Hook Auditor (Phase 3)
+- `HookAuditor.analyze_clip_hook()` — text-only analysis of first 3 seconds
+- 10 hook types: wicket, six, four, crowd_eruption, commentator_scream, reaction_face, controversy, milestone, drama, instant_payoff
+- Output: `{hook_score: 0-100, hook_type, swipe_risk: high|medium|low, swipe_risks: [], reason, first_20_words}`
+- Runs on exported clips (Stage 6) — saves to `clip_learner.db`
+
+#### ClipLearner (Phase 4)
+- SQLite DB `clip_learner.db` with tables:
+  - `clip_performance`: clip_id, video_title, match_context, selected_rank, final_score, hook_score, agent_scores_json, rejection_reasons, youtube_video_id, views, estimated_retention, completion_rate, avg_view_duration_seconds
+  - `hook_analysis`: clip_id, hook_score, hook_type, swipe_risk, swipe_risks_json, first_20_words, agent_hook_score
+- Thread-safe via internal `threading.Lock()`
+- Methods: `save_clip_selection()`, `save_hook_analysis()`, `update_performance()`, `get_all_clips()`, `get_top_performers()`, `get_performance_summary()`
+
+#### Test Coverage
+```bash
+.venv/bin/python -m pytest tests/automation/test_clip_selection.py -v
+# 49 tests: 4 helpers, 4 HookExpert, 3 EmotionExpert, 4 CricketContext, 
+#   2 ViralPotential, 2 ViewerPsychology, 2 Retention, 4 BrutalRejection,
+#   2 AllAgents, 4 Arbiter, 3 ClipSelector, 7 HookAuditor, 5 ClipLearner, 3 AgentBase
+```
 
 ---
 
@@ -262,6 +342,9 @@ Transcript re-fetch (same video, within 1h):
 ```bash
 # All automation tests
 .venv/bin/python -m pytest tests/test_automation.py -v
+
+# Clip selection tests (49 tests)
+.venv/bin/python -m pytest tests/automation/test_clip_selection.py -v
 
 # SEO & Analytics tests (root) — currently none exist
 # TODO: add tests for seo.py, seo_learner.py, analytics.py

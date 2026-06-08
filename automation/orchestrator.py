@@ -137,6 +137,9 @@ def run(
     transcript_path = str(Path(transcripts_dir) / f"{stem}.json")
     highlights_path = str(Path(highlights_dir) / f"{stem}.yaml")
 
+    # Hoisted config flag — shared across stages 3-5, 6 (hook audit), 8b (update_performance)
+    use_new_selector = cfg.get("clip_selection", {}).get("enabled", True)
+
     # ── Stages 1-8 — skipped when learn_only ────────────────────────
     if not learn_only:
 
@@ -200,12 +203,15 @@ def run(
                 _PROVIDER_HEALTH.record_failure("transcriber")
                 result.failures.append(f"stage2: {e}")
 
-        # ── Stage 3-5: Highlight detection + score + rank ───────
+        # ── Stage 3-5: Highlight detection + agent scoring + rank ──
         if not skip_highlight:
             try:
                 with run_phase(log, "stage 3-5 Highlight + Score + Rank",
                                "highlight", run_id=rid) as ph:
-                    from highlight import detect_highlights
+                    if use_new_selector:
+                        from automation.clip_selection.pipeline import detect_highlights
+                    else:
+                        from highlight import detect_highlights
                     highlights = detect_highlights(transcript_path, video_path,
                                                    highlights_path)
                     result.selected_clips = len(highlights)
@@ -221,6 +227,7 @@ def run(
                             "end": h.get("end"),
                         })
                         dims = h.get("dimension_scores", {})
+                        agent_scores = h.get("agent_scores", {})
                         lock_score = _lock_scorer.score({
                             "clip_id": h["id"],
                             "duration_s": (
@@ -232,7 +239,10 @@ def run(
                         })
                         _emit_event(cid, EventType.candidate_scored, {
                             "score": h.get("score", 0.0),
+                            "final_score": h.get("final_score", h.get("score", 0.0)),
                             "dimension_scores": dims,
+                            "agent_scores": agent_scores,
+                            "hook_score": h.get("hook_score"),
                             "ai_score": h.get("ai_score"),
                             "lock_score": lock_score["score"],
                             "lock_features": lock_score["features"],
@@ -241,6 +251,38 @@ def run(
                             "rank": rank_idx,
                             "total": len(highlights),
                         })
+
+                    # Save clip selection data for Phase 4 learning
+                    if use_new_selector and highlights:
+                        try:
+                            from automation.clip_selection.clip_learner import ClipLearner
+                            _learner = ClipLearner()
+                            for rank_idx, h in enumerate(highlights, 1):
+                                agent_scores = h.get("agent_scores", {})
+                                _learner.save_clip_selection(
+                                    clip_id=f"{stem}/{h['id']}",
+                                    selected_rank=rank_idx,
+                                    final_score=h.get("final_score", 0),
+                                    agent_scores=agent_scores,
+                                    video_title=_title,
+                                )
+                                hook_score = h.get("hook_score")
+                                if hook_score is not None:
+                                    _learner.save_hook_analysis(
+                                        clip_id=f"{stem}/{h['id']}",
+                                        hook_score=hook_score,
+                                        hook_type=agent_scores.get("hook_expert", {}).get("reasoning", "unknown"),
+                                        swipe_risk="low" if hook_score >= 30 else "high",
+                                        swipe_risks=[],
+                                        first_20_words=" ".join(h.get("text", "").split()[:20]),
+                                        agent_hook_score=agent_scores.get("hook_expert", {}).get("score"),
+                                    )
+                            _learner.close()
+                            log.info("[clip_learner] saved selection data for %d clips",
+                                     len(highlights))
+                        except Exception as e:
+                            log.warning("[clip_learner] save failed: %s", e)
+
                     _PROVIDER_HEALTH.record_success("llm")
                     ph.set(selected=result.selected_clips)
             except Exception as e:
@@ -263,6 +305,88 @@ def run(
                         _emit_event(f"{stem}/{clip_path.stem}", EventType.exported, {
                             "path": str(clip_path),
                         })
+                    # Phase 3 — Hook audit: analyze first 3s of each exported clip
+                    if result.exported and use_new_selector:
+                        try:
+                            with run_phase(log, "stage 6a Hook audit",
+                                           "hook_audit", run_id=rid) as ph:
+                                from automation.clip_selection.hook_auditor import (
+                                    HookAuditor,
+                                )
+                                from automation.clip_selection.clip_learner import (
+                                    ClipLearner,
+                                )
+                                _auditor = HookAuditor()
+                                _learner = ClipLearner()
+                                highlights_by_id = {
+                                    h["id"]: h for h in highlights
+                                }
+                                hook_audited = 0
+                                for clip_path in result.exported:
+                                    clip_id = clip_path.stem
+                                    source_start = highlights_by_id.get(
+                                        clip_id, {}
+                                    ).get("start", 0.0)
+                                    transcript_text = highlights_by_id.get(
+                                        clip_id, {}
+                                    ).get("text", "")
+                                    duration = (
+                                        highlights_by_id.get(clip_id, {}).get(
+                                            "end", 0.0
+                                        )
+                                        - source_start
+                                    )
+                                    if duration <= 0:
+                                        duration = 30.0
+                                    if not transcript_text:
+                                        try:
+                                            with open(
+                                                clip_path.with_name(
+                                                    f"{clip_path.stem}_metadata.json"
+                                                )
+                                            ) as f:
+                                                meta = json.load(f)
+                                            transcript_text = meta.get(
+                                                "description", ""
+                                            )
+                                        except Exception:
+                                            transcript_text = ""
+                                    hook_result = _auditor.analyze_clip_hook(
+                                        clip_path=str(clip_path),
+                                        transcript_text=transcript_text,
+                                        start_sec=source_start,
+                                        clip_duration=duration,
+                                    )
+                                    _learner.save_hook_analysis(
+                                        clip_id=f"{stem}/{clip_id}",
+                                        hook_score=hook_result["hook_score"],
+                                        hook_type=hook_result["hook_type"],
+                                        swipe_risk=hook_result["swipe_risk"],
+                                        swipe_risks=hook_result.get(
+                                            "swipe_risks", []
+                                        ),
+                                        first_20_words=hook_result.get(
+                                            "first_20_words", ""
+                                        ),
+                                    )
+                                    _emit_event(
+                                        f"{stem}/{clip_id}",
+                                        EventType.candidate_scored,
+                                        {
+                                            "hook_score": hook_result["hook_score"],
+                                            "hook_type": hook_result["hook_type"],
+                                            "swipe_risk": hook_result["swipe_risk"],
+                                        },
+                                    )
+                                    hook_audited += 1
+                                _learner.close()
+                                ph.set(audited=hook_audited)
+                                log.info(
+                                    "[hook_audit] %d clips analyzed",
+                                    hook_audited,
+                                )
+                        except Exception as e:
+                            log.warning("[hook_audit] failed: %s", e)
                     # SEO runs immediately after export
                     if not skip_seo and result.exported:
                         export_dir = str(result.exported[0].parent)
@@ -458,7 +582,7 @@ def run(
                                 slot += timedelta(hours=jitter)
                                 publish_at = format_for_youtube(slot)
                         try:
-                            upload_video(
+                            video_id = upload_video(
                                 str(clip_path), str(meta_path),
                                 privacy=privacy, publish_at=publish_at,
                             )
@@ -466,8 +590,27 @@ def run(
                             _emit_event(
                                 f"{stem}/{clip_path.stem}",
                                 EventType.published,
-                                {"privacy": privacy, "publish_at": publish_at},
+                                {"privacy": privacy, "publish_at": publish_at,
+                                 "youtube_video_id": video_id},
                             )
+                            # Phase 4 — record YouTube video ID for later analytics
+                            if video_id and use_new_selector:
+                                try:
+                                    from automation.clip_selection.clip_learner import (
+                                        ClipLearner,
+                                    )
+                                    _learner = ClipLearner()
+                                    _learner.update_performance(
+                                        clip_id=f"{stem}/{clip_path.stem}",
+                                        youtube_video_id=video_id,
+                                        views=0,
+                                    )
+                                    _learner.close()
+                                except Exception as e:
+                                    log.warning(
+                                        "[clip_learner] update_performance failed: %s",
+                                        e,
+                                    )
                         except Exception as e:
                             _emit_infra_failed(
                                 f"{stem}/{clip_path.stem}", str(e),
@@ -644,6 +787,54 @@ def run(
                     _cricket_state.close()
         except Exception as e:
             result.failures.append(f"stage9e: {e}")
+
+        # ── Stage 9f: ClipSelector feedback loop ──────────────────────
+        # Learn adaptive agent weights + entity biases from clip_learner.db
+        # and persist them so the next pipeline run biases toward proven winners.
+        if use_new_selector:
+            try:
+                with run_phase(log, "stage 9f ClipSelector Feedback",
+                               "clip_feedback", run_id=rid) as ph:
+                    from automation.clip_selection.weight_learner import (
+                        recalibrate_weights,
+                        load_entity_biases,
+                    )
+                    import json as _json
+
+                    adaptive_weights = recalibrate_weights(
+                        db_path="clip_learner.db",
+                        min_clips=cfg.get("clip_selection", {}).get(
+                            "learning_min_clips", 10
+                        ),
+                        drift_rate=cfg.get("clip_selection", {}).get(
+                            "learning_drift_rate", 0.3
+                        ),
+                    )
+                    # Persist weights for next run
+                    weights_path = Path("clip_selection_weights.json")
+                    with open(weights_path, "w") as f:
+                        _json.dump(adaptive_weights, f, indent=2)
+
+                    entity_biases = load_entity_biases("self_learner.db")
+                    biases_path = Path("clip_selection_biases.json")
+                    with open(biases_path, "w") as f:
+                        _json.dump(entity_biases, f, indent=2, default=str)
+
+                    log.info(
+                        "[clip_feedback] adaptive weights persisted: %s",
+                        {k: round(v, 3) for k, v in adaptive_weights.items()},
+                    )
+                    if entity_biases:
+                        log.info(
+                            "[clip_feedback] entity biases persisted: "
+                            "%d top players, %d avoid players",
+                            len(entity_biases.get("top_players", [])),
+                            len(entity_biases.get("avoid_players", [])),
+                        )
+                    ph.set(weights_updated=True)
+            except Exception as e:
+                log.warning("[clip_feedback] Failed: %s", e)
+                result.failures.append(f"stage9f: {e}")
 
         try:
             with run_phase(log, "stage 9d Provider Health",
