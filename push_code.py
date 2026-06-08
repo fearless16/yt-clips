@@ -33,6 +33,7 @@ TOKEN_FILES = [
 # If missing locally but present on Drive, restore (don't push "missing").
 PERSISTENT_FILES = [
     "self_learner.db",
+    "clip_learner.db",
 ]
 
 try:
