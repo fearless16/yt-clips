@@ -85,3 +85,11 @@ kaggle_monitor.py
 # Learner databases (SQLite — not for version control)
 self_learner.db
 automation.db
+clip_learner.db
+
+# Auto-generated adaptive config
+clip_selection_weights.json
+clip_selection_biases.json
+
+# Backups
+*.bak
