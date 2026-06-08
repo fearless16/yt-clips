@@ -33,9 +33,30 @@ _CRICKET_TERMS = {
     "wide", "over", "inning", "strike", "maiden", "duck", "collapse",
     "chase", "target", "required", "win", "lost", "final", "semifinal",
     "playoff", "qualifier", "tie", "drs",
+    # Missing fundamental terms
+    "out", "stump", "castled", "delivery", "batsman", "bowler",
+    "yorker", "bouncer", "googly", "doosra", "fulltoss", "slower",
+    "reverse", "sweep", "cover", "drive", "pull", "hook", "cut",
+    "flick", "glance", "timber", "knocked", "clean", "middle",
+    "on", "off", "leg", "point", "slip", "gully", "third",
+    "sixer", "fourr", "chhakka", "chauka",
+    # Stadiums and venues
+    "wankhede", "lords", "mcg", "eden", "scg",
+    "chinnaswamy", "chepauk", "kotla", "mohali",
+    # Countries / teams
+    "india", "australia", "england", "south", "africa",
+    "pakistan", "bangladesh", "afghanistan", "sri", "lanka",
+    "zimbabwe", "ireland", "scotland", "netherlands",
+    # Commentary intensity
+    "crowd", "eruption", "roar", "stadium", "ground",
+    "atmosphere", "electric", "vibrant", "thunderous",
 }
 
-_CRICKET_PHRASES = ["run out", "no ball", "super over"]
+_CRICKET_PHRASES = ["run out", "no ball", "super over", "free hit", "power play",
+                     "death over", "last over", "world cup", "ipl final",
+                     "test match", "one day", "t20 world",
+                     "takes", "catch", "direct hit", "run a ball",
+                     "player of the match", "man of the match"]
 
 _EMOTION_WORDS = {
     "oh", "wow", "what", "no", "yes", "whoa", "insane", "crazy", "bro",
@@ -46,15 +67,23 @@ _EMOTION_WORDS = {
     "khatarnak", "shandar", "dhamaakedaar", "zabardast", "bawaal",
     "oho", "accha", "haan", "nahi", "chhakka", "chauka", "sixer",
     "jeet", "machaa", "dekho", "khatam",
+    # More emotional intensity
+    "berserk", "wild", "pandemonium", "carnage", "riot",
+    "stunning", "sensational", "magnificent", "extraordinary",
+    "unreal", "speechless", "historic", "legendary", "iconic",
+    "majestic", "devastating", "ruthless", "monstrous",
+    "absolute", "beauty", "class", "vintage", "magic",
+    "woww", "ohh", "ahh", "woah",
 }
 
 _PAYOFF_WORDS = {
     "out", "gone", "taken", "bowled", "caught", "stumped",
     "six", "four", "boundary", "century", "fifty", "win", "victory",
     "final", "champion", "record", "history", "hattrick",
+    "castled", "timber", "knocked", "clean",
 }
 
-_PAYOFF_PHRASES = ["got him"]
+_PAYOFF_PHRASES = ["got him", "clean bowled", "middle stump", "goes for a walk"]
 
 
 def _words(text: str) -> set[str]:
@@ -67,6 +96,27 @@ def _count_overlap(words_set: set[str], keywords: set[str]) -> int:
 
 def _phrase_hits(text_lower: str, phrases: list[str]) -> int:
     return sum(1 for p in phrases if p in text_lower)
+
+
+def _collapse_repeats(w: str) -> str:
+    result = []
+    i = 0
+    while i < len(w):
+        run_start = i
+        while i < len(w) and w[i] == w[run_start]:
+            i += 1
+        run_len = i - run_start
+        if run_len >= 3:
+            result.append(w[run_start])
+        else:
+            result.extend(w[run_start:i])
+    return ''.join(result)
+
+
+def _fuzzy_words(text: str) -> set[str]:
+    raw = set(re.findall(r'\b\w+\b', text.lower()))
+    normalized = {_collapse_repeats(w) for w in raw}
+    return raw | normalized
 
 
 def _rms_range(rms_map: dict, t_start: float, t_end: float) -> list[float]:
@@ -122,7 +172,7 @@ class HookExpert(Agent):
             reasons.append("question_hook")
 
         # Commentary intensity in hook window
-        hook_words = _words(hook_text)
+        hook_words = _fuzzy_words(hook_text)
         emotion_hits = _count_overlap(hook_words, _EMOTION_WORDS)
         score += min(emotion_hits * 5, 15)
         if emotion_hits > 0:
@@ -168,7 +218,7 @@ class EmotionExpert(Agent):
                 reasons.append(f"spikes={spike_count}")
 
         # Emotion word density
-        words = _words(text)
+        words = _fuzzy_words(text)
         emotion_hits = _count_overlap(words, _EMOTION_WORDS)
         score += min(emotion_hits * 4, 20)
         if emotion_hits >= 3:
@@ -206,7 +256,7 @@ class CricketContextExpert(Agent):
         score = 20.0
         reasons = []
 
-        words = _words(text)
+        words = _fuzzy_words(text)
         text_lower = text.lower()
 
         # Player mentions
@@ -314,7 +364,7 @@ class ViralPotentialExpert(Agent):
         score = 10.0
         reasons = []
 
-        words = _words(text)
+        words = _fuzzy_words(text)
 
         # Rare/high-impact events
         rare_terms = {
@@ -395,7 +445,7 @@ class ViewerPsychologyExpert(Agent):
             "king", "goat", "legend", "best", "greatest", "champion",
             "our", "we", "us", "india", "team india",
         }
-        words = _words(text)
+        words = _fuzzy_words(text)
         identity_hits = _count_overlap(words, identity_words)
         score += min(identity_hits * 5, 15)
         if identity_hits > 0:
@@ -480,7 +530,7 @@ class RetentionExpert(Agent):
             reasons.append("strong_payoff_energy")
 
         last_words = text.rstrip()[-40:] if len(text) >= 40 else text
-        payoff_hits = _count_overlap(_words(last_words), _PAYOFF_WORDS)
+        payoff_hits = _count_overlap(_fuzzy_words(last_words), _PAYOFF_WORDS)
         payoff_hits += _phrase_hits(last_words.lower(), _PAYOFF_PHRASES)
         if payoff_hits:
             score += 10
@@ -540,7 +590,7 @@ class BrutalRejectionAgent(Agent):
                 reasons.append("low_energy_segment")
 
         # No emotional content
-        words = _words(text)
+        words = _fuzzy_words(text)
         if _count_overlap(words, _EMOTION_WORDS) == 0:
             rejection_score += 15
             reasons.append("no_emotion_words")
