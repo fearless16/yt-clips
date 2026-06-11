@@ -117,7 +117,7 @@ class AIClient:
     def __init__(self):
         self.nvidia_api_key = os.getenv("NVIDIA_API_KEY")
         self.nvidia_base_url = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-        self.opencode_api_key = os.getenv("OPENCODE_ZEN_API_KEY")
+        self.opencode_api_key = os.getenv("OPENCODE_ZEN_API_KEY") or os.getenv("OPENCODE_API_KEY")
         self.opencode_base_url = os.getenv("OPENCODE_ZEN_BASE_URL", "https://opencode.ai/zen/go/v1")
         self.groq_api_key = os.getenv("GROQ_API_KEY")
         self.groq_base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
