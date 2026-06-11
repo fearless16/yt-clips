@@ -787,11 +787,10 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
     Fires available models concurrently, returns first valid JSON.
     """
     try:
-        response = _get_ai().generate_fastest_first(
+        response = _get_ai().generate_text(
             prompt=user_prompt,
             system_instruction=_SYSTEM,
-            prefer_provider=provider_override,
-            prefer_model=model_override,
+            prefer_model=model_override or _get_ai()._model,
         )
         if not response or not response.strip():
             log.warning("[%s] AI returned empty response", clip_id)
