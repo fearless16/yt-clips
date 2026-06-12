@@ -202,6 +202,8 @@ seo:
   # Inject random hardcoded viral hooks/CTAs into descriptions. OFF by default:
   # the product contract prefers per-clip LLM-generated hooks over generic copy.
   inject_viral_elements: false
+  # Sleep between SEO calls for each clip (seconds). Longer = less rate limiting.
+  inter_clip_sleep_s: 30
 
 # ── SEO Learner ─────────────────────────────────────────────────────────────────
 # Self-improving SEO system — learns from past performance to boost future clips.
@@ -213,13 +215,23 @@ learner:
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
   provider: "opencode"          # opencode (Go) | nvidia
-  model: "qwen3.7-max"          # primary: best quality (~20-120s, $0 with Go sub)
+  model: "qwen3.7-max"          # primary
   # Provider chain priority:
-  # 1. OpenCode Go: qwen3.7-max — best quality (~20-120s)
-  # 2. OpenCode Go: minimax-m3, minimax-m2.7 — fast fallbacks (~2-5s)
-  # 3. OpenCode Go: mimo-v2.5-pro, mimo-v2.5, kimi-k2.5/k2.6, glm-5/5.1
-  # 4. OpenCode Go: deepseek-v4-pro/flash, minimax-m2.5, qwen3.7-plus, qwen3.6-plus
-  # 5. NVIDIA: llama-3.3-nemotron-super-49b-v1, llama-3.3-70b-instruct
+  # 1. OpenCode Go: qwen3.7-max
+  # 2. OpenCode Go: mimo-v2.5-pro
+  # 3. OpenCode Go: deepseek-v4-pro
+  # 4. NVIDIA: llama-3.3-nemotron-super-49b-v1
+  # Per-error cooldown durations (seconds). Set 0 for defaults.
+  cooldown_seconds:
+    auth_failure: 7200           # 2 hours
+    quota_exhausted: 7200        # 2 hours
+    rate_limit: 300              # 5 minutes
+    model_not_found: 300         # 5 minutes
+    timeout: 120                 # 2 minutes
+    server_error: 120            # 2 minutes
+  # Circuit breaker: provider-level cooldown after N consecutive failures
+  circuit_breaker_max_failures: 15
+  circuit_breaker_cooldown_seconds: 900  # 15 minutes
   auto_benchmark: false                 # Set true to auto-discover best model on startup
   # ── LLM orchestration resilience (feat/llm-orchestration) ──────────────────
   retry_base_delay_seconds: 2.0         # Backoff before the failover retry round (transient/429/5xx only)
