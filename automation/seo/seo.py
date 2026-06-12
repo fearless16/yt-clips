@@ -191,6 +191,16 @@ ENGAGING_CTAS = [
     "Cricket ke har ek moment ke liye stay tuned!",
 ]
 
+# ── SEO Model Restrictions ─────────────────────────────────────────────────────
+# Only these models are trusted for SEO generation.
+# nvidia (nemotron/llama) and groq (llama/grok) produce generic, low-quality SEO.
+SEO_PREFERRED_MODELS = [
+    ("opencode", "qwen3.7-max"),
+    ("opencode", "mimo-v2.5-pro"),
+    ("opencode", "deepseek-v4-pro"),
+]
+SEO_BLOCKED_PROVIDERS = {"nvidia", "groq"}
+
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
 _SYSTEM = (
@@ -787,11 +797,19 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
     Fires available models concurrently, returns first valid JSON.
     """
     try:
-        response = _get_ai().generate_text(
-            prompt=user_prompt,
-            system_instruction=_SYSTEM,
-            prefer_model=model_override or _get_ai()._model,
-        )
+        ai = _get_ai()
+        if model_override:
+            response = ai.generate_text(
+                prompt=user_prompt,
+                system_instruction=_SYSTEM,
+                prefer_model=model_override,
+            )
+        else:
+            # Use SEO-restricted models (OpenCode Go only)
+            response = ai.generate_seo_text(
+                prompt=user_prompt,
+                system_instruction=_SYSTEM,
+            )
         if not response or not response.strip():
             log.warning("[%s] AI returned empty response", clip_id)
             return None
@@ -834,11 +852,19 @@ def _escalation_seo(clip_id: str, user_prompt: str,
         transcript=transcript,
     )
     try:
-        response = _get_ai().generate_text(
-            prompt=salvage_prompt,
-            system_instruction=_SYSTEM,
-            prefer_model=model_override,
-        )
+        ai = _get_ai()
+        if model_override:
+            response = ai.generate_text(
+                prompt=salvage_prompt,
+                system_instruction=_SYSTEM,
+                prefer_model=model_override,
+            )
+        else:
+            # Use SEO-restricted models (OpenCode Go only)
+            response = ai.generate_seo_text(
+                prompt=salvage_prompt,
+                system_instruction=_SYSTEM,
+            )
         if not response:
             return None
         parsed = _parse_json_response(response)

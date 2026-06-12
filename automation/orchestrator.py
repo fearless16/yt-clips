@@ -295,11 +295,10 @@ def run(
             try:
                 with run_phase(log, "stage 6 Export + SEO", "export", run_id=rid) as ph:
                     from export import export_all
-                    from automation.seo.seo import process_all_seo
                     result.exported = export_all(
                         highlights_path, video_path,
                         transcript_path=transcript_path,
-                        generate_seo=False,
+                        generate_seo=not skip_seo,
                     )
                     for clip_path in result.exported:
                         _emit_event(f"{stem}/{clip_path.stem}", EventType.exported, {
@@ -387,10 +386,8 @@ def run(
                                 )
                         except Exception as e:
                             log.warning("[hook_audit] failed: %s", e)
-                    # SEO runs immediately after export
+                    # SEO is now handled per-clip inside export_all()
                     if not skip_seo and result.exported:
-                        export_dir = str(result.exported[0].parent)
-                        process_all_seo(highlights_path, export_dir)
                         result.seo_generated = len(result.exported)
                     _PROVIDER_HEALTH.record_success("export")
                     ph.set(exported=len(result.exported),

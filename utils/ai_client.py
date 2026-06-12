@@ -551,6 +551,76 @@ class AIClient:
             available["groq"] = self.PROVIDER_MODELS["groq"]
         return available
 
+    # --- SEO-SPECIFIC (restricted to OpenCode Go) ---
+
+    # Models trusted for SEO, in priority order.
+    # nvidia/groq produce generic low-quality SEO — NEVER used.
+    SEO_PREFERRED_MODELS = [
+        ("opencode", "qwen3.7-max"),
+        ("opencode", "mimo-v2.5-pro"),
+        ("opencode", "deepseek-v4-pro"),
+    ]
+
+    def generate_seo_text(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+        """Generate text for SEO using ONLY OpenCode Go models.
+
+        Priority: qwen3.7-max → mimo-v2.5-pro → deepseek-v4-pro.
+        Never falls back to nvidia, groq, or ollama — bad SEO is worse
+        than retrying later.
+
+        Raises:
+            RuntimeError: If all OpenCode Go models fail.
+        """
+        if not self.opencode_api_key:
+            raise RuntimeError("OpenCode Go API key missing — cannot generate SEO")
+
+        errors = []
+        for provider, model in self.SEO_PREFERRED_MODELS:
+            if self._in_cooldown(provider):
+                log.info("SEO: skipping %s/%s (cooldown)", provider, model)
+                continue
+            if not self._check_and_consume_token(provider, model):
+                log.info("SEO: skipping %s/%s (rate-limited)", provider, model)
+                continue
+            try:
+                res = self._call_provider(provider, prompt, system_instruction,
+                                          prefer_model=model)
+                if res and res.strip():
+                    self._record_success(provider)
+                    self._last_provider = provider
+                    self._last_model = model
+                    self._log_cost(provider, model,
+                                   len(prompt) + len(system_instruction or ""),
+                                   len(res))
+                    log.info("SEO LLM ok via %s/%s", provider, model)
+                    return res.strip()
+            except Exception as e:
+                self._note_provider_error(provider, e)
+                log.warning("SEO: %s/%s failed: %s", provider, model, e)
+                errors.append(f"{provider}/{model}: {e}")
+
+        # Retry round (ignore token bucket, respect cooldowns)
+        for provider, model in self.SEO_PREFERRED_MODELS:
+            if self._in_cooldown(provider):
+                continue
+            try:
+                res = self._call_provider(provider, prompt, system_instruction,
+                                          prefer_model=model)
+                if res and res.strip():
+                    self._record_success(provider)
+                    self._last_provider = provider
+                    self._last_model = model
+                    log.info("SEO LLM ok via %s/%s (retry)", provider, model)
+                    return res.strip()
+            except Exception as e:
+                self._note_provider_error(provider, e)
+                errors.append(f"{provider}/{model} (retry): {e}")
+
+        raise RuntimeError(
+            f"SEO generation failed — all OpenCode Go models exhausted. "
+            f"Errors: {'; '.join(errors)}"
+        )
+
     def generate_image(self, prompt: str, output_path: str) -> bool:
         return False
 

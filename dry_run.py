@@ -180,6 +180,11 @@ def _api_intercept_context(video_path: str):
                  prompt.replace("\n", " ")[:60])
         return "Kohli hit a six. Bumrah bowled a yorker. Amazing catch."
 
+    def _fake_generate_seo_text(self, prompt="", system_instruction=None):
+        log.info("  [FAKE AI] generate_seo_text (prompt=%.60s...)",
+                 prompt.replace("\n", " ")[:60])
+        return _FAKE_SEO_JSON
+
     def _fake_generate_image(prompt="", **kwargs):
         log.info("  [FAKE AI] generate_image (prompt=%.60s...)", prompt[:60])
         return b"JPEG" * 1024
@@ -516,6 +521,7 @@ def _api_intercept_context(video_path: str):
         # AI providers
         patch("utils.ai_client.AIClient.generate_fastest_first", _fake_generate_fastest_first),
         patch("utils.ai_client.AIClient.generate_text", _fake_generate_text),
+        patch("utils.ai_client.AIClient.generate_seo_text", _fake_generate_seo_text),
         patch("utils.ai_client.AIClient.generate_image", _fake_generate_image),
         # subprocess intercept
         patch("subprocess.run", _fake_subprocess_run),

@@ -354,12 +354,14 @@ class TestProcessAllSEOFailureMarker:
         (tmp_path / "input").mkdir()
 
         mock_ai = MagicMock()
-        mock_ai.generate_fastest_first.return_value = json.dumps({
+        seo_response = json.dumps({
             "title": "Kohli ne maara CHHAKKA! 🔥 #Shorts",
             "description": "Virat Kohli smashes massive six over long-on in IPL 2026",
             "hashtags": ["#Shorts", "#IPL"],
             "search_terms": ["kohli six ipl wankhede"],
         })
+        mock_ai.generate_fastest_first.return_value = seo_response
+        mock_ai.generate_seo_text.return_value = seo_response
         mock_get_ai.return_value = mock_ai
 
         h_path = self._make_highlights_yaml(tmp_path, {
@@ -382,6 +384,7 @@ class TestProcessAllSEOFailureMarker:
         mock_ai = MagicMock()
         mock_ai.generate_fastest_first.side_effect = Exception("fail")
         mock_ai.generate_text.side_effect = Exception("fail")
+        mock_ai.generate_seo_text.side_effect = Exception("fail")
         mock_get_ai.return_value = mock_ai
 
         h_path = self._make_highlights_yaml(tmp_path, {
@@ -424,6 +427,7 @@ class TestInterClipSleepConfigurable:
         mock_ai = MagicMock()
         mock_ai.generate_fastest_first.side_effect = Exception("fail")
         mock_ai.generate_text.side_effect = Exception("fail")
+        mock_ai.generate_seo_text.side_effect = Exception("fail")
         mock_get_ai.return_value = mock_ai
 
         mock_time.sleep = MagicMock()
@@ -464,12 +468,14 @@ class TestRetryFailedSEO:
         (out_dir / "clip_retry_seo_failed.json").write_text(json.dumps(marker))
 
         mock_ai = MagicMock()
-        mock_ai.generate_fastest_first.return_value = json.dumps({
+        seo_response = json.dumps({
             "title": "Kohli ne maara CHHAKKA! 🔥 Recovered",
             "description": "Virat Kohli smashes massive six over long-on in IPL 2026",
             "hashtags": ["#Shorts"],
             "search_terms": ["kohli six wankhede"],
         })
+        mock_ai.generate_fastest_first.return_value = seo_response
+        mock_ai.generate_seo_text.return_value = seo_response
         mock_get_ai.return_value = mock_ai
 
         from automation.seo.seo import retry_failed_seo
@@ -517,3 +523,73 @@ class TestLazyAIClientInit:
         assert client is not None
         # Same instance on second call
         assert seo_mod._get_ai() is client
+
+
+# ---------------------------------------------------------------------------
+# SEO Model Restrictions (P0 — block nvidia/groq from SEO)
+# ---------------------------------------------------------------------------
+
+class TestSEOModelRestrictions:
+
+    def test_seo_blocked_providers_includes_nvidia_and_groq(self):
+        """nvidia and groq must be in SEO_BLOCKED_PROVIDERS."""
+        from automation.seo.seo import SEO_BLOCKED_PROVIDERS
+        assert "nvidia" in SEO_BLOCKED_PROVIDERS
+        assert "groq" in SEO_BLOCKED_PROVIDERS
+        assert "opencode" not in SEO_BLOCKED_PROVIDERS
+
+    def test_seo_preferred_models_all_opencode(self):
+        """All models in SEO_PREFERRED_MODELS must be opencode provider."""
+        from automation.seo.seo import SEO_PREFERRED_MODELS
+        for provider, model in SEO_PREFERRED_MODELS:
+            assert provider == "opencode", f"Non-opencode model: {provider}/{model}"
+
+    def test_seo_preferred_models_priority(self):
+        """Priority order: qwen3.7-max, mimo-v2.5-pro, deepseek-v4-pro."""
+        from automation.seo.seo import SEO_PREFERRED_MODELS
+        models = [m for _, m in SEO_PREFERRED_MODELS]
+        assert models[0] == "qwen3.7-max"
+        assert models[1] == "mimo-v2.5-pro"
+        assert models[2] == "deepseek-v4-pro"
+
+    @patch("automation.seo.seo._get_ai")
+    def test_generate_ai_seo_uses_generate_seo_text(self, mock_get_ai):
+        """_generate_ai_seo must call generate_seo_text (not generate_text)
+        when no model_override is specified."""
+        mock_ai = MagicMock()
+        mock_ai.generate_seo_text.return_value = json.dumps({
+            "title": "Kohli ne maara CHHAKKA! 🔥",
+            "description": "Virat Kohli smashes massive six in IPL 2026",
+            "hashtags": ["#Shorts", "#IPL"],
+            "search_terms": ["kohli six ipl"],
+        })
+        mock_ai._model = "qwen3.7-max"
+        mock_get_ai.return_value = mock_ai
+
+        from automation.seo.seo import _generate_ai_seo
+        result = _generate_ai_seo("clip_001", "test prompt", "kohli six", True)
+        assert result is not None
+        assert result["title"] == "Kohli ne maara CHHAKKA! 🔥"
+        # Must call generate_seo_text, NOT generate_text
+        mock_ai.generate_seo_text.assert_called_once()
+        mock_ai.generate_text.assert_not_called()
+
+    @patch("automation.seo.seo._get_ai")
+    def test_generate_ai_seo_uses_generate_text_with_model_override(self, mock_get_ai):
+        """When model_override is set, _generate_ai_seo should use generate_text
+        (allowing the caller to specify any model)."""
+        mock_ai = MagicMock()
+        mock_ai.generate_text.return_value = json.dumps({
+            "title": "Override model SEO title! 🔥",
+            "description": "Description for override test",
+            "hashtags": ["#Shorts"],
+            "search_terms": ["test term"],
+        })
+        mock_get_ai.return_value = mock_ai
+
+        from automation.seo.seo import _generate_ai_seo
+        result = _generate_ai_seo("clip_002", "test prompt", "test", True,
+                                   model_override="custom-model-v1")
+        assert result is not None
+        mock_ai.generate_text.assert_called_once()
+        mock_ai.generate_seo_text.assert_not_called()
