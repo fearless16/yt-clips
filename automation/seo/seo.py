@@ -1071,10 +1071,10 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
                     upload_success=False,
                 ))
 
-        # Breathing room between clips — configurable, default 5s
+        # Breathing room between clips — configurable, default 30s
         if idx < len(clips):
-            sleep_s = cfg.get("seo", {}).get("inter_clip_sleep_s", 5)
-            log.debug("Sleeping %.1fs before next SEO call...", sleep_s)
+            sleep_s = cfg.get("seo", {}).get("inter_clip_sleep_s", 30)
+            log.info("Sleeping %.1fs before next SEO call...", sleep_s)
             time.sleep(sleep_s)
 
     # Close SEO learner

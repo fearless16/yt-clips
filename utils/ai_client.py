@@ -176,9 +176,13 @@ class AIClient:
     def _record_failure(cls, provider: str):
         with cls._shared_lock:
             cls._provider_failures[provider] = cls._provider_failures.get(provider, 0) + 1
-            if cls._provider_failures[provider] >= 5:
-                cls._provider_cooldown_until[provider] = time.time() + 300
-                log.warning("Provider %s hit circuit breaker! Cooldown for 5 minutes.", provider)
+            ai_cfg = _cfg.get("ai", {})
+            max_fails = int(ai_cfg.get("circuit_breaker_max_failures", 10))
+            cb_cooldown = float(ai_cfg.get("circuit_breaker_cooldown_seconds", 600))
+            if cls._provider_failures[provider] >= max_fails:
+                cls._provider_cooldown_until[provider] = time.time() + cb_cooldown
+                log.warning("Provider %s hit circuit breaker (%d failures)! Cooldown for %.0fs.",
+                            provider, max_fails, cb_cooldown)
 
     @classmethod
     def _is_rate_limited(cls, exc: Exception) -> bool:
@@ -189,30 +193,41 @@ class AIClient:
         return _extract_retry_after(exc)
 
     @classmethod
+    def _cooldown_seconds(cls, category: str) -> float:
+        ai_cfg = _cfg.get("ai", {})
+        cooldowns = ai_cfg.get("cooldown_seconds", {})
+        return float(cooldowns.get(category, 0))
+
+    @classmethod
     def _note_provider_error(cls, provider: str, exc: Exception, default_cooldown: float = 30.0):
         cat = classify_error(exc)
+        cd = cls._cooldown_seconds(cat)
         if cat == ErrorCategory.AUTH_FAILURE:
+            wait = cd or 3600
             with cls._shared_lock:
-                cls._provider_cooldown_until[provider] = time.time() + 3600
-            log.error("Provider %s auth failure - marking unavailable for 1 hour", provider)
+                cls._provider_cooldown_until[provider] = time.time() + wait
+            log.error("Provider %s auth failure - marking unavailable for %.0fs", provider, wait)
         elif cat == ErrorCategory.QUOTA_EXHAUSTED:
+            wait = cd or 3600
             with cls._shared_lock:
-                cls._provider_cooldown_until[provider] = time.time() + 3600
-            log.warning("Provider %s quota exhausted - switching to next provider", provider)
+                cls._provider_cooldown_until[provider] = time.time() + wait
+            log.warning("Provider %s quota exhausted - cooldown %.0fs", provider, wait)
         elif cat == ErrorCategory.RATE_LIMIT:
-            wait_s = _extract_retry_after(exc) or default_cooldown
+            wait_s = _extract_retry_after(exc) or cd or default_cooldown
             with cls._shared_lock:
                 prev = cls._provider_cooldown_until.get(provider, 0.0)
                 cls._provider_cooldown_until[provider] = max(prev, time.time() + wait_s)
             log.warning("Provider %s rate-limited (429) - cooling down %.0fs", provider, wait_s)
         elif cat == ErrorCategory.MODEL_NOT_FOUND:
+            wait = cd or 120
             with cls._shared_lock:
-                cls._provider_cooldown_until[provider] = time.time() + 60
-            log.warning("Provider %s model not found - switching to next compatible model", provider)
+                cls._provider_cooldown_until[provider] = time.time() + wait
+            log.warning("Provider %s model not found - cooldown %.0fs", provider, wait)
         elif cat in (ErrorCategory.TIMEOUT, ErrorCategory.SERVER_ERROR):
+            wait = cd or 30
             with cls._shared_lock:
-                cls._provider_cooldown_until[provider] = time.time() + 15
-            log.warning("Provider %s transient error (%s) - short cooldown", provider, cat)
+                cls._provider_cooldown_until[provider] = time.time() + wait
+            log.warning("Provider %s transient error (%s) - cooldown %.0fs", provider, cat, wait)
         cls._record_failure(provider)
 
     @classmethod
