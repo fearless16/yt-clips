@@ -194,8 +194,8 @@ ENGAGING_CTAS = [
 # ── SEO Model Restrictions ─────────────────────────────────────────────────────
 # Only these models are trusted for SEO generation.
 # nvidia (nemotron/llama) and groq (llama/grok) produce generic, low-quality SEO.
+# qwen3.7-max excluded: returns 401 "not supported for format oa-compat"
 SEO_PREFERRED_MODELS = [
-    ("opencode", "qwen3.7-max"),
     ("opencode", "mimo-v2.5-pro"),
     ("opencode", "deepseek-v4-pro"),
 ]

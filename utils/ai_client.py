@@ -570,8 +570,8 @@ class AIClient:
 
     # Models trusted for SEO, in priority order.
     # nvidia/groq produce generic low-quality SEO — NEVER used.
+    # qwen3.7-max excluded: returns 401 "not supported for format oa-compat"
     SEO_PREFERRED_MODELS = [
-        ("opencode", "qwen3.7-max"),
         ("opencode", "mimo-v2.5-pro"),
         ("opencode", "deepseek-v4-pro"),
     ]
