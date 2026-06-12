@@ -215,12 +215,11 @@ learner:
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
   provider: "opencode"          # opencode (Go) | nvidia
-  model: "qwen3.7-max"          # primary
+  model: "mimo-v2.5-pro"        # primary (qwen3.7-max returns 401 for oa-compat)
   # Provider chain priority:
-  # 1. OpenCode Go: qwen3.7-max
-  # 2. OpenCode Go: mimo-v2.5-pro
-  # 3. OpenCode Go: deepseek-v4-pro
-  # 4. NVIDIA: llama-3.3-nemotron-super-49b-v1
+  # 1. OpenCode Go: mimo-v2.5-pro
+  # 2. OpenCode Go: deepseek-v4-pro
+  # 3. NVIDIA: llama-3.3-nemotron-super-49b-v1
   # Per-error cooldown durations (seconds). Set 0 for defaults.
   cooldown_seconds:
     auth_failure: 7200           # 2 hours

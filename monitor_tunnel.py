@@ -45,24 +45,20 @@ def _post(path: str, data: dict) -> dict | None:
 
 
 def determine_skip_flags(files: dict) -> list[str]:
-    flags = []
-    if files.get("transcripts"):
-        if any(f["name"].endswith(".json") for f in files["transcripts"]):
-            flags.append("--skip-transcribe")
-            print("  ✅ Checkpoint: transcript exists → --skip-transcribe")
-    if files.get("input"):
-        if any(f["name"].endswith(".mp4") for f in files["input"]):
-            flags.append("--skip-download")
-            print("  ✅ Checkpoint: video exists → --skip-download")
-    if files.get("highlights"):
-        if any(f["name"].endswith(".yaml") for f in files["highlights"]):
-            flags.extend(["--skip-download", "--skip-transcribe", "--skip-highlight"])
-            print("  ✅ Checkpoint: highlights exist → skip-download/transcribe/highlight")
-    if files.get("shorts"):
-        if any(f["name"].endswith(".mp4") for f in files["shorts"]):
-            flags.extend(["--skip-download", "--skip-transcribe", "--skip-highlight", "--skip-export"])
-            print("  ✅ Checkpoint: clips exist → skip-download/transcribe/highlight/export")
-    return flags
+    flags = set()
+    if files.get("transcripts") and any(f["name"].endswith(".json") for f in files["transcripts"]):
+        flags.add("--skip-transcribe")
+        print("  ✅ Checkpoint: transcript exists → --skip-transcribe")
+    if files.get("input") and any(f["name"].endswith(".mp4") for f in files["input"]):
+        flags.add("--skip-download")
+        print("  ✅ Checkpoint: video exists → --skip-download")
+    if files.get("highlights") and any(f["name"].endswith(".yaml") for f in files["highlights"]):
+        flags.update(["--skip-download", "--skip-transcribe", "--skip-highlight"])
+        print("  ✅ Checkpoint: highlights exist → skip-download/transcribe/highlight")
+    if files.get("shorts") and any(f["name"].endswith(".mp4") for f in files["shorts"]):
+        flags.update(["--skip-download", "--skip-transcribe", "--skip-highlight", "--skip-export"])
+        print("  ✅ Checkpoint: clips exist → skip-download/transcribe/highlight/export")
+    return sorted(flags)
 
 
 def remove_auth_files():
@@ -111,7 +107,6 @@ def main():
     print(f"Monitoring tunnel: {TUNNEL_URL}")
     print(f"Video: {VIDEO_URL}")
     print(f"Poll interval: {POLL_SEC}s")
-    print(f"⚠️  DUPLICATE UPLOAD PREVENTION: Auth files wiped on any re-submit")
     print()
 
     while True:
@@ -134,6 +129,9 @@ def main():
                 names = ", ".join(f["name"] for f in entries)
                 print(f"  📁 {dirname}/: {names}")
 
+        has_shorts = bool(files.get("shorts"))
+        clips_maybe_uploaded = has_shorts
+
         # ── Pipeline finished ──
         if result_data:
             rstatus = result_data.get("status")
@@ -145,9 +143,10 @@ def main():
                 print("  🛑 Watcher killed. Pipeline fully done.")
                 return 0
             else:
-                print("  ❌ Pipeline failed. Resuming from last checkpoint (no re-upload)...")
+                print("  ❌ Pipeline failed. Resuming from last checkpoint...")
                 flags = determine_skip_flags(files)
-                remove_auth_files()
+                if clips_maybe_uploaded:
+                    remove_auth_files()
                 kill_remote_pipeline()
                 time.sleep(3)
                 resubmit(flags)
@@ -159,7 +158,8 @@ def main():
         if status in ("failed", "interrupted"):
             print("  ❌ Pipeline reported failure. Resuming from checkpoint...")
             flags = determine_skip_flags(files)
-            remove_auth_files()
+            if clips_maybe_uploaded:
+                remove_auth_files()
             kill_remote_pipeline()
             time.sleep(3)
             resubmit(flags)
@@ -174,7 +174,8 @@ def main():
             if result_retry:
                 continue
             flags = determine_skip_flags(files)
-            remove_auth_files()
+            if clips_maybe_uploaded:
+                remove_auth_files()
             kill_remote_pipeline()
             resubmit(flags)
             time.sleep(POLL_SEC)
