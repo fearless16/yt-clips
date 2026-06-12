@@ -165,6 +165,8 @@ class TestSEOContract:
             "hashtags": ["#Shorts", "#Kohli"],
         })
         with patch("utils.ai_client.AIClient.generate_fastest_first",
+                   return_value=ai_json), \
+             patch("utils.ai_client.AIClient.generate_seo_text",
                    return_value=ai_json):
             res = generate_clip_seo("c1", "kohli six", "RCB vs CSK",
                                     is_shorts=True)
@@ -178,6 +180,8 @@ class TestSEOContract:
         with patch("utils.ai_client.AIClient.generate_fastest_first",
                    return_value=""), \
              patch("utils.ai_client.AIClient.generate_text",
+                   side_effect=RuntimeError("down")), \
+             patch("utils.ai_client.AIClient.generate_seo_text",
                    side_effect=RuntimeError("down")):
             with pytest.raises(SEOGenerationError):
                 generate_clip_seo("c2", "kohli six", "RCB vs CSK")
@@ -189,6 +193,8 @@ class TestSEOContract:
         with patch("utils.ai_client.AIClient.generate_fastest_first",
                    return_value=""), \
              patch("utils.ai_client.AIClient.generate_text",
+                   side_effect=RuntimeError("down")), \
+             patch("utils.ai_client.AIClient.generate_seo_text",
                    side_effect=RuntimeError("down")):
             generate_seo_for_exported_clip("clipQ", "kohli six",
                                            str(tmp_path), video_title="RCB vs CSK")
@@ -203,6 +209,8 @@ class TestSEOContract:
                            "description": "Virat Kohli smashes massive six over long-on in IPL 2026",
                            "search_terms": ["kohli six wankhede"], "hashtags": ["#Shorts"]})
         with patch("utils.ai_client.AIClient.generate_fastest_first",
+                   return_value=good), \
+             patch("utils.ai_client.AIClient.generate_seo_text",
                    return_value=good):
             r = retry_failed_seo(str(tmp_path))
         assert r["recovered"] == 1
@@ -499,6 +507,8 @@ class TestModelDiversity:
                            "description": "Virat Kohli smashes massive six over long-on in IPL 2026",
                            "search_terms": ["kohli six wankhede"], "hashtags": ["#Shorts"]})
         with patch("utils.ai_client.AIClient.generate_fastest_first",
+                   return_value=good), \
+             patch("utils.ai_client.AIClient.generate_seo_text",
                    return_value=good):
             generate_clip_seo("c1", "kohli six", "RCB vs CSK",
                               provider_override="openrouter",

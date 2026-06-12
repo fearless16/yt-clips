@@ -154,7 +154,7 @@ Return ONLY valid JSON:
 }}"""
 
     try:
-        response = _get_ai().generate_fastest_first(
+        response = _get_ai().generate_seo_text(
             prompt=prompt,
             system_instruction=_SYSTEM,
         )

@@ -370,3 +370,94 @@ def test_get_available_providers_only_enabled():
     assert "opencode" in avail
     assert "nvidia" not in avail
     assert "groq" not in avail
+
+
+# --- SEO-specific generation (OpenCode Go only) ---
+
+class TestGenerateSeoText:
+
+    def setup_method(self):
+        reset_shared_state()
+
+    def test_seo_preferred_models_all_opencode(self):
+        """SEO_PREFERRED_MODELS must only contain opencode provider."""
+        for provider, model in AIClient.SEO_PREFERRED_MODELS:
+            assert provider == "opencode", f"Non-opencode model in SEO list: {provider}/{model}"
+
+    def test_seo_preferred_models_priority_order(self):
+        """Priority: qwen3.7-max → mimo-v2.5-pro → deepseek-v4-pro."""
+        models = [m for _, m in AIClient.SEO_PREFERRED_MODELS]
+        assert models == ["qwen3.7-max", "mimo-v2.5-pro", "deepseek-v4-pro"]
+
+    def test_seo_text_uses_opencode_only(self):
+        """generate_seo_text must only call opencode, never nvidia/groq/ollama."""
+        ai = AIClient()
+        ai.opencode_api_key = "mock"
+        ai.nvidia_api_key = "mock"
+        ai.groq_api_key = "mock"
+
+        with patch.object(ai, "generate_opencode", return_value="SEO OK") as mock_oc, \
+             patch.object(ai, "generate_nvidia") as mock_nv, \
+             patch.object(ai, "generate_groq") as mock_gr, \
+             patch.object(ai, "generate_ollama") as mock_ol:
+            result = ai.generate_seo_text("test seo prompt")
+            assert result == "SEO OK"
+            assert mock_oc.called
+            mock_nv.assert_not_called()
+            mock_gr.assert_not_called()
+            mock_ol.assert_not_called()
+
+    def test_seo_text_raises_without_opencode_key(self):
+        """generate_seo_text must raise if OpenCode key is missing."""
+        ai = AIClient()
+        ai.opencode_api_key = None
+        with pytest.raises(RuntimeError, match="OpenCode Go API key missing"):
+            ai.generate_seo_text("test")
+
+    def test_seo_text_tries_all_three_models_on_failure(self):
+        """Should try qwen3.7-max, mimo-v2.5-pro, deepseek-v4-pro before raising."""
+        ai = AIClient()
+        ai.opencode_api_key = "mock"
+
+        models_tried = []
+
+        def capture_model(prompt, system_instruction=None):
+            models_tried.append(ai._model)
+            raise RuntimeError("model down")
+
+        with patch.object(ai, "generate_opencode", side_effect=capture_model):
+            with pytest.raises(RuntimeError, match="all OpenCode Go models exhausted"):
+                ai.generate_seo_text("test")
+
+        # Should have tried all 3 models at least once (primary + retry rounds)
+        assert "qwen3.7-max" in models_tried
+        assert "mimo-v2.5-pro" in models_tried
+        assert "deepseek-v4-pro" in models_tried
+
+    def test_seo_text_falls_through_to_second_model(self):
+        """If qwen3.7-max fails, should try mimo-v2.5-pro."""
+        ai = AIClient()
+        ai.opencode_api_key = "mock"
+
+        call_count = [0]
+
+        def selective_fail(prompt, system_instruction=None):
+            call_count[0] += 1
+            if ai._model == "qwen3.7-max":
+                raise RuntimeError("qwen down")
+            return "MIMO OK"
+
+        with patch.object(ai, "generate_opencode", side_effect=selective_fail):
+            result = ai.generate_seo_text("test")
+            assert result == "MIMO OK"
+
+    def test_seo_text_never_calls_ollama_fallback(self):
+        """Even when all 3 models fail, must NOT fall back to ollama."""
+        ai = AIClient()
+        ai.opencode_api_key = "mock"
+
+        with patch.object(ai, "generate_opencode", side_effect=RuntimeError("down")), \
+             patch.object(ai, "generate_ollama") as mock_ol:
+            with pytest.raises(RuntimeError):
+                ai.generate_seo_text("test")
+            mock_ol.assert_not_called()

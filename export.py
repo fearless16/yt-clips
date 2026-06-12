@@ -1149,7 +1149,6 @@ def export_all(
                     log.debug("Warm-up skip for %s: %s", dev, e)
 
     exported_clips = []
-    seo_queue: List[Dict] = []   # queued after all encoding is done
 
     def _export_one(args):
         """Worker function for parallel export."""
@@ -1171,10 +1170,38 @@ def export_all(
             _validate_av_sync(path, clip_id)
         return (idx, total, clip_id, path, info)
 
-    # Run exports in parallel
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    def _seo_worker(clip_id: str, info: dict, output_dir: Path, ctx: dict):
+        """Generate SEO for a single clip immediately after export.
+
+        Runs in a separate thread pool so it never blocks ongoing exports.
+        Uses OpenCode Go models only (qwen3.7-max, mimo-v2.5-pro, deepseek-v4-pro).
+        """
+        try:
+            from automation.seo.seo import generate_seo_for_exported_clip
+            generate_seo_for_exported_clip(
+                clip_id=clip_id,
+                transcript=info.get("text", "Cricket Live"),
+                output_dir=str(output_dir),
+                video_title=ctx.get("video_title", ""),
+                scorecard=ctx.get("scorecard", ""),
+                trend_topics=ctx.get("trend_topics", []),
+                live_stream_url=ctx.get("live_stream_url", ""),
+            )
+            log.info("🏷  SEO done: %s", clip_id)
+        except Exception as e:
+            log.error("🏷  SEO failed for %s: %s", clip_id, e)
+
+    # ── Parallel Export + Immediate SEO ──────────────────────────────────────────
+    # Export clips in parallel. As each clip finishes, its SEO is submitted
+    # to a separate thread pool immediately — no waiting for all exports.
+    # SEO uses OpenCode Go models only (qwen3.7-max, mimo-v2.5-pro, deepseek-v4-pro).
+    seo_futures = []
+    with ThreadPoolExecutor(max_workers=max_workers) as export_executor:
+        # SEO pool: 2 workers max (API rate limits)
+        seo_executor = ThreadPoolExecutor(max_workers=2) if (generate_seo and seo_context) else None
+
         futures = [
-            executor.submit(_export_one, (idx, len(filtered_items), clip_id, start, end, info, analysis))
+            export_executor.submit(_export_one, (idx, len(filtered_items), clip_id, start, end, info, analysis))
             for idx, (clip_id, start, end, info, analysis) in enumerate(filtered_items, start=1)
         ]
 
@@ -1184,39 +1211,26 @@ def export_all(
                 if path:
                     exported_clips.append(Path(path))
                     log.info("[%d/%d] Exported: %s", idx, total, clip_id)
-                    # Queue for SEO — don't block encoding with API calls
-                    if generate_seo and seo_context:
-                        seo_queue.append({
-                            "clip_id": clip_id,
-                            "transcript": info.get("text", "Cricket Live"),
-                        })
+                    # Fire SEO immediately — runs parallel to remaining exports
+                    if seo_executor and seo_context:
+                        seo_fut = seo_executor.submit(
+                            _seo_worker, clip_id, info, out_dir, seo_context
+                        )
+                        seo_futures.append(seo_fut)
                 else:
                     log.warning("[%d/%d] Export failed or dropped: %s", idx, total, clip_id)
             except Exception as e:
                 log.error(f"Parallel export error: {e}")
 
-    # ── SEO phase: runs after all encoding is done ───────────────────────────
-    # One AI call per clip, 8s wait between calls to avoid 429.
-    # Encoding is fully unblocked — SEO never delays the next export.
-    if generate_seo and seo_context and seo_queue:
-        log.info("🏷  SEO phase: %d clips...", len(seo_queue))
-        try:
-            from automation.seo.seo import generate_seo_for_exported_clip
-            for idx, item in enumerate(seo_queue):
-                # 8s pause between calls (skip before first call)
-                inter_pause = 8.0 if idx > 0 else 0.0
-                generate_seo_for_exported_clip(
-                    clip_id=item["clip_id"],
-                    transcript=item["transcript"],
-                    output_dir=str(out_dir),
-                    video_title=seo_context.get("video_title", ""),
-                    scorecard=seo_context.get("scorecard", ""),
-                    trend_topics=seo_context.get("trend_topics", []),
-                    live_stream_url=seo_context.get("live_stream_url", ""),
-                    inter_clip_pause=inter_pause,
-                )
-        except Exception as e:
-            log.error("SEO phase failed: %s", e)
+    # Wait for any remaining SEO tasks to finish
+    if seo_futures:
+        log.info("🏷  Waiting for %d remaining SEO tasks...", len(seo_futures))
+        for fut in seo_futures:
+            try:
+                fut.result(timeout=120)
+            except Exception as e:
+                log.error("SEO task error: %s", e)
+        seo_executor.shutdown(wait=False)
 
     log.info("✨ Export complete: %d clips in %s", len(exported_clips), out_dir)
     return exported_clips
@@ -1224,3 +1238,4 @@ def export_all(
 
 if __name__ == "__main__":
     pass
+

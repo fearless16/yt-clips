@@ -77,12 +77,14 @@ class TestSEOOnlyRun:
         (tmp_path / "clip2.mp4").write_bytes(b"\x00" * 1000)
 
         mock_ai = MagicMock()
-        mock_ai.generate_fastest_first.return_value = json.dumps({
+        seo_response = json.dumps({
             "title": "Kohli ne maara CHHAKKA! 🔥 #Shorts",
             "description": "Virat Kohli smashes massive six over long-on, crowd goes crazy in Wankhede!",
             "hashtags": ["#Shorts", "#Kohli", "#RCBvsCSK"],
             "search_terms": ["kohli six wankhede", "RCB vs CSK highlights"],
         })
+        mock_ai.generate_fastest_first.return_value = seo_response
+        mock_ai.generate_seo_text.return_value = seo_response
         mock_get_ai.return_value = mock_ai
 
         result = run_seo_only(str(tmp_path))
