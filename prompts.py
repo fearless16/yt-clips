@@ -155,31 +155,31 @@ Evaluate each candidate and return JSON:
 
 # ─── Stage 7: SEO (selected clips only) ─────────────────────────────────────
 
-SEO_SYSTEM = """You are generating SEO metadata for a selected short-form clip.
+SEO_SYSTEM = """You are an elite YouTube SEO strategist for cricket content, optimized for the
+June 2026 YouTube algorithm. Generate RICH, LONG, STRUCTURED descriptions with emoji section
+headers — not short corporate summaries. Use Hinglish for titles (Hindi in Roman letters).
 
 Generate:
-- title
-- description
-- tags
+- title (max 100 chars, multi-segment with pipes, Hinglish)
+- description (2000-4500 chars, structured with emoji section headers)
+- tags (for YouTube API tags field)
 - hook text
 - thumbnail text
-- hashtags
+- hashtags (15, covering players/teams/event/format/trending)
+- search_terms (25-30, mix English + Hindi transliteration)
 
 Constraints:
-- Keep title clickable but truthful.
-- Do not keyword-stuff.
-- Keep description concise and natural.
-- Match the clip's actual content.
-- Avoid generating SEO for rejected clips.
-- CRITICAL: If the audience is Indian, use Hinglish for the title.
-  Hinglish = Hindi words written in ENGLISH/Roman letters. NEVER use Devanagari/Hindi script.
-  - CORRECT: "Kohli ne maara SIX!" / "Dhoni ka last over thriller!"
-  - WRONG: "कोहली ने मारा सिक्स!" / "धोनी का लास्ट ओवर"
-- Description should be in English.
+- Title MUST be Hinglish (Hindi words in ENGLISH/Roman letters). NEVER Devanagari script.
+  CORRECT: "Kohli ne maara SIX!" / "Bumrah ki deadly YORKER!"
+  WRONG: "कोहली ने मारा सिक्स!"
+- Description: English, structured with emoji headers (📝 🔥 🏟️ 🏏 ⚠️ 🏷️ #️⃣)
+- Include Hindi transliterated search terms (aaj ka match, live cricket score)
+- CRITICAL: Only use player names and events from the transcript.
+- NEVER invent or hallucinate player names or match events.
 
 Return only JSON."""
 
-SEO_USER_TEMPLATE = """Generate SEO metadata for this clip.
+SEO_USER_TEMPLATE = """Generate rich YouTube SEO metadata for this clip.
 
 Platform: {platform}
 Audience language: {language}
@@ -194,12 +194,13 @@ Clip summary:
 
 Return JSON:
 {{
-  "title": "string",
-  "description": "string",
-  "tags": ["string"],
+  "title": "🔴 Hinglish hook | Match Context | Format 🔥 (max 100 chars)",
+  "description": "📝 Hook...\\n\\n🔥 Match Situation...\\n\\n🏟️ Match Info...\\n\\n🏏 Key Players...\\n\\n⚠️ Disclaimer...\\n\\n🏷️ Tags...\\n\\n#️⃣ Hashtags... (2000-4500 chars)",
+  "tags": ["tag1", "tag2", "..."],
   "hook_text": "string",
   "thumbnail_text": "string",
-  "hashtags": ["string"]
+  "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#IPL2026", "...15 total"],
+  "search_terms": ["player action", "match context", "aaj ka match", "...25-30 total"]
 }}"""
 
 

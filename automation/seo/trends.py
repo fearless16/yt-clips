@@ -110,17 +110,33 @@ def extract_match_teams(video_title: str) -> Tuple[List[str], str]:
     return found, match_type
 
 
-def get_rotated_hashtags(match_type: str = "ipl", seed: Optional[int] = None) -> List[str]:
-    """Return a diverse set of hashtags for variety across clips."""
-    ipl_teams = ["#RCB", "#CSK", "#MI", "#KKR", "#SRH", "#DC", "#PBKS", "#RR", "#LSG", "#GT"]
-    generic = ["#CricketShorts", "#IPLHighlights", "#T20Highlights"]
-    tags = ["#IPL2026", "#Shorts"]
+def get_rotated_hashtags(match_type: str = "ipl", seed: Optional[int] = None, domain: str = "cricket") -> List[str]:
+    """Return a diverse set of hashtags for variety across clips based on domain."""
     if seed is not None:
         random.seed(seed)
-    team_tag = random.choice(ipl_teams)
-    generic_tag = random.choice(generic)
-    tags.extend([team_tag, generic_tag])
-    return tags
+
+    if domain == "football":
+        fb_stars = ["#Mbappe", "#Ronaldo", "#Messi", "#Griezmann", "#Neymar"]
+        generic = ["#FIFAWorldCup", "#WorldCup2026", "#Football", "#SoccerHighlights"]
+        tags = ["#FIFA2026", "#Shorts"]
+        star_tag = random.choice(fb_stars)
+        generic_tag = random.choice(generic)
+        tags.extend([star_tag, generic_tag])
+        return tags
+    elif domain == "general":
+        generic = ["#Trending", "#Viral", "#Foryou", "#ShortsVideo"]
+        tags = ["#Shorts"]
+        generic_tag = random.choice(generic)
+        tags.append(generic_tag)
+        return tags
+    else:  # cricket
+        ipl_teams = ["#RCB", "#CSK", "#MI", "#KKR", "#SRH", "#DC", "#PBKS", "#RR", "#LSG", "#GT"]
+        generic = ["#CricketShorts", "#IPLHighlights", "#T20Highlights"]
+        tags = ["#IPL2026", "#Shorts"]
+        team_tag = random.choice(ipl_teams)
+        generic_tag = random.choice(generic)
+        tags.extend([team_tag, generic_tag])
+        return tags
 
 
 def parse_cricbuzz_scorecard(html: str) -> str:
@@ -374,20 +390,107 @@ def fetch_match_scorecard(query: str) -> str:
     return ""
 
 
+def detect_video_domain(video_title: str, transcript: str = "") -> Tuple[str, str, List[str]]:
+    """Detect domain, primary topic/query, and keywords from title and transcript.
+
+    Returns:
+        Tuple[str, str, List[str]]: (domain, query, keywords)
+    """
+    text = f"{video_title} {transcript}".lower()
+    
+    football_kw = {
+        "fifa", "world cup", "football", "mbappe", "ronaldo", "messi", 
+        "griezmann", "soccer", "estadio azteca", "morocco", "france", 
+        "argentina", "portugal", "jiménez", "south africa", "england roast", 
+        "cricfy", "dai dai"
+    }
+    cricket_kw = {
+        "cricket", "ipl", "t20", "odi", "test match", "wankhede", "chinnaswamy", 
+        "rcb", "mi", "csk", "kohli", "rohit sharma", "bumrah", "dhoni", 
+        "cricbuzz", "wicket", "run rate", "rinku singh", "padikkal", "patidar"
+    }
+    
+    fb_count = sum(1 for kw in football_kw if kw in text)
+    cr_count = sum(1 for kw in cricket_kw if kw in text)
+    
+    if fb_count > cr_count and fb_count > 0:
+        domain = "football"
+    elif cr_count > fb_count and cr_count > 0:
+        domain = "cricket"
+    else:
+        if fb_count > 0:
+            domain = "football"
+        elif cr_count > 0:
+            domain = "cricket"
+        else:
+            domain = "general"
+            
+    words = re.findall(r"\b[A-Za-z0-9]+\b", video_title)
+    stopwords = {
+        "vs", "live", "match", "today", "commentary", "highlights", "watchalong", 
+        "watch", "along", "the", "and", "for", "with", "from", "shorts", "video", 
+        "show", "epic", "dhamaka", "mein", "gayi", "phat", "ki", "ka", "ko", "ne", 
+        "aur", "se", "bhi", "ke", "hai", "aaj", "ab", "is", "in", "it", "to", "effect"
+    }
+    
+    keywords = []
+    for w in words:
+        wl = w.lower()
+        if wl not in stopwords and len(w) > 2 and w not in keywords:
+            keywords.append(w)
+            
+    if len(keywords) < 3 and transcript:
+        t_words = re.findall(r"\b[A-Z][a-z]+\b", transcript)
+        for tw in t_words:
+            if tw.lower() not in stopwords and tw not in keywords:
+                keywords.append(tw)
+                
+    if not keywords:
+        keywords = ["Sports" if domain != "general" else "Trending"]
+        
+    query = " ".join(keywords[:3])
+    return domain, query, keywords
+
+
 def get_trending_context(domain: str = "cricket", region: str = "IN", video_title: str = "") -> Dict:
     """Aggregate all trend sources into a single context dict."""
     topics = []
+    
+    detected_domain = domain
+    query_topic = f"{domain} live"
+    teams = []
+    match_type = "ipl"
+    
+    if video_title:
+        detected_domain, query_topic, keywords = detect_video_domain(video_title)
+        teams, match_type = extract_match_teams(video_title)
+    
     trends = fetch_google_trends_in()
     topics.extend(trends)
-    competitor = fetch_competitor_signals()
-    topics.extend(competitor)
-    yt_suggestions = fetch_youtube_suggestions(f"{domain} live")
+    
+    if video_title and query_topic:
+        try:
+            q_encoded = urllib.parse.quote_plus(f"{query_topic} live today")
+            resp = _session().get(
+                f"https://news.google.com/rss/search?q={q_encoded}&hl={en-IN if 'region' not in locals() else region}&gl={IN if 'region' not in locals() else region}", timeout=10
+            )
+            if resp.status_code == 200:
+                topics.extend(_extract_topics_from_rss(resp.text, max_topics=20))
+        except Exception as e:
+            log.warning("Competitor RSS error: %s", e)
+    else:
+        competitor = fetch_competitor_signals()
+        topics.extend(competitor)
+        
+    yt_suggestions = fetch_youtube_suggestions(query_topic)
     topics.extend(yt_suggestions)
-
-    teams, match_type = extract_match_teams(video_title) if video_title else ([], "ipl")
-    scorecard_data = fetch_cricbuzz_live_score(video_title, match_type)
+    
+    scorecard_data = {}
+    if detected_domain == "cricket":
+        scorecard_data = fetch_cricbuzz_live_score(video_title, match_type)
+        
     live_stream_url = fetch_own_live_stream_url()
-
+    
     seen = set()
     unique_topics = []
     for t in topics:
@@ -396,12 +499,13 @@ def get_trending_context(domain: str = "cricket", region: str = "IN", video_titl
             seen.add(tl)
             unique_topics.append(t)
     top_topics = unique_topics[:20]
-
+    
     return {
         "topics": top_topics,
-        "scorecard": scorecard_data.get("scorecard", ""),
+        "scorecard": scorecard_data.get("scorecard", "") if scorecard_data else "",
         "live_stream_url": live_stream_url,
         "teams": teams,
+        "domain": detected_domain,
     }
 
 

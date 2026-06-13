@@ -204,14 +204,44 @@ SEO_BLOCKED_PROVIDERS = {"nvidia", "groq"}
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
 _SYSTEM = (
-    "You are a desi YouTube SEO expert specializing in viral cricket shorts "
-    "for Indian and Pakistani audiences. "
-    "Generate high-CTR titles, engaging descriptions, and optimized tags. "
-    "Use emojis and full-on desi cricket discussion style — no boring English commentary. "
-    "Focus on Indian and Pakistani cricket audience with drawing-room style banter. "
-    "CRITICAL: Only use player names, teams, and events that appear in the transcript. "
+    "You are an elite YouTube SEO strategist for cricket content, optimized for the "
+    "June 2026 YouTube algorithm. You understand CTR optimization, watch-time signals, "
+    "engagement rate boosting, and discoverability through long-tail search terms. "
+    "Your audience is Indian and Pakistani cricket fans — use Hinglish (Hindi in Roman letters) "
+    "for titles and mix Hindi/English for maximum reach. "
+    "Generate RICH, LONG, STRUCTURED descriptions with emoji section headers — "
+    "not short corporate summaries. Think like a top cricket YouTuber with 500K subs. "
+    "Include Hindi transliterated search terms (e.g., 'aaj ka match', 'live cricket score') "
+    "alongside English terms for bilingual discoverability. "
+    "CRITICAL: Only use player names, teams, and events from the transcript. "
     "NEVER invent or hallucinate player names or match events. "
-    "Return ONLY valid JSON — no markdown, no explanation."
+    "Return ONLY valid JSON — no markdown, no explanation, no extra text."
+)
+
+_SYSTEM_FOOTBALL = (
+    "You are an elite YouTube SEO strategist for football/soccer content, optimized for the "
+    "June 2026 YouTube algorithm. You understand CTR optimization, watch-time signals, "
+    "engagement rate boosting, and discoverability through long-tail search terms. "
+    "Your audience is global football fans — use a mix of English and popular Hinglish "
+    "for titles and descriptions for maximum reach. "
+    "Generate RICH, LONG, STRUCTURED descriptions with emoji section headers — "
+    "not short corporate summaries. Think like a top football YouTuber with 500K subs. "
+    "Include Hinglish transliterated search terms alongside English terms for bilingual discoverability. "
+    "CRITICAL: Only use player names, teams, and events from the transcript. "
+    "NEVER invent or hallucinate player names or match events. "
+    "Return ONLY valid JSON — no markdown, no explanation, no extra text."
+)
+
+_SYSTEM_GENERAL = (
+    "You are an elite YouTube SEO strategist, optimized for the "
+    "June 2026 YouTube algorithm. You understand CTR optimization, watch-time signals, "
+    "engagement rate boosting, and discoverability through long-tail search terms. "
+    "Generate RICH, LONG, STRUCTURED descriptions with emoji section headers — "
+    "not short corporate summaries. Think like a top creator with 500K subs. "
+    "Include relevant search terms alongside English terms for discoverability. "
+    "CRITICAL: Only use facts, names, and events from the transcript. "
+    "NEVER invent or hallucinate facts or events. "
+    "Return ONLY valid JSON — no markdown, no explanation, no extra text."
 )
 
 _PROMPT_TMPL = """CONTEXT:
@@ -223,65 +253,263 @@ _PROMPT_TMPL = """CONTEXT:
 
 CLIP TRANSCRIPT: {transcript}
 
-TASK: Generate YouTube Shorts SEO for this specific clip.
+TASK: Generate RICH, LONG YouTube SEO for this specific clip.
 
 You MUST return valid JSON (no markdown, no other text):
 {{
-  "title": "<max 80 chars, Hinglish hook that describes THIS CLIP>",
-  "description": "<English description of what happened. Max 800 chars. No line breaks>",
-  "hashtags": ["<max 5 hashtags>"],
-  "search_terms": ["<max 10 search terms for this clip>"]
+  "title": "<max 100 chars, multi-segment Hinglish title with pipes>",
+  "description": "<LONG structured description, 2000-4500 chars, with emoji section headers>",
+  "hashtags": ["<15 hashtags>"],
+  "search_terms": ["<25-30 search terms including Hindi transliterations>"]
 }}
 
-TITLE REQUIREMENTS (Hinglish only — Hindi written in English/Roman letters, NOT Devanagari script):
-- CRITICAL: Start with the MOST IMPORTANT event of THIS CLIP
-  (e.g., "Kohli ne maara SIX!" or "Bumrah ki deadly YORKER!")
-- NOT just the match title. Make it specific to the clip's content.
-- Hinglish = Hindi words written in ENGLISH LETTERS (Roman alphabet). NEVER use Devanagari/Hindi script (अ, ब, क etc.)
-  - CORRECT: "Kohli ne maara six!" / "Dhoni ka last over thriller"
-  - WRONG: "कोहली ने मारा सिक्स!" / "धोनी का लास्ट ओवर"
-- Include the most dramatic moment of the clip
-- End with relevant emojis
-- Max 80 characters
+═══ TITLE FORMAT (max 100 chars) ═══
+- Use multi-segment format with pipes: 🔴 Hook | Match Context | Channel/Format
+- MUST be Hinglish (Hindi in Roman/English letters, NEVER Devanagari script)
+  CORRECT: "Kohli ne maara SIX! 🔥" / "Bumrah ki deadly YORKER!"
+  WRONG: "कोहली ने मारा सिक्स!" (NO Hindi script)
+- Start with the MOST DRAMATIC moment from THIS CLIP
+- Use emojis: 🔴 🔥 💥 ⚡ 😱 🏏
+- Examples:
+  "🔴 Kohli OUT on 0! | RCB vs MI IPL 2026 | Live Score #Shorts"
+  "Bumrah ki DEADLY Yorker! 💥 | MI vs CSK Highlights | IPL 2026"
 
-DESCRIPTION REQUIREMENTS (Full English):
-- Write in English — casual, engaging, not corporate
-- First 2 lines: What happened in this specific clip
-- Then: Context of the match situation
-- Then: Player stats/achievements if relevant
-- End with a CTA (Call to Action)
-- For Shorts: Short and punchy (max 300 chars)
-- For Regular videos: Full detailed match coverage (max 800 chars)
+═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED) ═══
+Write a LONG, structured description with these sections:
 
-SEARCH TERMS (English):
-- Primary: Player name + action (e.g., "virat kohli six wankhede")
-- Secondary: Match context + clip type
-- Don't use generic terms like "cricket video" or "sports video"
+1. 📝 HOOK (2-3 lines): Dramatic summary of what happened in the clip.
+   Use the most exciting moment as the opening line.
 
-HASHTAGS:
-- Primary: #PlayerName, #TeamName (from actual teams playing)
-- Include #Shorts if this is a short
-- Add event-specific tags
-- Max 5 hashtags
+2. 🔥 Current Match Situation (3-5 lines): What's happening in the match.
+   Score, key dismissals, partnerships, run rate.
+
+3. 👉 CTA: "If you love cricket, please SUBSCRIBE! We are growing together."
+
+4. 🏟️ Match Info:
+   Series, Match number, Teams, Venue, Toss result.
+
+5. 🏏 Key Players Today:
+   List key players from both teams with roles (c) (wk) etc.
+
+6. ⚠️ Disclaimer:
+   "This is a watch-along and scorecard video. No live match footage or
+   audio from official broadcasters. All logos belong to respective owners."
+
+7. 🏷️ Tags / Search Terms:
+   Embed ALL search terms as comma-separated list in the description too.
+
+8. #️⃣ Hashtags:
+   List all hashtags at the end of description.
+
+═══ SEARCH TERMS (25-30 terms, mix English + Hindi transliteration) ═══
+Categories to cover:
+- Player + action: "virat kohli six", "bumrah yorker"
+- Match context: "rcb vs mi live score", "ipl 2026 match 54"
+- Hindi transliterated: "aaj ka match", "live cricket match", "aaj ka match live"
+- Hindi script terms: "लाइव क्रिकेट स्कोर" (yes, include Devanagari in search terms)
+- Long-tail: "how to watch ipl live", "ipl live stream free"
+- Channel/format: "cricket live commentary hindi", "ipl live score today"
+- Regional: "cricket live match today online"
+- Do NOT use ultra-generic terms like "cricket video" or "sports video"
+
+═══ HASHTAGS (exactly 15) ═══
+Must include:
+- #Shorts (if applicable)
+- Player hashtags: #ViratKohli #JaspritBumrah etc.
+- Team hashtags: #RCB #MI #MumbaiIndians etc.
+- Event: #IPL2026 #IPL
+- Format: #LiveCricket #CricketLive #LiveScore
+- Trending: #Cricket #T20
 """
 
-_SALVAGE_TMPL = """Generate YouTube Shorts SEO for this cricket clip.
+_PROMPT_TMPL_FOOTBALL = """CONTEXT:
+  Match: {video_title}
+  Live Trending / Search Spikes: {trend_topics}
+  Live Streaming URL: {live_stream_url}
+  Teams in this match: {teams}
+  (Unused scorecard info for compatibility: {scorecard})
+
+CLIP TRANSCRIPT: {transcript}
+
+TASK: Generate RICH, LONG YouTube SEO for this specific football/soccer clip.
+
+You MUST return valid JSON (no markdown, no other text):
+{{
+  "title": "<max 100 chars, multi-segment Hinglish/English title with pipes>",
+  "description": "<LONG structured description, 2000-4500 chars, with emoji section headers>",
+  "hashtags": ["<15 hashtags>"],
+  "search_terms": ["<25-30 search terms including Hinglish transliterations>"]
+}}
+
+═══ TITLE FORMAT (max 100 chars) ═══
+- Use multi-segment format with pipes: 🔴 Hook | Match Context | Channel/Format
+- Start with the MOST DRAMATIC moment from THIS CLIP
+- Use emojis: 🔴 🔥 💥 ⚡ 😱 ⚽ 🏆
+- Examples:
+  "🔴 Mbappé ne kardia DHAMAKA! 🤯 | France vs Argentina WC | Live Score #Shorts"
+  "Ronaldo's LAST World Cup? 💔 | Portugal vs Morocco Highlights | FIFA 2026"
+
+═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED) ═══
+Write a LONG, structured description with these sections:
+
+1. 📝 HOOK (2-3 lines): Dramatic summary of what happened in the clip.
+   Use the most exciting moment as the opening line.
+
+2. 🔥 Current Match Situation (3-5 lines): What's happening in the match.
+   Score, key goals, red cards, key players.
+
+3. 👉 CTA: "If you love football, please SUBSCRIBE! We are growing together."
+
+4. 🏟️ Match Info:
+   Tournament, Match stage, Teams, Venue.
+
+5. ⚽ Key Players Today:
+   List key players from both teams.
+
+6. ⚠️ Disclaimer:
+   "This is a watch-along and discussion video. No live match footage or
+   audio from official broadcasters. All logos belong to respective owners."
+
+7. 🏷️ Tags / Search Terms:
+   Embed ALL search terms as comma-separated list in the description too.
+
+8. #️⃣ Hashtags:
+   List all hashtags at the end of description.
+
+═══ SEARCH TERMS (25-30 terms, mix English + Hinglish) ═══
+Categories to cover:
+- Player + action: "mbappe goal highlights", "ronaldo free kick"
+- Match context: "france vs argentina live score", "fifa world cup 2026 live"
+- Hinglish transliterated: "aaj ka match", "world cup live stream", "aaj ka match live"
+- Hindi/transliterated: "वर्ल्ड कप 2026", "aaj ka football match"
+- Long-tail: "how to watch world cup live", "fifa live stream free"
+- Do NOT use ultra-generic terms like "sports video" or "football video"
+
+═══ HASHTAGS (exactly 15) ═══
+Must include:
+- #Shorts (if applicable)
+- Player hashtags: #Mbappe #Ronaldo #Messi etc.
+- Team hashtags: #France #Portugal #Argentina etc.
+- Event: #FIFAWorldCup #WorldCup2026 #FIFA2026
+- Format: #LiveFootball #FootballLive #LiveScore
+- Trending: #Football #Soccer #WorldCup
+"""
+
+_PROMPT_TMPL_GENERAL = """CONTEXT:
+  Topic: {video_title}
+  Live Trending / Search Spikes: {trend_topics}
+  Live Streaming URL: {live_stream_url}
+  (Unused scorecard/teams info for compatibility: {scorecard} {teams})
+
+CLIP TRANSCRIPT: {transcript}
+
+TASK: Generate RICH, LONG YouTube SEO for this specific clip.
+
+You MUST return valid JSON (no markdown, no other text):
+{{
+  "title": "<max 100 chars, multi-segment title with pipes>",
+  "description": "<LONG structured description, 2000-4500 chars, with emoji section headers>",
+  "hashtags": ["<15 hashtags>"],
+  "search_terms": ["<25-30 search terms>"]
+}}
+
+═══ TITLE FORMAT (max 100 chars) ═══
+- Use multi-segment format with pipes: 🔴 Hook | Context | Channel/Format
+- Start with the MOST DRAMATIC moment from THIS CLIP
+- Use emojis: 🔴 🔥 💥 ⚡ 😱 
+
+═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED) ═══
+Write a LONG, structured description with these sections:
+
+1. 📝 HOOK (2-3 lines): Dramatic summary of what happened in the clip.
+   Use the most exciting moment as the opening line.
+
+2. 🔥 Key Takeaways / Highlights (3-5 lines): What is discussed in this clip.
+
+3. 👉 CTA: "If you like this content, please SUBSCRIBE! We are growing together."
+
+4. 💡 Video Info:
+   Topic, Context, Key details.
+
+5. ⚠️ Disclaimer:
+   "This is an opinion/reaction and discussion video. All opinions expressed are personal."
+
+6. 🏷️ Tags / Search Terms:
+   Embed ALL search terms as comma-separated list in the description too.
+
+7. #️⃣ Hashtags:
+   List all hashtags at the end of description.
+
+═══ SEARCH TERMS (25-30 terms) ═══
+Categories to cover:
+- Topic + action
+- Context
+- Long-tail phrases
+
+═══ HASHTAGS (exactly 15) ═══
+Must include:
+- #Shorts (if applicable)
+- Topic hashtags
+- Trending hashtags
+"""
+
+_SALVAGE_TMPL_FOOTBALL = """Generate YouTube SEO for this football clip.
 
 Match: {video_title}
 Clip: {transcript}
 
 Requirements:
-- Title: Hinglish (Hindi words in English/Roman letters, NO Devanagari script), max 80 chars, with emojis
-- Description: English, casual tone, max 500 chars
-- Hashtags: max 5, include #Shorts
-- Search terms: 3-5 English terms
+- Title: Hinglish/English, max 100 chars, multi-segment with pipes and emojis
+- Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ ⚽ ⚠️ 🏷️ #️⃣)
+- Hashtags: 10-15, include #Shorts, player names, teams, event
+- Search terms: 15-25 terms, mix English + Hinglish transliteration (aaj ka match, world cup live stream)
 
 Return valid JSON ONLY:
 {{
-  "title": "Hinglish (English letters only, NO Devanagari) clip-specific title max 80 chars with emojis",
-  "description": "English description of the clip, casual and engaging, max 500 chars",
-  "hashtags": ["#Shorts", "#Cricket"],
-  "search_terms": ["term1", "term2", "term3"]
+  "title": "🔴 Dramatic Hook | Match Context | Format 🔥",
+  "description": "📝 Hook paragraph...\n\n🔥 Match Situation...\n\n🏟️ Match Info...\n\n⚽ Key Players...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
+  "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#FIFA2026", "...up to 15"],
+  "search_terms": ["player action", "match context", "aaj ka match", "world cup live", "...up to 25"]
+}}
+"""
+
+_SALVAGE_TMPL_GENERAL = """Generate YouTube SEO for this clip.
+
+Topic: {video_title}
+Clip: {transcript}
+
+Requirements:
+- Title: Hinglish/English, max 100 chars, multi-segment with pipes and emojis
+- Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ 💡 ⚠️ 🏷️ #️⃣)
+- Hashtags: 10-15, include #Shorts, topic names, trending tags
+- Search terms: 15-25 terms, mix English + Hinglish/local terms
+
+Return valid JSON ONLY:
+{{
+  "title": "🔴 Dramatic Hook | Context | Format 🔥",
+  "description": "📝 Hook paragraph...\n\n🔥 Highlights...\n\n🏟️ Context...\n\n💡 Key Details...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
+  "hashtags": ["#Shorts", "#Topic", "...up to 15"],
+  "search_terms": ["topic action", "context", "...up to 25"]
+}}
+"""
+
+_SALVAGE_TMPL = """Generate YouTube SEO for this cricket clip.
+
+Match: {video_title}
+Clip: {transcript}
+
+Requirements:
+- Title: Hinglish (Hindi in English/Roman letters, NO Devanagari), max 100 chars, multi-segment with pipes and emojis
+- Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ 🏏 ⚠️ 🏷️ #️⃣)
+- Hashtags: 10-15, include #Shorts, player names, teams, event
+- Search terms: 15-25 terms, mix English + Hindi transliteration (aaj ka match, live cricket score)
+
+Return valid JSON ONLY:
+{{
+  "title": "🔴 Dramatic Hinglish hook | Match Context | Format 🔥",
+  "description": "📝 Hook paragraph...\n\n🔥 Match Situation...\n\n🏟️ Match Info...\n\n🏏 Key Players...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
+  "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#IPL2026", "...up to 15"],
+  "search_terms": ["player action", "match context", "aaj ka match", "live cricket score", "...up to 25"]
 }}
 """
 
@@ -381,7 +609,7 @@ def _inject_viral_elements(title: str, description: str, hashtags: List[str],
 def _rank_and_optimize_tags(
     tags: List[str],
     context: str,
-    max_tags: int = 5,
+    max_tags: int = 15,
 ) -> List[str]:
     """Rank hashtags by relevance, remove duplicates, respect max_tags limit.
 
@@ -464,23 +692,25 @@ def _consolidate_seo(title: str, description: str, hashtags: List[str],
             unique_terms.append(st_clean)
 
     return {
-        "title": title.strip()[:80],
-        "description": description.strip()[:800],
-        "hashtags": unique_hashtags[:5],
-        "search_terms": unique_terms[:10],
+        "title": title.strip()[:100],
+        "description": description.strip()[:4500],
+        "hashtags": unique_hashtags[:15],
+        "search_terms": unique_terms[:30],
     }
 
 
 def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: bool = True) -> Dict:
     """Ensure title length, description length, hashtag count, search term count.
 
-    Enforces strict caps: title≤80, description≤800, hashtags≤5, terms≤10.
+    Enforces strict caps: title≤100, description≤4500, hashtags≤15, terms≤30.
     Strips generic poison terms from search_terms.
+    YouTube API limits: title=100 chars, description=5000 bytes, tags=500 chars.
+    We stay under API limits with margin for safety.
     """
     out = dict(item)
     out["is_shorts"] = is_shorts
-    out["title"] = (out.get("title") or "")[:80]
-    out["description"] = (out.get("description") or "")[:800]
+    out["title"] = (out.get("title") or "")[:100]
+    out["description"] = (out.get("description") or "")[:4500]
 
     htags = out.get("hashtags") or []
     if isinstance(htags, str):
@@ -492,7 +722,7 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
         if t_clean.lower() not in seen:
             seen.add(t_clean.lower())
             deduped.append(f"#{t_clean}")
-    out["hashtags"] = deduped[:5]
+    out["hashtags"] = deduped[:15]
 
     terms = out.get("search_terms") or []
     if isinstance(terms, str):
@@ -507,7 +737,7 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
         if st_clean.lower() not in seen:
             seen.add(st_clean.lower())
             deduped_t.append(st_clean)
-    out["search_terms"] = deduped_t[:10]
+    out["search_terms"] = deduped_t[:30]
 
     return out
 
@@ -529,8 +759,8 @@ def _validate_seo_quality(item: Dict) -> bool:
     if title.lower().rstrip("!.?") in GENERIC_TITLES:
         return False
 
-    # 3. Description must have substance (at least 20 chars)
-    if len(description) < 20:
+    # 3. Description must have substance (at least 100 chars for rich SEO)
+    if len(description) < 100:
         return False
 
     # 4. Title must not contain Devanagari script (kills discoverability)
@@ -713,13 +943,37 @@ def generate_clip_seo(
     teams_str = ", ".join(teams)
     trend_str = ", ".join(trend_topics[:5]) if trend_topics else ""
 
+    # Detect domain dynamically
+    from .trends import detect_video_domain
+    domain, query, keywords = detect_video_domain(video_title or "", transcript or "")
+
+    # Select prompt templates based on domain
+    if domain == "football":
+        sys_instruction = _SYSTEM_FOOTBALL
+        prompt_tmpl = _PROMPT_TMPL_FOOTBALL
+        salvage_tmpl = _SALVAGE_TMPL_FOOTBALL
+        default_title = "Football Match"
+        default_teams = "Teams"
+    elif domain == "general":
+        sys_instruction = _SYSTEM_GENERAL
+        prompt_tmpl = _PROMPT_TMPL_GENERAL
+        salvage_tmpl = _SALVAGE_TMPL_GENERAL
+        default_title = "Video Topic"
+        default_teams = "N/A"
+    else:
+        sys_instruction = _SYSTEM
+        prompt_tmpl = _PROMPT_TMPL
+        salvage_tmpl = _SALVAGE_TMPL
+        default_title = "Cricket Match"
+        default_teams = "India vs Other"
+
     # Build prompt
-    user_prompt = _PROMPT_TMPL.format(
-        video_title=video_title or "Cricket Match",
+    user_prompt = prompt_tmpl.format(
+        video_title=video_title or default_title,
         scorecard=scorecard or "N/A",
         trend_topics=trend_str or "N/A",
         live_stream_url=live_stream_url or "N/A",
-        teams=teams_str or "India vs Other",
+        teams=teams_str or default_teams,
         transcript=transcript,
     )
 
@@ -749,7 +1003,9 @@ def generate_clip_seo(
     result = _attempt_seo_generation(clip_id, user_prompt, transcript, video_title,
                                      is_shorts,
                                      provider_override=provider_override,
-                                     model_override=model_override)
+                                     model_override=model_override,
+                                     sys_instruction=sys_instruction,
+                                     salvage_tmpl=salvage_tmpl)
 
     return result
 
@@ -762,6 +1018,8 @@ def _attempt_seo_generation(
     is_shorts: bool,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    sys_instruction: str = _SYSTEM,
+    salvage_tmpl: str = _SALVAGE_TMPL,
 ) -> Dict:
     """Attempt AI SEO with two-tier escalation.
 
@@ -772,13 +1030,16 @@ def _attempt_seo_generation(
     """
     ai_result = _generate_ai_seo(clip_id, user_prompt, transcript, is_shorts,
                                   provider_override=provider_override,
-                                  model_override=model_override)
+                                  model_override=model_override,
+                                  sys_instruction=sys_instruction)
     if ai_result:
         ai_result["ai_generated"] = True
         return ai_result
 
     esc_result = _escalation_seo(clip_id, user_prompt, transcript, video_title, is_shorts,
-                                  model_override=model_override)
+                                  model_override=model_override,
+                                  sys_instruction=sys_instruction,
+                                  salvage_tmpl=salvage_tmpl)
     if esc_result:
         esc_result["ai_generated"] = True
         return esc_result
@@ -791,7 +1052,8 @@ def _attempt_seo_generation(
 def _generate_ai_seo(clip_id: str, user_prompt: str,
                      transcript: str, is_shorts: bool,
                      provider_override: Optional[str] = None,
-                     model_override: Optional[str] = None) -> Optional[Dict]:
+                     model_override: Optional[str] = None,
+                     sys_instruction: str = _SYSTEM) -> Optional[Dict]:
     """Parallel fastest-first AI generation.
 
     Fires available models concurrently, returns first valid JSON.
@@ -801,14 +1063,14 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
         if model_override:
             response = ai.generate_text(
                 prompt=user_prompt,
-                system_instruction=_SYSTEM,
+                system_instruction=sys_instruction,
                 prefer_model=model_override,
             )
         else:
             # Use SEO-restricted models (OpenCode Go only)
             response = ai.generate_seo_text(
                 prompt=user_prompt,
-                system_instruction=_SYSTEM,
+                system_instruction=sys_instruction,
             )
         if not response or not response.strip():
             log.warning("[%s] AI returned empty response", clip_id)
@@ -841,14 +1103,16 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
 def _escalation_seo(clip_id: str, user_prompt: str,
                     transcript: str, video_title: str,
                     is_shorts: bool,
-                    model_override: Optional[str] = None) -> Optional[Dict]:
+                    model_override: Optional[str] = None,
+                    sys_instruction: str = _SYSTEM,
+                    salvage_tmpl: str = _SALVAGE_TMPL) -> Optional[Dict]:
     """Escalation SEO: stricter prompt with more context.
 
     Called when Tier 1 fails. Uses a different model/provider if available.
     """
     # Try single-provider generation with a more constrained prompt
-    salvage_prompt = _SALVAGE_TMPL.format(
-        video_title=video_title or "Cricket Match",
+    salvage_prompt = salvage_tmpl.format(
+        video_title=video_title or "Video Match",
         transcript=transcript,
     )
     try:
@@ -856,14 +1120,14 @@ def _escalation_seo(clip_id: str, user_prompt: str,
         if model_override:
             response = ai.generate_text(
                 prompt=salvage_prompt,
-                system_instruction=_SYSTEM,
+                system_instruction=sys_instruction,
                 prefer_model=model_override,
             )
         else:
             # Use SEO-restricted models (OpenCode Go only)
             response = ai.generate_seo_text(
                 prompt=salvage_prompt,
-                system_instruction=_SYSTEM,
+                system_instruction=sys_instruction,
             )
         if not response:
             return None

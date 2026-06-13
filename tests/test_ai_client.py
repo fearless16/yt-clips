@@ -385,9 +385,9 @@ class TestGenerateSeoText:
             assert provider == "opencode", f"Non-opencode model in SEO list: {provider}/{model}"
 
     def test_seo_preferred_models_priority_order(self):
-        """Priority: qwen3.7-max → mimo-v2.5-pro → deepseek-v4-pro."""
+        """Priority: mimo-v2.5-pro → deepseek-v4-pro."""
         models = [m for _, m in AIClient.SEO_PREFERRED_MODELS]
-        assert models == ["qwen3.7-max", "mimo-v2.5-pro", "deepseek-v4-pro"]
+        assert models == ["mimo-v2.5-pro", "deepseek-v4-pro"]
 
     def test_seo_text_uses_opencode_only(self):
         """generate_seo_text must only call opencode, never nvidia/groq/ollama."""
@@ -414,8 +414,8 @@ class TestGenerateSeoText:
         with pytest.raises(RuntimeError, match="OpenCode Go API key missing"):
             ai.generate_seo_text("test")
 
-    def test_seo_text_tries_all_three_models_on_failure(self):
-        """Should try qwen3.7-max, mimo-v2.5-pro, deepseek-v4-pro before raising."""
+    def test_seo_text_tries_all_models_on_failure(self):
+        """Should try mimo-v2.5-pro, deepseek-v4-pro before raising."""
         ai = AIClient()
         ai.opencode_api_key = "mock"
 
@@ -429,13 +429,12 @@ class TestGenerateSeoText:
             with pytest.raises(RuntimeError, match="all OpenCode Go models exhausted"):
                 ai.generate_seo_text("test")
 
-        # Should have tried all 3 models at least once (primary + retry rounds)
-        assert "qwen3.7-max" in models_tried
+        # Should have tried both models at least once (primary + retry rounds)
         assert "mimo-v2.5-pro" in models_tried
         assert "deepseek-v4-pro" in models_tried
 
     def test_seo_text_falls_through_to_second_model(self):
-        """If qwen3.7-max fails, should try mimo-v2.5-pro."""
+        """If mimo-v2.5-pro fails, should try deepseek-v4-pro."""
         ai = AIClient()
         ai.opencode_api_key = "mock"
 
@@ -443,13 +442,13 @@ class TestGenerateSeoText:
 
         def selective_fail(prompt, system_instruction=None):
             call_count[0] += 1
-            if ai._model == "qwen3.7-max":
-                raise RuntimeError("qwen down")
-            return "MIMO OK"
+            if ai._model == "mimo-v2.5-pro":
+                raise RuntimeError("mimo down")
+            return "DEEPSEEK OK"
 
         with patch.object(ai, "generate_opencode", side_effect=selective_fail):
             result = ai.generate_seo_text("test")
-            assert result == "MIMO OK"
+            assert result == "DEEPSEEK OK"
 
     def test_seo_text_never_calls_ollama_fallback(self):
         """Even when all 3 models fail, must NOT fall back to ollama."""

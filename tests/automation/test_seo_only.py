@@ -78,10 +78,12 @@ class TestSEOOnlyRun:
 
         mock_ai = MagicMock()
         seo_response = json.dumps({
-            "title": "Kohli ne maara CHHAKKA! 🔥 #Shorts",
-            "description": "Virat Kohli smashes massive six over long-on, crowd goes crazy in Wankhede!",
-            "hashtags": ["#Shorts", "#Kohli", "#RCBvsCSK"],
-            "search_terms": ["kohli six wankhede", "RCB vs CSK highlights"],
+            "title": "🔴 Kohli ne maara CHHAKKA! 💥 | RCB vs CSK IPL 2026 | Live Score #Shorts",
+            "description": "📝 Virat Kohli smashes massive six over long-on, crowd goes crazy in Wankhede! RCB chasing 185 and Kohli is on fire with back-to-back boundaries. Subscribe for more cricket highlights!",
+            "hashtags": ["#Shorts", "#Kohli", "#RCBvsCSK", "#IPL2026", "#ViratKohli",
+                         "#RCB", "#CSK", "#LiveCricket", "#Cricket", "#T20"],
+            "search_terms": ["kohli six wankhede", "RCB vs CSK highlights",
+                             "aaj ka match", "ipl 2026 live", "kohli batting today"],
         })
         mock_ai.generate_fastest_first.return_value = seo_response
         mock_ai.generate_seo_text.return_value = seo_response
