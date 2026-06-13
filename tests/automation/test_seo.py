@@ -356,7 +356,7 @@ class TestProcessAllSEOFailureMarker:
         mock_ai = MagicMock()
         seo_response = json.dumps({
             "title": "Kohli ne maara CHHAKKA! 🔥 #Shorts",
-            "description": "Virat Kohli smashes massive six over long-on in IPL 2026",
+            "description": "📝 Virat Kohli smashes massive six over long-on in IPL 2026! The crowd goes wild as King Kohli deposits the bowler into the stands. Subscribe for more cricket!",
             "hashtags": ["#Shorts", "#IPL"],
             "search_terms": ["kohli six ipl wankhede"],
         })
@@ -470,7 +470,7 @@ class TestRetryFailedSEO:
         mock_ai = MagicMock()
         seo_response = json.dumps({
             "title": "Kohli ne maara CHHAKKA! 🔥 Recovered",
-            "description": "Virat Kohli smashes massive six over long-on in IPL 2026",
+            "description": "📝 Virat Kohli smashes massive six over long-on in IPL 2026! The crowd goes crazy as King Kohli hits back-to-back boundaries. RCB chasing big total!",
             "hashtags": ["#Shorts"],
             "search_terms": ["kohli six wankhede"],
         })
@@ -545,12 +545,11 @@ class TestSEOModelRestrictions:
             assert provider == "opencode", f"Non-opencode model: {provider}/{model}"
 
     def test_seo_preferred_models_priority(self):
-        """Priority order: qwen3.7-max, mimo-v2.5-pro, deepseek-v4-pro."""
+        """Priority order: mimo-v2.5-pro, deepseek-v4-pro."""
         from automation.seo.seo import SEO_PREFERRED_MODELS
         models = [m for _, m in SEO_PREFERRED_MODELS]
-        assert models[0] == "qwen3.7-max"
-        assert models[1] == "mimo-v2.5-pro"
-        assert models[2] == "deepseek-v4-pro"
+        assert models[0] == "mimo-v2.5-pro"
+        assert models[1] == "deepseek-v4-pro"
 
     @patch("automation.seo.seo._get_ai")
     def test_generate_ai_seo_uses_generate_seo_text(self, mock_get_ai):
@@ -559,7 +558,7 @@ class TestSEOModelRestrictions:
         mock_ai = MagicMock()
         mock_ai.generate_seo_text.return_value = json.dumps({
             "title": "Kohli ne maara CHHAKKA! 🔥",
-            "description": "Virat Kohli smashes massive six in IPL 2026",
+            "description": "📝 Virat Kohli smashes massive six in IPL 2026! The crowd at Chinnaswamy goes absolutely wild as King Kohli deposits the delivery into the second tier!",
             "hashtags": ["#Shorts", "#IPL"],
             "search_terms": ["kohli six ipl"],
         })
@@ -581,7 +580,7 @@ class TestSEOModelRestrictions:
         mock_ai = MagicMock()
         mock_ai.generate_text.return_value = json.dumps({
             "title": "Override model SEO title! 🔥",
-            "description": "Description for override test",
+            "description": "📝 Custom model generated SEO for this cricket clip. Amazing moment captured from the match! The crowd goes wild as the bowler strikes. Subscribe for more!",
             "hashtags": ["#Shorts"],
             "search_terms": ["test term"],
         })

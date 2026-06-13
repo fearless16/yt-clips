@@ -135,7 +135,7 @@ class TestSEOQualityGate:
         from automation.seo.seo import _validate_seo_quality
         item = {
             "title": "Kohli ne maara CHHAKKA! 🔥",
-            "description": "Virat Kohli smashes a massive six over long-on",
+            "description": "📝 Virat Kohli smashes a massive six over long-on! The crowd at Chinnaswamy goes absolutely wild as King Kohli deposits the bowler into the stands. Subscribe for more!",
             "hashtags": ["#Shorts", "#Kohli", "#RCBvsCSK"],
             "search_terms": ["kohli six wankhede", "RCB vs CSK highlights"],
         }
@@ -163,6 +163,8 @@ class TestSEOQualityGate:
         with patch("utils.ai_client.AIClient.generate_fastest_first",
                    return_value=generic_response), \
              patch("utils.ai_client.AIClient.generate_text",
+                   return_value=generic_response), \
+             patch("utils.ai_client.AIClient.generate_seo_text",
                    return_value=generic_response):
             with pytest.raises(SEOGenerationError):
                 generate_clip_seo("c1", "kohli hit six over long on", "RCB vs CSK")

@@ -109,10 +109,46 @@ _FAKE_HIGHLIGHTS = {
 }
 
 _FAKE_SEO_JSON = json.dumps({
-    "title": "Kohli Six! #Shorts",
-    "description": "Amazing shot by Kohli in today's match! Subscribe for more. #Shorts",
-    "hashtags": ["#Shorts", "#Kohli", "#IPL"],
-    "search_terms": ["kohli six", "ipl highlights", "rcb vs csk"],
+    "title": "🔴 Kohli ne maara CHHAKKA! 💥 | RCB vs CSK IPL 2026 | Live Score #Shorts",
+    "description": (
+        "📝 Virat Kohli smashes a massive six over long-on! The crowd at Chinnaswamy "
+        "goes absolutely wild as Kohli deposits Jadeja into the stands!\n\n"
+        "🔥 Current Match Situation:\n"
+        "RCB is chasing 185 and Kohli is on fire! After a slow start, "
+        "the King has shifted gears with back-to-back boundaries. RCB at 95/2 "
+        "after 12 overs, needing 90 from 48 balls.\n\n"
+        "👉 If you love cricket, please SUBSCRIBE! We are growing together.\n\n"
+        "🏟️ Match Info:\n"
+        "Series: Indian Premier League 2026 (Match 42)\n"
+        "Teams: Royal Challengers Bengaluru (RCB) vs Chennai Super Kings (CSK)\n"
+        "Venue: M. Chinnaswamy Stadium, Bengaluru\n"
+        "Toss: CSK won the toss and elected to bat.\n\n"
+        "🏏 Key Players Today:\n"
+        "RCB: Virat Kohli, Rajat Patidar (c), Jacob Bethell, Krunal Pandya\n"
+        "CSK: Ruturaj Gaikwad (c), Ravindra Jadeja, Matheesha Pathirana\n\n"
+        "⚠️ Disclaimer: This is a watch-along and scorecard video. No live match "
+        "footage or audio from official broadcasters. All logos belong to respective owners.\n\n"
+        "🏷️ Tags: kohli six, rcb vs csk live, ipl 2026 live, aaj ka match, "
+        "virat kohli batting, cricket live match today\n\n"
+        "#️⃣ #RCBvsCSK #ViratKohli #IPL2026 #RCB #CSK #LiveCricket #Shorts"
+    ),
+    "hashtags": [
+        "#Shorts", "#ViratKohli", "#RCB", "#CSK", "#IPL2026",
+        "#RCBvsCSK", "#LiveCricket", "#CricketLive", "#IPL",
+        "#Kohli", "#Cricket", "#T20", "#LiveScore", "#RCBvCSK", "#KohliSix"
+    ],
+    "search_terms": [
+        "kohli six", "rcb vs csk live score", "ipl 2026 match 42",
+        "virat kohli batting today", "rcb vs csk highlights",
+        "aaj ka match", "live cricket match", "aaj ka match live",
+        "ipl live kaise dekhe", "cricket live match today online",
+        "लाइव क्रिकेट स्कोर", "kohli six chinnaswamy",
+        "rcb vs csk ipl 2026", "live ipl match", "cricket live",
+        "ipl 2026 live", "kohli batting rcb", "csk vs rcb scorecard",
+        "ipl live stream", "how to watch ipl live",
+        "cricket live commentary hindi", "rcb chase",
+        "kohli jadeja six", "ipl live score today", "rcb winning"
+    ],
 })
 
 _FAKE_FFPROBE_OUTPUT = json.dumps({
