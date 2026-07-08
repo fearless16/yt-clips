@@ -50,7 +50,7 @@ def main():
     if result.failures:
         print(f"\nFAILURES:")
         for f in result.failures:
-            print(f"  ⚠ {f}")
+            print(f"  ! {f}")
     print(f"{'='*60}")
 
     return 1 if result.failures else 0
