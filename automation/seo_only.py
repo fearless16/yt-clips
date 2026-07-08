@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -44,6 +45,24 @@ def _get_ai():
 
 # ── Clip discovery ───────────────────────────────────────────────────────────
 
+def _metadata_is_valid(meta_path: Path) -> bool:
+    """Return True only if the metadata file exists AND parses as valid JSON.
+
+    A truncated/corrupt file (e.g. left behind by an interrupted write) must
+    NOT be treated as 'already done' — otherwise the clip would be skipped
+    forever.
+    """
+    if not meta_path.exists():
+        return False
+    try:
+        json.loads(meta_path.read_text(encoding="utf-8"))
+        return True
+    except (ValueError, OSError):
+        log.debug("[seo_only] stale/corrupt metadata ignored: %s", meta_path)
+        return False
+
+
+
 def discover_clips(
     clips_dir: str,
     skip_existing: bool = True,
@@ -61,11 +80,19 @@ def discover_clips(
     if not d.exists():
         return []
 
+    # Case-insensitive discovery (covers .MP4/.Mp4 on Linux/Colab) without
+    # double-counting, since Windows glob is already case-insensitive.
+    seen = set()
     clips = []
-    for mp4 in sorted(d.glob("*.mp4")):
+    for mp4 in sorted(d.iterdir()):
+        if mp4.suffix.lower() != ".mp4" or not mp4.is_file():
+            continue
+        if mp4 in seen:
+            continue
+        seen.add(mp4)
         clip_id = mp4.stem
         meta_path = mp4.with_name(f"{clip_id}_metadata.json")
-        if skip_existing and meta_path.exists():
+        if skip_existing and _metadata_is_valid(meta_path):
             log.debug("[seo_only] skip (has metadata): %s", clip_id)
             continue
         clips.append({"clip_id": clip_id, "path": str(mp4)})
@@ -93,7 +120,7 @@ def _load_clip_transcript(
     if highlights_yaml and Path(highlights_yaml).exists():
         try:
             import yaml
-            with open(highlights_yaml) as f:
+            with open(highlights_yaml, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             if clip_id in data and isinstance(data[clip_id], dict):
                 return data[clip_id].get("text", "")
@@ -107,11 +134,18 @@ def _load_clip_transcript(
     # Try transcript JSON
     if transcript_json and Path(transcript_json).exists():
         try:
-            with open(transcript_json) as f:
+            with open(transcript_json, encoding="utf-8") as f:
                 data = json.load(f)
             segments = data if isinstance(data, list) else data.get("segments", [])
-            # Return full transcript — SEO will handle truncation
-            return " ".join(s.get("text", "") for s in segments[:50])
+            # Return full transcript — SEO will handle truncation.
+            # Guard against non-dict segment entries (malformed transcripts).
+            texts = []
+            for s in segments[:50]:
+                if isinstance(s, dict):
+                    texts.append(str(s.get("text", "")))
+                else:
+                    texts.append(str(s))
+            return " ".join(texts)
         except Exception as e:
             log.debug("[seo_only] transcript json load failed: %s", e)
 
@@ -193,8 +227,14 @@ def run_seo_only(
     """
     clips = discover_clips(clips_dir, skip_existing=skip_existing)
     if not clips:
+        # Count how many clips were skipped (had valid existing metadata)
+        d = Path(clips_dir)
+        total_mp4 = sum(
+            1 for p in d.iterdir()
+            if p.is_file() and p.suffix.lower() == ".mp4"
+        ) if d.exists() else 0
         log.info("[seo_only] no clips to process")
-        return {"processed": 0, "failed": 0, "skipped": 0}
+        return {"processed": 0, "failed": 0, "skipped": total_mp4}
 
     # Auto-discover highlights yaml if not provided
     if not highlights_yaml:
@@ -209,7 +249,7 @@ def run_seo_only(
             meta_file = Path("input") / "video_metadata.json"
         if meta_file.exists():
             try:
-                with open(meta_file) as f:
+                with open(meta_file, encoding="utf-8") as f:
                     video_title = json.load(f).get("title", "")
             except Exception:
                 pass
@@ -237,17 +277,41 @@ def run_seo_only(
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "source": "seo_only",
             }
-            meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+            try:
+                # Atomic write: temp file + os.replace so an interrupted run
+                # never leaves a truncated/corrupt metadata file behind.
+                tmp_path = meta_path.with_suffix(".tmp")
+                tmp_path.write_text(
+                    json.dumps(meta, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                os.replace(tmp_path, meta_path)
+            except OSError as e:
+                log.error("[seo_only] write failed for %s: %s", clip_id, e)
+                # Roll back the temp file if it lingered
+                tmp_path = meta_path.with_suffix(".tmp")
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                failed += 1
+                log.warning("[seo_only] FAIL %s - metadata write failed", clip_id)
+                continue
             processed += 1
-            log.info("[seo_only] ✅ %s → %s", clip_id, seo.get("title", "?")[:60])
+            log.info("[seo_only] OK %s -> %s", clip_id, seo.get("title", "?")[:60])
         else:
             failed += 1
-            log.warning("[seo_only] ❌ %s — AI generation failed", clip_id)
+            log.warning("[seo_only] FAIL %s - AI generation failed", clip_id)
 
         # Breathing room between API calls
         if idx < len(clips) - 1:
             time.sleep(inter_clip_sleep)
 
-    result = {"processed": processed, "failed": failed, "skipped": 0}
-    log.info("[seo_only] DONE: %d processed, %d failed", processed, failed)
+    # Skipped = total clips present minus those we attempted to process
+    total_present = sum(
+        1 for p in Path(clips_dir).iterdir()
+        if p.is_file() and p.suffix.lower() == ".mp4"
+    ) if Path(clips_dir).exists() else 0
+    skipped = max(0, total_present - len(clips))
+    result = {"processed": processed, "failed": failed, "skipped": skipped}
+    log.info("[seo_only] DONE: %d processed, %d failed, %d skipped",
+             processed, failed, skipped)
     return result
