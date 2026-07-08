@@ -809,13 +809,13 @@ def run(
                     )
                     # Persist weights for next run
                     weights_path = Path("clip_selection_weights.json")
-                    with open(weights_path, "w") as f:
-                        _json.dump(adaptive_weights, f, indent=2)
+                    with open(weights_path, "w", encoding="utf-8") as f:
+                        _json.dump(adaptive_weights, f, indent=2, ensure_ascii=False)
 
                     entity_biases = load_entity_biases("self_learner.db")
                     biases_path = Path("clip_selection_biases.json")
-                    with open(biases_path, "w") as f:
-                        _json.dump(entity_biases, f, indent=2, default=str)
+                    with open(biases_path, "w", encoding="utf-8") as f:
+                        _json.dump(entity_biases, f, indent=2, default=str, ensure_ascii=False)
 
                     log.info(
                         "[clip_feedback] adaptive weights persisted: %s",

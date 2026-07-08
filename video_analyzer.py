@@ -434,7 +434,7 @@ def analyze_video(
         output_path = str(Path(cfg["paths"]["temp"]) / f"{stem}_analysis.json")
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
 
     _print_summary(summary, segments)

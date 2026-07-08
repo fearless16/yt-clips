@@ -22,7 +22,29 @@ from rich import box
 
 rich_traceback_install(show_locals=False)
 
-_CONSOLE = Console(stderr=False)
+
+def _safe_stream(stream):
+    """Return a stream that never raises on non-encodable chars (e.g. emoji on
+    a Windows cp1252 console). Prefer reconfiguring to UTF-8; fall back to a
+    replacement-error wrapper so log records are never silently dropped."""
+    try:
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        return stream
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:
+        return stream.buffer
+    except AttributeError:
+        return stream
+
+
+_CONSOLE = Console(
+    stderr=False,
+    file=_safe_stream(sys.stdout),
+    emoji=False,
+    soft_wrap=True,
+)
 
 
 class PhaseTracker:
@@ -206,6 +228,8 @@ def get_logger(name: str, log_file: str = "logs/pipeline.log", level: str = "INF
             show_path=False,
             rich_tracebacks=True,
             tracebacks_show_locals=False,
+            markup=False,
+            show_level=False,
         )
     c_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.addHandler(c_handler)
