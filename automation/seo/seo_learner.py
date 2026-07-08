@@ -115,7 +115,7 @@ class SEOLearner:
         if current <= self._loaded_mtime:
             return
         try:
-            with open(self.performance_db, "r") as f:
+            with open(self.performance_db, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if "version" not in data:
                 data["version"] = 1
@@ -151,7 +151,7 @@ class SEOLearner:
         }
         if self.performance_db.exists():
             try:
-                with open(self.performance_db, "r") as f:
+                with open(self.performance_db, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     if "version" not in data:
                         data["version"] = 1
@@ -173,7 +173,7 @@ class SEOLearner:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_path = tempfile.mkstemp(dir=str(db_path.parent), suffix=".tmp")
         try:
-            with os.fdopen(fd, "w") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(self.learned_insights, f, indent=2)
             os.replace(tmp_path, str(db_path))
         except Exception:

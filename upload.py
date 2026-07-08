@@ -212,7 +212,7 @@ def get_authenticated_service(token_index=0):
         return None
 
     try:
-        with open(tokens_path, "r") as f:
+        with open(tokens_path, "r", encoding="utf-8-sig") as f:
             token_data = json.load(f)
     except Exception as e:
         log.error("Failed to parse %s: %s", tokens_path, e)
@@ -231,7 +231,7 @@ def get_authenticated_service(token_index=0):
         try:
             creds.refresh(Request())
             log.info("YouTube token refreshed successfully")
-            with open("yt_channel_token.json", "w") as f:
+            with open("yt_channel_token.json", "w", encoding="utf-8") as f:
                 f.write(creds.to_json())
         except Exception as e:
             log.warning("Token refresh failed: %s", e)

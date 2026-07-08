@@ -123,6 +123,8 @@ export:
   audio_bitrate: "192k"                 # ↓ from 320k — mobile speakers, 192k indistinguishable
   crf: 22                               # ↑ from 18 — saves 30-40% encode time, invisible on mobile
   super_resolution: false                 # AI 4x upscale via Real-ESRGAN (GPU only; auto-skips on CPU)
+  super_res_device: "auto"               # "auto" | "cuda:0" | "cuda:1" ... (ignored on CPU)
+  max_workers: 0                         # 0 = auto (1 per GPU for super-res, else 2-4 CPU); cap parallelism
   ffmpeg_timeout_seconds: 900           # Prevent hung FFmpeg exports
   min_output_bytes: 100000              # Reject tiny/corrupt exports
   # Hardware encoder — auto-detected in export.py; config is fallback
@@ -253,7 +255,7 @@ thumbnail:
   enabled: true
   use_ai: false                     # Set to true for AI image generation (Nano Banana 2)
   template_path: "channel_logo.png"  # Use logo as a watermark/element
-  font_path: "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" # Colab friendly
+  font_path: ""                      # Empty → auto-detect per-OS (Windows/macOS/Linux)
   font_size: 120
   text_color: "#FFFFFF"
   stroke_color: "#000000"

@@ -150,7 +150,7 @@ def get_next_slot(interval_hours: int = 1) -> datetime:
     state: Dict = {}
     if os.path.exists(STATE_FILE):
         try:
-            with open(STATE_FILE) as f:
+            with open(STATE_FILE, encoding="utf-8") as f:
                 state = json.load(f)
         except (json.JSONDecodeError, OSError):
             state = {}
@@ -178,7 +178,7 @@ def get_next_slot(interval_hours: int = 1) -> datetime:
 
     # Persist
     state["last_scheduled"] = next_slot.isoformat()
-    with open(STATE_FILE, "w") as f:
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
     return next_slot

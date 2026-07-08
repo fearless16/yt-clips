@@ -22,7 +22,73 @@ from rich import box
 
 rich_traceback_install(show_locals=False)
 
-_CONSOLE = Console(stderr=False)
+
+class _ReplaceStream:
+    """Text stream wrapper that never raises on non-encodable output.
+
+    On Windows the console defaults to cp1252, so an emoji in a log message
+    raises UnicodeEncodeError inside the Rich handler, which logging swallows
+    via handleError — silently dropping the record. Wrapping the write path
+    with errors="replace" (the fix endorsed across Stack Overflow / Rich
+    issues #3907/#3764) guarantees the record is always emitted.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        try:
+            self._stream.write(text)
+        except UnicodeEncodeError:
+            # Sanitize to the sink's encoding (cp1252 on Windows consoles)
+            # using replacement chars, so the record is always emitted.
+            safe = text.encode("cp1252", errors="replace").decode("cp1252")
+            try:
+                self._stream.write(safe)
+            except UnicodeEncodeError:
+                self._stream.write(text.encode("ascii", errors="replace").decode("ascii"))
+        return len(text)
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def _safe_stream(stream):
+    """Return a stream that never raises on non-encodable chars.
+
+    Prefer reconfiguring the real stdout/stderr to UTF-8 (per PEP 528 /
+    community guidance). If that is unavailable, wrap writes with a
+    replacement-error handler so log records are never silently dropped.
+    """
+    try:
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        return stream
+    except (ValueError, OSError, AttributeError):
+        return _ReplaceStream(stream)
+
+
+_CONSOLE = Console(
+    stderr=False,
+    file=_safe_stream(sys.stdout),
+    emoji=False,
+    soft_wrap=True,
+)
+
+# Harden the process-wide streams once (defense-in-depth). Even if some other
+# library prints directly to stdout/stderr, output stays UTF-8-safe on Windows.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        if hasattr(_s, "reconfigure"):
+            _s.reconfigure(encoding="utf-8", errors="replace")
+    except (ValueError, OSError, AttributeError):
+        pass
 
 
 class PhaseTracker:
@@ -206,6 +272,8 @@ def get_logger(name: str, log_file: str = "logs/pipeline.log", level: str = "INF
             show_path=False,
             rich_tracebacks=True,
             tracebacks_show_locals=False,
+            markup=False,
+            show_level=False,
         )
     c_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
     logger.addHandler(c_handler)

@@ -423,7 +423,8 @@ def grade_video(source_path: str, reference_path: str, output_path: str) -> str:
 
     import subprocess
     import shutil
-    tmp_out = f"/tmp/yt_clips_grade_{os.getpid()}.mp4"
+    import tempfile
+    tmp_out = os.path.join(tempfile.gettempdir(), f"yt_clips_grade_{os.getpid()}.mp4")
 
     cmd = [
         "ffmpeg", "-y",

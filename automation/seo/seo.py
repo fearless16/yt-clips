@@ -1193,7 +1193,7 @@ def generate_seo_for_exported_clip(
                 "video_title": video_title,
                 "is_shorts": is_shorts,
             }
-            with open(marker_path, "w") as f:
+            with open(marker_path, "w", encoding="utf-8") as f:
                 json.dump(marker_data, f)
             if metadata_path.exists():
                 metadata_path.unlink()
@@ -1213,7 +1213,7 @@ def generate_seo_for_exported_clip(
             "video_title": video_title,
             "is_shorts": is_shorts,
         }
-        with open(marker_path, "w") as f:
+        with open(marker_path, "w", encoding="utf-8") as f:
             json.dump(marker_data, f)
         return {"_seo_failed": True, "error": str(e)}
 
@@ -1322,7 +1322,7 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
                 "is_shorts": True,
             }
             marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
-            with open(marker_path, "w") as f:
+            with open(marker_path, "w", encoding="utf-8") as f:
                 json.dump(marker_data, f)
             all_results.append({"_seo_failed": True, "clip_id": clip_id})
 
