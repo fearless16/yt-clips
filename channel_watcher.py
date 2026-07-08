@@ -82,7 +82,7 @@ def monitor(channel_url: str, interval_minutes: int = 60):
 
                 if pipeline_result.returncode == 0:
                     # Mark as processed only on success
-                    with open(processed_file, "a") as f:
+                    with open(processed_file, "a", encoding="utf-8") as f:
                         f.write(f"{video_id}\n")
                     log.info(f"✅ Pipeline complete for {video_id}")
                     consecutive_errors = 0

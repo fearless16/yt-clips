@@ -69,7 +69,7 @@ def get_youtube_service():
             return None
         flow = InstalledAppFlow.from_client_secrets_file(str(client_secrets), SCOPES)
         new_creds = flow.run_local_server(open_browser=True, open_browser_timeout_seconds=120)
-        with open("yt_channel_token.json", "w") as f:
+        with open("yt_channel_token.json", "w", encoding="utf-8") as f:
             f.write(new_creds.to_json())
         print("Token saved to yt_channel_token.json")
         return new_creds
@@ -82,7 +82,7 @@ def get_youtube_service():
         if creds and creds.expired and creds.refresh_token:
             try:
                 creds.refresh(Request())
-                with open("yt_channel_token.json", "w") as f:
+                with open("yt_channel_token.json", "w", encoding="utf-8") as f:
                     f.write(creds.to_json())
             except Exception as e:
                 print(f"Token refresh failed: {e}")

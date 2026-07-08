@@ -1117,24 +1117,36 @@ def export_all(
     # ── Parallel Export ─────────────────────────────────────────────────────────
     # Use thread pool for I/O-bound FFmpeg processes
     encoder = _get_best_encoder()
-    super_res = cfg.get("export", {}).get("super_resolution", False)
+    export_cfg = cfg.get("export", {})
+    super_res = export_cfg.get("super_resolution", False)
+    # Super-res needs CUDA; auto-disable + warn rather than crash on CPU/Windows.
+    import torch
+    cuda_available = torch.cuda.is_available()
+    if super_res and not cuda_available:
+        log.warning(
+            "super_resolution enabled but CUDA unavailable — skipping super-res (CPU fallback)"
+        )
+        super_res = False
     if super_res:
-        import torch
-        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+        gpu_count = torch.cuda.device_count()
         max_workers = max(1, min(gpu_count, len(filtered_items)))  # 1 worker per GPU
     else:
-        max_workers = max(1, min(2 if encoder == "h264_nvenc" else 4, len(filtered_items)))
-    log.info(f"🚀 Starting parallel export with {max_workers} workers (super_res={super_res})...")
+        cfg_workers = int(export_cfg.get("max_workers", 0) or 0)
+        if cfg_workers > 0:
+            max_workers = max(1, min(cfg_workers, len(filtered_items)))
+        else:
+            max_workers = max(1, min(2 if encoder == "h264_nvenc" else 4, len(filtered_items)))
+    log.info("Starting parallel export with %d workers (super_res=%s)", max_workers, super_res)
 
     # Pre-initialize SuperResEnhancer per GPU BEFORE spawning threads.
     # This prevents concurrent GFPGAN model loading which causes heap corruption.
     _sr_instances = {}
     if super_res and not premium_enabled:
         from utils.super_res import SuperResEnhancer
-        import torch
-        gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
-        for g in range(gpu_count):
-            dev = f"cuda:{g}" if gpu_count > 1 else "cuda:0"
+        # Device is configurable; "auto" → first visible CUDA device.
+        device_cfg = str(export_cfg.get("super_res_device", "auto")).lower()
+        for g in range(torch.cuda.device_count()):
+            dev = f"cuda:{g}" if device_cfg == "auto" else device_cfg
             _sr_instances[dev] = SuperResEnhancer(scale=4, device=dev)
             log.info("Pre-initialized SuperResEnhancer on %s", dev)
         # Warm up: process a dummy frame on each device to avoid first-frame stall

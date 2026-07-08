@@ -609,7 +609,7 @@ def detect_highlights(
     meta_file = Path(cfg["paths"]["input"]) / "video_metadata.json"
     if meta_file.exists():
         try:
-            with open(meta_file, "r") as f:
+            with open(meta_file, "r", encoding="utf-8") as f:
                 meta = json.load(f)
                 video_title = meta.get("title", "")
         except Exception:
