@@ -30,7 +30,13 @@ def _find_best_font() -> str:
 class ThumbnailGenerator:
     def __init__(self):
         self.config = cfg.get("thumbnail", {})
-        self.font_path = self.config.get("font_path") or _find_best_font()
+        # Config font_path is only used if it actually exists; otherwise fall
+        # back to OS auto-detection (so a Linux path in config.yaml doesn't
+        # crash a Windows run, and vice-versa).
+        cfg_font = self.config.get("font_path")
+        self.font_path = (
+            cfg_font if (cfg_font and os.path.exists(cfg_font)) else _find_best_font()
+        )
         self.font_size = self.config.get("font_size", 120)
         self.text_color = self.config.get("text_color", "#FFFFFF")
         self.stroke_color = self.config.get("stroke_color", "#000000")
@@ -41,7 +47,7 @@ class ThumbnailGenerator:
         log.info(f"Generating thumbnail for {video_path}...")
         
         # Load metadata for text and context
-        with open(metadata_path, "r") as f:
+        with open(metadata_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
         
         title = meta.get("title", "Cricket Highlights")
@@ -54,7 +60,7 @@ class ThumbnailGenerator:
             prompt = f"Cricket action shot: {title}. High contrast, 4K, professional YouTube Short style."
             success = ai.generate_image(prompt, output_path)
             if success:
-                log.info(f"✅ AI Thumbnail (Nano Banana Pro) saved to {output_path}")
+                log.info("AI Thumbnail (Nano Banana Pro) saved to %s", output_path)
                 return True
             log.warning("AI Thumbnail generation failed, falling back to frame extraction.")
 
@@ -94,7 +100,7 @@ class ThumbnailGenerator:
 
         # Save final thumbnail
         img.save(output_path, quality=95)
-        log.info(f"✅ Thumbnail saved to {output_path}")
+        log.info("Thumbnail saved to %s", output_path)
         
         # Cleanup temp frame
         if frame_path.exists():

@@ -49,8 +49,18 @@ def transcribe(video_path: str, output_path: str):
     beam_size = t_cfg.get("beam_size", 5)
     vad_filter = t_cfg.get("vad_filter", True)
 
+    # Normalize "auto" → cuda when a GPU is present (OS-agnostic; faster-whisper
+    # only accepts "cpu"/"cuda", never "auto"). Previously GPU auto-selection was
+    # gated on sys.platform == "linux", which silently forced CPU on Windows.
+    if target_device == "auto":
+        try:
+            import torch
+            target_device = "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            target_device = "cpu"
+
     devices_to_try = []
-    if target_device == "cuda" or (sys.platform == "linux" and target_device != "cpu"):
+    if target_device == "cuda":
         devices_to_try = [("cuda", compute_type), ("cpu", "int8")]
     else:
         devices_to_try = [(target_device, compute_type)]
