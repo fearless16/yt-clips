@@ -237,12 +237,12 @@ def run_seo_only(
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "source": "seo_only",
             }
-            meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+            meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
             processed += 1
-            log.info("[seo_only] ✅ %s → %s", clip_id, seo.get("title", "?")[:60])
+            log.info("[seo_only] OK %s -> %s", clip_id, seo.get("title", "?")[:60])
         else:
             failed += 1
-            log.warning("[seo_only] ❌ %s — AI generation failed", clip_id)
+            log.warning("[seo_only] FAIL %s - AI generation failed", clip_id)
 
         # Breathing room between API calls
         if idx < len(clips) - 1:
