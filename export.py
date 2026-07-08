@@ -1013,7 +1013,7 @@ def export_all(
     """
     if isinstance(highlights, (str, Path)):
         import yaml
-        with open(highlights, "r") as f:
+        with open(highlights, "r", encoding="utf-8") as f:
             highlights = yaml.safe_load(f) or {}
 
     if not isinstance(highlights, dict):

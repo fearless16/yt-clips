@@ -121,15 +121,17 @@ def _extractor_args(client: str, dl_cfg: dict) -> list[str]:
 def _yt_dlp_path() -> str:
     """Find yt-dlp binary, preferring the one in the active venv."""
     import shutil
-    # Try venv-relative path first
+    # Try venv-relative path first (Windows uses yt-dlp.exe)
     venv_bin = Path(sys.executable).parent
-    candidate = venv_bin / "yt-dlp"
-    if candidate.exists():
-        return str(candidate)
+    for name in ("yt-dlp", "yt-dlp.exe"):
+        candidate = venv_bin / name
+        if candidate.exists():
+            return str(candidate)
     # Fallback to system PATH
     found = shutil.which("yt-dlp")
     if found:
         return found
+    # Last resort: let subprocess resolve it (works on POSIX PATH)
     return "yt-dlp"
 
 

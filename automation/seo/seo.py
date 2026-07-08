@@ -7,6 +7,7 @@ the next tier of models is tried immediately. Three-tier fallback: AI → salvag
 generic templates or prefixes.
 """
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -1198,8 +1199,10 @@ def generate_seo_for_exported_clip(
                 metadata_path.unlink()
             result["_seo_failed"] = True
         else:
-            with open(metadata_path, "w") as f:
+            tmp_path = metadata_path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, metadata_path)
         return result
     except Exception as e:
         log.error("[%s] SEO generation failed: %s", clip_id, e)
@@ -1302,10 +1305,13 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
                     upload_success=True,
                 ))
 
-            # Save individual file immediately
+            # Save individual file immediately (atomic: temp + replace so an
+            # interrupted run never leaves a truncated metadata file behind)
             per_clip_path = Path(output_dir) / f"{clip_id}_metadata.json"
-            with open(per_clip_path, "w", encoding="utf-8") as f:
+            tmp_path = per_clip_path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, per_clip_path)
         except SEOGenerationError as e:
             log.warning("[%s] SEO failed — writing failure marker: %s", clip_id, e)
             failures.append(clip_id)
@@ -1396,10 +1402,12 @@ def retry_failed_seo(output_dir: str) -> dict:
             )
             if result and not result.get("_seo_failed"):
                 meta_path = out / f"{clip_id}_metadata.json"
-                meta_path.write_text(
+                tmp_path = meta_path.with_suffix(".tmp")
+                tmp_path.write_text(
                     json.dumps(result, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
+                os.replace(tmp_path, meta_path)
                 m.unlink()
                 recovered += 1
                 log.info("[retry] %s recovered", clip_id)
