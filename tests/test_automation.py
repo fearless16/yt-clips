@@ -435,7 +435,7 @@ class TestTranscribeConfig:
         assert t.get("batch_size", 0) >= 4
         assert t.get("beam_size", 0) >= 3
         assert t.get("vad_filter") is True
-        assert t.get("device") in ("cuda", "cpu")
+        assert t.get("device") in ("cuda", "cpu", "auto")
 
     def test_vram_logging_does_not_crash(self):
         from transcribe import _log_vram

@@ -31,8 +31,8 @@ download:
 transcription:
   model: "small"                        # tiny | base | small | medium | large-v3
   language: "hi"                        # Hindi commentary — use hi for better accuracy
-  device: "cuda"            # Prioritizes GPU, auto-falls back to CPU if missing
-  compute_type: "float16"    # Optimized for GPU; auto-switches to int8 on CPU fallback
+  device: "auto"             # auto-detects CUDA/ROCm/CPU; falls back gracefully
+  compute_type: "auto"       # auto: float16 on GPU, int8 on CPU
   batch_size: 24                        # Parallel segments; T4 handles 24 fine with small model
   beam_size: 3                          # ↓ from 5 — 40% faster, negligible quality loss for clips
   vad_filter: true                      # Filter out non-speech for 2-3x speedup
