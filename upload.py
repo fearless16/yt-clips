@@ -228,13 +228,30 @@ def get_authenticated_service(token_index=0):
         return None
 
     if creds and creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-            log.info("YouTube token refreshed successfully")
-            with open("yt_channel_token.json", "w", encoding="utf-8") as f:
-                f.write(creds.to_json())
-        except Exception as e:
-            log.warning("Token refresh failed: %s", e)
+        refreshed = False
+        for attempt in range(1, 3):
+            try:
+                creds.refresh(Request())
+                log.info("YouTube token refreshed successfully (attempt %d)", attempt)
+                with open("yt_channel_token.json", "w", encoding="utf-8") as f:
+                    f.write(creds.to_json())
+                refreshed = True
+                break
+            except Exception as e:
+                err_msg = str(e).lower()
+                if "invalid_grant" in err_msg or "token has been expired" in err_msg or "revoked" in err_msg:
+                    log.error(
+                        "YouTube token refresh FAILED (invalid_grant) — refresh token "
+                        "is revoked or expired. Run: python setup_auth.py  to re-authenticate."
+                    )
+                    return None
+                if attempt < 2:
+                    log.warning("Token refresh attempt %d failed: %s — retrying", attempt, e)
+                    time.sleep(2)
+                else:
+                    log.warning("Token refresh failed after %d attempts: %s", attempt, e)
+                    return None
+        if not refreshed:
             return None
 
     if not creds or not creds.valid:
