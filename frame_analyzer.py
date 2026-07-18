@@ -13,6 +13,20 @@ from utils.face_matcher import find_host_in_frame
 cfg = load_config()
 log = get_logger("analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
+_FACE_RECOGNITION_AVAILABLE: bool | None = None
+
+
+def _has_face_recognition() -> bool:
+    global _FACE_RECOGNITION_AVAILABLE
+    if _FACE_RECOGNITION_AVAILABLE is None:
+        try:
+            import face_recognition  # noqa: F401
+            _FACE_RECOGNITION_AVAILABLE = True
+        except ImportError:
+            _FACE_RECOGNITION_AVAILABLE = False
+            log.warning("face_recognition not installed — face matching disabled")
+    return _FACE_RECOGNITION_AVAILABLE
+
 # Per-clip crop smoothing state — thread-local to prevent bleed across parallel exports
 _crop_local = threading.local()
 
@@ -152,10 +166,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
     except Exception:
         pass
 
-    try:
-        import face_recognition
-    except ImportError:
-        log.warning("face_recognition not installed — skipping face matching")
+    if not _has_face_recognition():
         return None
 
     best_face = None
