@@ -19,6 +19,7 @@ Usage:
     python dry_run.py --list-external        # list all API-call intercept points
     python dry_run.py --validate-config      # only check required config keys
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import argparse
 import contextlib

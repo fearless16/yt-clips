@@ -5,6 +5,8 @@ Saves results to seo_output.txt for copy-paste into YouTube Studio.
 Usage:
     .venv/bin/python generate_seo_all.py
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
+
 import json
 import os
 import re

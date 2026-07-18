@@ -1,3 +1,5 @@
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
+
 import subprocess
 import json
 import os

@@ -11,6 +11,7 @@ Usage:
     python pipeline.py <youtube_url> --mode ref_grade   # enable reference-derived color grade
     python pipeline.py <youtube_url> --mode face_mapper # enable 6-step per-frame face enhancement
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import argparse
 import shutil

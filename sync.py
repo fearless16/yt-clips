@@ -13,6 +13,7 @@ Usage:
     python sync.py                          # Sync all shorts
     python sync.py --folder shorts/2026-05-03_093000  # Sync specific folder
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import argparse
 import os

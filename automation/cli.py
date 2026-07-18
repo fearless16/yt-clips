@@ -1,4 +1,5 @@
 """CLI — command-line interface for the orchestration pipeline."""
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import argparse
 import json

@@ -11,6 +11,7 @@ Usage:
   python worker.py --pipeline   # Also check for new videos to process
   python worker.py --report     # Just print current learnings
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import sys
 import json

@@ -11,6 +11,7 @@ Usage:
     .venv/bin/python learn_from_uploads.py --limit 30
     .venv/bin/python learn_from_uploads.py --channel UCQtCMKPc41MHd7hujVuGm5g
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 import argparse
 import json
 import os
