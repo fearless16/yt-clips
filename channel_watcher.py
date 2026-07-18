@@ -8,6 +8,8 @@ Features:
   - Error recovery with max retry limits
   - Proper logging via utils/logger.py
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
+
 import sys
 import time
 import subprocess

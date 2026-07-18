@@ -7,6 +7,8 @@ NOTE: This uses YouTube Data API (not Drive API), so it has its own
 auth via yt_channel_token.json + client_secrets.json. This is intentionally
 separate from the Drive auth in utils/drive_auth.py.
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
+
 import os
 import json
 import sys

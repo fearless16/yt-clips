@@ -4,6 +4,8 @@ persisted from the previous run. No new data ingestion — pure read.
 Usage:
     .venv/bin/python verify_learning.py
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
+
 import os
 import sys
 from self_learner import (

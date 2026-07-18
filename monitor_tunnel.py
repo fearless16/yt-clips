@@ -4,6 +4,8 @@ Prevents duplicate uploads at all costs.
 Usage:
     .venv/bin/python monitor_tunnel.py <tunnel-url> <video-url>
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
+
 import json
 import ssl
 import sys

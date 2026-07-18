@@ -7,6 +7,7 @@ Usage (Colab T4):
     pr = PremiumRender()
     pr.render_clip(input_path, output_path, start, end, speed_map)
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import json
 import subprocess

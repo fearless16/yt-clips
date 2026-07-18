@@ -21,6 +21,7 @@ Zero modifications to existing pipeline code.
 """
 
 from __future__ import annotations
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import argparse
 import copy

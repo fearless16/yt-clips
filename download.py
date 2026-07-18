@@ -6,6 +6,7 @@ Prefers VP9/AV1 for quality, remuxes to MP4 container.
 
 Uses yt-dlp's current YouTube clients with Colab-friendly fallbacks.
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import argparse
 from collections import deque

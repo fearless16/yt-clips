@@ -5,6 +5,7 @@ Fetches transcript + generates SEO with minimax-m3 → updates metadata (no re-u
 Usage:
     python re_seo.py <URL_or_ID> [<URL_or_ID> ...]
 """
+import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import json
 import os
