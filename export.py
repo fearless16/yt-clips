@@ -112,16 +112,56 @@ def _parse_fps(rate: str) -> float:
     return fps if fps > 0 else 30.0
 
 
+def _detect_gpu_vendor(wmic_output: str = None) -> str | None:
+    """Detect GPU vendor from system info. Returns 'amd', 'nvidia', 'intel', or None."""
+    if wmic_output is None:
+        try:
+            r = subprocess.run(
+                ["powershell", "-Command",
+                 "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"],
+                capture_output=True, text=True, timeout=5,
+            )
+            wmic_output = r.stdout
+        except Exception:
+            return None
+    lower = (wmic_output or "").lower()
+    if "amd" in lower or "radeon" in lower:
+        return "amd"
+    if "nvidia" in lower or "geforce" in lower or "rtx" in lower or "gtx" in lower:
+        return "nvidia"
+    if "intel" in lower:
+        return "intel"
+    return None
+
+
+# Mapping: vendor → ordered list of preferred hardware encoders
+_VENDOR_ENCODER_ORDER = {
+    "amd":    ["h264_amf", "h264_nvenc", "h264_qsv", "h264_vaapi", "h264_videotoolbox"],
+    "nvidia": ["h264_nvenc", "h264_qsv", "h264_amf", "h264_vaapi", "h264_videotoolbox"],
+    "intel":  ["h264_qsv", "h264_nvenc", "h264_amf", "h264_vaapi", "h264_videotoolbox"],
+}
+_DEFAULT_ENCODER_ORDER = ["h264_nvenc", "h264_amf", "h264_videotoolbox", "h264_qsv", "h264_vaapi"]
+
+
 def _get_best_encoder() -> str:
     global _BEST_ENCODER
     with _BEST_ENCODER_LOCK:
         if _BEST_ENCODER:
             return _BEST_ENCODER
-        candidates = ["h264_nvenc", "h264_videotoolbox", "h264_qsv", "h264_vaapi"]
+
+        vendor = _detect_gpu_vendor()
+        if vendor:
+            log.info("GPU vendor detected: %s", vendor)
+            candidates = [e for e in _VENDOR_ENCODER_ORDER.get(vendor, _DEFAULT_ENCODER_ORDER)]
+        else:
+            log.info("GPU vendor unknown — trying all hardware encoders")
+            candidates = list(_DEFAULT_ENCODER_ORDER)
+
         try:
             result = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=15)
+            available = result.stdout
             for enc in candidates:
-                if enc in result.stdout:
+                if enc in available:
                     log.info("Testing encoder: %s ...", enc)
                     if _smoke_test_encoder(enc):
                         log.info("Using encoder: %s", enc)
@@ -145,6 +185,8 @@ def _smoke_test_encoder(encoder: str) -> bool:
     ]
     if encoder == "h264_nvenc":
         cmd.extend(["-preset", "p4"])
+    elif encoder == "h264_amf":
+        cmd.extend(["-quality", "speed"])
     cmd.extend(["-t", "0.5", temp_test])
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
