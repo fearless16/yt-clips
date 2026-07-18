@@ -275,6 +275,20 @@ def _fetch_via_api(video_id: str) -> dict | None:
         return None
 
 
+def _find_ytdlp() -> str:
+    """Find yt-dlp executable — checks venv Scripts, then PATH."""
+    import shutil
+    import sys
+    # Check venv Scripts first (Windows: yt-dlp.exe, Unix: yt-dlp)
+    vtd = Path(sys.executable).parent / ("yt-dlp.exe" if sys.platform == "win32" else "yt-dlp")
+    if vtd.exists():
+        return str(vtd)
+    found = shutil.which("yt-dlp")
+    if found:
+        return found
+    return "yt-dlp"
+
+
 def _fetch_via_ytdlp(video_id: str) -> dict | None:
     """Fetch transcript via yt-dlp (VTT download). Returns None on failure."""
     import subprocess
@@ -284,7 +298,7 @@ def _fetch_via_ytdlp(video_id: str) -> dict | None:
         with tempfile.NamedTemporaryFile(suffix=".vtt", delete=False, mode="w") as f:
             tmp_path = f.name
         cmd = [
-            "yt-dlp", "--skip-download", "--write-auto-subs", "--sub-langs", "en,hi",
+            _find_ytdlp(), "--skip-download", "--write-auto-subs", "--sub-langs", "en,hi",
             "--remote-components", "ejs:github",
             "-o", tmp_path.replace(".vtt", ""), f"https://www.youtube.com/watch?v={video_id}",
         ]

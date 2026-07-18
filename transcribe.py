@@ -49,15 +49,41 @@ def transcribe(video_path: str, output_path: str):
     beam_size = t_cfg.get("beam_size", 5)
     vad_filter = t_cfg.get("vad_filter", True)
 
-    # Normalize "auto" → cuda when a GPU is present (OS-agnostic; faster-whisper
-    # only accepts "cpu"/"cuda", never "auto"). Previously GPU auto-selection was
-    # gated on sys.platform == "linux", which silently forced CPU on Windows.
+    # Normalize "auto" → cuda ONLY on NVIDIA GPUs (faster-whisper/CTranslate2
+    # only supports NVIDIA CUDA, NOT AMD ROCm on Windows). AMD GPUs fall back
+    # to CPU int8 automatically.
     if target_device == "auto":
         try:
             import torch
-            target_device = "cuda" if torch.cuda.is_available() else "cpu"
+            if torch.cuda.is_available():
+                # Double-check it's actually NVIDIA (not AMD ROCm misreported)
+                gpu_name = torch.cuda.get_device_name(0).lower()
+                if "nvidia" in gpu_name or "geforce" in gpu_name or "rtx" in gpu_name or "tesla" in gpu_name or "titan" in gpu_name:
+                    target_device = "cuda"
+                    log.info("NVIDIA GPU detected: %s — using CUDA", torch.cuda.get_device_name(0))
+                else:
+                    target_device = "cpu"
+                    log.warning("Non-NVIDIA GPU detected (%s) — CTranslate2 only supports NVIDIA CUDA. Using CPU.",
+                                torch.cuda.get_device_name(0))
+            else:
+                target_device = "cpu"
         except Exception:
             target_device = "cpu"
+
+    # Warn if user explicitly set "cuda" but no NVIDIA GPU is available
+    if target_device == "cuda":
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                log.warning("CUDA requested but not available — falling back to CPU")
+                target_device = "cpu"
+        except Exception:
+            log.warning("CUDA requested but torch not available — falling back to CPU")
+            target_device = "cpu"
+
+    # Normalize "auto" compute_type → float16 on GPU, int8 on CPU
+    if compute_type == "auto":
+        compute_type = "float16" if target_device == "cuda" else "int8"
 
     devices_to_try = []
     if target_device == "cuda":

@@ -120,16 +120,34 @@ def run(
 
     # ── Phase 2: Transcribe ────────────────────────────────────────────────────
     _banner("PHASE 2 — TRANSCRIPTION")
+    transcript_source = "none"
     if skip_transcribe:
         log.info("Skipping transcription (--skip-transcribe). Using: %s", transcript_path)
         if not Path(transcript_path).exists():
             log.error("Transcript not found at %s — cannot skip transcription.", transcript_path)
             sys.exit(1)
     else:
+        # Priority 1: YouTube transcript (fast, free, no GPU needed)
         t0 = time.perf_counter()
-        from transcribe import transcribe
-        transcribe(video_path, transcript_path)
-        log.info("Phase 2 complete in %.1f s", time.perf_counter() - t0)
+        yt_transcript = None
+        try:
+            from automation.transcript import fetch as fetch_transcript
+            yt_transcript = fetch_transcript(url, output_path=transcript_path)
+        except Exception as e:
+            log.warning("YouTube transcript fetch failed: %s", e)
+
+        if yt_transcript and yt_transcript.get("segments"):
+            transcript_source = yt_transcript.get("source", "api")
+            n_segs = len(yt_transcript["segments"])
+            log.info("YouTube transcript fetched: %d segments (source=%s) in %.1f s",
+                     n_segs, transcript_source, time.perf_counter() - t0)
+        else:
+            # Priority 2: Local Whisper (slow, needs GPU/CPU)
+            log.info("YouTube transcript unavailable — falling back to local Whisper")
+            from transcribe import transcribe
+            transcribe(video_path, transcript_path)
+            transcript_source = "whisper"
+            log.info("Local Whisper transcription done in %.1f s", time.perf_counter() - t0)
 
     # ── Phase 2.5: Video Analysis (face/lighting map) ─────────────────────────
     _banner("PHASE 2.5 — VIDEO ANALYSIS")
