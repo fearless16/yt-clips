@@ -252,7 +252,7 @@ def main():
         from automation.learner.migrate import migrate as migrate_learner_state
         summary = migrate_learner_state(db_path=db_path, dry_run=False, reset=False)
         if summary.get("events_built", 0) > 0:
-            print(f"  Migrated {summary['events_built']} events -> "
+            print(f"  Migrated {summary['events_built']} events → "
                   f"{summary.get('learners_updated', 0)} learner updates")
         else:
             print(f"  No new events to migrate")
