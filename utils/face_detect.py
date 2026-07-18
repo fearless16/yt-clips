@@ -20,26 +20,40 @@ log = get_logger("face_detect", cfg.get("logging", {}).get("log_file", "logs/pip
 
 _MP_INSTANCE: Optional[tuple] = None  # (mp_module, detector)
 _MP_LOCK = threading.Lock()
+_MP_UNAVAILABLE: bool = False  # True if mediapipe import failed once
 
 
-def _get_mp() -> tuple:
-    """Singleton getter for (mediapipe_module, FaceDetector)."""
-    global _MP_INSTANCE
+def _get_mp() -> Optional[tuple]:
+    """Singleton getter for (mediapipe_module, FaceDetector).
+
+    Returns None if mediapipe is not installed (after logging a single warning).
+    """
+    global _MP_INSTANCE, _MP_UNAVAILABLE
+    if _MP_UNAVAILABLE:
+        return None
     if _MP_INSTANCE is None:
         with _MP_LOCK:
             if _MP_INSTANCE is None:
-                import mediapipe as mp
-                from mediapipe.tasks import python
-                from mediapipe.tasks.python import vision
-                model_path = Path(__file__).resolve().parent.parent / "face_detector.tflite"
-                if not model_path.exists():
-                    model_path = Path("face_detector.tflite")
-                if not model_path.exists():
-                    raise FileNotFoundError(f"MediaPipe face detector model file not found: {model_path}")
-                log.info(f"Initializing MediaPipe FaceDetector with model: {model_path}")
-                base_options = python.BaseOptions(model_asset_path=str(model_path))
-                options = vision.FaceDetectorOptions(base_options=base_options)
-                _MP_INSTANCE = (mp, vision.FaceDetector.create_from_options(options))
+                try:
+                    import mediapipe as mp
+                    from mediapipe.tasks import python
+                    from mediapipe.tasks.python import vision
+                    model_path = Path(__file__).resolve().parent.parent / "face_detector.tflite"
+                    if not model_path.exists():
+                        model_path = Path("face_detector.tflite")
+                    if not model_path.exists():
+                        raise FileNotFoundError(f"MediaPipe face detector model file not found: {model_path}")
+                    log.info(f"Initializing MediaPipe FaceDetector with model: {model_path}")
+                    base_options = python.BaseOptions(model_asset_path=str(model_path))
+                    options = vision.FaceDetectorOptions(base_options=base_options)
+                    _MP_INSTANCE = (mp, vision.FaceDetector.create_from_options(options))
+                except ImportError:
+                    _MP_UNAVAILABLE = True
+                    log.warning(
+                        "MediaPipe not installed — face detection disabled. "
+                        "Install with: pip install mediapipe"
+                    )
+                    return None
     return _MP_INSTANCE
 
 
@@ -81,7 +95,10 @@ def detect_faces(frame: np.ndarray, score_threshold: float = 0.5) -> List[Tuple[
         return []
 
     try:
-        mp, detector = _get_mp()
+        mp_detector = _get_mp()
+        if mp_detector is None:
+            return []
+        mp, detector = mp_detector
         # Convert BGR to RGB (MediaPipe expects RGB)
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
