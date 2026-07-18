@@ -22,6 +22,20 @@ from utils.logger import get_logger
 cfg = load_config()
 log = get_logger("premium", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
+_FACE_RECOGNITION_AVAILABLE: bool | None = None
+
+
+def _has_face_recognition() -> bool:
+    global _FACE_RECOGNITION_AVAILABLE
+    if _FACE_RECOGNITION_AVAILABLE is None:
+        try:
+            import face_recognition  # noqa: F401
+            _FACE_RECOGNITION_AVAILABLE = True
+        except ImportError:
+            _FACE_RECOGNITION_AVAILABLE = False
+            log.warning("face_recognition not installed — identity tracking disabled")
+    return _FACE_RECOGNITION_AVAILABLE
+
 # ─── GPU / Backend Detection ──────────────────────────────────────────────
 
 HAS_TORCH = False
@@ -927,10 +941,7 @@ class HostDetector:
         self.reference_embeddings: List[np.ndarray] = []
         self.has_host_reference = len(reference_photos) > 0
 
-        try:
-            import face_recognition
-        except ImportError:
-            log.warning("face_recognition not installed, identity tracking disabled")
+        if not _has_face_recognition():
             return
 
         for ref_img in reference_photos:
