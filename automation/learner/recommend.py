@@ -58,9 +58,9 @@ CATEGORY_ICONS = {
 }
 
 PRIORITY_BAR = {
-    "high": "██████",
-    "medium": "████  ",
-    "low": "██    ",
+    "high": "######",
+    "medium": "####  ",
+    "low": "##    ",
 }
 
 
@@ -92,16 +92,16 @@ def _format_recommendation(rec: CricketRecommendation) -> str:
     bar = PRIORITY_BAR.get(rec.priority, "      ")
     lines = [
         f"{icon} {bar} priority={rec.priority:6s} confidence={rec.confidence:.2f}",
-        f"  → {rec.recommendation}",
-        f"  ↳ {rec.reason}",
+        f"  -> {rec.recommendation}",
+        f"  >> {rec.reason}",
     ]
     if rec.expires_at:
-        lines.append(f"  ⏰ expires: {rec.expires_at}")
+        lines.append(f"  [expires: {rec.expires_at}]")
     if rec.supporting_data:
         data_str = ", ".join(
             f"{k}={v}" for k, v in list(rec.supporting_data.items())[:4]
         )
-        lines.append(f"  📊 {data_str}")
+        lines.append(f"  [data] {data_str}")
     return "\n".join(lines)
 
 
@@ -473,9 +473,9 @@ def calibrate_verdicts(
         print("=" * 72)
         print(f"  Scored {n} historical events")
         print(f"  Min:    {p_min:.3f}")
-        print(f"  P25:    {p25:.3f}  → AVERAGE threshold")
-        print(f"  Median: {p50:.3f}  → GOOD threshold")
-        print(f"  P75:    {p75:.3f}  → STRONG threshold")
+        print(f"  P25:    {p25:.3f}  -> AVERAGE threshold")
+        print(f"  Median: {p50:.3f}  -> GOOD threshold")
+        print(f"  P75:    {p75:.3f}  -> STRONG threshold")
         print(f"  Max:    {p_max:.3f}")
         print(f"  Mean:   {avg:.3f}")
         print()
