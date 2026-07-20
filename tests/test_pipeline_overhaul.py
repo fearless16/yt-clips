@@ -121,7 +121,8 @@ class TestLLMOrchestration:
             status_code = 429
             response = MagicMock(headers={"retry-after": "120"})
 
-        with patch.object(AIClient, "generate_opencode", side_effect=FakeExc()):
+        with patch.object(AIClient, "generate_opencode", side_effect=FakeExc()), \
+             patch.object(AIClient, "generate_openrouter", side_effect=FakeExc()):
             out = ai.generate_fastest_first("p", "s")
         assert out == ""  # escalation signal, NOT generic text
 

@@ -34,19 +34,26 @@ def _log_vram(tag: str = ""):
         pass
 
 
-# ── whisper.cpp Vulkan GPU path (AMD / any GPU with Vulkan) ──────────────
+# ── whisper.cpp GPU path (ROCm > Vulkan > CPU) ─────────────────────────
 
 _WHISPER_CLI_CANDIDATES = [
-    Path(__file__).parent / "whisper_vulkan" / "whisper-cli.exe",
-    Path(__file__).parent / "whisper_vulkan" / "whisper-cli",
+    # ROCm (HIP) — fastest for AMD GPUs, v1.8.4+ with gfx120X support
+    ("rocm", Path(__file__).parent / "whisper_rocm" / "whisper-cli.exe"),
+    # Vulkan — cross-vendor fallback, older v1.0 build
+    ("vulkan", Path(__file__).parent / "whisper_vulkan" / "whisper-cli.exe"),
+    ("vulkan", Path(__file__).parent / "whisper_vulkan" / "whisper-cli"),
 ]
 
+# Model preferences: ROCm prefers large-v3-turbo, Vulkan uses small
+_ROCM_MODEL_PREF = ["large-v3-turbo", "large-v3", "medium", "small"]
+_VULKAN_MODEL_PREF = ["small", "medium", "large-v3"]
 
-def _find_whisper_cli() -> Optional[Path]:
-    """Locate whisper-cli binary for Vulkan GPU acceleration."""
-    for p in _WHISPER_CLI_CANDIDATES:
+
+def _find_whisper_cli() -> Optional[tuple]:
+    """Locate best whisper-cli binary. Returns (backend, path) or None."""
+    for backend, p in _WHISPER_CLI_CANDIDATES:
         if p.exists():
-            return p
+            return (backend, p)
     return None
 
 
@@ -59,14 +66,20 @@ def _whisper_cli_version(cli: Path) -> str:
 
 
 def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
-    """Transcribe using whisper.cpp Vulkan GPU. Returns True on success."""
-    cli = _find_whisper_cli()
-    if not cli:
+    """Transcribe using whisper.cpp GPU (ROCm or Vulkan). Returns True on success."""
+    result = _find_whisper_cli()
+    if not result:
         return False
+    backend, cli = result
 
     t_cfg = cfg["transcription"]
-    model_name = t_cfg.get("model", "small")
     language = t_cfg.get("language", "hi")
+
+    # Select best model for this backend
+    if backend == "rocm":
+        pref = _ROCM_MODEL_PREF
+    else:
+        pref = _VULKAN_MODEL_PREF
 
     # Map faster-whisper model names to ggml model file names
     model_map = {
@@ -74,18 +87,32 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
         "small": "ggml-small.bin", "medium": "ggml-medium.bin",
         "large-v3": "ggml-large-v3.bin", "large-v3-turbo": "ggml-large-v3-turbo.bin",
     }
-    ggml_name = model_map.get(model_name, f"ggml-{model_name}.bin")
-    model_path = Path(__file__).parent / "models" / ggml_name
+
+    # Try preferred models in order
+    model_path = None
+    ggml_name = None
+    for m in pref:
+        candidate = Path(__file__).parent / "models" / model_map.get(m, f"ggml-{m}.bin")
+        if candidate.exists():
+            model_path = candidate
+            ggml_name = model_map.get(m, f"ggml-{m}.bin")
+            break
+
+    if not model_path:
+        # Try config model or fallback
+        model_name = t_cfg.get("model", "small")
+        ggml_name = model_map.get(model_name, f"ggml-{model_name}.bin")
+        model_path = Path(__file__).parent / "models" / ggml_name
 
     if not model_path.exists():
-        log.warning("Vulkan model not found: %s — will try downloading", model_path)
+        log.warning("whisper model not found: %s — downloading", model_path)
         try:
             model_path.parent.mkdir(parents=True, exist_ok=True)
             url = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{ggml_name}"
             log.info("Downloading %s ...", ggml_name)
             subprocess.run(
                 ["curl", "-L", "-o", str(model_path), url],
-                timeout=600, check=True,
+                timeout=1200, check=True,
             )
             log.info("Downloaded %s (%.0f MB)", ggml_name, model_path.stat().st_size / 1e6)
         except Exception as e:
@@ -97,7 +124,7 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
     audio_wav = Path(__file__).parent / "temp" / "whisper_input.wav"
     audio_wav.parent.mkdir(parents=True, exist_ok=True)
 
-    log.info("Extracting audio for whisper.cpp Vulkan...")
+    log.info("Extracting audio for whisper.cpp %s...", backend.upper())
     try:
         subprocess.run(
             ["ffmpeg", "-hide_banner", "-y", "-i", video,
@@ -109,9 +136,9 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
         log.error("Audio extraction failed: %s", e)
         return False
 
-    # Run whisper-cli with Vulkan GPU
+    # Build command — backend-specific flags
     out_dir = Path(__file__).parent / "temp"
-    out_base = str(out_dir / "whisper_vulkan_out")
+    out_base = str(out_dir / f"whisper_{backend}_out")
 
     cmd = [
         str(cli),
@@ -124,7 +151,11 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
         "-t", "8",
     ]
 
-    log.info("Transcribing with whisper.cpp Vulkan GPU: model=%s language=%s", ggml_name, language)
+    # ROCm: use 2 GPU processors for parallel streams
+    if backend == "rocm":
+        cmd.extend(["-p", "2"])
+
+    log.info("Transcribing with whisper.cpp %s GPU: model=%s language=%s", backend, ggml_name, language)
     log.info("CMD: %s", " ".join(cmd))
     t0 = time.monotonic()
 
@@ -138,7 +169,7 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
         return False
 
     duration_s = time.monotonic() - t0
-    log.info("whisper.cpp Vulkan completed in %.1fs", duration_s)
+    log.info("whisper.cpp %s completed in %.1fs", backend.upper(), duration_s)
 
     # Parse JSON output
     json_path = Path(out_base + ".json")
@@ -149,8 +180,19 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
         return False
 
     try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(json_path, "rb") as f:
+            raw = f.read()
+        # Try multiple encodings (whisper-cli may produce non-UTF-8)
+        data = None
+        for enc in ["utf-8", "utf-8-sig", "cp1252", "latin-1"]:
+            try:
+                data = json.loads(raw.decode(enc))
+                break
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+        if data is None:
+            log.error("Failed to decode whisper JSON output")
+            return False
     except Exception as e:
         log.error("Failed to parse whisper JSON: %s", e)
         return False
@@ -200,7 +242,7 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
     with open(out, "w", encoding="utf-8") as f:
         json.dump({
             "segments": results,
-            "source": "whisper-vulkan",
+            "source": f"whisper-{backend}",
             "language": detected_lang,
         }, f, indent=2, ensure_ascii=False)
 
@@ -219,17 +261,19 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
 def transcribe(video_path: str, output_path: str):
     """
     Transcribe audio from video.
-    Priority: whisper.cpp Vulkan GPU → faster-whisper CUDA → faster-whisper CPU.
+    Priority: whisper.cpp ROCm (AMD HIP) → whisper.cpp Vulkan → faster-whisper CUDA → faster-whisper CPU.
     """
-    # Try Vulkan GPU path first (AMD / any GPU with Vulkan support)
-    if _find_whisper_cli():
-        log.info("whisper.cpp Vulkan CLI found — attempting GPU transcription")
+    # Try GPU path first (ROCm > Vulkan)
+    gpu = _find_whisper_cli()
+    if gpu:
+        backend, cli = gpu
+        log.info("whisper.cpp %s CLI found at %s — attempting GPU transcription", backend, cli)
         try:
             if _transcribe_vulkan(video_path, output_path, cfg):
                 return
-            log.warning("Vulkan path failed — falling back to faster-whisper")
+            log.warning("%s path failed — falling back to faster-whisper", backend)
         except Exception as e:
-            log.warning("Vulkan transcription error (%s) — falling back to faster-whisper", e)
+            log.warning("%s transcription error (%s) — falling back to faster-whisper", backend, e)
 
     # Fallback: faster-whisper (NVIDIA CUDA or CPU)
     from faster_whisper import WhisperModel

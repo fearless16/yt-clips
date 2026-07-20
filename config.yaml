@@ -23,6 +23,9 @@ download:
   output_filename: "video.mp4"
   # aria2c: 2-3x faster downloads on Colab (install: apt-get install -y aria2)
   use_aria2c: true
+  # Client order: web_safari first (1080p HLS, reliable). default/aria2c
+  # tries 4K WebM (3.6GB) which times out on slow connections.
+  player_clients: ["web_safari", "default", "mweb"]
   # Proof of Origin (PO) Token — for bypassing bot detection
   po_token: "" 
   # Optional: Proxy for bypassing Colab IP blocks (e.g. http://user:pass@host:port)
