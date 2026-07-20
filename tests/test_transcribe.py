@@ -45,7 +45,7 @@ def test_cricket_terms_substitution(tmp_path):
     mock_info.duration = 2.0
     mock_info.language = "en"
     
-    with patch("transcribe.WhisperModel") as MockWhisperModel, \
+    with patch("faster_whisper.WhisperModel") as MockWhisperModel, \
          patch("transcribe.correct_segments_with_llm", side_effect=lambda x: x):
         
         instance = MockWhisperModel.return_value
@@ -75,7 +75,7 @@ def test_fetch_unified_path_fallback(tmp_path):
     with patch("automation.transcript._fetch_via_youtube_data_api", return_value=None), \
          patch("automation.transcript._fetch_via_api", return_value=None), \
          patch("automation.transcript._fetch_via_ytdlp", return_value=None), \
-         patch("transcribe.WhisperModel") as MockWhisperModel, \
+         patch("faster_whisper.WhisperModel") as MockWhisperModel, \
          patch("transcribe.correct_segments_with_llm", side_effect=lambda x: x):
              
         mock_segment = MagicMock()

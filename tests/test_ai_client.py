@@ -19,6 +19,7 @@ def test_provider_circuit_breaker():
     ai.groq_api_key = None
 
     with patch.object(ai, "generate_opencode", side_effect=RuntimeError("OC Down")), \
+         patch.object(ai, "generate_openrouter", side_effect=RuntimeError("OR Down")), \
          patch.object(ai, "generate_ollama", side_effect=RuntimeError("Ollama Down")):
         for _ in range(5):
             try:
@@ -46,6 +47,7 @@ def test_rate_limit_token_bucket():
     ai.groq_api_key = None
 
     with patch.object(ai, "generate_opencode", return_value="OC Fallback") as mock_oc, \
+         patch.object(ai, "generate_openrouter", side_effect=RuntimeError("OR Down")), \
          patch.object(ai, "generate_ollama", side_effect=RuntimeError("Ollama Down")):
         res = ai.generate_text("test prompt")
         assert res == "OC Fallback"
@@ -92,7 +94,8 @@ def test_auth_failure_stops_retry():
     auth_exc = Exception("Invalid API key")
     auth_exc.status_code = 401
 
-    with patch.object(ai, "generate_opencode", side_effect=auth_exc):
+    with patch.object(ai, "generate_opencode", side_effect=auth_exc), \
+         patch.object(ai, "generate_openrouter", side_effect=auth_exc):
         with pytest.raises(RuntimeError, match="Auth failures detected"):
             ai.generate_text("test prompt")
 
@@ -106,6 +109,7 @@ def test_quota_exhaustion_skips_provider():
 
     quota_exc = Exception("quota exceeded")
     with patch.object(ai, "generate_opencode", side_effect=quota_exc), \
+         patch.object(ai, "generate_openrouter", side_effect=quota_exc), \
          patch.object(ai, "generate_nvidia", return_value="NV OK") as mock_nv:
         res = ai.generate_text("test prompt")
         assert res == "NV OK"
@@ -151,7 +155,8 @@ def test_fastest_first_records_success_and_skips_cooldown():
     ai.opencode_api_key = "k"
     ai.nvidia_api_key = None
 
-    with patch.object(AIClient, "generate_opencode", return_value="RACED OK"):
+    with patch.object(AIClient, "generate_opencode", return_value="RACED OK"), \
+         patch.object(AIClient, "generate_openrouter", side_effect=RuntimeError("no")):
         out = ai.generate_fastest_first("p", "s")
     assert out == "RACED OK"
     assert ai.get_used_provider() == "opencode"
@@ -165,7 +170,8 @@ def test_fastest_first_returns_empty_when_all_fail():
     ai.nvidia_api_key = None
     ai.groq_api_key = None
 
-    with patch.object(AIClient, "generate_opencode", side_effect=FakeRateLimitError(retry_after=60)):
+    with patch.object(AIClient, "generate_opencode", side_effect=FakeRateLimitError(retry_after=60)), \
+         patch.object(AIClient, "generate_openrouter", side_effect=RuntimeError("no")):
         out = ai.generate_fastest_first("p", "s")
     assert out == ""
     assert AIClient._in_cooldown("opencode") is True
@@ -183,7 +189,8 @@ def test_fastest_first_keeps_slow_but_valid_response():
         return "SLOW VALID"
 
     with patch("utils.config.load_config", return_value={"ai": {"race_tier_timeout_seconds": 5.0}, "logging": {}}):
-        with patch.object(AIClient, "generate_opencode", side_effect=slow_ok):
+        with patch.object(AIClient, "generate_opencode", side_effect=slow_ok), \
+             patch.object(AIClient, "generate_openrouter", side_effect=RuntimeError("no")):
             out = ai.generate_fastest_first("p", "s")
     assert out == "SLOW VALID"
 
@@ -339,9 +346,9 @@ def test_model_timeouts_include_qwen37():
     assert len(AIClient.MODEL_TIMEOUTS) == 1
 
 
-def test_providers_only_opencode_nvidia_groq():
-    assert set(AIClient.PROVIDER_MODELS.keys()) == {"opencode", "nvidia", "groq"}
-    assert "openrouter" not in AIClient.PROVIDER_MODELS
+def test_providers_only_opencode_openrouter_nvidia_groq():
+    assert set(AIClient.PROVIDER_MODELS.keys()) == {"opencode", "openrouter", "nvidia", "groq"}
+    assert "openrouter" in AIClient.PROVIDER_MODELS
 
 
 def test_nvidia_models():
@@ -357,7 +364,7 @@ def test_xiaomi_mimo_in_opencode():
 
 def test_total_model_count():
     total = sum(len(v) for v in AIClient.PROVIDER_MODELS.values())
-    assert total == 19, f"Expected 19 models, got {total}"
+    assert total == 21, f"Expected 21 models, got {total}"
 
 
 def test_get_available_providers_only_enabled():
@@ -399,13 +406,15 @@ class TestGenerateSeoText:
         with patch.object(ai, "generate_opencode", return_value="SEO OK") as mock_oc, \
              patch.object(ai, "generate_nvidia") as mock_nv, \
              patch.object(ai, "generate_groq") as mock_gr, \
-             patch.object(ai, "generate_ollama") as mock_ol:
+             patch.object(ai, "generate_ollama") as mock_ol, \
+             patch.object(ai, "generate_openrouter") as mock_or:
             result = ai.generate_seo_text("test seo prompt")
             assert result == "SEO OK"
             assert mock_oc.called
             mock_nv.assert_not_called()
             mock_gr.assert_not_called()
             mock_ol.assert_not_called()
+            mock_or.assert_not_called()
 
     def test_seo_text_raises_without_opencode_key(self):
         """generate_seo_text must raise if OpenCode key is missing."""
@@ -425,8 +434,9 @@ class TestGenerateSeoText:
             models_tried.append(ai._model)
             raise RuntimeError("model down")
 
-        with patch.object(ai, "generate_opencode", side_effect=capture_model):
-            with pytest.raises(RuntimeError, match="all OpenCode Go models exhausted"):
+        with patch.object(ai, "generate_opencode", side_effect=capture_model), \
+             patch.object(ai, "generate_openrouter", side_effect=RuntimeError("OR down")):
+            with pytest.raises(RuntimeError, match="all models exhausted"):
                 ai.generate_seo_text("test")
 
         # Should have tried both models at least once (primary + retry rounds)
@@ -451,11 +461,12 @@ class TestGenerateSeoText:
             assert result == "DEEPSEEK OK"
 
     def test_seo_text_never_calls_ollama_fallback(self):
-        """Even when all 3 models fail, must NOT fall back to ollama."""
+        """Even when all models fail, must NOT fall back to ollama."""
         ai = AIClient()
         ai.opencode_api_key = "mock"
 
         with patch.object(ai, "generate_opencode", side_effect=RuntimeError("down")), \
+             patch.object(ai, "generate_openrouter", side_effect=RuntimeError("OR down")), \
              patch.object(ai, "generate_ollama") as mock_ol:
             with pytest.raises(RuntimeError):
                 ai.generate_seo_text("test")

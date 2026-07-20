@@ -381,6 +381,63 @@ def run(
         except Exception as e:
             log.warning("Analytics failed: %s", e)
 
+    # ── Phase 8: Self-Learning & DB Updates ─────────────────────────────────
+    if exported:
+        _banner("PHASE 8 — SELF-LEARNING & DB")
+        t0 = time.perf_counter()
+
+        # 8a: Record pipeline metrics to self_learner.db
+        try:
+            from self_learner.learner import Learner as SelfLearner
+            _sl = SelfLearner()
+            _sl.observe("pipeline_run", {
+                "duration": time.perf_counter() - start_total,
+                "exported": len(exported),
+                "uploaded": uploaded_count,
+                "selected_clips": len(exported),
+                "failures": len(failures),
+                "transcript_source": transcript_source if 'transcript_source' in dir() else "unknown",
+            })
+            _sl.close()
+            log.info("[self_learner] pipeline_run observed")
+        except Exception as e:
+            log.warning("[self_learner] observation failed: %s", e)
+
+        # 8b: Save clip selection data to clip_learner.db
+        try:
+            from automation.clip_selection.clip_learner import ClipLearner
+            _cl = ClipLearner()
+            highlights_yaml = highlights_path if Path(highlights_path).exists() else None
+            clip_scores = {}
+            if highlights_yaml:
+                import yaml
+                with open(highlights_yaml, "r", encoding="utf-8") as f:
+                    hl_data = yaml.safe_load(f) or {}
+                for i, clip_data in enumerate(hl_data.get("clips", []), 1):
+                    clip_id = clip_data.get("id", f"clip{i}")
+                    _cl.save_clip_selection(
+                        clip_id=clip_id,
+                        video_title=Path(video_path).stem,
+                        selected_rank=i,
+                        final_score=clip_data.get("score", 0.0),
+                        agent_scores_json=clip_data.get("agent_scores"),
+                        rejection_reasons=clip_data.get("rejection_reasons"),
+                    )
+            _cl.close()
+            log.info("[clip_learner] saved clip selection data")
+        except Exception as e:
+            log.warning("[clip_learner] save failed: %s", e)
+
+        # 8c: Sync DBs to Drive
+        try:
+            from sync import sync_db_to_drive
+            sync_db_to_drive()
+            log.info("[db_sync] DBs synced to Drive")
+        except Exception as e:
+            log.warning("[db_sync] failed: %s", e)
+
+        log.info("Phase 8 complete in %.1f s", time.perf_counter() - t0)
+
     # ── Summary ────────────────────────────────────────────────────────────────
     total = time.perf_counter() - start_total
     

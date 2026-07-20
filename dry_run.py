@@ -322,6 +322,7 @@ def _api_intercept_context(video_path: str):
             self.returncode = 0
             self.stdout = io.StringIO("")
             self.stderr = io.StringIO("")
+            self.args = cmd
         def communicate(self, input=None, timeout=None):
             return ("", "")
         def wait(self, timeout=None):
@@ -566,10 +567,9 @@ def _api_intercept_context(video_path: str):
         patch("subprocess.Popen", _FakePopen),
         # Google APIs
         patch("googleapiclient.discovery.build", _fake_google_build),
-        # faster-whisper (both module-level and any cached module-level refs)
+        # faster-whisper (module-level mock)
         patch("faster_whisper.WhisperModel", _FakeWhisperModel),
         patch("faster_whisper.BatchedInferencePipeline", _FakeBatchedPipeline),
-        patch("transcribe.WhisperModel", _FakeWhisperModel),
         # youtube-transcript-api
         patch("youtube_transcript_api.YouTubeTranscriptApi", _FakeYouTubeTranscriptApi),
         # PIL

@@ -96,6 +96,7 @@ class AIClient:
                      "deepseek-v4-pro", "deepseek-v4-flash",
                      "minimax-m2.5", "minimax-m2.7", "minimax-m3",
                      "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"],
+        "openrouter": ["nvidia/nemotron-3-super-120b-a12b:free", "openrouter/free"],
         "nvidia": ["nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct",
                    "nvidia/llama-3.3-nemotron-super-49b-v1.5"],
         "groq": ["llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct"],
@@ -104,6 +105,7 @@ class AIClient:
     # Per-provider rate limit overrides. Groq has strict TPM limits.
     PROVIDER_RATE_LIMITS = {
         "opencode": {"capacity": 30.0, "refill_per_sec": 0.5},
+        "openrouter": {"capacity": 10.0, "refill_per_sec": 0.15},  # free tier, conservative
         "nvidia": {"capacity": 30.0, "refill_per_sec": 0.5},
         "groq": {"capacity": 10.0, "refill_per_sec": 0.15},  # ~6K TPM limit
     }
@@ -243,7 +245,7 @@ class AIClient:
             return cls._provider_cooldown_until.get(provider, 0.0) > time.time()
 
     def _get_failover_chain(self, start_provider: str) -> List[str]:
-        chain = ["opencode", "nvidia", "groq"]
+        chain = ["opencode", "openrouter", "nvidia", "groq"]
         if start_provider in chain:
             chain.remove(start_provider)
             chain.insert(0, start_provider)
@@ -271,6 +273,8 @@ class AIClient:
         try:
             if provider == "opencode":
                 return self.generate_opencode(prompt, system_instruction)
+            elif provider == "openrouter":
+                return self.generate_openrouter(prompt, system_instruction)
             elif provider == "nvidia":
                 return self.generate_nvidia(prompt, system_instruction)
             elif provider == "groq":
@@ -286,6 +290,7 @@ class AIClient:
         out_tokens = output_chars // 4
         rates = {
             "opencode": {"in": 0.0, "out": 0.0},
+            "openrouter": {"in": 0.0, "out": 0.0},
             "nvidia": {"in": 0.07, "out": 0.07},
             "ollama": {"in": 0.0, "out": 0.0}
         }
@@ -316,6 +321,8 @@ class AIClient:
         for p in chain:
             if p == "opencode" and self.opencode_api_key:
                 available_chain.append(p)
+            elif p == "openrouter":
+                available_chain.append(p)  # hardcoded key
             elif p == "nvidia" and self.nvidia_api_key:
                 available_chain.append(p)
             elif p == "groq" and self.groq_api_key:
@@ -500,6 +507,32 @@ class AIClient:
             raise ValueError(f"OpenCode returned empty (finish_reason={response.choices[0].finish_reason})")
         return content.strip()
 
+    # --- OpenRouter (free tier fallback) ---
+
+    def generate_openrouter(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+        """Generate via OpenRouter (free tier models). Always available as last-resort fallback."""
+        api_key = "OPENROUTER_API_KEY"
+        client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+        self._last_provider = "openrouter"
+        self._last_model = self._model
+        t0 = time.monotonic()
+        response = client.chat.completions.create(
+            model=self._model, messages=messages, temperature=0.7, max_tokens=8192,
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
+        log.info("LLM: openrouter/%s (%dms, %d tokens)", self._model, duration_ms, tokens,
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms,
+                        "metadata": {"provider": "openrouter", "model": self._model, "tokens": tokens}})
+        content = response.choices[0].message.content
+        if content is None:
+            raise ValueError(f"OpenRouter returned empty (finish_reason={response.choices[0].finish_reason})")
+        return content.strip()
+
     # --- NVIDIA ---
 
     def generate_nvidia(self, prompt: str, system_instruction: Optional[str] = None) -> str:
@@ -567,6 +600,7 @@ class AIClient:
         available = {}
         if self.opencode_api_key:
             available["opencode"] = self.PROVIDER_MODELS["opencode"]
+        available["openrouter"] = self.PROVIDER_MODELS["openrouter"]  # always available
         if self.nvidia_api_key:
             available["nvidia"] = self.PROVIDER_MODELS["nvidia"]
         if self.groq_api_key:
@@ -638,8 +672,24 @@ class AIClient:
                 self._note_provider_error(provider, e)
                 errors.append(f"{provider}/{model} (retry): {e}")
 
+        # Last resort: OpenRouter free tier (nvidia/nemotron-3-super-120b-a12b:free) — better than failing
+        if not self._in_cooldown("openrouter"):
+            try:
+                res = self.generate_openrouter(prompt, system_instruction)
+                if res and res.strip():
+                    self._record_success("openrouter")
+                    self._last_provider = "openrouter"
+                    self._last_model = "nvidia/nemotron-3-super-120b-a12b:free"
+                    self._log_cost("openrouter", "nvidia/nemotron-3-super-120b-a12b:free",
+                                   len(prompt) + len(system_instruction or ""),
+                                   len(res))
+                    log.info("SEO LLM ok via openrouter/nvidia/nemotron-3-super-120b-a12b:free (fallback)")
+                    return res.strip()
+            except Exception as e:
+                errors.append(f"openrouter/nvidia/nemotron-3-super-120b-a12b:free: {e}")
+
         raise RuntimeError(
-            f"SEO generation failed — all OpenCode Go models exhausted. "
+            f"SEO generation failed — all models exhausted. "
             f"Errors: {'; '.join(errors)}"
         )
 
