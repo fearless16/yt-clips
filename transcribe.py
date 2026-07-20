@@ -1,14 +1,15 @@
 """
 transcribe.py — Phase 2: Speech-to-Text with GPU-optimized faster-whisper.
+Vulkan GPU path for AMD GPUs via whisper.cpp (whisper-cli.exe).
 """
 
 import json
+import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Optional
-
-from faster_whisper import WhisperModel
 
 from utils.config import load_config
 from utils.logger import get_logger
@@ -33,11 +34,206 @@ def _log_vram(tag: str = ""):
         pass
 
 
+# ── whisper.cpp Vulkan GPU path (AMD / any GPU with Vulkan) ──────────────
+
+_WHISPER_CLI_CANDIDATES = [
+    Path(__file__).parent / "whisper_vulkan" / "whisper-cli.exe",
+    Path(__file__).parent / "whisper_vulkan" / "whisper-cli",
+]
+
+
+def _find_whisper_cli() -> Optional[Path]:
+    """Locate whisper-cli binary for Vulkan GPU acceleration."""
+    for p in _WHISPER_CLI_CANDIDATES:
+        if p.exists():
+            return p
+    return None
+
+
+def _whisper_cli_version(cli: Path) -> str:
+    try:
+        r = subprocess.run([str(cli), "--version"], capture_output=True, text=True, timeout=5)
+        return (r.stdout + r.stderr).strip()[:100]
+    except Exception:
+        return "unknown"
+
+
+def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
+    """Transcribe using whisper.cpp Vulkan GPU. Returns True on success."""
+    cli = _find_whisper_cli()
+    if not cli:
+        return False
+
+    t_cfg = cfg["transcription"]
+    model_name = t_cfg.get("model", "small")
+    language = t_cfg.get("language", "hi")
+
+    # Map faster-whisper model names to ggml model file names
+    model_map = {
+        "tiny": "ggml-tiny.bin", "base": "ggml-base.bin",
+        "small": "ggml-small.bin", "medium": "ggml-medium.bin",
+        "large-v3": "ggml-large-v3.bin", "large-v3-turbo": "ggml-large-v3-turbo.bin",
+    }
+    ggml_name = model_map.get(model_name, f"ggml-{model_name}.bin")
+    model_path = Path(__file__).parent / "models" / ggml_name
+
+    if not model_path.exists():
+        log.warning("Vulkan model not found: %s — will try downloading", model_path)
+        try:
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            url = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{ggml_name}"
+            log.info("Downloading %s ...", ggml_name)
+            subprocess.run(
+                ["curl", "-L", "-o", str(model_path), url],
+                timeout=600, check=True,
+            )
+            log.info("Downloaded %s (%.0f MB)", ggml_name, model_path.stat().st_size / 1e6)
+        except Exception as e:
+            log.error("Failed to download model %s: %s", ggml_name, e)
+            return False
+
+    # Extract audio to WAV for whisper-cli
+    video = str(Path(video_path))
+    audio_wav = Path(__file__).parent / "temp" / "whisper_input.wav"
+    audio_wav.parent.mkdir(parents=True, exist_ok=True)
+
+    log.info("Extracting audio for whisper.cpp Vulkan...")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-y", "-i", video,
+             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+             str(audio_wav)],
+            timeout=120, check=True, capture_output=True,
+        )
+    except Exception as e:
+        log.error("Audio extraction failed: %s", e)
+        return False
+
+    # Run whisper-cli with Vulkan GPU
+    out_dir = Path(__file__).parent / "temp"
+    out_base = str(out_dir / "whisper_vulkan_out")
+
+    cmd = [
+        str(cli),
+        "-m", str(model_path),
+        "-f", str(audio_wav),
+        "-l", language or "hi",
+        "-ojf",
+        "-of", out_base,
+        "--no-prints",
+        "-t", "8",
+    ]
+
+    log.info("Transcribing with whisper.cpp Vulkan GPU: model=%s language=%s", ggml_name, language)
+    log.info("CMD: %s", " ".join(cmd))
+    t0 = time.monotonic()
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    except subprocess.TimeoutExpired:
+        log.error("whisper-cli timed out after 3600s")
+        return False
+    except Exception as e:
+        log.error("whisper-cli failed: %s", e)
+        return False
+
+    duration_s = time.monotonic() - t0
+    log.info("whisper.cpp Vulkan completed in %.1fs", duration_s)
+
+    # Parse JSON output
+    json_path = Path(out_base + ".json")
+    if not json_path.exists():
+        log.error("whisper-cli JSON output not found at %s", json_path)
+        if proc.stderr:
+            log.error("whisper-cli stderr: %s", proc.stderr[-500:])
+        return False
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        log.error("Failed to parse whisper JSON: %s", e)
+        return False
+
+    # Convert to pipeline segment format
+    results = []
+    for seg in data.get("transcription", []):
+        offsets = seg.get("offsets", {})
+        start_ms = offsets.get("from", 0)
+        end_ms = offsets.get("to", 0)
+        text = seg.get("text", "").strip()
+        if not text:
+            continue
+
+        words_data = []
+        for tok in seg.get("tokens", []):
+            tok_text = tok.get("text", "").strip()
+            if not tok_text or tok_text.startswith("[_"):
+                continue
+            tok_offsets = tok.get("offsets", {})
+            words_data.append({
+                "start": tok_offsets.get("from", 0) / 1000.0,
+                "end": tok_offsets.get("to", 0) / 1000.0,
+                "word": tok_text,
+            })
+
+        results.append({
+            "start": start_ms / 1000.0,
+            "end": end_ms / 1000.0,
+            "text": text,
+            "words": words_data,
+        })
+
+    detected_lang = data.get("result", {}).get("language", language or "unknown")
+
+    # Post-processing
+    from utils.transcript_postproc import correct_segments
+    results, n_corr = correct_segments(results)
+    if n_corr:
+        log.info("Cricket spelling correction: %d substitutions", n_corr)
+
+    results = correct_segments_with_llm(results)
+
+    # Save
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump({
+            "segments": results,
+            "source": "whisper-vulkan",
+            "language": detected_lang,
+        }, f, indent=2, ensure_ascii=False)
+
+    # Cleanup temp audio
+    try:
+        audio_wav.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    audio_info = data.get("systeminfo", "")
+    log.info("Vulkan GPU transcription complete: %d segments, source=whisper-vulkan (%s)",
+             len(results), audio_info[:80])
+    return True
+
+
 def transcribe(video_path: str, output_path: str):
     """
-    Transcribe audio from video using faster-whisper (GPU-accelerated).
-    Uses configurable batch_size and VAD filter for maximum GPU utilization.
+    Transcribe audio from video.
+    Priority: whisper.cpp Vulkan GPU → faster-whisper CUDA → faster-whisper CPU.
     """
+    # Try Vulkan GPU path first (AMD / any GPU with Vulkan support)
+    if _find_whisper_cli():
+        log.info("whisper.cpp Vulkan CLI found — attempting GPU transcription")
+        try:
+            if _transcribe_vulkan(video_path, output_path, cfg):
+                return
+            log.warning("Vulkan path failed — falling back to faster-whisper")
+        except Exception as e:
+            log.warning("Vulkan transcription error (%s) — falling back to faster-whisper", e)
+
+    # Fallback: faster-whisper (NVIDIA CUDA or CPU)
+    from faster_whisper import WhisperModel
+
     t_cfg = cfg["transcription"]
     video = str(Path(video_path))
 
