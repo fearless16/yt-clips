@@ -166,8 +166,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
     except Exception:
         pass
 
-    if not _has_face_recognition():
-        return None
+    # face_recognition is optional — detection + tracking work without it
 
     best_face = None
     best_score = -1.0
@@ -632,10 +631,13 @@ def analyze_clip(
                 break
         
         if not face_crop:
-            log.warning("[%s] Host absent from configured facecam bounds", clip_id)
-            host_absent = True
+            log.warning("[%s] Host absent from configured facecam bounds — falling back to best detected face", clip_id)
+            # Fall back to best face even if outside facecam region
+            face_crop = max(face_candidates, key=lambda f: (f.get("face_w", 0) * f.get("face_h", 0)) * f.get("confidence", 0.0))
+            if not face_crop:
+                host_absent = True
     
-    # 3. Last fallback: just pick the best detected face overall
+    # 3. No facecam config — just pick the best detected face overall
     elif face_candidates:
         face_crop = max(face_candidates, key=lambda f: (f.get("face_w", 0) * f.get("face_h", 0)) * f.get("confidence", 0.0))
 
