@@ -62,9 +62,9 @@ def run(
     skip_export: bool = False,
     skip_sync: bool = False,
     skip_seo: bool = False,
-    auto_sync: bool = False,
-    auto_upload: bool = False,
-    auto_schedule: bool = False,
+    auto_sync: bool = True,
+    auto_upload: bool = True,
+    auto_schedule: bool = True,
     skip_tests: bool = False,
     sample_minutes: Optional[int] = None,
     sync_from_drive: bool = False,
@@ -502,9 +502,9 @@ Examples:
     parser.add_argument("-skip-export", "--skip-export",     action="store_true", help="Skip Phase 4 (use existing clips in shorts/)")
     parser.add_argument("-skip-sync", "--skip-sync",       action="store_true", help="Skip Phase 5 (Drive Sync)")
     parser.add_argument("-skip-seo", "--skip-seo",         action="store_true", help="Skip SEO generation in Phase 4.5")
-    parser.add_argument("-sync", "--sync",            action="store_true", help="Auto-sync exported Shorts to Google Drive")
-    parser.add_argument("-upload", "--upload",          action="store_true", help="Auto-upload exported Shorts to YouTube")
-    parser.add_argument("-schedule", "--schedule",        action="store_true", help="Auto-schedule uploads (2-hour intervals)")
+    parser.add_argument("--no-sync",    action="store_true", help="Disable auto-sync to Drive (default: enabled)")
+    parser.add_argument("--no-upload",  action="store_true", help="Disable auto-upload to YouTube (default: enabled)")
+    parser.add_argument("--no-schedule", action="store_true", help="Disable auto-schedule (default: enabled)")
     parser.add_argument("-skip-tests", "--skip-tests",    action="store_true", help="Skip pre-generation pytest guard")
     parser.add_argument("--sample-minutes", type=int, default=None, help="Download only a random N-minute sample of the video")
     parser.add_argument("--sync-from-drive", action="store_true", help="Pull video + transcript from Google Drive instead of downloading")
@@ -520,9 +520,9 @@ Examples:
         skip_export=args.skip_export,
         skip_sync=args.skip_sync,
         skip_seo=args.skip_seo,
-        auto_sync=args.sync,
-        auto_upload=args.upload,
-        auto_schedule=args.schedule,
+        auto_sync=not args.no_sync,
+        auto_upload=not args.no_upload,
+        auto_schedule=not args.no_schedule,
         skip_tests=args.skip_tests,
         sample_minutes=args.sample_minutes,
         sync_from_drive=args.sync_from_drive,

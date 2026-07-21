@@ -100,6 +100,7 @@ class AIClient:
         "nvidia": ["nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct",
                    "nvidia/llama-3.3-nemotron-super-49b-v1.5"],
         "groq": ["llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct"],
+        "deepseek": ["deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
     }
 
     # Per-provider rate limit overrides. Groq has strict TPM limits.
@@ -108,6 +109,7 @@ class AIClient:
         "openrouter": {"capacity": 10.0, "refill_per_sec": 0.15},  # free tier, conservative
         "nvidia": {"capacity": 30.0, "refill_per_sec": 0.5},
         "groq": {"capacity": 10.0, "refill_per_sec": 0.15},  # ~6K TPM limit
+        "deepseek": {"capacity": 30.0, "refill_per_sec": 0.5},
     }
 
     # Per-model timeouts (seconds) for non-blocking race.
@@ -123,6 +125,8 @@ class AIClient:
         self.opencode_base_url = os.getenv("OPENCODE_ZEN_BASE_URL", "https://opencode.ai/zen/go/v1")
         self.groq_api_key = os.getenv("GROQ_API_KEY")
         self.groq_base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+        self.deepseek_api_key = os.getenv("DEEPSEEK_API_KEY")
+        self.deepseek_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
         self.ollama_url = "http://localhost:11434/api/generate"
         ai_cfg = _cfg.get("ai", {})
         self._provider = ai_cfg.get("provider", "opencode")
@@ -245,7 +249,7 @@ class AIClient:
             return cls._provider_cooldown_until.get(provider, 0.0) > time.time()
 
     def _get_failover_chain(self, start_provider: str) -> List[str]:
-        chain = ["opencode", "openrouter", "nvidia", "groq"]
+        chain = ["deepseek", "opencode", "openrouter", "nvidia", "groq"]
         if start_provider in chain:
             chain.remove(start_provider)
             chain.insert(0, start_provider)
@@ -279,6 +283,8 @@ class AIClient:
                 return self.generate_nvidia(prompt, system_instruction)
             elif provider == "groq":
                 return self.generate_groq(prompt, system_instruction)
+            elif provider == "deepseek":
+                return self.generate_deepseek(prompt, system_instruction)
             else:
                 raise ValueError(f"Unknown provider {provider}")
         finally:
@@ -326,6 +332,8 @@ class AIClient:
             elif p == "nvidia" and self.nvidia_api_key:
                 available_chain.append(p)
             elif p == "groq" and self.groq_api_key:
+                available_chain.append(p)
+            elif p == "deepseek" and self.deepseek_api_key:
                 available_chain.append(p)
 
         errors = []
@@ -590,6 +598,35 @@ class AIClient:
             raise ValueError(f"Groq returned empty (finish_reason={response.choices[0].finish_reason})")
         return content.strip()
 
+    # --- DeepSeek ---
+
+    def generate_deepseek(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+        if not self.deepseek_api_key:
+            raise ValueError("DeepSeek API key missing")
+        client = OpenAI(api_key=self.deepseek_api_key, base_url=self.deepseek_base_url)
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+        self._last_provider = "deepseek"
+        self._last_model = self._model
+        api_model = self._model
+        if api_model == "deepseek-v4-pro":
+            api_model = "deepseek-chat"
+        t0 = time.monotonic()
+        response = client.chat.completions.create(
+            model=api_model, messages=messages, temperature=0.7, max_tokens=8192,
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
+        log.info("LLM: deepseek/%s (%dms, %d tokens)", self._model, duration_ms, tokens,
+                 extra={"stage": "llm_generate", "duration_ms": duration_ms,
+                        "metadata": {"provider": "deepseek", "model": self._model, "tokens": tokens}})
+        content = response.choices[0].message.content
+        if content is None:
+            raise ValueError(f"DeepSeek returned empty (finish_reason={response.choices[0].finish_reason})")
+        return content.strip()
+
     def get_used_provider(self) -> str:
         return self._last_provider or self._provider
 
@@ -605,6 +642,8 @@ class AIClient:
             available["nvidia"] = self.PROVIDER_MODELS["nvidia"]
         if self.groq_api_key:
             available["groq"] = self.PROVIDER_MODELS["groq"]
+        if self.deepseek_api_key:
+            available["deepseek"] = self.PROVIDER_MODELS["deepseek"]
         return available
 
     # --- SEO-SPECIFIC (restricted to OpenCode Go) ---
@@ -613,8 +652,23 @@ class AIClient:
     # nvidia/groq produce generic low-quality SEO — NEVER used.
     # qwen3.7-max excluded: returns 401 "not supported for format oa-compat"
     SEO_PREFERRED_MODELS = [
+        ("deepseek", "deepseek-v4-pro"),
+        ("deepseek", "deepseek-chat"),
+        ("deepseek", "deepseek-reasoner"),
         ("opencode", "mimo-v2.5-pro"),
+        ("opencode", "mimo-v2.5"),
         ("opencode", "deepseek-v4-pro"),
+        ("opencode", "deepseek-v4-flash"),
+        ("opencode", "kimi-k2.5"),
+        ("opencode", "kimi-k2.6"),
+        ("opencode", "glm-5"),
+        ("opencode", "glm-5.1"),
+        ("opencode", "minimax-m2.5"),
+        ("opencode", "minimax-m2.7"),
+        ("opencode", "minimax-m3"),
+        ("opencode", "qwen3.7-max"),
+        ("opencode", "qwen3.7-plus"),
+        ("opencode", "qwen3.6-plus"),
     ]
 
     def generate_seo_text(self, prompt: str, system_instruction: Optional[str] = None) -> str:

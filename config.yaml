@@ -219,8 +219,8 @@ learner:
 
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
-  provider: "opencode"          # opencode (Go) | nvidia
-  model: "mimo-v2.5-pro"        # primary (qwen3.7-max returns 401 for oa-compat)
+  provider: "deepseek"          # deepseek | opencode (Go) | nvidia
+  model: "deepseek-v4-pro"      # deepseek-v4-pro maps to deepseek-chat on DeepSeek API
   # Provider chain priority:
   # 1. OpenCode Go: mimo-v2.5-pro
   # 2. OpenCode Go: deepseek-v4-pro
