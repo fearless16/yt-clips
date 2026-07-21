@@ -1164,17 +1164,20 @@ def export_all(
     export_cfg = cfg.get("export", {})
     super_res = export_cfg.get("super_resolution", False)
     # Super-res needs CUDA; auto-disable + warn rather than crash on CPU/Windows.
-    import torch
-    cuda_available = torch.cuda.is_available()
-    if super_res and not cuda_available:
-        log.warning(
-            "super_resolution enabled but CUDA unavailable — skipping super-res (CPU fallback)"
-        )
-        super_res = False
     if super_res:
-        gpu_count = torch.cuda.device_count()
-        max_workers = max(1, min(gpu_count, len(filtered_items)))  # 1 worker per GPU
-    else:
+        try:
+            import torch
+            cuda_available = torch.cuda.is_available()
+            if not cuda_available:
+                log.warning("super_resolution enabled but CUDA unavailable — skipping super-res")
+                super_res = False
+            else:
+                gpu_count = torch.cuda.device_count()
+                max_workers = max(1, min(gpu_count, len(filtered_items)))
+        except ImportError:
+            log.warning("torch not installed — disabling super_resolution")
+            super_res = False
+    if not super_res:
         cfg_workers = int(export_cfg.get("max_workers", 0) or 0)
         if cfg_workers > 0:
             max_workers = max(1, min(cfg_workers, len(filtered_items)))
