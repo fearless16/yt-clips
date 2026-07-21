@@ -193,18 +193,30 @@ def _sample_frames_gpu(video_path, fps, width, height, step, interval_sec, durat
     """GPU-accelerated frame sampling via ffmpeg (auto-detect hwaccel). Falls back to CPU."""
     frame_size = width * height * 3
     import subprocess
-    # Detect if CUDA is available
-    has_cuda = False
+
+    available = set()
     try:
         r = subprocess.run(
             ["ffmpeg", "-hide_banner", "-hwaccels"],
             capture_output=True, text=True, timeout=5,
         )
-        has_cuda = "cuda" in r.stdout.lower()
+        available = {a.strip().lower() for a in r.stdout.splitlines()
+                     if a.strip() and not a.startswith("H")}
     except Exception:
         pass
 
-    hwaccel = "cuda" if has_cuda else "none"
+    # Prefer platform-native hwaccel; cuda often fails on rawvideo pipes
+    hwaccel = "none"
+    if "dxva2" in available:
+        hwaccel = "dxva2"
+    elif "d3d12va" in available:
+        hwaccel = "d3d12va"
+    elif "cuda" in available:
+        hwaccel = "cuda"
+    elif "qsv" in available:
+        hwaccel = "qsv"
+
+    log.info("Using ffmpeg hwaccel=%s (available: %s)", hwaccel, ", ".join(sorted(available)))
     cmd = [
         "ffmpeg",
         "-hwaccel", hwaccel,
@@ -219,8 +231,20 @@ def _sample_frames_gpu(video_path, fps, width, height, step, interval_sec, durat
         cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8
     )
     idx = 0
-    log_every = max(1, 300 // interval_sec)  # log every ~5 min of video
+    log_every = max(1, 300 // interval_sec)
     try:
+        # Read first frame to validate hwaccel works; fall back if it doesn't
+        first_raw = proc.stdout.read(frame_size)
+        if not first_raw or len(first_raw) < frame_size:
+            log.warning("hwaccel=%s produced no frames — falling back to CPU sampling", hwaccel)
+            proc.kill()
+            proc.wait()
+            yield from _sample_frames_cpu(video_path, fps, step, interval_sec)
+            return
+        first_frame = np.frombuffer(first_raw, np.uint8).reshape((height, width, 3))
+        yield (0.0, first_frame)
+        idx += 1
+
         while True:
             raw = proc.stdout.read(frame_size)
             if not raw or len(raw) < frame_size:
