@@ -93,3 +93,9 @@ clip_selection_biases.json
 
 # Backups
 *.bak
+
+# ML models & local binaries (too large for git)
+models/
+whisper_rocm/
+whisper_vulkan/
+*.onnx

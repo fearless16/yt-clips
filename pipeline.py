@@ -153,21 +153,32 @@ def run(
     # ── Phase 2.5: Video Analysis (face/lighting map) ─────────────────────────
     _banner("PHASE 2.5 — VIDEO ANALYSIS")
     analysis_path = str(Path(cfg["paths"]["temp"]) / f"{stem}_analysis.json")
-    try:
-        from video_analyzer import analyze_video
-        analysis = analyze_video(
-            video_path=video_path,
-            photos_dir="photos/",
-            reference_image="expectation.png",
-            sample_interval=2.0,
-            output_path=analysis_path,
-        )
-        log.info("Phase 2.5 complete — face rate: %.0f%%, avg quality: %.3f",
-                 analysis["summary"]["face_detection_rate"],
-                 analysis["summary"]["avg_quality"])
-    except Exception as e:
-        log.warning("Video analysis failed (non-fatal): %s", e)
-        analysis = None
+    analysis = None
+    if Path(analysis_path).exists():
+        try:
+            with open(analysis_path) as f:
+                analysis = json.load(f)
+            log.info("Using cached analysis (%d frames, face rate %.0f%%)",
+                     len(analysis.get("frames", [])),
+                     analysis.get("summary", {}).get("face_detection_rate", 0))
+        except Exception:
+            analysis = None
+    if analysis is None:
+        try:
+            from video_analyzer import analyze_video
+            analysis = analyze_video(
+                video_path=video_path,
+                photos_dir="photos/",
+                reference_image="expectation.png",
+                sample_interval=2.0,
+                output_path=analysis_path,
+            )
+            log.info("Phase 2.5 complete — face rate: %.0f%%, avg quality: %.3f",
+                     analysis["summary"]["face_detection_rate"],
+                     analysis["summary"]["avg_quality"])
+        except Exception as e:
+            log.warning("Video analysis failed (non-fatal): %s", e)
+            analysis = None
 
     # ── Phase 3: Highlight Detection ───────────────────────────────────────────
     _banner("PHASE 3 — HIGHLIGHT DETECTION")

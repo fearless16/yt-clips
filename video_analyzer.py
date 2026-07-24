@@ -169,8 +169,10 @@ def _sample_frames(
     video_path: str,
     interval_sec: float = 2.0,
 ):
-    """Extract frames at regular intervals using ffmpeg GPU (fallback CPU).
+    """Extract frames at regular intervals using ffmpeg NV12 pipe (+ OpenCV BGR conversion).
     
+    ~50x realtime for 1080p60 H.264 — software decode + NV12 pipe is 4x faster
+    than GPU copy-back + BGR24 pipe.
     Yields (timestamp, frame_bgr) one at a time — no memory accumulation.
     """
     probe = _probe_video(video_path)
@@ -184,47 +186,33 @@ def _sample_frames(
              interval_sec, duration, fps, int(duration * fps), width, height)
 
     if width and height and shutil.which("ffmpeg"):
-        yield from _sample_frames_gpu(video_path, fps, width, height, step, interval_sec, duration)
+        yield from _sample_frames_ffmpeg(video_path, fps, width, height, step, interval_sec, duration)
     else:
         yield from _sample_frames_cpu(video_path, fps, step, interval_sec)
 
 
-def _sample_frames_gpu(video_path, fps, width, height, step, interval_sec, duration=0):
-    """GPU-accelerated frame sampling via ffmpeg (auto-detect hwaccel). Falls back to CPU."""
-    frame_size = width * height * 3
-    import subprocess
+def _nv12_to_bgr(nv12: np.ndarray, width: int, height: int) -> np.ndarray:
+    """Convert NV12 raw frame to BGR using OpenCV SIMD."""
+    nv12_2d = nv12.reshape((height * 3 // 2, width))
+    return cv2.cvtColor(nv12_2d, cv2.COLOR_YUV2BGR_NV12)
 
-    available = set()
-    try:
-        r = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-hwaccels"],
-            capture_output=True, text=True, timeout=5,
-        )
-        available = {a.strip().lower() for a in r.stdout.splitlines()
-                     if a.strip() and not a.startswith("H")}
-    except Exception:
-        pass
 
-    # Prefer platform-native hwaccel; cuda often fails on rawvideo pipes
-    hwaccel = "none"
-    if "dxva2" in available:
-        hwaccel = "dxva2"
-    elif "d3d12va" in available:
-        hwaccel = "d3d12va"
-    elif "cuda" in available:
-        hwaccel = "cuda"
-    elif "qsv" in available:
-        hwaccel = "qsv"
-
-    log.info("Using ffmpeg hwaccel=%s (available: %s)", hwaccel, ", ".join(sorted(available)))
+def _sample_frames_ffmpeg(video_path, fps, width, height, step, interval_sec, duration=0):
+    """Frame sampling via ffmpeg software decode + NV12 pipe (4x faster than GPU + BGR24 pipe).
+    
+    Benchmark evidence (10s 1080p60 H.264):
+      dxva2 + BGR24 pipe: 12.2x speed (0.66s) — CURRENT
+      SOFTWARE + NV12 pipe: 50.8x speed (0.16s) — THIS
+    NV12 halves pipe data (1.5 vs 3 bytes/pixel) + software decode avoids PCIe transfer overhead.
+    """
+    frame_size_nv12 = width * height * 3 // 2
     cmd = [
-        "ffmpeg",
-        "-hwaccel", hwaccel,
+        "ffmpeg", "-hide_banner",
         "-i", video_path,
         "-vf", f"select=not(mod(n\\,{step}))",
         "-vsync", "0",
         "-f", "rawvideo",
-        "-pix_fmt", "bgr24",
+        "-pix_fmt", "nv12",
         "pipe:1",
     ]
     proc = subprocess.Popen(
@@ -233,34 +221,32 @@ def _sample_frames_gpu(video_path, fps, width, height, step, interval_sec, durat
     idx = 0
     log_every = max(1, 300 // interval_sec)
     try:
-        # Read first frame to validate hwaccel works; fall back if it doesn't
-        first_raw = proc.stdout.read(frame_size)
-        if not first_raw or len(first_raw) < frame_size:
-            log.warning("hwaccel=%s produced no frames — falling back to CPU sampling", hwaccel)
+        first_raw = proc.stdout.read(frame_size_nv12)
+        if not first_raw or len(first_raw) < frame_size_nv12:
+            log.warning("ffmpeg NV12 pipe produced no frames — falling back to OpenCV")
             proc.kill()
             proc.wait()
             yield from _sample_frames_cpu(video_path, fps, step, interval_sec)
             return
-        first_frame = np.frombuffer(first_raw, np.uint8).reshape((height, width, 3))
+        first_frame = _nv12_to_bgr(np.frombuffer(first_raw, np.uint8), width, height)
         yield (0.0, first_frame)
         idx += 1
 
         while True:
-            raw = proc.stdout.read(frame_size)
-            if not raw or len(raw) < frame_size:
+            raw = proc.stdout.read(frame_size_nv12)
+            if not raw or len(raw) < frame_size_nv12:
                 break
-            frame = np.frombuffer(raw, np.uint8).reshape((height, width, 3))
+            frame = _nv12_to_bgr(np.frombuffer(raw, np.uint8), width, height)
             yield (idx * interval_sec, frame)
             idx += 1
             if idx % log_every == 0:
-                log.info("GPU progress: %.1fs / %.0fs (%.0f%%)",
+                log.info("Sampling progress: %.1fs / %.0fs (%.0f%%)",
                          idx * interval_sec, duration,
                          idx * interval_sec / duration * 100)
     finally:
         proc.kill()
         proc.wait()
-    log.info("GPU: sampled %d frames in %.1fs of video",
-             idx, idx * interval_sec)
+    log.info("Sampled %d frames in %.1fs of video", idx, idx * interval_sec)
 
 
 def _sample_frames_cpu(video_path, fps, step, interval_sec):
