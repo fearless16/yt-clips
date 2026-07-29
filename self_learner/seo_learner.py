@@ -29,6 +29,10 @@ class SEOPerformance:
     view_count: int = 0
     like_count: int = 0
     engagement_rate: float = 0.0
+    search_impressions: int = 0
+    ctr: float = 0.0
+    description_length: int = 0
+    topic_cluster: str = ""
     timestamp: float = field(default_factory=time.time)
 
 
@@ -69,6 +73,10 @@ class SEOLearner:
                 "view_count": perf.view_count,
                 "like_count": perf.like_count,
                 "engagement_rate": perf.engagement_rate,
+                "search_impressions": perf.search_impressions,
+                "ctr": perf.ctr,
+                "description_length": perf.description_length,
+                "topic_cluster": perf.topic_cluster,
                 "timestamp": perf.timestamp,
             },
             confidence=1.0,

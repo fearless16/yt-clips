@@ -509,6 +509,61 @@ def get_trending_context(domain: str = "cricket", region: str = "IN", video_titl
     }
 
 
+KNOWN_PLAYER_NAMES = {
+    "virat kohli", "rohit sharma", "jasprit bumrah", "ms dhoni", "mahendra singh dhoni",
+    "suryakumar yadav", "kl rahul", "rishabh pant", "shreyas iyer", "shubman gill",
+    "hardik pandya", "ravindra jadeja", "jadeja", "rashid khan", "andre russell",
+    "sunil narine", "pat cummins", "mitchell starc", "josh hazlewood", "glenn maxwell",
+    "david warner", "steve smith", "kane williamson", "trent boult", "tim southee",
+    "shaheen afridi", "babar azam", "mohammad rizwan", "faf du plessis", "quinton de kock",
+    "aiden markram", "kagiso rabada", "ankit kumar", "shivam dube", "rinku singh",
+    "devon conway", "ruturaj gaikwad", "deepak chahar", "tushar deshpande",
+    "david miller", "shahrukh khan", "mohit sharma", "yuzvendra chahal", "kuldeep yadav",
+    "axar patel", "arshdeep singh", "harshal patel", "mohammed siraj", "prasidh krishna",
+    "umran malik", "t natarajan", "bhuvneshwar kumar", "jofra archer", "mark wood",
+    "sam curran", "ben stokes", "moeen ali", "chris jordan", "jason holder",
+    "kieron pollard", "dwayne bravo", "imran tahir", "tabraiz shamsi",
+    "jonny bairstow", "jason roy", "alex hales", "phil salt", "liam livingstone",
+    "harry brook", "joe root", "ben duckett", "zak crawley",
+}
+
+
+def extract_cricket_entities_from_transcript(transcript: str) -> Dict[str, List[str]]:
+    """Extract cricket-specific entities (players, teams, match context) from transcript text."""
+    text_lower = transcript.lower()
+    found_players = []
+    found_teams = []
+    match_context = []
+
+    for name in sorted(KNOWN_PLAYER_NAMES, key=lambda x: -len(x)):
+        if name in text_lower:
+            found_players.append(name.title())
+            text_lower = text_lower.replace(name, "", 1)
+
+    for abbr, full in sorted(TEAM_MAPPINGS.items(), key=lambda x: -len(x[0])):
+        if abbr in text_lower:
+            found_teams.append(full)
+
+    actions = ["six", "four", "wicket", "catch", "boundary", "century", "half-century",
+               "hat-trick", "yorker", "bouncer", "run out", "stumped", "lbw", "bowled",
+               "no ball", "wide ball", "over", "run rate", "powerplay", "target", "chase",
+               "required run rate", "rr", "super over", "dls", "drinks break", "strategic timeout"]
+    for action in actions:
+        if action in text_lower:
+            match_context.append(action)
+            text_lower = text_lower.replace(action, "", 1)
+
+    scores = re.findall(r'\d{1,3}/\d{1,2}', transcript)
+    if scores:
+        match_context.extend(scores)
+
+    return {
+        "players": list(dict.fromkeys(found_players)),
+        "teams": list(dict.fromkeys(found_teams)),
+        "match_context": list(dict.fromkeys(match_context)),
+    }
+
+
 def humanize_title(raw_title: str) -> str:
     """Convert raw video title to SEO-friendly human-readable form."""
     title = raw_title.strip()

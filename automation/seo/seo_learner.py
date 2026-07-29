@@ -211,7 +211,8 @@ class SEOLearner:
     def record_performance(self, clip_id: str, title: str, description: str,
                            hashtags: List[str], analytics: Dict,
                            tags: List[str] = None, search_terms: List[str] = None,
-                           provider: str = None, model: str = None):
+                           provider: str = None, model: str = None,
+                           topic_cluster: str = None):
         features = self._extract_seo_features(title, description, hashtags)
         features["tags_count"] = len(tags or [])
         features["search_terms_count"] = len(search_terms or [])
@@ -230,6 +231,7 @@ class SEOLearner:
             "features": features,
             "provider": provider,
             "model": model,
+            "topic_cluster": topic_cluster,
         }
 
         self._dedup_clips(record)
@@ -282,34 +284,41 @@ class SEOLearner:
         views = analytics.get("viewCount", 0)
         likes = analytics.get("likeCount", 0)
         comments = analytics.get("commentCount", 0)
+        search_impressions = analytics.get("search_impressions", 0)
+        ctr = analytics.get("ctr", 0.0)
 
         views_score = min(1.0, math.log(max(1, views)) / 15)
         engagement_rate = (likes + comments) / max(1, views)
-        # Apply view-based credibility scaling to avoid noise on low-view clips
         credibility = min(1.0, views / 100.0)
         engagement_score = min(1.0, engagement_rate * 20) * credibility
 
-        has_retention = analytics.get("retention") is not None
-        has_ctr = analytics.get("ctr") is not None
+        search_score = 0.0
+        if search_impressions > 0:
+            search_score = min(1.0, math.log(max(1, search_impressions)) / 12)
+        if ctr > 0:
+            search_score = max(search_score, min(1.0, ctr * 8))
 
-        if has_retention and has_ctr:
+        has_retention = analytics.get("retention") is not None
+        has_ctr_internal = "ctr" in analytics
+
+        if has_retention and has_ctr_internal:
             score = (
-                views_score * 0.4 +
-                engagement_score * 0.3 +
-                min(1.0, max(0.0, analytics["retention"])) * 0.2 +
-                min(1.0, max(0.0, analytics["ctr"] * 10)) * 0.1
+                views_score * 0.35 +
+                engagement_score * 0.25 +
+                min(1.0, max(0.0, analytics.get("retention", 0))) * 0.2 +
+                search_score * 0.2
             )
         elif has_retention:
             score = (
-                views_score * 0.5 +
+                views_score * 0.4 +
                 engagement_score * 0.3 +
-                min(1.0, max(0.0, analytics["retention"])) * 0.2
+                min(1.0, max(0.0, analytics.get("retention", 0))) * 0.3
             )
-        elif has_ctr:
+        elif has_ctr_internal:
             score = (
-                views_score * 0.5 +
+                views_score * 0.4 +
                 engagement_score * 0.3 +
-                min(1.0, max(0.0, analytics["ctr"] * 10)) * 0.2
+                search_score * 0.3
             )
         else:
             score = views_score * 0.6 + engagement_score * 0.4

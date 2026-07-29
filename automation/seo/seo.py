@@ -18,6 +18,7 @@ from utils.logger import get_logger
 from utils.ai_client import AIClient
 from .trends import TEAM_MAPPINGS
 from automation._cache import TTLCache
+from utils.ocr import extract_ocr_entities
 
 SUGGEST_CACHE = TTLCache(maxsize=16, ttl=600)
 TREND_CACHE = TTLCache(maxsize=4, ttl=300)
@@ -214,8 +215,12 @@ _SYSTEM = (
     "not short corporate summaries. Think like a top cricket YouTuber with 500K subs. "
     "Include Hindi transliterated search terms (e.g., 'aaj ka match', 'live cricket score') "
     "alongside English terms for bilingual discoverability. "
-    "CRITICAL: Only use player names, teams, and events from the transcript. "
+    "CRITICAL: Use player names, teams, and events from the transcript AND/OR on-screen text (OCR). "
+    "Only use entities that appear in at least one of these sources. "
     "NEVER invent or hallucinate player names or match events. "
+    "CRITICAL: Every search term must appear NATURALLY within the description paragraphs. "
+    "NEVER append a keyword list, tag block, or comma-separated term list at the end. "
+    "The description must read as a natural, flowing document. "
     "Return ONLY valid JSON — no markdown, no explanation, no extra text."
 )
 
@@ -228,7 +233,8 @@ _SYSTEM_FOOTBALL = (
     "Generate RICH, LONG, STRUCTURED descriptions with emoji section headers — "
     "not short corporate summaries. Think like a top football YouTuber with 500K subs. "
     "Include Hinglish transliterated search terms alongside English terms for bilingual discoverability. "
-    "CRITICAL: Only use player names, teams, and events from the transcript. "
+    "CRITICAL: Use player names, teams, and events from the transcript AND/OR on-screen text (OCR). "
+    "Only use entities that appear in at least one of these sources. "
     "NEVER invent or hallucinate player names or match events. "
     "Return ONLY valid JSON — no markdown, no explanation, no extra text."
 )
@@ -258,10 +264,10 @@ TASK: Generate RICH, LONG YouTube SEO for this specific clip.
 
 You MUST return valid JSON (no markdown, no other text):
 {{
-  "title": "<max 100 chars, multi-segment Hinglish title with pipes>",
-  "description": "<LONG structured description, 2000-4500 chars, with emoji section headers>",
-  "hashtags": ["<15 hashtags>"],
-  "search_terms": ["<25-30 search terms including Hindi transliterations>"]
+    "title": "<max 100 chars, multi-segment Hinglish title with pipes>",
+    "description": "<LONG structured description, 2000-4500 chars, with emoji section headers — EVERY search term embedded naturally>",
+    "hashtags": ["<15 hashtags>"],
+    "search_terms": ["<25-30 search terms including Hindi transliterations> — these also appear NATURALLY in description text"]
 }}
 
 ═══ TITLE FORMAT (max 100 chars) ═══
@@ -275,14 +281,18 @@ You MUST return valid JSON (no markdown, no other text):
   "🔴 Kohli OUT on 0! | RCB vs MI IPL 2026 | Live Score #Shorts"
   "Bumrah ki DEADLY Yorker! 💥 | MI vs CSK Highlights | IPL 2026"
 
-═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED) ═══
-Write a LONG, structured description with these sections:
+═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED, NATURAL) ═══
+Write a LONG, structured description with these sections. ALL search terms
+must be embedded NATURALLY within the paragraph text — do NOT append any
+keyword list, tag block, or comma-separated term list.
 
 1. 📝 HOOK (2-3 lines): Dramatic summary of what happened in the clip.
-   Use the most exciting moment as the opening line.
+   Use the most exciting moment as the opening line. Naturally work in
+   key search terms (player names, action words, match context).
 
 2. 🔥 Current Match Situation (3-5 lines): What's happening in the match.
-   Score, key dismissals, partnerships, run rate.
+   Score, key dismissals, partnerships, run rate. Embed search terms
+   like "rcb vs mi live score", "ipl 2026 match 54" naturally.
 
 3. 👉 CTA: "If you love cricket, please SUBSCRIBE! We are growing together."
 
@@ -296,10 +306,7 @@ Write a LONG, structured description with these sections:
    "This is a watch-along and scorecard video. No live match footage or
    audio from official broadcasters. All logos belong to respective owners."
 
-7. 🏷️ Tags / Search Terms:
-   Embed ALL search terms as comma-separated list in the description too.
-
-8. #️⃣ Hashtags:
+7. #️⃣ Hashtags:
    List all hashtags at the end of description.
 
 ═══ SEARCH TERMS (25-30 terms, mix English + Hindi transliteration) ═══
@@ -744,6 +751,7 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
 
 
 def _validate_seo_quality(item: Dict) -> bool:
+
     """Quality gate: reject SEO that would hurt channel performance.
 
     Returns True if the SEO output is clip-specific and worth uploading.
@@ -767,6 +775,21 @@ def _validate_seo_quality(item: Dict) -> bool:
     # 4. Title must not contain Devanagari script (kills discoverability)
     # Unicode range: \u0900-\u097F (Devanagari block)
     if re.search(r'[\u0900-\u097F]', title):
+        return False
+
+    # 5. Natural embedding check — reject if keyword list/tag block is
+    #    appended at the end of description (signals lazy SEO).
+    #    Look for patterns like:
+    #      - "Tags:", "Keywords:", "Search terms:" at end (label + colon)
+    #      - Comma-separated single-word dump on last line
+    last_200 = description[-200:].lower()
+    if re.search(r'\b(?:search[_ ]terms?|tags?|keywords?)\s*:', last_200):
+        return False
+    # Check last line for high comma density (keyword dump indicator)
+    last_line = description.split('\n')[-1].strip().lower()
+    words = last_line.split(',')
+    if len(words) >= 6 and all(len(w.strip().split()) <= 2 for w in words) \
+       and not last_line.rstrip().endswith(('.', '!', '?')):
         return False
 
     return True
@@ -926,6 +949,7 @@ def generate_clip_seo(
     fallback_terms: Optional[List[str]] = None,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
+    video_path: str = "",
 ) -> Dict:
     """Generate SEO metadata for a single clip using fastest-first parallel model racing.
 
@@ -977,6 +1001,16 @@ def generate_clip_seo(
         teams=teams_str or default_teams,
         transcript=transcript,
     )
+
+    # OPTIONAL OCR entity extraction (degraded gracefully if easyocr unavailable)
+    ocr_entities = extract_ocr_entities(video_path) if video_path else {}
+    ocr_text = ""
+    if ocr_entities:
+        sb = "; ".join(ocr_entities.get("scoreboard", []))
+        pn = "; ".join(ocr_entities.get("player_names", []))
+        os = "; ".join(ocr_entities.get("on_screen_text", []))
+        ocr_text = f"\n\nON-SCREEN TEXT (OCR from video):\n  Scoreboard: {sb or '(none)'}\n  Player names: {pn or '(none)'}\n  Raw text: {os or '(none)'}"
+        user_prompt += ocr_text
 
     # Inject learner intelligence into the prompt
     learner_ctx = _get_learner_context()
@@ -1161,7 +1195,7 @@ def generate_seo_for_exported_clip(
     is_shorts: bool = True,
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
-    **kwargs,
+    video_path: str = "",
 ) -> Dict:
     """Generate SEO for an already-exported clip and write metadata to disk.
 
@@ -1183,6 +1217,7 @@ def generate_seo_for_exported_clip(
             is_shorts=is_shorts,
             provider_override=provider_override,
             model_override=model_override,
+            video_path=video_path,
         )
         if result.get("ai_generated") is False:
             log.warning("[%s] AI SEO failed — writing failure marker", clip_id)
@@ -1218,7 +1253,8 @@ def generate_seo_for_exported_clip(
         return {"_seo_failed": True, "error": str(e)}
 
 
-def process_all_seo(highlights_path: str, output_dir: str) -> str:
+def process_all_seo(highlights_path: str, output_dir: str,
+                    video_path: str = "") -> str:
     """
     Sequential per-clip SEO. Loads highlights YAML, fetches trend context once,
     then generates SEO for each clip one at a time.
@@ -1246,6 +1282,10 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
                 live_stream_url = meta.get("live_stream_url", "")
         except Exception:
             pass
+
+    if not video_path:
+        dl_fn = cfg.get("download", {}).get("output_filename", "video.mp4")
+        video_path = str(Path(cfg["paths"]["input"]) / dl_fn)
 
     # Fetch trend context ONCE for the whole session (cached)
     trend_cache_key = f"trend:{video_title[:50]}"
@@ -1287,6 +1327,7 @@ def process_all_seo(highlights_path: str, output_dir: str) -> str:
                 trend_topics=trend_topics,
                 live_stream_url=live_stream_url,
                 teams=teams,
+                video_path=video_path,
             )
             all_results.append(result)
 
