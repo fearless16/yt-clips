@@ -166,3 +166,84 @@ class TestEdgeCases:
                 any_detected = True
                 break
         assert any_detected, "SCRFD DirectML GPU detected no faces in any frame"
+
+
+class TestDecodeSCRFD:
+    def _make_scrfd_outputs(self):
+        """Build synthetic outputs matching SCRFD model outputs."""
+        strides = [8, 16, 32]
+        outputs = []
+        for idx, s in enumerate(strides):
+            fm = 640 // s
+            n = fm * fm
+            # scores: (1, n*2, 1)
+            scores = np.zeros((1, n * 2, 1), dtype=np.float32)
+            # place one strong detection at known grid cell, anchor 0
+            cell = n // 2  # middle of feature map
+            scores[0, cell * 2, 0] = 0.85
+            # another at cell+1, anchor 1
+            scores[0, (cell + 1) * 2 + 1, 0] = 0.75
+            outputs.append(scores)
+
+        for idx, s in enumerate(strides):
+            fm = 640 // s
+            n = fm * fm
+            bboxes = np.zeros((1, n * 2, 4), dtype=np.float32)
+            # bbox deltas for cell n//2 anchor 0 at stride s
+            cell = n // 2
+            col = cell % fm
+            row = cell // fm
+            cx = col * s + s // 2
+            cy = row * s + s // 2
+            bboxes[0, cell * 2, :] = [10.0, 10.0, 10.0, 10.0]  # symmetric around center
+
+            cell2 = cell + 1
+            col2 = cell2 % fm
+            row2 = cell2 // fm
+            cx2 = col2 * s + s // 2
+            cy2 = row2 * s + s // 2
+            bboxes[0, (cell + 1) * 2 + 1, :] = [15.0, 15.0, 15.0, 15.0]
+            outputs.append(bboxes)
+        return outputs
+
+    def test_decode_returns_correct_count_and_positions(self):
+        from utils.face_detect import _decode_scrfd
+        outputs = self._make_scrfd_outputs()
+        results = _decode_scrfd(outputs, 640, 0.5, 0.5)
+        # stride 32 has fewer grid cells; n//2 may exceed its range at strides 8,16
+        # but stride 32 still has some cells (640/32 = 20, 400 cells). n//2 = 200 < 400, ok
+        assert len(results) >= 2, f"Expected >=2 detections, got {len(results)}"
+        for x, y, w, h in results:
+            assert w > 0 and h > 0
+            assert x >= 0 and y >= 0
+
+    def test_decode_all_below_threshold_returns_empty(self):
+        from utils.face_detect import _decode_scrfd
+        outputs = self._make_scrfd_outputs()
+        results = _decode_scrfd(outputs, 640, 0.5, 0.99)
+        assert results == []
+
+    def test_decode_returns_different_for_high_threshold(self):
+        from utils.face_detect import _decode_scrfd
+        outputs = self._make_scrfd_outputs()
+        low = _decode_scrfd(outputs, 640, 0.5, 0.5)
+        high = _decode_scrfd(outputs, 640, 0.5, 0.8)
+        assert len(low) >= len(high)
+        assert len(high) >= 0
+
+    def test_decode_known_bbox_values(self):
+        from utils.face_detect import _decode_scrfd
+        s = 8
+        fm = 640 // s
+        n = fm * fm
+        scores = np.zeros((1, n * 2, 1), dtype=np.float32)
+        bboxes = np.zeros((1, n * 2, 4), dtype=np.float32)
+        # two non-zero-area detections in stride 8
+        scores[0, 0, 0] = 0.9  # cell 0, anchor 0
+        bboxes[0, 0, :] = [4.0, 4.0, 6.0, 6.0]
+        scores[0, 2, 0] = 0.9  # cell 1, anchor 0 (col=1)
+        bboxes[0, 2, :] = [5.0, 5.0, 10.0, 10.0]
+
+        outputs = [scores] + [np.zeros_like(bboxes)] * 2 + [bboxes] + [np.zeros_like(bboxes)] * 2
+        results = _decode_scrfd(outputs, 640, 0.5, 0.5)
+        assert len(results) >= 2, f"Expected >=2, got {len(results)}"

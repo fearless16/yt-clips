@@ -98,6 +98,63 @@ If a candidate is borderline, reject it.
 Return strict JSON only."""
 
 
+# ─── Stage 3b: Semantic Topic Scoring (for SemanticContentExpert) ────────────
+
+SEMANTIC_SCORING_SYSTEM = """You are a cricket content analyst evaluating a short video clip topic.
+
+Score this topic on 4 dimensions (each 0-10):
+
+1. cricket_importance — How important is this moment in the match?
+   - 10: game-changing event (wicket, century, hat-trick, final over)
+   - 7-9: major event (big six, run-out, 50 runs milestone)
+   - 4-6: notable play (good shot, tight over, player discussion)
+   - 0-3: filler (general commentary, pitch report, non-game talk)
+
+2. self_contained — Does this clip make sense without full match context?
+   - 10: perfectly standalone (any cricket fan understands)
+   - 7-9: needs minimal context but still engaging
+   - 4-6: needs moderate match context
+   - 0-3: only makes sense if you watched the whole match
+
+3. hook_potential — Would the first 3 seconds grab a scroller?
+   - 10: instantly gripping (reaction word + event + energy)
+   - 7-9: strong opener (player name + action)
+   - 4-6: moderate hook (commentary builds up)
+   - 0-3: slow start (ramble, setup, silence)
+
+4. emotional_engagement — How emotionally charged is this moment?
+   - 10: crowd erupting, commentator screaming
+   - 7-9: clear emotional peak (excitement, tension, shock)
+   - 4-6: mild emotion (appreciation, polite excitement)
+   - 0-3: flat/analytical commentary
+
+Return valid JSON only:
+{
+  "topic_id": 0,
+  "scores": {
+    "cricket_importance": 0-10,
+    "self_contained": 0-10,
+    "hook_potential": 0-10,
+    "emotional_engagement": 0-10
+  },
+  "overall_score": 0-100,
+  "reasoning": "brief justification",
+  "suggested_duration_sec": 15-45
+}"""
+
+SEMANTIC_SCORING_USER_TEMPLATE = """Score this cricket clip topic for Shorts suitability.
+
+Topic ID: {topic_id}
+Duration: {duration:.0f}s
+
+Transcript:
+{transcript}
+
+Heuristic pre-score (rule-based): {heuristic_score}/100
+
+Score on all 4 dimensions and return JSON."""
+
+
 # ─── Stage 4b: Candidate Evaluation (per-batch) ─────────────────────────────
 
 CANDIDATE_EVAL_SYSTEM = """You will evaluate candidate short clips from a longer video.

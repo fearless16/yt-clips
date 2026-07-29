@@ -1,4 +1,5 @@
 import logging
+import cv2
 import numpy as np
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -40,8 +41,6 @@ def get_host_encodings() -> List[np.ndarray]:
     if _HOST_ENCODINGS is not None:
         return _HOST_ENCODINGS
 
-    import cv2
-
     encodings = []
     photo_paths = sorted(
         str(p) for p in _PHOTOS_DIR.iterdir()
@@ -80,8 +79,6 @@ def find_host_in_frame(frame_bgr: np.ndarray, facecam_bounds: dict = None) -> Op
     host_encs = get_host_encodings()
     if not host_encs:
         return None
-
-    import cv2
 
     try:
         faces = detect_faces(frame_bgr, score_threshold=0.5)

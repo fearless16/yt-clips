@@ -12,6 +12,7 @@ from automation.clip_selection.agents import (
     ViewerPsychologyExpert,
     RetentionExpert,
     BrutalRejectionAgent,
+    SemanticContentExpert,
     ALL_AGENTS,
     _words,
     _count_overlap,
@@ -269,12 +270,13 @@ class TestBrutalRejectionAgent:
 
 class TestAllAgents:
     def test_all_agents_registered(self):
-        assert len(ALL_AGENTS) == 7
+        assert len(ALL_AGENTS) == 8
         names = {a.name for a in ALL_AGENTS}
         assert names == {
             "hook_expert", "emotion_expert", "cricket_context",
             "viral_potential", "viewer_psychology",
             "retention_expert", "brutal_rejection",
+            "semantic_content",
         }
 
     def test_weights_sum_is_reasonable(self):
@@ -573,20 +575,21 @@ class TestWeightLearner:
                 "clip_id": f"c{i}",
                 "final_score": 50.0 + i,
                 "views": 100 + i * 50,
-                "agent_scores": {
-                    "hook_expert": {"score": 40 + i * 2, "reasoning": "ok"},
-                    "emotion_expert": {"score": 30 + i, "reasoning": "ok"},
-                    "cricket_context": {"score": 20 + i, "reasoning": "ok"},
-                    "viral_potential": {"score": 10 + i, "reasoning": "ok"},
-                    "viewer_psychology": {"score": 15 + i, "reasoning": "ok"},
-                    "retention_expert": {"score": 50 + i, "reasoning": "ok"},
-                    "brutal_rejection": {"score": 0, "should_reject": False},
-                },
+                    "agent_scores": {
+                        "hook_expert": {"score": 40 + i * 2, "reasoning": "ok"},
+                        "emotion_expert": {"score": 30 + i, "reasoning": "ok"},
+                        "cricket_context": {"score": 20 + i, "reasoning": "ok"},
+                        "viral_potential": {"score": 10 + i, "reasoning": "ok"},
+                        "viewer_psychology": {"score": 15 + i, "reasoning": "ok"},
+                        "retention_expert": {"score": 50 + i, "reasoning": "ok"},
+                        "semantic_content": {"score": 25 + i, "reasoning": "ok"},
+                        "brutal_rejection": {"score": 0, "should_reject": False},
+                    },
             })
 
         result = compute_adaptive_weights(perf_data, min_clips=10, drift_rate=0.3)
         assert "hook_expert" in result
-        assert "technical_quality" in result
+        assert "semantic_content" in result
         assert abs(sum(result.values()) - 1.0) < 0.01
 
     def test_recalibrate_weights_convenience(self):
@@ -665,3 +668,142 @@ class TestEntityBias:
         c = {"start": 0, "end": 10, "text": "Kohli hits a six"}
         result = agent.score(c, rms_context)
         assert result["score"] > 20
+
+
+# ── Agent 8: Semantic Content Expert ─────────────────────────────────
+
+class TestSemanticContentExpert:
+    def test_topic_salience_boost(self, rms_context):
+        agent = SemanticContentExpert()
+        c = {"start": 0, "end": 20, "text": "Kohli ne maara six! Crowd goes wild!"}
+        rms_context["topics"] = [
+            {"start": 0, "end": 30, "salience_score": 80,
+             "segments": [{"start": 0, "end": 20, "text": "Kohli six!"}]}
+        ]
+        rms_context["topic_heuristics"] = {
+            "0.0-30.0": {"salience_score": 80, "entity_density": {"player_hits": 1, "team_hits": 0}},
+        }
+        result = agent.score(c, rms_context)
+        assert result["score"] > 30
+
+    def test_no_topics_fallback(self, rms_context):
+        agent = SemanticContentExpert()
+        c = {"start": 0, "end": 20, "text": "Kohli six!"}
+        rms_context["topics"] = []
+        rms_context["topic_heuristics"] = {}
+        result = agent.score(c, rms_context)
+        assert 0 <= result["score"] <= 100
+
+    def test_topic_alignment_bonus(self, rms_context):
+        agent = SemanticContentExpert()
+        c = {"start": 10, "end": 30, "text": "What a shot!"}
+        rms_context["topics"] = [
+            {"start": 10, "end": 30, "salience_score": 50,
+             "segments": [{"start": 10, "end": 30, "text": "What a shot!"}]}
+        ]
+        rms_context["topic_heuristics"] = {
+            "10.0-30.0": {"salience_score": 50, "entity_density": {"player_hits": 0, "team_hits": 0}},
+        }
+        result = agent.score(c, rms_context)
+        assert "topic_aligned" in result["reasoning"]
+
+    def test_context_ref_penalty(self, rms_context):
+        agent = SemanticContentExpert()
+        c = {"start": 0, "end": 20,
+             "text": "he then bowled him and that was the end of that over so they moved on"}
+        rms_context["topics"] = []
+        rms_context["topic_heuristics"] = {}
+        result = agent.score(c, rms_context)
+        assert "context_refs" in result["reasoning"]
+
+
+# ── Topic Segmenter ─────────────────────────────────────────────────
+
+class TestTopicSegmenter:
+    def test_empty_segments(self):
+        from automation.clip_selection.topic_segmenter import TopicSegmenter
+        segmenter = TopicSegmenter()
+        result = segmenter.segment([])
+        assert result == []
+
+    def test_single_segment(self):
+        from automation.clip_selection.topic_segmenter import TopicSegmenter
+        segmenter = TopicSegmenter()
+        segs = [{"start": 0, "end": 10, "text": "hello world"}]
+        result = segmenter.segment(segs)
+        assert len(result) == 1
+        assert result[0]["start"] == 0
+        assert result[0]["end"] == 10
+
+    def test_returns_required_fields(self):
+        from automation.clip_selection.topic_segmenter import TopicSegmenter
+        segmenter = TopicSegmenter()
+        segs = [{"start": 0, "end": 5, "text": "part one"},
+                {"start": 5, "end": 10, "text": "part two"}]
+        result = segmenter.segment(segs)
+        for topic in result:
+            assert "topic_id" in topic
+            assert "start" in topic
+            assert "end" in topic
+            assert "text" in topic
+            assert "segments" in topic
+
+
+# ── Cricket Heuristics ──────────────────────────────────────────────
+
+class TestCricketHeuristics:
+    def test_entity_density(self):
+        from automation.clip_selection.cricket_heuristics import entity_density
+        result = entity_density("Kohli hits a six Rohit scores a four")
+        assert result["player_hits"] >= 2
+        assert result["density"] > 0
+
+    def test_event_intensity(self):
+        from automation.clip_selection.cricket_heuristics import event_intensity
+        result = event_intensity("SIX! What a wicket! That is a boundary!")
+        assert result["total_events"] >= 3
+
+    def test_sentiment_intensity(self):
+        from automation.clip_selection.cricket_heuristics import sentiment_intensity
+        result = sentiment_intensity("Oh wow! Unbelievable! What a shot!!!")
+        assert result["exclamations"] >= 3
+        assert result["score"] > 50
+
+    def test_topic_salience_high(self):
+        from automation.clip_selection.cricket_heuristics import topic_salience_score
+        result = topic_salience_score(
+            "SIX! Kohli smashes it for a boundary! Incredible shot! Oh wow!"
+        )
+        assert result["score"] > 20
+
+    def test_topic_salience_low(self):
+        from automation.clip_selection.cricket_heuristics import topic_salience_score
+        result = topic_salience_score(
+            "and then he said that and then they went there"
+        )
+        assert result["score"] < 30
+
+    def test_score_all_topics(self):
+        from automation.clip_selection.cricket_heuristics import score_all_topics
+        topics = [
+            {"topic_id": 0, "start": 0, "end": 10,
+             "text": "SIX! Kohli hits a boundary!"},
+            {"topic_id": 1, "start": 10, "end": 20,
+             "text": "and then a single to rotate the strike"},
+        ]
+        result = score_all_topics(topics)
+        assert len(result) == 2
+        assert result[0]["salience_score"] > result[1]["salience_score"]
+
+
+# ── Updated Weight Consistency ─────────────────────────────────────
+
+class TestUpdatedWeights:
+    def test_all_agents_weights_sum(self):
+        total = sum(a.weight for a in ALL_AGENTS if a.name != "brutal_rejection")
+        assert 0.95 <= total <= 1.05
+
+    def test_semantic_content_weighted_in_arbiter(self):
+        from automation.clip_selection.arbiter import AGENT_WEIGHTS
+        assert "semantic_content" in AGENT_WEIGHTS
+        assert 0.10 <= AGENT_WEIGHTS["semantic_content"] <= 0.20

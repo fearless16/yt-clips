@@ -6,25 +6,22 @@ toward agents that best predict high-performing clips.
 
 Closed-loop: orchestrator Stage 9 → recalibrate_weights() → updated weights
 → injected into next Stage 3-5 run → better clip selection over time.
+
+Weights import from arbiter (single source of truth — ``agents.py``).
 """
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 from utils.logger import get_logger
 
+from automation.clip_selection.arbiter import _DEFAULT_WEIGHTS
+
 log = get_logger("weight_learner")
 
-DEFAULT_WEIGHTS: dict[str, float] = {
-    "hook_expert": 0.35,
-    "emotion_expert": 0.20,
-    "viral_potential": 0.15,
-    "cricket_context": 0.10,
-    "viewer_psychology": 0.10,
-    "retention_expert": 0.05,
-    "technical_quality": 0.05,
-}
+DEFAULT_WEIGHTS: dict[str, float] = dict(_DEFAULT_WEIGHTS)
 
 
 def load_performance_data(
@@ -94,7 +91,6 @@ def compute_adaptive_weights(
         return dict(DEFAULT_WEIGHTS)
 
     agent_names = list(DEFAULT_WEIGHTS.keys())
-    agent_names.remove("technical_quality")  # no agent for this
 
     agent_totals: dict[str, float] = {name: 0.0 for name in agent_names}
     view_buckets: dict[str, list[tuple[float, float]]] = {
@@ -130,6 +126,8 @@ def compute_adaptive_weights(
 
         if std_x > 0 and std_y > 0:
             corr = numerator / (len(xs) * std_x * std_y)
+            if math.isnan(corr) or math.isinf(corr):
+                corr = 0.0
         else:
             corr = 0.0
 
@@ -169,9 +167,6 @@ def compute_adaptive_weights(
         default = DEFAULT_WEIGHTS[name]
         learned = learned_weights.get(name, default)
         blended[name] = default * (1 - drift_rate) + learned * drift_rate
-
-    # Add back technical_quality
-    blended["technical_quality"] = DEFAULT_WEIGHTS["technical_quality"]
 
     # Re-normalize
     total = sum(blended.values())

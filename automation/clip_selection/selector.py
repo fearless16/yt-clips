@@ -124,10 +124,17 @@ class ClipSelector:
 
     def _score_single(self, candidate: dict, context: dict) -> dict:
         """Run all 7 agents on one candidate."""
+        # Pass all OTHER candidates' texts for duplicate detection
+        all_texts = context.get("all_candidate_texts", set())
+        candidate_text = candidate.get("text", "").strip()
+        other_texts = {t for t in all_texts if t != candidate_text}
+        candidate_context = dict(context)
+        candidate_context["all_candidate_texts"] = other_texts
+
         agent_scores = {}
         for agent in self.agents:
             try:
-                result = agent.score(candidate, context)
+                result = agent.score(candidate, candidate_context)
                 agent_scores[agent.name] = result
             except Exception as e:
                 log.warning("Agent %s failed: %s", agent.name, e)
@@ -184,6 +191,8 @@ def select_best_clips(
         "max_rms": max_rms,
         "transcript_segments": transcript_segments,
         "match_context": match_context or {},
+        "topics": [],
+        "topic_heuristics": {},
     }
 
     scored = selector.score_candidates(candidates, context)

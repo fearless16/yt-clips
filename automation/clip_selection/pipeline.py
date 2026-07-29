@@ -6,7 +6,6 @@ Usage:
 """
 
 import json
-import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -19,6 +18,8 @@ from utils.logger import get_logger
 
 from automation.clip_selection.selector import ClipSelector
 from automation.clip_selection.arbiter import fmt_ts
+from automation.clip_selection.topic_segmenter import TopicSegmenter
+from automation.clip_selection.cricket_heuristics import score_all_topics
 
 from prompts import MAX_CANDIDATES, MAX_SELECTED_CLIPS, MIN_QUALITY_THRESHOLD
 
@@ -107,6 +108,11 @@ def _merge_windows(windows: list[dict], gap: float) -> list[dict]:
         if w["start"] - prev["end"] <= gap:
             prev["end"] = max(prev["end"], w["end"])
             prev["score"] = max(prev["score"], w["score"])
+            # Merge text from both windows (longer text wins)
+            curr_text = w.get("text", "")
+            prev_text = prev.get("text", "")
+            if len(curr_text) > len(prev_text):
+                prev["text"] = curr_text
         else:
             merged.append(dict(w))
     return merged
@@ -223,8 +229,7 @@ def detect_highlights(
 
     t_path = Path(transcript_path)
     if not t_path.exists():
-        log.error("Transcript not found: %s", t_path)
-        sys.exit(1)
+        raise FileNotFoundError(f"Transcript not found: {t_path}")
 
     with open(t_path, encoding="utf-8") as f:
         data = json.load(f)
@@ -251,6 +256,21 @@ def detect_highlights(
         max_rms = 1.0
 
     log.info("Audio RMS - avg: %.4f | max: %.4f", avg_rms, max_rms)
+
+    # ── Topic segmentation + cricket heuristics ───────────────────────────
+    topics = []
+    topic_heuristics = {}
+    try:
+        segmenter = TopicSegmenter()
+        topics = segmenter.segment(segments)
+        heuristic_scores = score_all_topics(topics)
+        for t, hs in zip(topics, heuristic_scores):
+            t.update(hs)
+            cand_key = f"{t['start']:.1f}-{t['end']:.1f}"
+            topic_heuristics[cand_key] = hs
+        log.info("Topic segmentation: %d topics found", len(topics))
+    except Exception as e:
+        log.warning("Topic segmentation failed: %s — continuing without", e)
 
     # ── Heuristic pre-filter (same as highlight.py) ────────────────────────
     scored = []
@@ -288,7 +308,7 @@ def detect_highlights(
             win_end = c["end"]
         if win_end - win_start > max_dur:
             win_end = win_start + max_dur
-        windows.append({"start": win_start, "end": win_end, "score": c["score"]})
+        windows.append({"start": win_start, "end": win_end, "score": c["score"], "text": c.get("text", "")})
 
     windows.sort(key=lambda w: w["start"])
     merged = _merge_windows(windows, h_cfg["merge_gap"])
@@ -350,6 +370,8 @@ def detect_highlights(
         "transcript_segments": segments,
         "match_context": match_context,
         "entity_bias": entity_biases,
+        "topics": topics,
+        "topic_heuristics": topic_heuristics,
     }
 
     # Score all candidates through 7 agents

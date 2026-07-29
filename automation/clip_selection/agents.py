@@ -9,81 +9,21 @@ import re
 from typing import Any
 
 from automation.clip_selection.agent_base import Agent
-
-# ── Shared helpers ────────────────────────────────────────────────────────
-
-_CRICKET_PLAYERS = {
-    "virat", "kohli", "rohit", "sharma", "dhoni", "msd", "sachin", "tendulkar",
-    "bumrah", "jasprit", "hardik", "pandya", "rahul", "ishan",
-    "kishan", "surya", "sky", "yadav", "gill", "shubman", "iyer", "shreyas",
-    "jaddu", "jadeja", "ashwin", "ravi", "kuldeep", "chahal", "shami",
-    "siraj", "arshdeep", "bhuvi", "bhuvneshwar", "umesh",
-    "babar", "rizwan", "shaheen", "fakhar", "naseem", "shadab",
-    "stokes", "buttler", "root", "bairstow", "woakes", "archer",
-    "warner", "smith", "maxwell", "starc", "cummins", "hazlewood",
-    "kane", "williamson", "conway", "phillips", "southee", "boult",
-    "rabada", "miller", "nortje", "jansen", "markram",
-    "rashid", "gurbaz", "mujeeb", "nabi", "zadran",
-    "malinga", "mathews", "shakib", "mustafizur", "tamim", "mushfiqur",
-}
-
-_CRICKET_TERMS = {
-    "six", "four", "wicket", "catch", "boundary", "century", "fifty",
-    "hattrick", "stumping", "lbw", "bowled",
-    "wide", "over", "inning", "strike", "maiden", "duck", "collapse",
-    "chase", "target", "required", "win", "lost", "final", "semifinal",
-    "playoff", "qualifier", "tie", "drs",
-    # Missing fundamental terms
-    "out", "stump", "castled", "delivery", "batsman", "bowler",
-    "yorker", "bouncer", "googly", "doosra", "fulltoss", "slower",
-    "reverse", "sweep", "cover", "drive", "pull", "hook", "cut",
-    "flick", "glance", "timber", "knocked", "clean", "middle",
-    "on", "off", "leg", "point", "slip", "gully", "third",
-    "sixer", "fourr", "chhakka", "chauka",
-    # Stadiums and venues
-    "wankhede", "lords", "mcg", "eden", "scg",
-    "chinnaswamy", "chepauk", "kotla", "mohali",
-    # Countries / teams
-    "india", "australia", "england", "south", "africa",
-    "pakistan", "bangladesh", "afghanistan", "sri", "lanka",
-    "zimbabwe", "ireland", "scotland", "netherlands",
-    # Commentary intensity
-    "crowd", "eruption", "roar", "stadium", "ground",
-    "atmosphere", "electric", "vibrant", "thunderous",
-}
-
-_CRICKET_PHRASES = ["run out", "no ball", "super over", "free hit", "power play",
-                     "death over", "last over", "world cup", "ipl final",
-                     "test match", "one day", "t20 world",
-                     "takes", "catch", "direct hit", "run a ball",
-                     "player of the match", "man of the match"]
-
-_EMOTION_WORDS = {
-    "oh", "wow", "what", "no", "yes", "whoa", "insane", "crazy", "bro",
-    "holy", "damn", "unbelievable", "incredible", "amazing", "brilliant",
-    "superb", "fantastic", "massive", "clutch", "huge", "destroyed",
-    "killed", "smashed", "demolished", "dominated", "thrashing",
-    "kya", "arre", "bhai", "yaar", "baap", "pagal", "gajab",
-    "khatarnak", "shandar", "dhamaakedaar", "zabardast", "bawaal",
-    "oho", "accha", "haan", "nahi", "chhakka", "chauka", "sixer",
-    "jeet", "machaa", "dekho", "khatam",
-    # More emotional intensity
-    "berserk", "wild", "pandemonium", "carnage", "riot",
-    "stunning", "sensational", "magnificent", "extraordinary",
-    "unreal", "speechless", "historic", "legendary", "iconic",
-    "majestic", "devastating", "ruthless", "monstrous",
-    "absolute", "beauty", "class", "vintage", "magic",
-    "woww", "ohh", "ahh", "woah",
-}
-
-_PAYOFF_WORDS = {
-    "out", "gone", "taken", "bowled", "caught", "stumped",
-    "six", "four", "boundary", "century", "fifty", "win", "victory",
-    "final", "champion", "record", "history", "hattrick",
-    "castled", "timber", "knocked", "clean",
-}
-
-_PAYOFF_PHRASES = ["got him", "clean bowled", "middle stump", "goes for a walk"]
+from automation.clip_selection.keywords import (
+    CRICKET_PLAYERS,
+    CRICKET_EVENTS,
+    CRICKET_PHRASES,
+    EMOTION_WORDS,
+    PAYOFF_WORDS,
+    PAYOFF_PHRASES,
+    COMMENTARY_WORDS,
+    CRICKET_VENUES,
+    CROWD_WORDS,
+    CONTROVERSY_WORDS,
+    RARE_EVENT_TERMS,
+    RARE_EVENT_PHRASES,
+    SERIES_WORDS,
+)
 
 
 def _words(text: str) -> set[str]:
@@ -132,7 +72,7 @@ def _avg_rms(rms_map: dict, t_start: float, t_end: float) -> float:
 
 class HookExpert(Agent):
     name = "hook_expert"
-    weight = 0.35
+    weight = 0.30
 
     def score(self, candidate: dict, context: dict) -> dict[str, Any]:
         start = candidate["start"]
@@ -159,7 +99,7 @@ class HookExpert(Agent):
 
         # Reaction word opener
         first_word = hook_text.split()[0].lower().strip(".!?,") if hook_text.split() else ""
-        if first_word in _EMOTION_WORDS:
+        if first_word in EMOTION_WORDS:
             score += 20
             reasons.append(f"reaction_opener={first_word}")
 
@@ -173,7 +113,7 @@ class HookExpert(Agent):
 
         # Commentary intensity in hook window
         hook_words = _fuzzy_words(hook_text)
-        emotion_hits = _count_overlap(hook_words, _EMOTION_WORDS)
+        emotion_hits = _count_overlap(hook_words, EMOTION_WORDS)
         score += min(emotion_hits * 5, 15)
         if emotion_hits > 0:
             reasons.append(f"emotion_words={emotion_hits}")
@@ -189,7 +129,7 @@ class HookExpert(Agent):
 
 class EmotionExpert(Agent):
     name = "emotion_expert"
-    weight = 0.20
+    weight = 0.15
 
     def score(self, candidate: dict, context: dict) -> dict[str, Any]:
         text = candidate.get("text", "")
@@ -219,7 +159,7 @@ class EmotionExpert(Agent):
 
         # Emotion word density
         words = _fuzzy_words(text)
-        emotion_hits = _count_overlap(words, _EMOTION_WORDS)
+        emotion_hits = _count_overlap(words, EMOTION_WORDS)
         score += min(emotion_hits * 4, 20)
         if emotion_hits >= 3:
             reasons.append(f"emotion_words={emotion_hits}")
@@ -245,7 +185,7 @@ class EmotionExpert(Agent):
 
 class CricketContextExpert(Agent):
     name = "cricket_context"
-    weight = 0.10
+    weight = 0.08
 
     def score(self, candidate: dict, context: dict) -> dict[str, Any]:
         text = candidate.get("text", "")
@@ -260,55 +200,52 @@ class CricketContextExpert(Agent):
         text_lower = text.lower()
 
         # Player mentions
-        player_hits = _count_overlap(words, _CRICKET_PLAYERS)
+        player_matched = words & CRICKET_PLAYERS
+        player_hits = len(player_matched)
         score += min(player_hits * 8, 25)
         if player_hits > 0:
             reasons.append(f"players={player_hits}")
 
-        # Entity bias: boost players that historically get more views
+        # Entity bias: count entity-level (not word-level) matches
         entity_bias = context.get("entity_bias", {})
-        high_perf_players = set()
+        top_player_hits = 0
         for name, _ in entity_bias.get("top_players", []):
-            for part in name.lower().split():
-                if len(part) > 1:
-                    high_perf_players.add(part)
-        low_perf_players = set()
-        for name in entity_bias.get("avoid_players", []):
-            for part in name.lower().split():
-                if len(part) > 1:
-                    low_perf_players.add(part)
-        top_player_hits = _count_overlap(words, high_perf_players)
+            name_parts = name.lower().split()
+            if any(p in words for p in name_parts if len(p) > 1):
+                top_player_hits += 1
         if top_player_hits:
             score += min(top_player_hits * 6, 15)
             reasons.append(f"high_perf_players={top_player_hits}")
-        avoid_player_hits = _count_overlap(words, low_perf_players)
+        avoid_player_hits = 0
+        for name in entity_bias.get("avoid_players", []):
+            name_parts = name.lower().split()
+            if any(p in words for p in name_parts if len(p) > 1):
+                avoid_player_hits += 1
         if avoid_player_hits:
             score -= min(avoid_player_hits * 4, 8)
             reasons.append(f"low_perf_players={avoid_player_hits}")
 
-        # Entity bias: boost teams that historically get more views
-        high_perf_teams = set()
+        # Entity bias: boost/hit teams that historically get more/less views
+        top_team_hits = 0
         for name, _ in entity_bias.get("top_teams", []):
-            for part in name.lower().split():
-                if len(part) > 1:
-                    high_perf_teams.add(part)
-        avoid_teams = set()
-        for name in entity_bias.get("avoid_teams", []):
-            for part in name.lower().split():
-                if len(part) > 1:
-                    avoid_teams.add(part)
-        top_team_hits = _count_overlap(words, high_perf_teams)
+            name_parts = name.lower().split()
+            if any(p in words for p in name_parts if len(p) > 1):
+                top_team_hits += 1
         if top_team_hits:
             score += min(top_team_hits * 5, 10)
             reasons.append(f"high_perf_teams={top_team_hits}")
-        avoid_team_hits = _count_overlap(words, avoid_teams)
+        avoid_team_hits = 0
+        for name in entity_bias.get("avoid_teams", []):
+            name_parts = name.lower().split()
+            if any(p in words for p in name_parts if len(p) > 1):
+                avoid_team_hits += 1
         if avoid_team_hits:
             score -= min(avoid_team_hits * 3, 6)
             reasons.append(f"low_perf_teams={avoid_team_hits}")
 
         # Key action terms (single words + multi-word phrases)
-        action_hits = _count_overlap(words, _CRICKET_TERMS)
-        action_hits += _phrase_hits(text_lower, _CRICKET_PHRASES)
+        action_hits = _count_overlap(words, CRICKET_EVENTS)
+        action_hits += _phrase_hits(text_lower, CRICKET_PHRASES)
         score += min(action_hits * 6, 20)
         if action_hits > 0:
             reasons.append(f"actions={action_hits}")
@@ -322,10 +259,7 @@ class CricketContextExpert(Agent):
                     break
 
         # Tournament / series mention
-        series_words = {"final", "semifinal", "playoff", "qualifier", "cup",
-                        "trophy", "championship", "ipl", "bbl",
-                        "psl", "test", "odi", "t20"}
-        series_hits = _count_overlap(words, series_words)
+        series_hits = _count_overlap(words, SERIES_WORDS)
         series_hits += _phrase_hits(text_lower, ["world cup"])
         if series_hits:
             score += 10
@@ -352,7 +286,7 @@ class CricketContextExpert(Agent):
 
 class ViralPotentialExpert(Agent):
     name = "viral_potential"
-    weight = 0.15
+    weight = 0.13
 
     def score(self, candidate: dict, context: dict) -> dict[str, Any]:
         text = candidate.get("text", "")
@@ -367,16 +301,8 @@ class ViralPotentialExpert(Agent):
         words = _fuzzy_words(text)
 
         # Rare/high-impact events
-        rare_terms = {
-            "hattrick", "century", "record", "history",
-            "unbelievable", "craziest", "biggest",
-            "longest", "fastest", "slowest",
-            "controversy", "fight", "argument", "angry", "confrontation",
-            "comeback", "upset", "shock", "stunner",
-        }
-        rare_phrases = ["first time", "never seen", "massive six"]
-        rare_hits = _count_overlap(words, rare_terms)
-        rare_hits += _phrase_hits(text.lower(), rare_phrases)
+        rare_hits = _count_overlap(words, RARE_EVENT_TERMS)
+        rare_hits += _phrase_hits(text.lower(), RARE_EVENT_PHRASES)
         score += min(rare_hits * 10, 30)
         if rare_hits > 0:
             reasons.append(f"rare_event={rare_hits}")
@@ -398,15 +324,12 @@ class ViralPotentialExpert(Agent):
                 break
 
         # Controversy signals
-        controversy_words = {"controversy", "fight", "angry", "argument",
-                             "abuse", "sledging", "send off", "drama"}
-        if _count_overlap(words, controversy_words):
+        if _count_overlap(words, CONTROVERSY_WORDS):
             score += 15
             reasons.append("controversy")
 
         # Crowd reaction (textual)
-        crowd_words = {"crowd", "audience", "stadium", "fans", "roar", "cheer"}
-        if _count_overlap(words, crowd_words):
+        if _count_overlap(words, CROWD_WORDS):
             score += 10
             reasons.append("crowd_reaction")
 
@@ -420,7 +343,7 @@ class ViralPotentialExpert(Agent):
 
 class ViewerPsychologyExpert(Agent):
     name = "viewer_psychology"
-    weight = 0.10
+    weight = 0.09
 
     def score(self, candidate: dict, context: dict) -> dict[str, Any]:
         text = candidate.get("text", "")
@@ -530,8 +453,8 @@ class RetentionExpert(Agent):
             reasons.append("strong_payoff_energy")
 
         last_words = text.rstrip()[-40:] if len(text) >= 40 else text
-        payoff_hits = _count_overlap(_fuzzy_words(last_words), _PAYOFF_WORDS)
-        payoff_hits += _phrase_hits(last_words.lower(), _PAYOFF_PHRASES)
+        payoff_hits = _count_overlap(_fuzzy_words(last_words), PAYOFF_WORDS)
+        payoff_hits += _phrase_hits(last_words.lower(), PAYOFF_PHRASES)
         if payoff_hits:
             score += 10
             reasons.append("text_payoff")
@@ -550,6 +473,97 @@ class RetentionExpert(Agent):
         return {
             "score": min(100, score),
             "reasoning": "; ".join(reasons) if reasons else "average_retention",
+        }
+
+
+# ── Agent 8: Semantic Content Expert ────────────────────────────────────────
+
+class SemanticContentExpert(Agent):
+    name = "semantic_content"
+    weight = 0.20
+
+    def score(self, candidate: dict, context: dict) -> dict[str, Any]:
+        text = candidate.get("text", "")
+        start = candidate["start"]
+        end = candidate["end"]
+        duration = end - start
+
+        score = 25.0
+        reasons = []
+
+        # ── Topic segmentation + heuristic scores ──────────────────────
+        topics = context.get("topics", [])
+        heuristics = context.get("topic_heuristics", {})
+        if topics:
+            overlapping = [
+                t for t in topics
+                if t["start"] < end and t["end"] > start
+            ]
+            if overlapping:
+                reasons.append(f"topic_overlap={len(overlapping)}")
+                best_topic = max(overlapping, key=lambda t: t.get("salience_score", 0))
+                topic_score = best_topic.get("salience_score", 0)
+                score += topic_score * 0.3
+                if topic_score > 60:
+                    reasons.append(f"high_salience_topic={topic_score:.0f}")
+
+                # Heuristic scores keyed by topic boundaries
+                topic_key = f"{best_topic['start']:.1f}-{best_topic['end']:.1f}"
+                h = heuristics.get(topic_key, {})
+                if h:
+                    salience = h.get("salience_score", 0)
+                    score += salience * 0.25
+                    if salience > 60:
+                        reasons.append(f"heuristic_salience={salience:.0f}")
+                    ed = h.get("entity_density", {})
+                    if ed.get("player_hits", 0) >= 2:
+                        score += 8
+                        reasons.append(f"multi_player={ed['player_hits']}")
+                    if ed.get("team_hits", 0) >= 1:
+                        score += 4
+                        reasons.append("team_mention")
+
+        # ── Boundary quality (starts/ends at natural topic boundaries) ─
+        if topics:
+            aligned_start = any(abs(t["start"] - start) < 2.0 for t in topics)
+            aligned_end = any(abs(t["end"] - end) < 2.0 for t in topics)
+            if aligned_start and aligned_end:
+                score += 12
+                reasons.append("topic_aligned")
+            elif aligned_start or aligned_end:
+                score += 6
+                reasons.append("partial_topic_alignment")
+
+        # ── Self-contained heuristic ────────────────────────────────────
+        words = _fuzzy_words(text)
+        text_lower = text.lower()
+
+        # Pronouns / references to prior context = less self-contained
+        context_refs = {"he", "she", "they", "that", "this", "then",
+                        "earlier", "before", "previous", "so",
+                        "therefore", "thus", "hence", "after"}
+        ref_hits = _count_overlap(words, context_refs)
+        if ref_hits >= 3:
+            score -= 6
+            reasons.append(f"context_refs={ref_hits}")
+
+        # Proper nouns / named entities = more self-contained
+        entity_hits = _count_overlap(words, CRICKET_PLAYERS)
+        if entity_hits >= 1:
+            score += 5
+            reasons.append("has_named_entity")
+
+        # Duration check for topic completeness
+        if 10 <= duration <= 45:
+            score += 8
+            reasons.append("good_topic_duration")
+        elif duration > 60:
+            score -= 8
+            reasons.append("too_long_for_topic")
+
+        return {
+            "score": min(100, score),
+            "reasoning": "; ".join(reasons) if reasons else "neutral_semantic",
         }
 
 
@@ -591,13 +605,13 @@ class BrutalRejectionAgent(Agent):
 
         # No emotional content
         words = _fuzzy_words(text)
-        if _count_overlap(words, _EMOTION_WORDS) == 0:
+        if _count_overlap(words, EMOTION_WORDS) == 0:
             rejection_score += 15
             reasons.append("no_emotion_words")
 
         # No cricket relevance
-        if (_count_overlap(words, _CRICKET_PLAYERS) == 0
-                and _count_overlap(words, _CRICKET_TERMS) == 0):
+        if (_count_overlap(words, CRICKET_PLAYERS) == 0
+                and _count_overlap(words, CRICKET_EVENTS) == 0):
             rejection_score += 10
             reasons.append("no_cricket_content")
 
@@ -611,7 +625,7 @@ class BrutalRejectionAgent(Agent):
         hook_rms = _avg_rms(rms_map, start, hook_end)
         if avg_rms > 0 and hook_rms < avg_rms * 1.1:
             first_word = text.split()[0].lower().strip(".!?,") if text.split() else ""
-            if first_word not in _EMOTION_WORDS:
+            if first_word not in EMOTION_WORDS:
                 rejection_score += 20
                 reasons.append("dull_hook")
 
@@ -647,4 +661,5 @@ ALL_AGENTS: list[Agent] = [
     ViewerPsychologyExpert(),
     RetentionExpert(),
     BrutalRejectionAgent(),
+    SemanticContentExpert(),
 ]

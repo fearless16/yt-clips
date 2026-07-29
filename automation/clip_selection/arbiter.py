@@ -1,13 +1,15 @@
 """Final Arbiter — combines agent scores and optionally runs LLM refinement.
 
 Two-tier approach:
-1. Weighted score from all 7 agents (fast, always runs)
+1. Weighted score from all agents (fast, always runs)
 2. LLM arbiter pass for top candidates (optional, refines rankings)
 
-Weights can be overridden at call time (e.g. from weight_learner.py).
+Weights are auto-built from agent class attributes — single source of truth.
+Override at call time via ``weights=`` parameter (e.g. from weight_learner.py).
 """
 
 import json
+import math
 import re
 from typing import Any
 
@@ -15,20 +17,24 @@ from utils.config import load_config
 from utils.logger import get_logger
 from utils.ai_client import AIClient
 
+from automation.clip_selection.agents import ALL_AGENTS
+
 cfg = load_config()
 log = get_logger("arbiter")
 
 
-_DEFAULT_WEIGHTS: dict[str, float] = {
-    "hook_expert": 0.35,
-    "emotion_expert": 0.20,
-    "viral_potential": 0.15,
-    "cricket_context": 0.10,
-    "viewer_psychology": 0.10,
-    "retention_expert": 0.05,
-    "technical_quality": 0.05,
-}
+def _build_default_weights() -> dict[str, float]:
+    total = sum(a.weight for a in ALL_AGENTS if a.name != "brutal_rejection")
+    if total <= 0:
+        return {}
+    return {
+        a.name: round(a.weight / total, 4)
+        for a in ALL_AGENTS
+        if a.name != "brutal_rejection" and a.weight > 0
+    }
 
+
+_DEFAULT_WEIGHTS: dict[str, float] = _build_default_weights()
 AGENT_WEIGHTS = dict(_DEFAULT_WEIGHTS)
 
 # AI client for LLM arbiter pass
@@ -195,19 +201,26 @@ def llm_arbiter_refine(
         # Apply LLM selection
         refined = []
         for sel in selected:
-            idx = sel.get("candidate_id", 0) - 1
-            if 0 <= idx < len(candidates):
-                c = dict(candidates[idx])
-                c["ai_score"] = sel.get("score", c.get("final_score", 0))
-                c["ai_reason"] = sel.get("reason", "")
-                refined.append(c)
+            candidate_id = sel.get("candidate_id", 1)
+            idx = candidate_id - 1
+            if not (0 <= idx < len(candidates)):
+                log.warning("LLM arbiter: invalid candidate_id %d (expected 1-%d)",
+                            candidate_id, len(candidates))
+                continue
+            c = dict(candidates[idx])
+            c["ai_score"] = sel.get("score", c.get("final_score", 0))
+            c["ai_reason"] = sel.get("reason", "")
+            refined.append(c)
 
         # Fill remaining slots if LLM didn't select enough
         if len(refined) < max_selected:
             selected_set = {s.get("candidate_id", 0) for s in selected}
-            for i, c in enumerate(candidates):
-                if (i + 1) not in selected_set and len(refined) < max_selected:
-                    refined.append(c)
+            remaining = [
+                c for i, c in enumerate(candidates)
+                if (i + 1) not in selected_set
+            ]
+            remaining.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+            refined.extend(remaining[:max_selected - len(refined)])
 
         refined.sort(key=lambda x: x.get("ai_score", x.get("final_score", 0)), reverse=True)
         return refined[:max_selected]

@@ -1003,7 +1003,7 @@ def _validate_av_sync(video_path: str, clip_id: str, tolerance: float = 0.5) -> 
             "-of", "default=noprint_wrappers=1:nokey=1",
             video_path,
         ]
-        v_result = subprocess.run(cmd, capture_output=True, text=True)
+        v_result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         v_dur = float(v_result.stdout.strip()) if v_result.stdout.strip() else 0.0
 
         cmd = [
@@ -1013,7 +1013,7 @@ def _validate_av_sync(video_path: str, clip_id: str, tolerance: float = 0.5) -> 
             "-of", "default=noprint_wrappers=1:nokey=1",
             video_path,
         ]
-        a_result = subprocess.run(cmd, capture_output=True, text=True)
+        a_result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         a_dur = float(a_result.stdout.strip()) if a_result.stdout.strip() else 0.0
 
         if v_dur > 0 and a_dur > 0:

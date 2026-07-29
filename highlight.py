@@ -30,7 +30,7 @@ def _extract_audio_rms(video_path: str, chunk_seconds: float = 1.0) -> List[Tupl
         "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", pcm_path,
     ]
     log.info("Extracting audio for RMS analysis ...")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode != 0:
         log.error("Audio extraction failed:\n%s", result.stderr[-1000:])
         return []
@@ -67,7 +67,7 @@ def _extract_audio_rms(video_path: str, chunk_seconds: float = 1.0) -> List[Tupl
 def _get_video_duration(video_path: str) -> float:
     cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
            "-of", "default=noprint_wrappers=1:nokey=1", video_path]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     try:
         return float(result.stdout.strip())
     except ValueError:

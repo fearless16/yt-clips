@@ -16,6 +16,9 @@ SCRFD_MODEL_PATH = Path(__file__).resolve().parent.parent / "scrfd_10g_bnkps.onn
 _LOCK = threading.Lock()
 _SESSION: Optional[object] = None
 
+_INPUT_SIZE = 640
+_CANVAS: Optional[np.ndarray] = None
+
 try:
     import onnxruntime as ort
     _HAS_DML = "DmlExecutionProvider" in ort.get_available_providers()
@@ -68,43 +71,51 @@ def get_session() -> object:
 
 def _decode_scrfd(outputs, input_size: int, scale: float, score_threshold: float) -> List[Tuple[int, int, int, int]]:
     strides = [8, 16, 32]
-    dets = []
+    dets_list = []
     for idx, stride in enumerate(strides):
-        scores = outputs[idx][0]
-        bboxes = outputs[idx + 3][0]
+        scores = outputs[idx][0]          # (n*2, 1)
+        bboxes = outputs[idx + 3][0]      # (n*2, 4)
         fm_h = input_size // stride
         fm_w = input_size // stride
-        for i in range(fm_h * fm_w):
-            for a in range(2):
-                aidx = i * 2 + a
-                score = float(scores[aidx][0])
-                if score < score_threshold:
-                    continue
-                col = i % fm_w
-                row = i // fm_w
-                cx = col * stride + stride // 2
-                cy = row * stride + stride // 2
-                x1 = cx - float(bboxes[aidx][0])
-                y1 = cy - float(bboxes[aidx][1])
-                x2 = cx + float(bboxes[aidx][2])
-                y2 = cy + float(bboxes[aidx][3])
-                dets.append([x1, y1, x2, y2, score])
-    if not dets:
+        n = fm_h * fm_w
+        scores_flat = scores[:, 0]        # (n*2,)
+        mask = scores_flat >= score_threshold
+        if not np.any(mask):
+            continue
+        aidx = np.arange(n * 2, dtype=np.intp)[mask]
+        selected_scores = scores_flat[mask]
+        selected_bbox = bboxes[mask]
+        i_vals = aidx // 2
+        col = (i_vals % fm_w).astype(np.float32)
+        row = (i_vals // fm_w).astype(np.float32)
+        cx = col * stride + stride // 2
+        cy = row * stride + stride // 2
+        candidates = np.column_stack([
+            cx - selected_bbox[:, 0],
+            cy - selected_bbox[:, 1],
+            cx + selected_bbox[:, 2],
+            cy + selected_bbox[:, 3],
+            selected_scores,
+        ])
+        dets_list.append(candidates)
+    if not dets_list:
         return []
-    dets = np.array(dets)
+    dets = np.concatenate(dets_list)
     keep = _nms(dets, 0.4)
     dets = dets[keep]
-    results = []
+    if len(dets) == 0:
+        return []
     ow = int(input_size / scale)
     oh = int(input_size / scale)
-    for d in dets:
-        x1 = max(0, int(d[0] / scale))
-        y1 = max(0, int(d[1] / scale))
-        x2 = min(ow, int(d[2] / scale))
-        y2 = min(oh, int(d[3] / scale))
-        if x2 > x1 and y2 > y1:
-            results.append((x1, y1, x2 - x1, y2 - y1))
-    return results
+    x1 = np.maximum(0, (dets[:, 0] / scale).astype(np.int32))
+    y1 = np.maximum(0, (dets[:, 1] / scale).astype(np.int32))
+    x2 = np.minimum(ow, (dets[:, 2] / scale).astype(np.int32))
+    y2 = np.minimum(oh, (dets[:, 3] / scale).astype(np.int32))
+    valid = (x2 > x1) & (y2 > y1)
+    return [
+        (int(x1[i]), int(y1[i]), int(x2[i] - x1[i]), int(y2[i] - y1[i]))
+        for i in np.where(valid)[0]
+    ]
 
 
 def _nms(dets: np.ndarray, thresh: float) -> List[int]:
@@ -129,15 +140,22 @@ def _nms(dets: np.ndarray, thresh: float) -> List[int]:
 
 
 def _detect_onnx(frame: np.ndarray, score_threshold: float) -> List[Tuple[int, int, int, int]]:
+    global _CANVAS
     session = get_session()
+    input_size = _INPUT_SIZE
     h, w = frame.shape[:2]
-    input_size = 640
     scale = min(input_size / w, input_size / h)
     nw, nh = int(w * scale), int(h * scale)
-    canvas = np.zeros((input_size, input_size, 3), dtype=np.uint8)
-    canvas[:nh, :nw] = cv2.resize(frame, (nw, nh))
-    blob = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-    blob = np.transpose(blob, (2, 0, 1))[np.newaxis, ...]
+
+    if _CANVAS is None or _CANVAS.shape[0] != input_size:
+        _CANVAS = np.zeros((input_size, input_size, 3), dtype=np.uint8)
+    elif _CANVAS.shape[1] != input_size:
+        _CANVAS = np.zeros((input_size, input_size, 3), dtype=np.uint8)
+
+    _CANVAS[:nh, :nw] = cv2.resize(frame, (nw, nh))
+    rgb = cv2.cvtColor(_CANVAS, cv2.COLOR_BGR2RGB)
+    blob = np.transpose(rgb.astype(np.float32) / 255.0, (2, 0, 1))[np.newaxis, :]
+
     input_name = session.get_inputs()[0].name
     outputs = session.run(None, {input_name: blob})
     faces = _decode_scrfd(outputs, input_size, scale, score_threshold)

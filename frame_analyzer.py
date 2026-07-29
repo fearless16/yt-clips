@@ -62,10 +62,8 @@ _PREV_CROP_X = None  # Only used by tests checking reset; actual state is in _cr
 
 def reset_crop_state() -> None:
     """Call once at the start of each new clip to prevent crop history bleeding across clips."""
-    global _PREV_CROP_X
     _crop_local.prev_crop_x = None
     _crop_local.last_face_bbox = None
-    _PREV_CROP_X = None  # Keep module-level in sync for backward compat
 
 def _smooth_int(prev: Optional[int], current: int, alpha: float = 0.25) -> int:
     if prev is None:
