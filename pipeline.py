@@ -384,11 +384,19 @@ def run(
                  time.perf_counter() - t0, uploaded_count, len(exported))
 
     # ── Phase 7: Analytics & SEO Learning ──────────────────────────────────────
-    if auto_upload:
+    if exported:
         _banner("PHASE 7 — ANALYTICS & SEO LEARNING")
         try:
             from automation.seo.analytics import generate_daily_insights
-            generate_daily_insights()
+            summary = generate_daily_insights()
+            if summary:
+                print(f"  Total clips tracked : {summary.get('total_clips', 0)}")
+                print(f"  Published to YT     : {summary.get('published', 0)}")
+                print(f"  Total views         : {summary.get('total_views', 0)}")
+                print(f"  Avg clip score      : {summary.get('avg_score', 0.0)}")
+                print(f"  Learner memories    : {summary.get('memories', 0)}")
+                print(f"  Processed events    : {summary.get('processed_events', 0)}")
+                print(f"  Recent exports      : {summary.get('recent_exports', 0)}")
         except FileNotFoundError as e:
             if "yt_channel_token.json" in str(e) or "client_secrets" in str(e):
                 log.warning("Analytics skipped — need yt_channel_token.json with youtube.readonly scope")
