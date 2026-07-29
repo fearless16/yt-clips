@@ -519,7 +519,7 @@ class AIClient:
 
     def generate_openrouter(self, prompt: str, system_instruction: Optional[str] = None) -> str:
         """Generate via OpenRouter (free tier models). Always available as last-resort fallback."""
-        api_key = "OPENROUTER_API_KEY"
+        api_key = os.environ.get("OPENROUTER_API_KEY", "")
         client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
         messages = []
         if system_instruction:
