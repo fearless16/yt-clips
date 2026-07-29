@@ -113,16 +113,15 @@ record is emitted on success **and** failure, all correlated by a per-run
 | 8 | `analytics` | `automation/seo/analytics.py` | performance metrics → SEO learning feedback |
 
 Two analysis paths exist for crop planning during export:
-- **Cheap** (`frame_analyzer.py`): **MediaPipe BlazeFace** via `utils/face_detect.py`
-  (`face_detector.tflite`) + dlib `face_recognition` identity match + EMA crop (CPU).
+- **Cheap** (`frame_analyzer.py`): **SCRFD/YuNet** via `utils/face_detect.py`
+  (`face_detector.onnx`) + `face_recognition` identity match + EMA crop (CPU).
 - **Premium** (`premium_analyzer.py` + `premium_render.py`): **YOLOv8-face**
   (GPU, explicit device + batched inference) + ByteTrack + Kalman + bezier crop,
   with RIFE + GFPGAN (GPU).
 
-> **Note:** there is **no Haar Cascade** anywhere in the pipeline. Earlier docs
-> and comments referenced "Haar"; the actual cheap detector has been MediaPipe
-> BlazeFace. A regression test (`tests/test_face_detection_gpu.py`) guards
-> against reintroducing Haar.
+> **Note:** there is **no Haar Cascade** anywhere in the pipeline. The cheap
+> detector is SCRFD/YuNet (ONNX, CPU). A regression test
+> (`tests/test_face_detection_gpu.py`) guards against reintroducing Haar.
 
 ### Module Ownership (legacy pipeline)
 

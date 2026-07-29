@@ -22,9 +22,9 @@ def _has_face_recognition() -> bool:
         try:
             import face_recognition  # noqa: F401
             _FACE_RECOGNITION_AVAILABLE = True
-        except ImportError:
+        except Exception:
             _FACE_RECOGNITION_AVAILABLE = False
-            log.warning("face_recognition not installed — face matching disabled")
+            log.warning("face_recognition unavailable — identity match disabled (SCRFD/YuNet detection still works)")
     return _FACE_RECOGNITION_AVAILABLE
 
 # Per-clip crop smoothing state — thread-local to prevent bleed across parallel exports
@@ -174,8 +174,9 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
 
     for (x, y, w, h) in faces:
         is_host = False
-        if host_encs:
+        if host_encs and _has_face_recognition():
             try:
+                import face_recognition
                 face_crop = frame_bgr[y:y+h, x:x+w]
                 if face_crop.size > 0:
                     rgb_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
@@ -574,6 +575,62 @@ def detect_dead_air(video_path: str, start: float, end: float) -> Dict:
     silence_count = res.stderr.decode(errors="replace").count("silence_start")
     return {"has_dead_air": silence_count > 0}
 
+def select_face_crop(
+    face_candidates: List[Dict],
+    has_facecam: bool,
+    facecam: Optional[Dict] = None,
+    clip_id: str = "clip",
+) -> Tuple[Optional[Dict], bool]:
+    """Pick crop face from sampled candidates.
+
+    Returns (face_crop, no_face).
+    - no_face=True only when candidates is empty (no crop possible).
+    - Facecam miss with other faces still returns a crop and no_face=False.
+    Never raises on empty candidates.
+    Priority: dynamic match → best in facecam bounds → largest area*conf → none.
+    """
+    facecam = facecam or {}
+
+    def _best(cands: List[Dict]) -> Optional[Dict]:
+        if not cands:
+            return None
+        return max(
+            cands,
+            key=lambda f: (f.get("face_w", 0) * f.get("face_h", 0)) * f.get("confidence", 0.0),
+        )
+
+    if not face_candidates:
+        return None, True
+
+    dynamic_matches = [f for f in face_candidates if f.get("is_dynamic_match")]
+    if dynamic_matches:
+        log.info("[%s] Found dynamic face match using reference photos", clip_id)
+        return max(dynamic_matches, key=lambda f: f.get("confidence", 0.0)), False
+
+    if has_facecam:
+        log.info("[%s] No dynamic match; validating config facecam bounds", clip_id)
+        fc_x, fc_y = facecam.get("x", 0), facecam.get("y", 0)
+        fc_w, fc_h = facecam.get("width", 320), facecam.get("height", 180)
+        in_bounds: List[Dict] = []
+        for f in face_candidates:
+            fx = f.get("face_x", f.get("x", 0))
+            fy = f.get("face_y", f.get("y", 0))
+            fw = f.get("face_w", f.get("width", 0))
+            fh = f.get("face_h", f.get("height", 0))
+            cx, cy = fx + fw / 2.0, fy + fh / 2.0
+            if (fc_x - 50) <= cx <= (fc_x + fc_w + 50) and (fc_y - 50) <= cy <= (fc_y + fc_h + 50):
+                in_bounds.append(f)
+        if in_bounds:
+            return _best(in_bounds), False
+        log.warning(
+            "[%s] No face in configured facecam bounds — falling back to best detected face",
+            clip_id,
+        )
+        return _best(face_candidates), False
+
+    return _best(face_candidates), False
+
+
 def analyze_clip(
     video_path: str,
     start: float,
@@ -607,40 +664,14 @@ def analyze_clip(
         if face:
             face_candidates.append(face)
 
-    face_crop = None
-    host_absent = False
-
-    # 1. Prioritize any candidate that is a dynamic match (matched reference photo)
-    dynamic_matches = [f for f in face_candidates if f.get("is_dynamic_match")]
-    if dynamic_matches:
-        log.info("[%s] Found dynamic face match using reference photos", clip_id)
-        face_crop = max(dynamic_matches, key=lambda f: f.get("confidence", 0.0))
-    
-    # 2. If no dynamic match, but we have a facecam config, check for presence there
-    elif has_facecam:
-        fc = layout_cfg.get("facecam", {})
-        log.info("[%s] No dynamic match; validating config facecam bounds", clip_id)
-        fc_x, fc_y = fc.get("x", 0), fc.get("y", 0)
-        fc_w, fc_h = fc.get("width", 320), fc.get("height", 180)
-        
-        for f in face_candidates:
-            fx, fy = f.get("face_x", f.get("x", 0)), f.get("face_y", f.get("y", 0))
-            if (fc_x - 50) <= fx <= (fc_x + fc_w + 50) and (fc_y - 50) <= fy <= (fc_y + fc_h + 50):
-                # Valid face found in config area
-                face_crop = f
-                break
-        
-        if not face_crop:
-            log.warning("[%s] Host absent from configured facecam bounds — falling back to best detected face", clip_id)
-            # Fall back to best face even if outside facecam region
-            face_crop = max(face_candidates, key=lambda f: (f.get("face_w", 0) * f.get("face_h", 0)) * f.get("confidence", 0.0))
-            if not face_crop:
-                host_absent = True
-    
-    # 3. No facecam config — just pick the best detected face overall
-    elif face_candidates:
-        face_crop = max(face_candidates, key=lambda f: (f.get("face_w", 0) * f.get("face_h", 0)) * f.get("confidence", 0.0))
-
+    face_crop, no_face = select_face_crop(
+        face_candidates,
+        has_facecam=has_facecam,
+        facecam=layout_cfg.get("facecam", {}),
+        clip_id=clip_id,
+    )
+    if no_face:
+        log.info("[%s] No faces detected in sample frames", clip_id)
 
     is_fast_paced = False
     silence_ratio = 0.0
@@ -761,6 +792,7 @@ def analyze_clip(
         "is_screen_share": is_screen_share,
         "should_drop": should_drop,
         "active_crop": face_crop,
+        "no_face": no_face,
         "speed_factor": speed_factor,
         "apply_lighting_fix": lighting["needs_correction"],
         "lighting_filter": lighting.get("lighting_filter", ""),

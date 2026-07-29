@@ -67,7 +67,7 @@ Convert 16:9 live streams → 9:16 shorts automatically.
 
 ### Modes
 
-**Cheap** (default): Haar Cascade + heuristics, works anywhere  
+**Cheap** (default): MediaPipe BlazeFace + heuristics, works anywhere  
 **Premium** (`premium.enabled: true`): YOLOv8-face + ByteTrack + Kalman + GFPGAN, GPU required  
 **Selective Enhancement** (`enhancement.selective: true`): 3-pass state→enhance→temporal
 
@@ -77,7 +77,7 @@ Convert 16:9 live streams → 9:16 shorts automatically.
 URL → Download (yt-dlp + aria2c)
     → Transcribe (faster-whisper, Hindi/English)
     → Highlight Detection (audio RMS + transcript scoring + Gemini AI)
-    → Frame Analysis (cheap=Haar / premium=YOLO+ByteTrack)
+    → Frame Analysis (cheap=MediaPipe BlazeFace / premium=YOLO+ByteTrack)
     → Export (crop + enhance + interpolate + encode)
     → Selective Enhancement (3-pass) [optional]
     → SEO + Thumbnails (Gemini + OpenRouter + Groq + NVIDIA)

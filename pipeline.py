@@ -62,6 +62,8 @@ def run(
     skip_export: bool = False,
     skip_sync: bool = False,
     skip_seo: bool = False,
+    skip_enhancement: bool = False,
+    skip_analysis: bool = False,
     auto_sync: bool = True,
     auto_upload: bool = True,
     auto_schedule: bool = True,
@@ -152,33 +154,36 @@ def run(
 
     # ── Phase 2.5: Video Analysis (face/lighting map) ─────────────────────────
     _banner("PHASE 2.5 — VIDEO ANALYSIS")
-    analysis_path = str(Path(cfg["paths"]["temp"]) / f"{stem}_analysis.json")
     analysis = None
-    if Path(analysis_path).exists():
-        try:
-            with open(analysis_path) as f:
-                analysis = json.load(f)
-            log.info("Using cached analysis (%d frames, face rate %.0f%%)",
-                     len(analysis.get("frames", [])),
-                     analysis.get("summary", {}).get("face_detection_rate", 0))
-        except Exception:
-            analysis = None
-    if analysis is None:
-        try:
-            from video_analyzer import analyze_video
-            analysis = analyze_video(
-                video_path=video_path,
-                photos_dir="photos/",
-                reference_image="expectation.png",
-                sample_interval=2.0,
-                output_path=analysis_path,
-            )
-            log.info("Phase 2.5 complete — face rate: %.0f%%, avg quality: %.3f",
-                     analysis["summary"]["face_detection_rate"],
-                     analysis["summary"]["avg_quality"])
-        except Exception as e:
-            log.warning("Video analysis failed (non-fatal): %s", e)
-            analysis = None
+    if not skip_analysis:
+        analysis_path = str(Path(cfg["paths"]["temp"]) / f"{stem}_analysis.json")
+        if Path(analysis_path).exists():
+            try:
+                with open(analysis_path) as f:
+                    analysis = json.load(f)
+                log.info("Using cached analysis (%d frames, face rate %.0f%%)",
+                         len(analysis.get("frames", [])),
+                         analysis.get("summary", {}).get("face_detection_rate", 0))
+            except Exception:
+                analysis = None
+        if analysis is None:
+            try:
+                from video_analyzer import analyze_video
+                analysis = analyze_video(
+                    video_path=video_path,
+                    photos_dir="photos/",
+                    reference_image="expectation.png",
+                    sample_interval=2.0,
+                    output_path=analysis_path,
+                )
+                log.info("Phase 2.5 complete — face rate: %.0f%%, avg quality: %.3f",
+                         analysis["summary"]["face_detection_rate"],
+                         analysis["summary"]["avg_quality"])
+            except Exception as e:
+                log.warning("Video analysis failed (non-fatal): %s", e)
+                analysis = None
+    else:
+        log.info("Skipping video analysis (--skip-analysis)")
 
     # ── Phase 3: Highlight Detection ───────────────────────────────────────────
     _banner("PHASE 3 — HIGHLIGHT DETECTION")
@@ -233,7 +238,7 @@ def run(
         if cfg.get("enhancement", {}).get("ref_grade", False):
             enhancement_mode = "ref_grade"
 
-    if exported and enhancement_mode:
+    if exported and enhancement_mode and not skip_enhancement:
         _banner(f"PHASE 4.25 — ENHANCEMENT ({enhancement_mode})")
         t0 = time.perf_counter()
         try:
@@ -513,6 +518,8 @@ Examples:
     parser.add_argument("-skip-export", "--skip-export",     action="store_true", help="Skip Phase 4 (use existing clips in shorts/)")
     parser.add_argument("-skip-sync", "--skip-sync",       action="store_true", help="Skip Phase 5 (Drive Sync)")
     parser.add_argument("-skip-seo", "--skip-seo",         action="store_true", help="Skip SEO generation in Phase 4.5")
+    parser.add_argument("-skip-enhancement", "--skip-enhancement", action="store_true", help="Skip Phase 4.25 Enhancement (ref_grade/face_mapper)")
+    parser.add_argument("-skip-analysis", "--skip-analysis", action="store_true", help="Skip Phase 2.5 (Video Analysis)")
     parser.add_argument("--no-sync",    action="store_true", help="Disable auto-sync to Drive (default: enabled)")
     parser.add_argument("--no-upload",  action="store_true", help="Disable auto-upload to YouTube (default: enabled)")
     parser.add_argument("--no-schedule", action="store_true", help="Disable auto-schedule (default: enabled)")
@@ -531,6 +538,8 @@ Examples:
         skip_export=args.skip_export,
         skip_sync=args.skip_sync,
         skip_seo=args.skip_seo,
+        skip_enhancement=args.skip_enhancement,
+        skip_analysis=args.skip_analysis,
         auto_sync=not args.no_sync,
         auto_upload=not args.no_upload,
         auto_schedule=not args.no_schedule,

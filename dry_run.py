@@ -627,6 +627,7 @@ def dry_run(url: str,
             skip_download=False, skip_transcribe=False,
             skip_highlight=False, skip_export=False,
             skip_sync=False, skip_seo=False,
+            skip_enhancement=False,
             auto_sync=False, auto_upload=False,
             auto_schedule=False, sample_minutes=None,
             sync_from_drive=False, mode=None) -> dict:
@@ -698,6 +699,7 @@ def dry_run(url: str,
                 skip_export=skip_export,
                 skip_sync=skip_sync,
                 skip_seo=skip_seo,
+                skip_enhancement=skip_enhancement,
                 auto_sync=auto_sync,
                 auto_upload=auto_upload,
                 auto_schedule=auto_schedule,
@@ -915,6 +917,7 @@ def main():
     parser.add_argument("--skip-export", action="store_true")
     parser.add_argument("--skip-sync", action="store_true")
     parser.add_argument("--skip-seo", action="store_true")
+    parser.add_argument("--skip-enhancement", action="store_true")
     parser.add_argument("--sync", action="store_true", dest="auto_sync")
     parser.add_argument("--upload", action="store_true", dest="auto_upload")
     parser.add_argument("--schedule", action="store_true", dest="auto_schedule")
@@ -950,6 +953,7 @@ def main():
         skip_export=args.skip_export,
         skip_sync=args.skip_sync,
         skip_seo=args.skip_seo,
+        skip_enhancement=args.skip_enhancement,
         auto_sync=args.auto_sync,
         auto_upload=args.auto_upload,
         auto_schedule=args.auto_schedule,

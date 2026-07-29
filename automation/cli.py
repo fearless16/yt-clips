@@ -108,6 +108,10 @@ def setup_argparse():
         help="Enhancement mode: ref_grade or face_mapper",
     )
     parser.add_argument(
+        "--skip-enhancement", action="store_true", default=False,
+        help="Skip enhancement phase (stage 6b)",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", default=False,
         help="Print what would be done without executing",
     )
@@ -190,6 +194,7 @@ def main(args=None):
         skip_highlight=parsed.skip_highlight,
         skip_export=parsed.skip_export,
         skip_seo=parsed.skip_seo,
+        skip_enhancement=parsed.skip_enhancement,
         auto_sync=parsed.sync,
         auto_upload=parsed.upload,
         auto_schedule=parsed.schedule,

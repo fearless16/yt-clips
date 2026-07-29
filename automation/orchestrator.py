@@ -104,6 +104,7 @@ def run(
     skip_export: bool = False,
     skip_sync: bool = False,
     skip_seo: bool = False,
+    skip_enhancement: bool = False,
     auto_sync: bool = False,
     auto_upload: bool = False,
     auto_schedule: bool = False,
@@ -409,7 +410,7 @@ def run(
                 log.warning("[stage 6] skipped — no .mp4 files found in %s", shorts_dir)
 
         # ── Stage 6b: Enhancement (optional) ────────────────────
-        if result.exported and mode:
+        if result.exported and mode and not skip_enhancement:
             try:
                 with run_phase(log, f"stage 6b Enhancement ({mode})",
                                "enhancement", run_id=rid) as ph:
