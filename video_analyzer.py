@@ -1,15 +1,3 @@
-"""
-video_analyzer.py — Pre-analysis: face/lighting map + reference photo matching.
-
-Samples the full VOD, detects faces, analyzes lighting, matches against
-reference photos, and produces a per-second quality map that feeds into
-highlight detection for smarter clip selection.
-
-Usage:
-    python video_analyzer.py <video_path> --photos photos/ --reference expectation.png
-    python video_analyzer.py input/video.mp4  # auto-detect photos/
-"""
-
 import argparse
 import json
 import shutil
@@ -25,54 +13,29 @@ import numpy as np
 
 from utils.config import load_config
 from utils.logger import get_logger
+from utils.face_detect import detect_faces
 
 cfg = load_config()
 log = get_logger("video_analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
-# ─── Face detection (prefer face_recognition, fallback to OpenCV) ─────────
-
-HAS_FACE_REC = False
-try:
-    import face_recognition
-    HAS_FACE_REC = True
-except ImportError:
-    pass
 
 def _detect_faces(frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
-    """Detect faces, return list of (top, right, bottom, left)."""
-    if HAS_FACE_REC:
-        try:
-            locations = face_recognition.face_locations(frame, model="hog")
-            if locations:
-                return locations
-        except Exception:
-            pass
-    from utils.face_detect import detect_faces
     bboxes = detect_faces(frame, score_threshold=0.5)
     return [(y, x + w, y + h, x) for (x, y, w, h) in bboxes]
 
 
-# ─── Lighting analysis ────────────────────────────────────────────────────
-
 def _analyze_lighting(frame: np.ndarray) -> Dict[str, float]:
-    """Analyze lighting properties of a frame."""
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
 
-    # Overall brightness (mean luminance)
     brightness = float(np.mean(gray))
-
-    # Contrast (std of luminance)
     contrast = float(np.std(gray))
 
-    # Histogram spread (how evenly distributed tones are)
     hist = cv2.calcHist([gray], [0], None, [256], [0, 256]).flatten()
     hist = hist / hist.sum()
-    # Entropy — higher = more tonal variety
     nonzero = hist[hist > 0]
     entropy = float(-np.sum(nonzero * np.log2(nonzero)))
 
-    # Face region brightness (if face detected)
     faces = _detect_faces(frame)
     face_brightness = 0.0
     face_contrast = 0.0
@@ -88,9 +51,8 @@ def _analyze_lighting(frame: np.ndarray) -> Dict[str, float]:
             face_contrast = float(np.std(face_gray))
             face_area_ratio = (face_gray.shape[0] * face_gray.shape[1]) / (h * w)
 
-    # Exposure quality — penalize too dark or too blown-out
-    overexposed = float(np.mean(gray > 240))  # fraction of near-white pixels
-    underexposed = float(np.mean(gray < 15))   # fraction of near-black pixels
+    overexposed = float(np.mean(gray > 240))
+    underexposed = float(np.mean(gray < 15))
 
     return {
         "brightness": round(brightness, 2),
@@ -105,15 +67,32 @@ def _analyze_lighting(frame: np.ndarray) -> Dict[str, float]:
     }
 
 
-# ─── Reference photo matching ─────────────────────────────────────────────
+def _compute_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
+    emb1 = emb1 / (np.linalg.norm(emb1) + 1e-6)
+    emb2 = emb2 / (np.linalg.norm(emb2) + 1e-6)
+    return float(np.dot(emb1, emb2))
+
+
+def _extract_face_embedding(frame_bgr: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
+    x, y, w, h = bbox
+    face = frame_bgr[y:y + h, x:x + w]
+    if face.size == 0:
+        return None
+    face = cv2.resize(face, (112, 112))
+    lab = cv2.cvtColor(face, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+    hist_l = cv2.calcHist([l], [0], None, [32], [0, 256]).flatten()
+    hist_a = cv2.calcHist([a], [0], None, [32], [0, 256]).flatten()
+    hist_b = cv2.calcHist([b], [0], None, [32], [0, 256]).flatten()
+    hist = np.concatenate([hist_l, hist_a, hist_b])
+    hist = hist / max(hist.sum(), 1)
+    return hist
+
 
 def _load_reference_embeddings(photos_dir: Path) -> List[np.ndarray]:
-    """Load face encodings from reference photos."""
-    if not HAS_FACE_REC:
-        return []
     if not photos_dir.exists():
         return []
-
     embeddings = []
     for ext in ("jpg", "jpeg", "png", "webp"):
         for img_path in photos_dir.glob(f"*.{ext}"):
@@ -121,9 +100,12 @@ def _load_reference_embeddings(photos_dir: Path) -> List[np.ndarray]:
                 img = cv2.imread(str(img_path))
                 if img is None:
                     continue
-                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                encs = face_recognition.face_encodings(rgb)
-                embeddings.extend(encs)
+                faces = detect_faces(img, score_threshold=0.5)
+                if faces:
+                    best = max(faces, key=lambda r: r[2] * r[3])
+                    emb = _extract_face_embedding(img, best)
+                    if emb is not None:
+                        embeddings.append(emb)
             except Exception as e:
                 log.debug("Failed to encode %s: %s", img_path.name, e)
     log.info("Loaded %d reference face embeddings from %s", len(embeddings), photos_dir)
@@ -135,46 +117,36 @@ def _match_face_to_references(
     face_location: Tuple[int, int, int, int],
     ref_embeddings: List[np.ndarray],
 ) -> float:
-    """Return best similarity score between detected face and reference photos."""
-    if not ref_embeddings or not HAS_FACE_REC:
+    if not ref_embeddings:
         return 0.0
     top, right, bottom, left = face_location
-    # Add generous padding for better encoding
     h, w = frame_rgb.shape[:2]
     pad = int(max(bottom - top, right - left) * 0.4)
     y1, y2 = max(0, top - pad), min(h, bottom + pad)
     x1, x2 = max(0, left - pad), min(w, right + pad)
-
     face_crop = frame_rgb[y1:y2, x1:x2]
     if face_crop.size == 0:
         return 0.0
-
-    encs = face_recognition.face_encodings(face_crop, num_jitters=1)
-    if not encs:
+    emb = _extract_face_embedding(face_crop, (x1, y1, x2 - x1, y2 - y1))
+    if emb is None:
         return 0.0
-
-    face_enc = encs[0]
     best = 0.0
-    for ref_enc in ref_embeddings:
-        dist = face_recognition.face_distance([ref_enc], face_enc)[0]
-        sim = 1.0 - dist  # cosine-like similarity
+    for ref_emb in ref_embeddings:
+        sim = _compute_similarity(emb, ref_emb)
         if sim > best:
             best = sim
     return round(best, 4)
 
 
-# ─── Frame sampler ─────────────────────────────────────────────────────────
+def _nv12_to_bgr(nv12: np.ndarray, width: int, height: int) -> np.ndarray:
+    nv12_2d = nv12.reshape((height * 3 // 2, width))
+    return cv2.cvtColor(nv12_2d, cv2.COLOR_YUV2BGR_NV12)
+
 
 def _sample_frames(
     video_path: str,
     interval_sec: float = 2.0,
 ):
-    """Extract frames at regular intervals using ffmpeg NV12 pipe (+ OpenCV BGR conversion).
-    
-    ~50x realtime for 1080p60 H.264 — software decode + NV12 pipe is 4x faster
-    than GPU copy-back + BGR24 pipe.
-    Yields (timestamp, frame_bgr) one at a time — no memory accumulation.
-    """
     probe = _probe_video(video_path)
     fps = probe.get("fps", 30)
     width = probe.get("width", 0)
@@ -182,30 +154,13 @@ def _sample_frames(
     duration = probe.get("duration", 0)
     step = max(1, int(fps * interval_sec))
 
-    log.info("Sampling frames every %.1fs from %.0fs video (%.0f fps, %d frames, %dx%d)",
-             interval_sec, duration, fps, int(duration * fps), width, height)
+    log.info("Sampling frames every %.1fs from %.0fs video (%dx%d, %.0f fps)",
+             interval_sec, duration, width, height, fps)
 
-    if width and height and shutil.which("ffmpeg"):
-        yield from _sample_frames_ffmpeg(video_path, fps, width, height, step, interval_sec, duration)
-    else:
-        yield from _sample_frames_cpu(video_path, fps, step, interval_sec)
+    if not width or not height:
+        log.error("Video probe failed, cannot sample frames")
+        return
 
-
-def _nv12_to_bgr(nv12: np.ndarray, width: int, height: int) -> np.ndarray:
-    """Convert NV12 raw frame to BGR using OpenCV SIMD."""
-    nv12_2d = nv12.reshape((height * 3 // 2, width))
-    return cv2.cvtColor(nv12_2d, cv2.COLOR_YUV2BGR_NV12)
-
-
-def _sample_frames_ffmpeg(video_path, fps, width, height, step, interval_sec, duration=0):
-    """Frame sampling via ffmpeg software decode + NV12 pipe (4x faster than GPU + BGR24 pipe).
-    
-    Benchmark evidence (10s 1080p60 H.264):
-      dxva2 + BGR24 pipe: 12.2x speed (0.66s) — CURRENT
-      SOFTWARE + NV12 pipe: 50.8x speed (0.16s) — THIS
-    NV12 halves pipe data (1.5 vs 3 bytes/pixel) + software decode avoids PCIe transfer overhead.
-    """
-    frame_size_nv12 = width * height * 3 // 2
     cmd = [
         "ffmpeg", "-hide_banner",
         "-i", video_path,
@@ -215,6 +170,7 @@ def _sample_frames_ffmpeg(video_path, fps, width, height, step, interval_sec, du
         "-pix_fmt", "nv12",
         "pipe:1",
     ]
+    frame_size_nv12 = width * height * 3 // 2
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8
     )
@@ -223,10 +179,9 @@ def _sample_frames_ffmpeg(video_path, fps, width, height, step, interval_sec, du
     try:
         first_raw = proc.stdout.read(frame_size_nv12)
         if not first_raw or len(first_raw) < frame_size_nv12:
-            log.warning("ffmpeg NV12 pipe produced no frames — falling back to OpenCV")
+            log.error("ffmpeg NV12 pipe produced no frames — aborting")
             proc.kill()
             proc.wait()
-            yield from _sample_frames_cpu(video_path, fps, step, interval_sec)
             return
         first_frame = _nv12_to_bgr(np.frombuffer(first_raw, np.uint8), width, height)
         yield (0.0, first_frame)
@@ -249,36 +204,11 @@ def _sample_frames_ffmpeg(video_path, fps, width, height, step, interval_sec, du
     log.info("Sampled %d frames in %.1fs of video", idx, idx * interval_sec)
 
 
-def _sample_frames_cpu(video_path, fps, step, interval_sec):
-    """CPU fallback via OpenCV. Yields (ts, frame)."""
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        log.error("Cannot open video: %s", video_path)
-        return
-    idx = 0
-    count = 0
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            if idx % step == 0:
-                yield (idx / fps if fps > 0 else 0, frame)
-                count += 1
-            idx += 1
-    finally:
-        cap.release()
-    log.info("CPU: sampled %d frames", count)
-
-
-# ─── Quality scoring ───────────────────────────────────────────────────────
-
-# Ideal ranges for talking-head YouTube Shorts (learned from expectation.png)
 IDEAL = {
-    "brightness": (100, 180),      # Well-lit face, not washed out
-    "contrast": (40, 80),          # Enough contrast for sharpness
-    "face_area_ratio": (0.08, 0.5),# Face should fill reasonable portion
-    "face_brightness": (100, 200), # Face well-lit
+    "brightness": (100, 180),
+    "contrast": (40, 80),
+    "face_area_ratio": (0.08, 0.5),
+    "face_brightness": (100, 200),
 }
 
 
@@ -287,22 +217,15 @@ def _score_frame(
     ref_match: float,
     face_detected: bool,
 ) -> float:
-    """
-    Score a single frame 0.0 (bad) → 1.0 (perfect).
-    Weights: face match (30%), lighting (30%), face presence (20%), exposure (20%).
-    """
     score = 0.0
 
-    # 1. Face presence (20 pts) — reduced penalty for sports/low-face content
     if not face_detected:
-        score += 0.05  # Reduced penalty: allows sports clips without close-ups
+        score += 0.05
     else:
         score += 0.20
 
-    # 2. Reference face match (30 pts)
     score += ref_match * 0.30
 
-    # 3. Lighting quality (30 pts)
     brightness = lighting["brightness"]
     b_lo, b_hi = IDEAL["brightness"]
     if b_lo <= brightness <= b_hi:
@@ -321,7 +244,6 @@ def _score_frame(
         contrast_score = max(0, 1.0 - dist / 50.0)
     score += contrast_score * 0.15
 
-    # 4. Exposure quality (20 pts) — penalize clipping
     over = lighting["overexposed_pct"]
     under = lighting["underexposed_pct"]
     exposure_penalty = (over + under) / 100.0
@@ -330,8 +252,6 @@ def _score_frame(
     return round(min(1.0, max(0.0, score)), 4)
 
 
-# ─── Main analysis ─────────────────────────────────────────────────────────
-
 def analyze_video(
     video_path: str,
     photos_dir: str = "photos/",
@@ -339,12 +259,6 @@ def analyze_video(
     sample_interval: float = 2.0,
     output_path: Optional[str] = None,
 ) -> Dict:
-    """
-    Analyze full video: face detection, lighting map, reference matching.
-
-    Returns:
-        Dict with per_second scores, summary stats, and segment recommendations.
-    """
     t_start = time.perf_counter()
     video_path = str(Path(video_path).resolve())
     photos_path = Path(photos_dir)
@@ -357,32 +271,30 @@ def analyze_video(
     log.info("Photos: %s", photos_path)
     log.info("Reference: %s", ref_path)
 
-    # Get video duration
     probe = _probe_video(video_path)
     duration = probe.get("duration", 0)
 
-    # Load reference face embeddings
     ref_embeddings = _load_reference_embeddings(photos_path)
 
-    # Also try expectation.png as a reference
-    if ref_path.exists() and HAS_FACE_REC:
+    if ref_path.exists():
         try:
             img = cv2.imread(str(ref_path))
             if img is not None:
-                rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                encs = face_recognition.face_encodings(rgb)
-                ref_embeddings.extend(encs)
-                log.info("Added reference from %s", ref_path)
+                faces = detect_faces(img, score_threshold=0.5)
+                if faces:
+                    best = max(faces, key=lambda r: r[2] * r[3])
+                    emb = _extract_face_embedding(img, best)
+                    if emb is not None:
+                        ref_embeddings.append(emb)
+                        log.info("Added reference from %s", ref_path)
         except Exception:
             pass
 
-    # Sample frames (streaming, GPU-accelerated — no memory accumulation)
     per_frame = []
     for ts, frame in _sample_frames(video_path, interval_sec=sample_interval):
         lighting = _analyze_lighting(frame)
         face_detected = lighting["face_count"] > 0
 
-        # Match against reference photos
         ref_match = 0.0
         if face_detected and ref_embeddings:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -405,13 +317,9 @@ def analyze_video(
         return {"summary": {"frames_sampled": 0, "duration_sec": 0, "error": "no frames"},
                 "per_second": [], "best_segments": [], "per_frame": []}
 
-    # Aggregate to per-second scores
     per_second = _aggregate_to_seconds(per_frame)
-
-    # Find best segments
     segments = _find_best_segments(per_second, duration)
 
-    # Summary stats
     all_scores = [f["quality"] for f in per_frame]
     with_face = [f for f in per_frame if f["lighting"]["face_count"] > 0]
 
@@ -430,7 +338,6 @@ def analyze_video(
         "analysis_time_sec": round(time.perf_counter() - t_start, 1),
     }
 
-    # Build output
     result = {
         "summary": summary,
         "per_second": per_second,
@@ -438,7 +345,6 @@ def analyze_video(
         "per_frame": per_frame,
     }
 
-    # Save
     if output_path is None:
         stem = Path(video_path).stem
         output_path = str(Path(cfg["paths"]["temp"]) / f"{stem}_analysis.json")
@@ -454,7 +360,6 @@ def analyze_video(
 
 
 def _probe_video(video_path: str) -> Dict:
-    """Get video metadata via ffprobe."""
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -484,7 +389,6 @@ def _probe_video(video_path: str) -> Dict:
 
 
 def _aggregate_to_seconds(per_frame: List[Dict]) -> List[Dict]:
-    """Aggregate per-frame scores to per-second averages."""
     buckets = defaultdict(list)
     for f in per_frame:
         sec = int(f["timestamp"])
@@ -515,22 +419,18 @@ def _find_best_segments(
     window: int = 25,
     top_n: int = 10,
 ) -> List[Dict]:
-    """Find the best contiguous segments for clipping."""
     if not per_second:
         return []
 
     scores = [ps["quality"] for ps in per_second]
     n = len(scores)
 
-    # Sliding window average
     candidates = []
     for i in range(max(1, n - window + 1)):
         end = min(i + window, n)
         window_scores = scores[i:end]
         avg = np.mean(window_scores)
-        # Bonus for face presence throughout
         face_ratio = sum(1 for ps in per_second[i:end] if ps["face_present"]) / len(window_scores)
-        # Bonus for reference match
         avg_ref = np.mean([ps["ref_match"] for ps in per_second[i:end]])
 
         composite = avg * 0.6 + face_ratio * 0.25 + avg_ref * 0.15
@@ -548,7 +448,6 @@ def _find_best_segments(
             "composite_score": round(float(composite), 4),
         })
 
-    # Deduplicate overlapping segments, keep best
     candidates.sort(key=lambda x: x["composite_score"], reverse=True)
     selected = []
     for c in candidates:
@@ -566,7 +465,6 @@ def _find_best_segments(
 
 
 def _print_summary(summary: Dict, segments: List[Dict]):
-    """Print analysis summary to terminal."""
     try:
         from rich.console import Console
         from rich.table import Table
@@ -622,7 +520,6 @@ def _print_summary(summary: Dict, segments: List[Dict]):
             console.print(st)
         console.print()
     except ImportError:
-        # Fallback: plain text
         print(f"\nVideo Analysis: {summary['duration_sec']:.0f}s")
         print(f"  Face detection: {summary['face_detection_rate']}%")
         print(f"  Avg quality: {summary['avg_quality']:.3f}")
@@ -630,8 +527,6 @@ def _print_summary(summary: Dict, segments: List[Dict]):
         for i, seg in enumerate(segments[:5], 1):
             print(f"    {i}. {seg['start_sec']:.0f}s-{seg['end_sec']:.0f}s (score={seg['composite_score']:.3f})")
 
-
-# ─── CLI entry point ───────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze video for face/lighting quality")

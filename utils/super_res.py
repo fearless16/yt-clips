@@ -237,13 +237,6 @@ class SuperResEnhancer:
             return img
             
     def _detect_faces(self, frame: "np.ndarray") -> list:
-        """Detect faces in frame."""
-        try:
-            import face_recognition
-            return face_recognition.face_locations(frame)
-        except Exception:
-            pass
-            
         from utils.face_detect import detect_faces
         bboxes = detect_faces(frame, score_threshold=0.5)
         return [(y, x + w, y + h, x) for (x, y, w, h) in bboxes]

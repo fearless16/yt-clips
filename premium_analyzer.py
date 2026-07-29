@@ -22,19 +22,30 @@ from utils.logger import get_logger
 cfg = load_config()
 log = get_logger("premium", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
-_FACE_RECOGNITION_AVAILABLE: bool | None = None
+from utils.face_detect import detect_faces
 
 
-def _has_face_recognition() -> bool:
-    global _FACE_RECOGNITION_AVAILABLE
-    if _FACE_RECOGNITION_AVAILABLE is None:
-        try:
-            import face_recognition  # noqa: F401
-            _FACE_RECOGNITION_AVAILABLE = True
-        except ImportError:
-            _FACE_RECOGNITION_AVAILABLE = False
-            log.warning("face_recognition not installed — identity tracking disabled")
-    return _FACE_RECOGNITION_AVAILABLE
+def _extract_embedding(frame_bgr: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
+    x, y, w, h = bbox
+    face = frame_bgr[y:y + h, x:x + w]
+    if face.size == 0:
+        return None
+    face = cv2.resize(face, (112, 112))
+    lab = cv2.cvtColor(face, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+    hist_l = cv2.calcHist([l], [0], None, [32], [0, 256]).flatten()
+    hist_a = cv2.calcHist([a], [0], None, [32], [0, 256]).flatten()
+    hist_b = cv2.calcHist([b], [0], None, [32], [0, 256]).flatten()
+    hist = np.concatenate([hist_l, hist_a, hist_b])
+    hist = hist / max(hist.sum(), 1)
+    return hist
+
+
+def _compute_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
+    emb1 = emb1 / (np.linalg.norm(emb1) + 1e-6)
+    emb2 = emb2 / (np.linalg.norm(emb2) + 1e-6)
+    return float(np.dot(emb1, emb2))
 
 # ─── GPU / Backend Detection ──────────────────────────────────────────────
 
@@ -933,7 +944,7 @@ def _detect_dead_air(video_path: str, start: float, end: float) -> Dict:
 class HostDetector:
     """
     Identifies the host among multiple detected faces using reference photos.
-    Uses face_recognition embeddings for high-accuracy host identification.
+    Uses GPU-based LAB-histogram embeddings for host identification.
     Falls back to largest face + facecam region when no references provided.
     """
 
@@ -941,16 +952,15 @@ class HostDetector:
         self.reference_embeddings: List[np.ndarray] = []
         self.has_host_reference = len(reference_photos) > 0
 
-        if not _has_face_recognition():
-            return
-
         for ref_img in reference_photos:
             if ref_img is not None and ref_img.size > 0:
                 try:
-                    rgb = cv2.cvtColor(ref_img, cv2.COLOR_BGR2RGB)
-                    encodings = face_recognition.face_encodings(rgb)
-                    if encodings:
-                        self.reference_embeddings.append(encodings[0])
+                    faces = detect_faces(ref_img, score_threshold=0.5)
+                    if faces:
+                        best = max(faces, key=lambda r: r[2] * r[3])
+                        emb = _extract_embedding(ref_img, best)
+                        if emb is not None:
+                            self.reference_embeddings.append(emb)
                 except Exception as e:
                     log.warning("Failed to process reference photo: %s", e)
 
@@ -960,30 +970,21 @@ class HostDetector:
             log.info("HostDetector initialized in fallback mode (largest face + facecam region)")
 
     def _compute_face_embedding(self, face_img: np.ndarray) -> Optional[np.ndarray]:
-        """Compute structural embedding for a face region."""
         try:
             if face_img is None or face_img.size == 0:
                 return None
-            import face_recognition
-            rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
-            encodings = face_recognition.face_encodings(rgb)
-            if encodings:
-                return encodings[0]
-            return None
+            faces = detect_faces(face_img, score_threshold=0.5)
+            if faces:
+                best = max(faces, key=lambda r: r[2] * r[3])
+                return _extract_embedding(face_img, best)
+            return _extract_embedding(face_img, (0, 0, face_img.shape[1], face_img.shape[0]))
         except Exception:
             return None
 
-    def _histogram_similarity(self, hist1: np.ndarray, hist2: np.ndarray) -> float:
-        """Compute similarity between two embeddings (0-1)."""
-        if hist1 is None or hist2 is None:
+    def _histogram_similarity(self, emb1: np.ndarray, emb2: np.ndarray) -> float:
+        if emb1 is None or emb2 is None:
             return 0.0
-        try:
-            import face_recognition
-            dist = face_recognition.face_distance([hist1], hist2)[0]
-            # Convert distance (lower is better, typically <0.6 is match) to similarity score
-            return float(max(0.0, 1.0 - dist))
-        except Exception:
-            return 0.0
+        return _compute_similarity(emb1, emb2)
 
     def identify_host(self, faces: List[Dict]) -> int:
         """

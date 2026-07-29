@@ -1,13 +1,3 @@
-"""
-detect_track.py — Module 2: Face Detection + Temporal Tracking.
-
-BEAST MODE FIXES:
-- Added ROI cropping for FaceLandmarker (10x FPS boost).
-- Fixed Jitter Threshold math (percentage based, stops rejecting real humans).
-- Fixed fake 2D Pose estimation garbage math.
-- Hardened LAB histogram embedding against lighting shifts.
-"""
-
 import os
 import sys
 import time
@@ -16,7 +6,6 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-# Suppress MediaPipe C++ log noise (feedback manager, clearcut)
 os.environ.setdefault('GLOG_minloglevel', '2')
 os.environ.setdefault('MEDIAPIPE_LOG_LEVEL', 'error')
 
@@ -36,11 +25,9 @@ from mediapipe import Image as MpImage, ImageFormat as MpImageFormat
 
 _face_detector = None
 _face_landmarker = None
-MEDIPIPE_GPU_ACTIVE = False
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.dirname(_MODULE_DIR)
-_IS_MACOS = sys.platform == "darwin"
 
 
 def _resolve_model(filename: str) -> str:
@@ -55,64 +42,45 @@ def _resolve_model(filename: str) -> str:
     raise FileNotFoundError(f"Model not found: {filename} (checked: {candidates})")
 
 
-def _try_gpu(delegate):
-    if _IS_MACOS:
-        return None
-    return delegate
-
-
 def get_detector():
-    global _face_detector, MEDIPIPE_GPU_ACTIVE
+    global _face_detector
     if _face_detector is None:
         model_path = _resolve_model("face_detector.tflite")
-        gpu_delegate = _try_gpu(mp_python.BaseOptions.Delegate.GPU)
-        if gpu_delegate is not None:
-            try:
-                base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=gpu_delegate)
-                options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.5)
-                _face_detector = vision.FaceDetector.create_from_options(options)
-                MEDIPIPE_GPU_ACTIVE = True
-            except Exception:
-                _face_detector = None
-        if _face_detector is None:
-            base_options = mp_python.BaseOptions(model_asset_path=model_path)
-            options = vision.FaceDetectorOptions(base_options=base_options, min_detection_confidence=0.5)
-            _face_detector = vision.FaceDetector.create_from_options(options)
+        base_options = mp_python.BaseOptions(
+            model_asset_path=model_path,
+            delegate=mp_python.BaseOptions.Delegate.GPU,
+        )
+        options = vision.FaceDetectorOptions(
+            base_options=base_options,
+            min_detection_confidence=0.5,
+        )
+        _face_detector = vision.FaceDetector.create_from_options(options)
     return _face_detector
 
 
 def get_landmarker():
-    global _face_landmarker, MEDIPIPE_GPU_ACTIVE
+    global _face_landmarker
     if _face_landmarker is None:
         model_path = _resolve_model("face_landmarker.task")
-        gpu_delegate = _try_gpu(mp_python.BaseOptions.Delegate.GPU)
-        if gpu_delegate is not None:
-            try:
-                base_options = mp_python.BaseOptions(model_asset_path=model_path, delegate=gpu_delegate)
-                options = vision.FaceLandmarkerOptions(base_options=base_options, num_faces=1, min_face_detection_confidence=0.5)
-                _face_landmarker = vision.FaceLandmarker.create_from_options(options)
-                MEDIPIPE_GPU_ACTIVE = True
-            except Exception:
-                _face_landmarker = None
-        if _face_landmarker is None:
-            base_options = mp_python.BaseOptions(model_asset_path=model_path)
-            options = vision.FaceLandmarkerOptions(base_options=base_options, num_faces=1, min_face_detection_confidence=0.5)
-            _face_landmarker = vision.FaceLandmarker.create_from_options(options)
+        base_options = mp_python.BaseOptions(
+            model_asset_path=model_path,
+            delegate=mp_python.BaseOptions.Delegate.GPU,
+        )
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+        )
+        _face_landmarker = vision.FaceLandmarker.create_from_options(options)
     return _face_landmarker
 
 
 def detect_faces(frame: np.ndarray) -> List[FaceTrack]:
-    global _face_detector, MEDIPIPE_GPU_ACTIVE
+    global _face_detector
     detector = get_detector()
     mp_image = MpImage(image_format=MpImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
 
-    try:
-        result = detector.detect(mp_image)
-    except Exception:
-        _face_detector = None
-        MEDIPIPE_GPU_ACTIVE = False
-        detector = get_detector()
-        result = detector.detect(mp_image)
+    result = detector.detect(mp_image)
 
     tracks = []
     for detection in result.detections:
@@ -133,16 +101,12 @@ def detect_faces(frame: np.ndarray) -> List[FaceTrack]:
 
 
 def extract_face_mesh(frame: np.ndarray, bbox: Optional[Tuple[int, int, int, int]] = None) -> Optional[np.ndarray]:
-    """Extract face landmarks. 
-    BEAST MODE: Crops ROI before running Landmarker to save massive CPU/GPU cycles.
-    """
-    global _face_landmarker, MEDIPIPE_GPU_ACTIVE
+    global _face_landmarker
     landmarker = get_landmarker()
-    
+
     h_full, w_full = frame.shape[:2]
     offset_x, offset_y = 0, 0
-    
-    # Crop ROI if bbox is provided
+
     if bbox is not None:
         bx, by, bw, bh = bbox
         pad = int(max(bw, bh) * 0.2)
@@ -150,7 +114,7 @@ def extract_face_mesh(frame: np.ndarray, bbox: Optional[Tuple[int, int, int, int
         y1 = max(0, by - pad)
         x2 = min(w_full, bx + bw + pad)
         y2 = min(h_full, by + bh + pad)
-        
+
         frame_roi = frame[y1:y2, x1:x2]
         offset_x, offset_y = x1, y1
         h_full, w_full = frame_roi.shape[:2]
@@ -159,19 +123,12 @@ def extract_face_mesh(frame: np.ndarray, bbox: Optional[Tuple[int, int, int, int
 
     mp_image = MpImage(image_format=MpImageFormat.SRGB, data=cv2.cvtColor(frame_roi, cv2.COLOR_BGR2RGB))
 
-    try:
-        result = landmarker.detect(mp_image)
-    except Exception:
-        _face_landmarker = None
-        MEDIPIPE_GPU_ACTIVE = False
-        landmarker = get_landmarker()
-        result = landmarker.detect(mp_image)
+    result = landmarker.detect(mp_image)
 
     if not result.face_landmarks:
         return None
 
     landmarks = result.face_landmarks[0]
-    # Map back to original frame coordinates
     pts = np.array(
         [[lm.x * w_full + offset_x, lm.y * h_full + offset_y, lm.z * w_full] for lm in landmarks],
         dtype=np.float32,
@@ -212,7 +169,6 @@ def compute_landmark_jitter(landmark_history: List[np.ndarray]) -> float:
         curr = landmark_history[i]
         if prev.shape == curr.shape:
             disp = np.mean(np.sqrt(np.sum((curr - prev) ** 2, axis=1)))
-            # BEAST MODE FIX: Convert to percentage (0.5px / 200px * 100 = 0.25%)
             disp_norm = (disp / 200.0) * 100.0
             displacements.append(disp_norm)
 
@@ -248,8 +204,7 @@ def _estimate_pose_from_landmarks(landmarks: np.ndarray) -> Tuple[float, float, 
     eye_mid = (left_eye + right_eye) / 2.0
     nose_offset = nose[0] - eye_mid[0]
     eye_dist = np.linalg.norm(right_eye - left_eye)
-    
-    # BEAST MODE FIX: Removed the fake "- 70.0" offset and arbitrary multipliers.
+
     yaw = float(np.degrees(np.arctan2(nose_offset, max(eye_dist, 1e-6)))) * 2.0
     pitch = float(np.degrees(np.arctan2(chin[1] - nose[1], max(np.linalg.norm(chin - nose), 1e-6)))) - 45.0
     roll = float(np.degrees(np.arctan2(right_eye[1] - left_eye[1], right_eye[0] - left_eye[0])))
@@ -285,8 +240,7 @@ def pass_quality_gates(
 
     jitter = compute_landmark_jitter(landmark_history)
     metrics["landmark_jitter"] = jitter
-    # BEAST MODE FIX: Threshold is now in percentage. 0.1% jitter is safe for real humans.
-    if jitter < 0.05: 
+    if jitter < 0.05:
         return False, metrics
 
     occupancy = compute_occupancy(landmarks, bbox)
@@ -303,12 +257,11 @@ def _compute_embedding(frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> Op
     if face_roi.size == 0:
         return None
 
-    # Normalize lighting before histogram to prevent sunlight from breaking identity
     lab = cv2.cvtColor(face_roi, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
     lab_norm = cv2.merge([l, a, b])
-    
+
     hist_l = cv2.calcHist([lab_norm], [0], None, [32], [0, 256]).flatten()
     hist_a = cv2.calcHist([lab_norm], [1], None, [32], [0, 256]).flatten()
     hist_b = cv2.calcHist([lab_norm], [2], None, [32], [0, 256]).flatten()
@@ -365,7 +318,6 @@ class FaceTracker:
         track = self._get_target_track()
 
         if track is not None and track.smooth_bbox is not None:
-            # BEAST MODE: Pass bbox to extract_face_mesh for massive FPS boost
             mesh = extract_face_mesh(frame, track.smooth_bbox)
             if mesh is not None:
                 self._landmark_history.append(mesh)

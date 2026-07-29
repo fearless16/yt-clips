@@ -25,7 +25,7 @@ import time
 
 from utils.config import load_config
 from utils.logger import get_logger
-from utils.face_detect import detect_face
+from utils.face_detect import detect_face, detect_faces
 
 cfg = load_config()
 log = get_logger("face_mapper", cfg["logging"]["log_file"], cfg["logging"]["level"])
@@ -525,8 +525,7 @@ def enhance_video(
     frames_dir = temp_dir / "frames"
     frames_dir.mkdir()
 
-    # ── Pre-scan: detect face bounding boxes using OpenCV DNN ──────────────
-    from utils.face_detect import detect_faces as _dnn_detect_faces
+    # ── Pre-scan: detect face bounding boxes using SCRFD DirectML GPU ──────
     face_bboxes: Dict[int, Tuple[int, int, int, int]] = {}
 
     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
@@ -535,7 +534,7 @@ def enhance_video(
         ret, frame = cap.read()
         if not ret:
             break
-        faces = _dnn_detect_faces(frame)
+        faces = detect_faces(frame)
         if faces:
             face_bboxes[idx] = max(faces, key=lambda f: f[2] * f[3])
         idx += 1

@@ -13,19 +13,30 @@ from utils.face_matcher import find_host_in_frame
 cfg = load_config()
 log = get_logger("analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
-_FACE_RECOGNITION_AVAILABLE: bool | None = None
+_FACE_RECOGNITION_AVAILABLE = True
 
 
-def _has_face_recognition() -> bool:
-    global _FACE_RECOGNITION_AVAILABLE
-    if _FACE_RECOGNITION_AVAILABLE is None:
-        try:
-            import face_recognition  # noqa: F401
-            _FACE_RECOGNITION_AVAILABLE = True
-        except Exception:
-            _FACE_RECOGNITION_AVAILABLE = False
-            log.warning("face_recognition unavailable — identity match disabled (SCRFD/YuNet detection still works)")
-    return _FACE_RECOGNITION_AVAILABLE
+def _extract_embedding(frame_bgr: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
+    x, y, w, h = bbox
+    face = frame_bgr[y:y + h, x:x + w]
+    if face.size == 0:
+        return None
+    face = cv2.resize(face, (112, 112))
+    lab = cv2.cvtColor(face, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+    hist_l = cv2.calcHist([l], [0], None, [32], [0, 256]).flatten()
+    hist_a = cv2.calcHist([a], [0], None, [32], [0, 256]).flatten()
+    hist_b = cv2.calcHist([b], [0], None, [32], [0, 256]).flatten()
+    hist = np.concatenate([hist_l, hist_a, hist_b])
+    hist = hist / max(hist.sum(), 1)
+    return hist
+
+
+def _compute_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
+    emb1 = emb1 / (np.linalg.norm(emb1) + 1e-6)
+    emb2 = emb2 / (np.linalg.norm(emb2) + 1e-6)
+    return float(np.dot(emb1, emb2))
 
 # Per-clip crop smoothing state — thread-local to prevent bleed across parallel exports
 _crop_local = threading.local()
@@ -166,7 +177,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
     except Exception:
         pass
 
-    # face_recognition is optional — detection + tracking work without it
+    # detection + tracking always use GPU (DirectML)
 
     best_face = None
     best_score = -1.0
@@ -174,17 +185,13 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
 
     for (x, y, w, h) in faces:
         is_host = False
-        if host_encs and _has_face_recognition():
+        if host_encs:
             try:
-                import face_recognition
-                face_crop = frame_bgr[y:y+h, x:x+w]
-                if face_crop.size > 0:
-                    rgb_crop = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
-                    encs = face_recognition.face_encodings(rgb_crop)
-                    if encs:
-                        matches = face_recognition.compare_faces(host_encs, encs[0], tolerance=0.6)
-                        if any(matches):
-                            is_host = True
+                emb = _extract_embedding(frame_bgr, (x, y, w, h))
+                if emb is not None:
+                    sims = [_compute_similarity(emb, he) for he in host_encs]
+                    if max(sims) >= 0.35:
+                        is_host = True
             except Exception:
                 pass
 

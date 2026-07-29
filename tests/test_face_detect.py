@@ -1,5 +1,3 @@
-"""Tests for utils/face_detect.py — SCRFD (GPU) + YuNet (CPU) face detection on sampled video frames."""
-
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -9,11 +7,10 @@ import numpy as np
 
 INPUT_VIDEO = Path("input/video.mp4")
 SAMPLES = 8
-MIN_FACE_AREA = 15 * 15  # many faces in this video are ~15-30px
+MIN_FACE_AREA = 15 * 15
 
 
 def _sample_frames(video_path: str = None, n: int = SAMPLES):
-    """Yield n evenly-spaced BGR frames from the video."""
     path = video_path or str(INPUT_VIDEO)
     if not Path(path).exists():
         return
@@ -31,14 +28,9 @@ def _sample_frames(video_path: str = None, n: int = SAMPLES):
 
 
 class TestDetectorInit:
-    def test_scrfd_backend_loads(self):
-        from utils.face_detect import _get_onnx_session
-        det = _get_onnx_session()
-        assert det is not None
-
-    def test_yunet_backend_loads(self):
-        from utils.face_detect import _get_yunet
-        det = _get_yunet((320, 320))
+    def test_scrfd_session_loads(self):
+        from utils.face_detect import get_session
+        det = get_session()
         assert det is not None
 
 
@@ -86,16 +78,11 @@ class TestDetectFace:
             single = detect_face(frame)
             all_faces = detect_faces(frame)
             if single is None:
-                assert len(all_faces) == 0, \
-                    "detect_face returned None but detect_faces found faces"
+                assert len(all_faces) == 0
                 continue
-            assert len(all_faces) > 0, \
-                "detect_face found a face but detect_faces returned empty"
+            assert len(all_faces) > 0
             largest = max(all_faces, key=lambda r: r[2] * r[3])
-            assert single == largest, (
-                f"detect_face returned {single} but largest in "
-                f"detect_faces is {largest}"
-            )
+            assert single == largest
 
     def test_detect_face_consistent(self):
         from utils.face_detect import detect_face
@@ -104,7 +91,7 @@ class TestDetectFace:
             bbox2 = detect_face(frame)
             if bbox1 is None and bbox2 is None:
                 continue
-            assert bbox1 == bbox2, f"inconsistent results: {bbox1} vs {bbox2}"
+            assert bbox1 == bbox2
 
     def test_lower_threshold_increases_recall(self):
         from utils.face_detect import detect_faces
@@ -112,36 +99,7 @@ class TestDetectFace:
         for _, frame in _sample_frames():
             high += len(detect_faces(frame, score_threshold=0.9))
             low += len(detect_faces(frame, score_threshold=0.5))
-        assert low >= high, "lower threshold should not reduce detections"
-
-
-class TestBackendAuto:
-    def test_backend_auto_returns_faces(self):
-        from utils.face_detect import detect_faces
-        for _, frame in _sample_frames():
-            faces = detect_faces(frame, backend='auto')
-            if len(faces) > 0:
-                for bbox in faces:
-                    x, y, w, h = bbox
-                    assert w > 0 and h > 0
-
-    def test_backend_onnx_returns_faces(self):
-        from utils.face_detect import detect_faces
-        for _, frame in _sample_frames():
-            faces = detect_faces(frame, backend='onnx')
-            if len(faces) > 0:
-                for bbox in faces:
-                    x, y, w, h = bbox
-                    assert w > 0 and h > 0
-
-    def test_backend_yunet_returns_faces(self):
-        from utils.face_detect import detect_faces
-        for _, frame in _sample_frames():
-            faces = detect_faces(frame, backend='yunet')
-            if len(faces) > 0:
-                for bbox in faces:
-                    x, y, w, h = bbox
-                    assert w > 0 and h > 0
+        assert low >= high
 
 
 class TestCropFace:
@@ -179,8 +137,7 @@ class TestEdgeCases:
         from utils.face_detect import detect_face
         for _, frame in _sample_frames():
             non_contiguous = frame[::2, ::2]
-            assert not non_contiguous.flags["C_CONTIGUOUS"], \
-                "expected non-contiguous array but got contiguous"
+            assert not non_contiguous.flags["C_CONTIGUOUS"]
             bbox = detect_face(non_contiguous)
             if bbox is not None:
                 x, y, w, h = bbox
@@ -198,19 +155,14 @@ class TestEdgeCases:
             return
         ratio = detected / total
         assert ratio >= 0.5, (
-            f"only {detected}/{total} frames ({ratio:.0%}) had a face detected, "
-            f"expected at least 50%"
+            f"only {detected}/{total} frames ({ratio:.0%}) had a face detected"
         )
 
-    def test_onnx_and_yunet_both_detect_faces(self):
+    def test_scrfd_detects_faces(self):
         from utils.face_detect import detect_faces
-        onnx_any, yunet_any = False, False
+        any_detected = False
         for _, frame in _sample_frames():
-            if detect_faces(frame, backend='onnx'):
-                onnx_any = True
-            if detect_faces(frame, backend='yunet'):
-                yunet_any = True
-            if onnx_any and yunet_any:
+            if detect_faces(frame, score_threshold=0.5):
+                any_detected = True
                 break
-        assert onnx_any, "ONNX (SCRFD) detected no faces in any frame"
-        assert yunet_any, "YuNet detected no faces in any frame"
+        assert any_detected, "SCRFD DirectML GPU detected no faces in any frame"

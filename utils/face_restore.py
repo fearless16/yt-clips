@@ -341,23 +341,6 @@ class FaceRestorer:
         return frame
         
     def _detect_faces(self, frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
-        """Detect faces in frame."""
-        try:
-            import face_recognition
-            return face_recognition.face_locations(frame)
-        except Exception:
-            pass
-            
-        try:
-            from deepface import DeepFace
-            faces = DeepFace.extract_faces(frame, enforce_detection=False)
-            return [(f['facial_area']['y'],
-                     f['facial_area']['x'] + f['facial_area']['w'],
-                     f['facial_area']['y'] + f['facial_area']['h'],
-                     f['facial_area']['x']) for f in faces]
-        except Exception:
-            pass
-            
         from utils.face_detect import detect_faces
         bboxes = detect_faces(frame, score_threshold=0.5)
         return [(y, x + w, y + h, x) for (x, y, w, h) in bboxes]
