@@ -13,14 +13,14 @@ import numpy as np
 
 from utils.config import load_config
 from utils.logger import get_logger
-from utils.face_detect import detect_faces
+from utils.face_detect import detect_faces, detect_faces_yunet
 
 cfg = load_config()
 log = get_logger("video_analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 
 def _detect_faces(frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
-    bboxes = detect_faces(frame, score_threshold=0.5)
+    bboxes = detect_faces(frame, score_threshold=0.5, min_area=2000)
     return [(y, x + w, y + h, x) for (x, y, w, h) in bboxes]
 
 
@@ -100,7 +100,7 @@ def _load_reference_embeddings(photos_dir: Path) -> List[np.ndarray]:
                 img = cv2.imread(str(img_path))
                 if img is None:
                     continue
-                faces = detect_faces(img, score_threshold=0.5)
+                faces = detect_faces_yunet(img, score_threshold=0.5)
                 if faces:
                     best = max(faces, key=lambda r: r[2] * r[3])
                     emb = _extract_face_embedding(img, best)
@@ -127,7 +127,7 @@ def _match_face_to_references(
     face_crop = frame_rgb[y1:y2, x1:x2]
     if face_crop.size == 0:
         return 0.0
-    emb = _extract_face_embedding(face_crop, (x1, y1, x2 - x1, y2 - y1))
+    emb = _extract_face_embedding(face_crop, (left - x1, top - y1, right - left, bottom - top))
     if emb is None:
         return 0.0
     best = 0.0
@@ -280,7 +280,7 @@ def analyze_video(
         try:
             img = cv2.imread(str(ref_path))
             if img is not None:
-                faces = detect_faces(img, score_threshold=0.5)
+                faces = detect_faces_yunet(img, score_threshold=0.5)
                 if faces:
                     best = max(faces, key=lambda r: r[2] * r[3])
                     emb = _extract_face_embedding(img, best)

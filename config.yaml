@@ -47,10 +47,10 @@ highlight:
   audio_energy_threshold: 0.25         # ↓ from 0.3 — catch more excitement moments
   # Minimum/maximum clip duration (seconds)
   min_duration: 8                       # ↓ from 10 — short punchy clips do better
-  max_duration: 45                      # ↓ from 58 — data shows 35-44s is sweet spot (63.7% completion)
+  max_duration: 30                      # Strict <30s for YouTube Shorts
   # Preferred duration range (scorer boosts clips in this range)
-  preferred_duration_min: 30            # Data: 35-44s = 0.342 score, 25-34s = 0.301
-  preferred_duration_max: 45
+  preferred_duration_min: 15            # Sweet spot for retention
+  preferred_duration_max: 29
   # Merge nearby highlights that are closer than this (seconds)
   merge_gap: 8
   # How many highlights to extract at most
