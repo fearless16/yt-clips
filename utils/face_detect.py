@@ -69,6 +69,41 @@ def get_session() -> object:
     return _SESSION
 
 
+def detect_faces_yunet(
+    frame: np.ndarray,
+    score_threshold: float = 0.5,
+    input_size: Tuple[int, int] = (640, 640),
+) -> List[Tuple[int, int, int, int]]:
+    """Detect faces using YuNet via OpenCV DNN."""
+    yunet_path = Path(__file__).resolve().parent.parent / "face_detection_yunet_2023mar.onnx"
+    if not yunet_path.exists():
+        log.debug("YuNet model not found")
+        return []
+
+    try:
+        h, w = frame.shape[:2]
+        yunet = cv2.FaceDetectorYN.create(str(yunet_path), "", input_size, score_threshold, 0.3, 5000)
+        frame_resized = cv2.resize(frame, input_size)
+        _, faces = yunet.detect(frame_resized)
+        if faces is None:
+            return []
+        sx = w / input_size[0]
+        sy = h / input_size[1]
+        results = []
+        for f in faces:
+            x = int(f[0] * sx)
+            y = int(f[1] * sy)
+            fw = int(f[2] * sx)
+            fh = int(f[3] * sy)
+            results.append((x, y, fw, fh))
+        if results:
+            log.debug("YuNet detected %d face(s)", len(results))
+        return results
+    except Exception as e:
+        log.debug("YuNet detection failed: %s", e)
+        return []
+
+
 def _decode_scrfd(outputs, input_size: int, scale: float, score_threshold: float) -> List[Tuple[int, int, int, int]]:
     strides = [8, 16, 32]
     dets_list = []
@@ -83,8 +118,11 @@ def _decode_scrfd(outputs, input_size: int, scale: float, score_threshold: float
         if not np.any(mask):
             continue
         aidx = np.arange(n * 2, dtype=np.intp)[mask]
-        selected_scores = scores_flat[mask]
-        selected_bbox = bboxes[mask]
+        aidx = aidx[aidx % 2 == 0]       # face class only (even indices)
+        if len(aidx) == 0:
+            continue
+        selected_scores = scores_flat[aidx]
+        selected_bbox = bboxes[aidx]
         i_vals = aidx // 2
         col = (i_vals % fm_w).astype(np.float32)
         row = (i_vals // fm_w).astype(np.float32)
@@ -171,10 +209,13 @@ def detect_face(frame: np.ndarray, score_threshold: float = 0.5) -> Optional[Tup
     return max(faces, key=lambda r: r[2] * r[3])
 
 
-def detect_faces(frame: np.ndarray, score_threshold: float = 0.5) -> List[Tuple[int, int, int, int]]:
+def detect_faces(frame: np.ndarray, score_threshold: float = 0.5, min_area: int = 0) -> List[Tuple[int, int, int, int]]:
     if frame is None or frame.size == 0:
         return []
-    return _detect_onnx(frame, score_threshold)
+    faces = _detect_onnx(frame, score_threshold)
+    if min_area > 0:
+        faces = [(x, y, w, h) for (x, y, w, h) in faces if w * h >= min_area]
+    return faces
 
 
 def crop_face_with_padding(

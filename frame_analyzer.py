@@ -88,41 +88,41 @@ def _detect_face_at_timestamp(video_path: str, timestamp: float, frame_w: int, f
     frame_bgr = frame.reshape((frame_h, frame_w, 3))
     return detect_face_crop(frame_bgr, frame_w, frame_h)
 
+def _apply_top_padding(
+    face_top_y: int, face_height: int, face_width: int,
+    frame_height: int, frame_width: int,
+) -> Tuple[int, int, int]:
+    """Return (crop_y, crop_h, crop_w) with face-centered positioning.
+    Target: face at ~30% of output height from top (matching expectation.png).
+    Guards against extreme zoom when face_width is anomalously small."""
+    # Target: face should be ~25% of output width (1080px) = 270px
+    target_face_w = 270
+    if face_width > 0:
+        face_w_clamped = max(face_width, 80)
+        scale = target_face_w / face_w_clamped
+        crop_w = int(1080 / scale)
+        crop_h = int(1920 / scale)
+    else:
+        headroom = int(face_height * 0.80)
+        body_below = int(face_height * 1.20)
+        crop_h = face_height + headroom + body_below
+        crop_w = int(crop_h * 9 / 16)
+
+    crop_h = min(crop_h, frame_height)
+    crop_w = min(crop_w, frame_width)
+    crop_h = max(crop_h, 568)
+    crop_w = max(crop_w, 320)
+    crop_y = max(0, min(frame_height - crop_h, face_top_y - int(crop_h * 0.70)))
+
+    return crop_y, crop_h, crop_w
+
+
 def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int) -> Optional[Dict]:
     # ── 0. Face-centered crop for YouTube Shorts style ───────────────────────
     # Reference (expectation.png): face at 30% from top, 30% headroom.
     # Crop region = face + 70% headroom above + body below.
     # This positions face at ~30% from top of crop, which after fill-crop
     # puts face at ~30% from top of final 1080x1920 frame.
-
-    def _apply_top_padding(face_top_y: int, face_height: int, face_width: int = 0):
-        """Return (crop_y, crop_h, crop_w) with face-centered positioning.
-        Target: face at ~30% of output height from top (matching expectation.png).
-        Crop is calculated from FACE SIZE, not height, to prevent oversized faces."""
-        # Target: face should be ~25% of output width (1080px) = 270px
-        target_face_w = 270
-        if face_width > 0:
-            # Calculate scale: how much to zoom in
-            scale = target_face_w / face_width
-            # Crop dimensions from source
-            crop_w = int(1080 / scale)  # Source region width
-            crop_h = int(1920 / scale)  # Source region height (9:16)
-        else:
-            # Fallback: use height-based calculation
-            headroom = int(face_height * 0.80)
-            body_below = int(face_height * 1.20)
-            crop_h = face_height + headroom + body_below
-            crop_w = int(crop_h * 9 / 16)
-        
-        # Don't exceed frame bounds
-        crop_h = min(crop_h, frame_height)
-        crop_w = min(crop_w, frame_width)
-        
-        # Position face at ~30% from top (matching expectation.png composition)
-        # face_top_y - crop_h * 0.70 puts face at 30% from top
-        crop_y = max(0, min(frame_height - crop_h, face_top_y - int(crop_h * 0.70)))
-        
-        return crop_y, crop_h, crop_w
 
     # ── 1. Dynamic Host Matching (Priority) ──────────────────────────────────
     # Try to find the host specifically using reference photos
@@ -134,7 +134,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         hx, hy = host_box["x"], host_box["y"]
         hw, hh = host_box["width"], host_box["height"]
         
-        crop_y, crop_h, crop_w = _apply_top_padding(hy, hh, hw)
+        crop_y, crop_h, crop_w = _apply_top_padding(hy, hh, hw, frame_height, frame_width)
         crop_x = hx + hw // 2 - crop_w // 2
         crop_x = max(0, min(crop_x, frame_width - crop_w))
         
@@ -151,10 +151,10 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
             "is_dynamic_match": True
         }
 
-    # ── 2. Fallback to DNN face detection ───────────────────
-    from utils.face_detect import detect_faces
-    faces = detect_faces(frame_bgr, score_threshold=0.5)
-    if len(faces) == 0:
+    # ── 2. YuNet DNN face detection ────────────────────────
+    from utils.face_detect import detect_faces_yunet
+    faces = detect_faces_yunet(frame_bgr, score_threshold=0.5)
+    if not faces:
         return None
 
     def _iou(boxA, boxB):
@@ -204,9 +204,11 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         norm_y = center_y / float(frame_height)
         size_ratio = h / float(frame_height)
         score = area
+        if area < 2000:
+            continue
         if size_ratio > 0.28:
             score *= 0.001
-        if norm_y < 0.55 and 0.25 < norm_x < 0.75 and h < frame_height * 0.5:
+        if not is_host and norm_y < 0.55 and 0.25 < norm_x < 0.75 and h < frame_height * 0.12:
             continue
         if 0.05 < size_ratio < 0.22:
             score *= 8.0
@@ -231,7 +233,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
     _set_last_face_bbox(best_face)
 
     x, y, w, h = best_face
-    crop_y, crop_h, crop_w = _apply_top_padding(y, h, w)
+    crop_y, crop_h, crop_w = _apply_top_padding(y, h, w, frame_height, frame_width)
     crop_x = x + w // 2 - crop_w // 2
     crop_x = max(0, min(crop_x, frame_width - crop_w))
     crop_x = _smooth_int(_get_prev_crop_x(), crop_x, alpha=0.25)

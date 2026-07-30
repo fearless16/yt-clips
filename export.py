@@ -71,12 +71,17 @@ def _sanitize_strategy(raw_strategy) -> Dict:
     active_crop = raw_strategy.get("active_crop")
     if isinstance(active_crop, dict):
         try:
-            active_crop = {
-                "x": max(0, int(active_crop.get("x", 0))),
-                "y": max(0, int(active_crop.get("y", 0))),
-                "width": max(2, int(active_crop.get("width", 0))),
-                "height": max(2, int(active_crop.get("height", 0))),
-            }
+            cw = max(2, int(active_crop.get("width", 0)))
+            ch = max(2, int(active_crop.get("height", 0)))
+            if cw < 200 or ch < 356:
+                active_crop = None
+            else:
+                active_crop = {
+                    "x": max(0, int(active_crop.get("x", 0))),
+                    "y": max(0, int(active_crop.get("y", 0))),
+                    "width": cw,
+                    "height": ch,
+                }
         except (TypeError, ValueError):
             active_crop = None
     else:
