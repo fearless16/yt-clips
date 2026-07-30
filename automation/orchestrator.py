@@ -508,6 +508,7 @@ def run(
                     slot_map: dict[str, datetime] = {}
                     if auto_schedule:
                         from scheduler import (
+                            _clamp_to_day_window,
                             assign_clips_to_slots,
                             format_for_youtube,
                         )
@@ -578,6 +579,7 @@ def run(
                                 # clip_idx which caused clips 10+ to be 20-30h out.
                                 jitter = random.uniform(2, 3)
                                 slot += timedelta(hours=jitter)
+                                slot = _clamp_to_day_window(slot)
                                 publish_at = format_for_youtube(slot)
                         try:
                             video_id = upload_video(

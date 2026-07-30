@@ -1,14 +1,15 @@
 """
-scheduler.py — Smart scheduling with jittered hourly slots + prime-time prioritization.
+scheduler.py — Smart scheduling with day-window clamping + jittered hourly slots + prime-time prioritization.
 
 Generates deterministic-jittered upload schedules so every hour has a different
-minute offset (e.g. 8:05, 9:12, 10:37). Best-performing clips are assigned to
-prime-time windows (evening 19-22 IST, lunch 12-14 IST).
+minute offset (e.g. 9:05, 10:12, 11:37). All slots are clamped to 9 AM – 9 PM IST.
+Best-performing clips are assigned to prime-time windows (evening 19-21 IST, lunch 12-14 IST).
 
 Design:
   - Jitter is deterministic per date+hour (MD5 hash → minute offset)
   - Same date+hour always produces the same offset (stable scheduling)
   - Different hours get different offsets (natural-looking jitter)
+  - Slots before 9 AM pushed to 9 AM; slots at/after 9 PM pushed to next day 9 AM
   - Prime-time slots are ranked: evening > lunch > off-peak
   - Best clips mapped to highest-ranked slots
 """
@@ -22,10 +23,14 @@ from typing import Dict, List, Optional, Tuple
 STATE_FILE = "scheduler_state.json"
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# Day window (IST) — uploads only between 9 AM and 9 PM
+DAY_START_HOUR = 9
+DAY_END_HOUR = 21
+
 # Prime-time windows (IST) in priority order (index, start_hour, end_hour)
 # Lower index = higher priority for best-clip assignment
 PRIME_WINDOWS: List[Tuple[int, int, int]] = [
-    (0, 19, 22),   # Evening prime: 7 PM – 10 PM — highest engagement
+    (0, 19, 21),   # Evening prime: 7 PM – 9 PM — highest engagement
     (1, 12, 14),   # Lunch prime:   12 PM – 2 PM — lunch scroll
 ]
 
@@ -43,6 +48,19 @@ def _jitter_minutes(dt: datetime, max_minutes: int = 55) -> int:
     seed = dt.strftime("%Y-%m-%d-%H")
     h = int(hashlib.md5(seed.encode()).hexdigest()[:8], 16)
     return h % (max_minutes + 1)
+
+
+def _clamp_to_day_window(dt: datetime) -> datetime:
+    """Clamp dt to DAY_START_HOUR–DAY_END_HOUR window (IST).
+    Before 9 AM → same day 9 AM (preserves minute).
+    9 PM or later → next day 9 AM (preserves minute).
+    """
+    if dt.hour < DAY_START_HOUR:
+        dt = dt.replace(hour=DAY_START_HOUR, second=0, microsecond=0)
+    elif dt.hour >= DAY_END_HOUR:
+        dt = (dt.replace(hour=DAY_START_HOUR, second=0, microsecond=0)
+              + timedelta(days=1))
+    return dt
 
 
 def is_prime_time(dt: datetime) -> bool:
@@ -77,19 +95,21 @@ def generate_schedule(
 
     Each slot's minute offset is deterministic (date+hour hash), so the same
     day-hour always gets the same jitter.  Slots begin on the next clean hour
-    boundary (not sub-minute).
+    boundary (not sub-minute).  Start is clamped to DAY_START_HOUR; any slot
+    past DAY_END_HOUR rolls to the next day.
     """
     if start_from is None:
         start_from = _now_ist()
 
-    # Round up to the next hour
+    # Round up to the next hour, then clamp start to day window
     start = start_from.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    start = _clamp_to_day_window(start)
 
     slots: List[datetime] = []
     for i in range(num_slots):
         base = start + timedelta(hours=i * interval_hours)
         jitter = _jitter_minutes(base)
-        slots.append(base.replace(minute=jitter))
+        slots.append(_clamp_to_day_window(base.replace(minute=jitter)))
     return slots
 
 
@@ -175,6 +195,9 @@ def get_next_slot(interval_hours: int = 1) -> datetime:
     else:
         jitter = _jitter_minutes(next_slot)
         next_slot = next_slot.replace(minute=jitter)
+
+    # Clamp to day window
+    next_slot = _clamp_to_day_window(next_slot)
 
     # Persist
     state["last_scheduled"] = next_slot.isoformat()
