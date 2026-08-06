@@ -279,6 +279,9 @@ clip_selection:
   use_llm_arbiter: true                # Run LLM Final Arbiter pass
   min_quality: 20.0                    # Min weighted score (0-100) to keep a clip
   max_selected: 10                     # Max clips to select
+  dedup_enabled: true                   # Reject windows already selected in prior runs
+  dedup_overlap_threshold: 0.6         # Min window overlap ratio to reject a re-upload duplicate
+                                       # (set dedup_enabled: false to force re-generate a match)
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging:

@@ -96,6 +96,30 @@ def _cfg() -> dict:
 # Public API
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _url_match_key(url: str | None) -> str | None:
+    """Derive a dedup-history namespace key from a run URL, or None.
+
+    Extracts the YouTube video ID (11 chars) from watch/shorts/live/embed
+    URLs; falls back to the bare host+path when no ID is parseable so history
+    stays isolated across different sources. None only when the URL is empty
+    or missing (callers then rely on video_metadata.json / output stem).
+    """
+    if not url or not str(url).strip():
+        return None
+    url = str(url).strip()
+    try:
+        from automation.clip_selection.pipeline import _extract_youtube_id
+        video_id = _extract_youtube_id(url)
+        if video_id:
+            return video_id
+    except Exception:
+        pass
+    host_path = url.split("?")[0].rstrip("/").replace("https://", "").replace("http://", "")
+    slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in host_path)
+    slug = "-".join(part for part in slug.split("-") if part)
+    return (slug[:64] or None).lower()
+
+
 def run(
     url: str,
     skip_download: bool = False,
@@ -137,6 +161,11 @@ def run(
     stem = Path(video_path).stem
     transcript_path = str(Path(transcripts_dir) / f"{stem}.json")
     highlights_path = str(Path(highlights_dir) / f"{stem}.yaml")
+
+    # Dedup-history namespace: derive a stable per-match key from the run URL
+    # so skip-download / drive-sync runs (which never write video_metadata.json)
+    # still get isolated history instead of collapsing onto the constant stem.
+    match_key = _url_match_key(url)
 
     # Hoisted config flag — shared across stages 3-5, 6 (hook audit), 8b (update_performance)
     use_new_selector = cfg.get("clip_selection", {}).get("enabled", True)
@@ -214,7 +243,8 @@ def run(
                     else:
                         from highlight import detect_highlights
                     highlights = detect_highlights(transcript_path, video_path,
-                                                   highlights_path)
+                                                   highlights_path,
+                                                   match_key=match_key)
                     result.selected_clips = len(highlights)
                     from automation.scoring.feature_extractor import FeatureExtractor
                     from automation.scoring.scoring import ClipScorer

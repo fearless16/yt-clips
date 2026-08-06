@@ -9,6 +9,7 @@ import re
 from typing import Any
 
 from automation.clip_selection.agent_base import Agent
+from automation.clip_selection.dedupe import overlaps_any_previous
 from automation.clip_selection.keywords import (
     CRICKET_PLAYERS,
     CRICKET_EVENTS,
@@ -634,6 +635,18 @@ class BrutalRejectionAgent(Agent):
         if text in candidate_texts:
             rejection_score += 20
             reasons.append("duplicate_content")
+
+        # Repeated content (overlaps a previously selected clip from a prior run)
+        previous_windows = context.get("previous_windows") or []
+        if previous_windows:
+            try:
+                dedup_threshold = float(context.get("dedup_overlap_threshold", 0.6))
+            except (TypeError, ValueError):
+                dedup_threshold = 0.6
+            if overlaps_any_previous(start, end, previous_windows, dedup_threshold):
+                rejection_score += 40
+                if "duplicate_content" not in reasons:
+                    reasons.append("duplicate_content")
 
         # Very high silence ratio
         word_count = len(text.split())

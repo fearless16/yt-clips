@@ -27,6 +27,50 @@ cfg = load_config()
 log = get_logger("clip_pipeline")
 
 
+def _match_key(input_dir: str, output_path: str) -> str:
+    """Return a stable dedup-history key for the current match.
+
+    History must be namespaced per match, NOT per filename stem: the
+    orchestrator always writes to ``input/video.mp4`` so the stem is the same
+    for every match, and re-using one history file would make a new match's
+    highlights get rejected against a *different* match's previously selected
+    windows. The key is derived from ``video_metadata.json`` (URL, falling
+    back to title) which ``download.py`` writes for every download. If no
+    metadata exists, falls back to the output filename stem so direct
+    ``detect_highlights`` callers still get isolated history.
+    """
+    metadata_file = Path(input_dir) / "video_metadata.json"
+    try:
+        with open(metadata_file, encoding="utf-8") as f:
+            meta = json.load(f)
+    except Exception:
+        meta = {}
+    url = str(meta.get("url", "") or "").strip()
+    if url:
+        video_id = _extract_youtube_id(url)
+        if video_id:
+            return video_id
+        return _slugify(url)
+    title = str(meta.get("title", "") or "").strip()
+    if title:
+        return _slugify(title)
+    return Path(output_path).stem
+
+
+def _extract_youtube_id(url: str) -> str | None:
+    """Extract a YouTube video ID from a watch/shorts/live/embed URL."""
+    import re
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|live/|embed/)([A-Za-z0-9_-]{11})(?:[?&#/]|$)", url)
+    return m.group(1) if m else None
+
+
+def _slugify(text: str, max_len: int = 64) -> str:
+    """Normalize an arbitrary string into a filesystem-safe key."""
+    slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in text)
+    slug = "-".join(part for part in slug.split("-") if part)
+    return (slug[:max_len] or "video").rstrip("-").lower()
+
+
 def _compute_speed_factor(
     window_duration: float,
     target_duration: float,
@@ -248,10 +292,21 @@ def detect_highlights(
     transcript_path: str | None = None,
     video_path: str | None = None,
     output_path: str | None = None,
+    match_key: str | None = None,
 ) -> list[dict]:
     """Replace ``highlight.detect_highlights()`` with 7-agent clip selection.
 
     Same signature, same YAML output format — drop-in replacement.
+
+    Args:
+        transcript_path: Path to transcript JSON (defaults to config paths).
+        video_path: Path to source video (defaults to config paths).
+        output_path: Path to write highlights YAML.
+        match_key: Explicit dedup-history namespace (e.g. the YouTube video ID
+            derived from the run URL). When provided it wins over the
+            ``video_metadata.json`` lookup, so flows that never write metadata
+            (``--skip-download``, drive sync) still get per-match isolation
+            instead of collapsing onto the constant ``video`` stem.
     """
     h_cfg = cfg["highlight"]
     paths = cfg["paths"]
@@ -413,6 +468,25 @@ def detect_highlights(
         "topic_heuristics": topic_heuristics,
     }
 
+    # Cross-run dedup: reject windows overlapping previously selected clips
+    # (same match re-processed → same highlight windows get re-selected).
+    # History is a sidecar file so it survives yaml overwrites every run.
+    from automation.clip_selection.dedupe import load_previous_windows
+    dedup_cfg = cfg.get("clip_selection", {})
+    if match_key:
+        key = match_key
+    else:
+        key = _match_key(paths["input"], output_path)
+    history_path = str(Path(paths["highlights"]) / f"{key}.dedupe_history.yaml")
+    previous_windows = []
+    if dedup_cfg.get("dedup_enabled", True):
+        previous_windows = load_previous_windows(history_path)
+    if previous_windows:
+        context_for_agents["previous_windows"] = previous_windows
+        context_for_agents["dedup_overlap_threshold"] = dedup_cfg.get("dedup_overlap_threshold", 0.6)
+        log.info("Cross-run dedup: %d previously selected windows loaded from %s",
+                 len(previous_windows), history_path)
+
     # Score all candidates through 7 agents
     scored_candidates = selector.score_candidates(merged, context_for_agents)
 
@@ -476,8 +550,38 @@ def detect_highlights(
                  fmt_ts(w["end"]), w.get("final_score", 0),
                  yaml_data[key]["speed_factor"])
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        yaml.dump(yaml_data, f, default_flow_style=False, allow_unicode=True)
+    # Atomic write: temp file + rename so a killed run never leaves a corrupt
+    # highlights yaml that silently disables dedup. A fully-deduped re-run
+    # (top is empty) preserves the previous run's highlights file instead of
+    # clobbering the record of already-produced clips with an empty selection.
+    if top:
+        tmp_output = str(Path(output_path).with_suffix(".tmp"))
+        with open(tmp_output, "w", encoding="utf-8") as f:
+            yaml.dump(yaml_data, f, default_flow_style=False, allow_unicode=True)
+        Path(tmp_output).replace(output_path)
+        log.info("Highlights saved -> %s (%d clips)", output_path, len(highlights))
+    else:
+        if Path(output_path).exists():
+            log.warning(
+                "Dedup: empty selection — preserving existing highlights %s",
+                output_path,
+            )
+        else:
+            log.warning("No clips selected — no highlights file written to %s", output_path)
 
-    log.info("Highlights saved -> %s (%d clips)", output_path, len(highlights))
+    # Append this run's selection to the cross-run dedup history (sidecar)
+    # ONLY after the highlights output committed — a crash mid-run must not
+    # burn windows into history for clips that were never published. History
+    # failures degrade to a warning, never crash the pipeline.
+    if dedup_cfg.get("dedup_enabled", True) and top:
+        from automation.clip_selection.dedupe import append_windows
+        try:
+            append_windows(history_path, [
+                {"start": w["start"], "end": w["end"]} for w in top
+            ])
+            log.info("Cross-run dedup: appended %d windows to history", len(top))
+        except Exception as e:
+            log.warning("Cross-run dedup: failed to append history %s: %s",
+                        history_path, e)
+
     return highlights

@@ -232,3 +232,34 @@ class TestMain:
         ret = main(["--dry-run", "https://youtube.com/watch?v=test"])
         assert ret == 0
         assert len(pipeline_called) == 0
+
+
+class TestUrlMatchKey:
+    """Dedup-history namespace derived from the run URL must isolate matches
+    even in flows that never write video_metadata.json (skip-download, drive
+    sync) — the round-2 Critical fix."""
+
+    def test_watch_url_extracts_video_id(self):
+        from automation.orchestrator import _url_match_key
+        assert _url_match_key("https://youtube.com/watch?v=AbC123xyz98") == "AbC123xyz98"
+
+    def test_short_url_extracts_video_id(self):
+        from automation.orchestrator import _url_match_key
+        assert _url_match_key("https://youtu.be/AbC123xyz98") == "AbC123xyz98"
+
+    def test_shorts_url_extracts_video_id(self):
+        from automation.orchestrator import _url_match_key
+        assert _url_match_key("https://youtube.com/shorts/AbC123xyz98") == "AbC123xyz98"
+
+    def test_no_id_falls_back_to_host_path_slug(self):
+        from automation.orchestrator import _url_match_key
+        assert _url_match_key("https://example.com/match/42") == "example-com-match-42"
+
+    def test_empty_url_returns_none(self):
+        from automation.orchestrator import _url_match_key
+        assert _url_match_key(None) is None
+        assert _url_match_key("") is None
+
+    def test_trailing_params_do_not_bleed_into_key(self):
+        from automation.orchestrator import _url_match_key
+        assert _url_match_key("https://youtu.be/AbC123xyz98?si=extra&t=30") == "AbC123xyz98"

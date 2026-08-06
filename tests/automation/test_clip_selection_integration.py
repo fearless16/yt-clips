@@ -168,3 +168,80 @@ class TestIntegration:
 
         r2 = analyze_clip_hook("/f.mp4", "", 0, 8)
         assert r2["swipe_risk"] == "high"
+
+
+class TestPipelineDedupeWiring:
+    """detect_highlights() must load previous windows from the history sidecar
+    and reject overlapping re-runs — the M4 wiring gap from review."""
+
+    def test_detect_highlights_dedups_across_runs(self, tmp_path):
+        from unittest.mock import patch
+        from automation.clip_selection.dedupe import load_previous_windows
+        import automation.clip_selection.pipeline as pipe
+
+        input_dir = tmp_path / "input"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        out = tmp_path / "highlights"
+        out.mkdir(parents=True, exist_ok=True)
+
+        (input_dir / "video_metadata.json").write_text(json.dumps(
+            {"title": "India vs Australia Test", "url": "https://youtu.be/AbC123xyz98"},
+        ), encoding="utf-8")
+
+        transcript = tmp_path / "transcript.json"
+        transcript.write_text(json.dumps([
+            {"start": 0, "end": 8, "text": "Hello and welcome to the match"},
+            {"start": 8, "end": 20, "text": "Oh wow Kohli hits a massive six"},
+            {"start": 20, "end": 30, "text": "crowd goes absolutely wild here"},
+            {"start": 60, "end": 70, "text": "and he takes a single quietly"},
+            {"start": 70, "end": 90, "text": "Bumrah with a stunning wicket bowl"},
+            {"start": 90, "end": 100, "text": "what a delivery just brilliant"},
+        ]), encoding="utf-8")
+
+        original_paths = pipe.cfg["paths"]["highlights"]
+        original_input = pipe.cfg["paths"]["input"]
+        original_arbiter = pipe.cfg["clip_selection"].get("use_llm_arbiter")
+        pipe.cfg["paths"]["highlights"] = str(out)
+        pipe.cfg["paths"]["input"] = str(input_dir)
+        pipe.cfg["clip_selection"]["use_llm_arbiter"] = False
+
+        def _fake_rms(*a, **k):
+            return [(t, 0.5 + (0.4 if t in (10, 11, 12) else 0.0)) for t in range(0, 100)]
+
+        with patch.object(pipe, "_extract_audio_rms", side_effect=_fake_rms), \
+             patch.object(pipe, "_get_video_duration", return_value=100.0), \
+             patch.object(pipe, "TopicSegmenter") as seg_mock, \
+             patch.object(pipe, "MAX_CANDIDATES", 6):
+            seg_mock.return_value.segment.return_value = []
+            try:
+                first = pipe.detect_highlights(
+                    transcript_path=str(transcript),
+                    video_path="/fake/video.mp4",
+                    output_path=str(out / "video.yaml"),
+                )
+                assert first, "first run should select clips"
+                history = load_previous_windows(out / "AbC123xyz98.dedupe_history.yaml")
+                assert len(history) > 0, "history must persist after first run"
+
+                # Second run: same transcript → same windows re-selected → dedup
+                # must reject them all, leaving an empty selection (no fallback
+                # resurrection when previous_windows present).
+                second = pipe.detect_highlights(
+                    transcript_path=str(transcript),
+                    video_path="/fake/video.mp4",
+                    output_path=str(out / "video.yaml"),
+                )
+                assert second == [], \
+                    "re-run of identical content must yield zero clips, got %d" % len(second)
+
+                # And the previously written highlights YAML must survive the
+                # empty re-run instead of being clobbered.
+                surviving = load_previous_windows(out / "video.yaml")
+                assert len(surviving) > 0, \
+                    "deduped re-run must preserve the previous highlights yaml"
+            finally:
+                pipe.cfg["paths"]["highlights"] = original_paths
+                pipe.cfg["paths"]["input"] = original_input
+                pipe.cfg["clip_selection"]["use_llm_arbiter"] = original_arbiter
+
+

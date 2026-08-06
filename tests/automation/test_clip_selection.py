@@ -265,6 +265,30 @@ class TestBrutalRejectionAgent:
         result = agent.score(c, rms_context)
         assert result["should_reject"]
 
+    def test_rejects_cross_run_duplicate(self, sample_candidate, rms_context):
+        agent = BrutalRejectionAgent()
+        rms_context["previous_windows"] = [
+            {"start": 110.0, "end": 150.0},  # overlaps candidate window 120-145
+        ]
+        result = agent.score(sample_candidate, rms_context)
+        assert result["should_reject"]
+        assert "duplicate_content" in result["reasoning"]
+
+    def test_accepts_when_no_previous_overlap(self, sample_candidate, rms_context):
+        agent = BrutalRejectionAgent()
+        rms_context["previous_windows"] = [
+            {"start": 300.0, "end": 400.0},
+        ]
+        result = agent.score(sample_candidate, rms_context)
+        assert not result["should_reject"]
+        assert "duplicate_content" not in result["reasoning"]
+
+    def test_empty_previous_windows_no_reject(self, sample_candidate, rms_context):
+        agent = BrutalRejectionAgent()
+        rms_context["previous_windows"] = []
+        result = agent.score(sample_candidate, rms_context)
+        assert not result["should_reject"]
+
 
 # ── All Agents ─────────────────────────────────────────────────────
 
@@ -361,6 +385,70 @@ class TestClipSelector:
         scored = selector.score_candidates(candidates, rms_context)
         final = selector.select(scored, rms_context, max_selected=3, min_quality=0)
         assert len(final) <= 3
+
+    def test_cross_run_duplicate_rejected_entirely(self, sample_candidate,
+                                                   rms_context):
+        selector = ClipSelector(use_llm_arbiter=False)
+        rms_context["previous_windows"] = [
+            {"start": 110.0, "end": 150.0},
+        ]
+        rms_context["rms_map"].update({t: 0.7 for t in range(200, 220)})
+        rms_context["avg_rms"] = 0.45
+        candidates = [
+            dict(sample_candidate),
+            {"start": 200.0, "end": 220.0,
+             "text": "Oh wow! Bumrah takes a wicket! Crowd goes wild! "
+                     "Unbelievable moment in this match!"},
+        ]
+        scored = selector.score_candidates(candidates, rms_context)
+        final = selector.select(scored, rms_context, max_selected=2, min_quality=0)
+        # The duplicate window must be rejected, the non-overlapping one survives
+        surviving = [c for c in scored if not c.get("should_reject", False)]
+        assert len(surviving) == 1
+        assert surviving[0]["start"] == 200.0
+
+    def test_no_cross_run_context_normal_selection(self, sample_candidate,
+                                                   rms_context):
+        selector = ClipSelector(use_llm_arbiter=False)
+        scored = selector.score_candidates([sample_candidate], rms_context)
+        assert not scored[0].get("should_reject", False)
+
+    def test_all_rejected_with_dedup_returns_empty(self, sample_candidate,
+                                                   rms_context):
+        selector = ClipSelector(use_llm_arbiter=False)
+        rms_context["previous_windows"] = [
+            {"start": 110.0, "end": 150.0},
+        ]
+        candidates = [dict(sample_candidate) for _ in range(3)]
+        scored = selector.score_candidates(candidates, rms_context)
+        assert all(c.get("should_reject", False) for c in scored)
+        final = selector.select(scored, rms_context, max_selected=3, min_quality=0)
+        assert final == []
+
+    def test_all_rejected_without_dedup_still_falls_back(self, dull_candidate,
+                                                         rms_context):
+        # Pre-existing behavior preserved: no dedup context → fallback resurrects
+        selector = ClipSelector(use_llm_arbiter=False)
+        scored = selector.score_candidates([dict(dull_candidate)], rms_context)
+        assert scored[0].get("should_reject", False)
+        final = selector.select(scored, rms_context, max_selected=1, min_quality=0)
+        assert len(final) == 1
+
+    def test_history_present_but_no_dedup_flag_still_falls_back(
+            self, dull_candidate, rms_context):
+        # History exists but NONE of the rejections are dedup-driven (dull_hook
+        # etc.) → must fall back to top candidates, NOT return empty. The empty
+        # return is reserved for genuinely dedup-rejected selections.
+        selector = ClipSelector(use_llm_arbiter=False)
+        rms_context["previous_windows"] = [
+            {"start": 9999.0, "end": 10000.0},
+        ]
+        scored = selector.score_candidates([dict(dull_candidate)], rms_context)
+        assert scored[0].get("should_reject", False)
+        assert "duplicate_content" not in " ".join(
+            scored[0].get("rejection_reasons", []))
+        final = selector.select(scored, rms_context, max_selected=1, min_quality=0)
+        assert len(final) == 1
 
 
 # ── Hook Auditor ───────────────────────────────────────────────────
