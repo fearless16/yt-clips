@@ -153,12 +153,12 @@ class TestSalvageTemplatesAligned:
 
     def test_salvage_templates_no_10_15_hashtags(self):
         from automation.seo import seo
-        for tmpl in (seo._SALVAGE_TMPL, seo._SALVAGE_TMPL_FOOTBALL, seo._SALVAGE_TMPL_GENERAL):
+        for tmpl in (seo._SALVAGE_TMPL, seo._SALVAGE_TMPL_FOOTBALL):
             assert "10-15" not in tmpl, "salvage template still asks for 10-15 hashtags"
 
     def test_salvage_templates_instruct_against_live_title(self):
         from automation.seo import seo
-        for tmpl in (seo._SALVAGE_TMPL, seo._SALVAGE_TMPL_FOOTBALL, seo._SALVAGE_TMPL_GENERAL):
+        for tmpl in (seo._SALVAGE_TMPL, seo._SALVAGE_TMPL_FOOTBALL):
             assert "NEVER use" in tmpl and "Live Score" in tmpl, \
                 "salvage template must instruct against LIVE title framing"
 
@@ -175,12 +175,64 @@ class TestPromptsNoLiveScoreTitle:
 
     def test_prompts_instruct_against_live_title(self):
         from automation.seo import seo
-        for tmpl in (seo._PROMPT_TMPL, seo._PROMPT_TMPL_FOOTBALL, seo._PROMPT_TMPL_GENERAL):
+        for tmpl in (seo._PROMPT_TMPL, seo._PROMPT_TMPL_FOOTBALL):
             assert 'NEVER use "Live Score", "LIVE"' in tmpl, \
                 "prompt should explicitly warn against LIVE framing in title"
 
     def test_prompts_instruct_against_shorts_in_title(self):
         from automation.seo import seo
-        for tmpl in (seo._PROMPT_TMPL, seo._PROMPT_TMPL_FOOTBALL, seo._PROMPT_TMPL_GENERAL):
+        for tmpl in (seo._PROMPT_TMPL, seo._PROMPT_TMPL_FOOTBALL):
             assert 'or "#Shorts" in the title' in tmpl, \
                 "prompt should warn against #Shorts in the title text"
+
+
+class TestNoGenericFlow:
+
+    def test_general_templates_removed(self):
+        import automation.seo.seo as seo
+        for attr in ("_PROMPT_TMPL_GENERAL", "_SALVAGE_TMPL_GENERAL", "_SYSTEM_GENERAL"):
+            assert not hasattr(seo, attr), f"{attr} must be removed — cricket-only channel"
+
+    def test_general_domain_uses_cricket_template(self, monkeypatch):
+        import automation.seo.seo as seo
+        from automation.seo.trends import detect_video_domain
+
+        assert detect_video_domain("Top 10 Gadgets Under 5000")[0] == "general", \
+            "test precondition: title must route to general domain"
+
+        captured = {}
+        def fake_attempt(clip_id, user_prompt, transcript, video_title, is_shorts,
+                         provider_override=None, model_override=None,
+                         sys_instruction=None, salvage_tmpl=None):
+            captured["sys_instruction"] = sys_instruction
+            captured["salvage_tmpl"] = salvage_tmpl
+            captured["user_prompt"] = user_prompt
+            return {"title": "t", "description": "d", "hashtags": [], "search_terms": []}
+
+        monkeypatch.setattr(seo, "_attempt_seo_generation", fake_attempt)
+        seo.generate_clip_seo(
+            "clip_generic", "A discussion about the latest tech trends and gadgets.",
+            video_title="Top 10 Gadgets Under 5000",
+        )
+        assert captured["sys_instruction"] is seo._SYSTEM
+        assert captured["salvage_tmpl"] is seo._SALVAGE_TMPL
+        assert "Match: Top 10 Gadgets Under 5000" in captured["user_prompt"]
+        assert "India vs Other" not in captured["user_prompt"], \
+            "general clip must not be injected with invented cricket teams"
+
+    def test_general_domain_gets_neutral_teams(self, monkeypatch):
+        import automation.seo.seo as seo
+
+        captured = {}
+        def fake_attempt(clip_id, user_prompt, transcript, video_title, is_shorts,
+                         provider_override=None, model_override=None,
+                         sys_instruction=None, salvage_tmpl=None):
+            captured["user_prompt"] = user_prompt
+            return {"title": "t", "description": "d", "hashtags": [], "search_terms": []}
+
+        monkeypatch.setattr(seo, "_attempt_seo_generation", fake_attempt)
+        seo.generate_clip_seo(
+            "clip_generic", "A discussion about gadgets.",
+            video_title="Top 10 Gadgets Under 5000",
+        )
+        assert "Teams in this match: N/A" in captured["user_prompt"]

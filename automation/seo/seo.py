@@ -239,18 +239,6 @@ _SYSTEM_FOOTBALL = (
     "Return ONLY valid JSON — no markdown, no explanation, no extra text."
 )
 
-_SYSTEM_GENERAL = (
-    "You are an elite YouTube SEO strategist, optimized for the "
-    "June 2026 YouTube algorithm. You understand CTR optimization, watch-time signals, "
-    "engagement rate boosting, and discoverability through long-tail search terms. "
-    "Generate RICH, LONG, STRUCTURED descriptions with emoji section headers — "
-    "not short corporate summaries. Think like a top creator with 500K subs. "
-    "Include relevant search terms alongside English terms for discoverability. "
-    "CRITICAL: Only use facts, names, and events from the transcript. "
-    "NEVER invent or hallucinate facts or events. "
-    "Return ONLY valid JSON — no markdown, no explanation, no extra text."
-)
-
 _PROMPT_TMPL = """CONTEXT:
   Match: {video_title}
   Scorecard (with venue, player stats, match situation): {scorecard}
@@ -407,67 +395,6 @@ Must include:
 - Trending generic: #Football or #Soccer only if nothing better
 """
 
-_PROMPT_TMPL_GENERAL = """CONTEXT:
-  Topic: {video_title}
-  Live Trending / Search Spikes: {trend_topics}
-  Live Streaming URL: {live_stream_url}
-  (Unused scorecard/teams info for compatibility: {scorecard} {teams})
-
-CLIP TRANSCRIPT: {transcript}
-
-TASK: Generate RICH, LONG YouTube SEO for this specific clip.
-
-You MUST return valid JSON (no markdown, no other text):
-{{
-  "title": "<max 100 chars, multi-segment title with pipes>",
-  "description": "<LONG structured description, 2000-4500 chars, with emoji section headers>",
-  "hashtags": ["<2-3 hashtags>"],
-  "search_terms": ["<25-30 search terms>"]
-}}
-
-═══ TITLE FORMAT (max 100 chars) ═══
-- Use multi-segment format with pipes: 🔴 Hook | Context | Channel/Format
-- Start with the MOST DRAMATIC moment from THIS CLIP
-- Use emojis: 🔴 🔥 💥 ⚡ 😱 
-- NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are
-  on-demand Shorts clips, not live streams. Live framing confuses viewers
-  and the algorithm. Use a curiosity/record-style hook instead.
-
-═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED) ═══
-Write a LONG, structured description with these sections:
-
-1. 📝 HOOK (2-3 lines): Dramatic summary of what happened in the clip.
-   Use the most exciting moment as the opening line.
-
-2. 🔥 Key Takeaways / Highlights (3-5 lines): What is discussed in this clip.
-
-3. 👉 CTA: "If you like this content, please SUBSCRIBE! We are growing together."
-
-4. 💡 Video Info:
-   Topic, Context, Key details.
-
-5. ⚠️ Disclaimer:
-   "This is an opinion/reaction and discussion video. All opinions expressed are personal."
-
-6. 🏷️ Tags / Search Terms:
-   Embed ALL search terms as comma-separated list in the description too.
-
-7. #️⃣ Hashtags:
-   List all hashtags at the end of description.
-
-═══ SEARCH TERMS (25-30 terms) ═══
-Categories to cover:
-- Topic + action
-- Context
-- Long-tail phrases
-
-═══ HASHTAGS (exactly 2-3 for Shorts) ═══
-Only the most relevant 2-3. Shorts with many hashtags underperform.
-Must include:
-- #Shorts always
-- Max 2 topic/trending hashtags
-- NEVER use live-framing tags (#Live #LiveScore #CricketLive)
-"""
 
 _SALVAGE_TMPL_FOOTBALL = """Generate YouTube SEO for this football clip.
 
@@ -487,27 +414,6 @@ Return valid JSON ONLY:
   "description": "📝 Hook paragraph...\n\n🔥 Match Situation...\n\n🏟️ Match Info...\n\n⚽ Key Players...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
   "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#FIFA2026", "...up to 3"],
   "search_terms": ["player action", "match context", "aaj ka match", "world cup live", "...up to 25"]
-}}
-"""
-
-_SALVAGE_TMPL_GENERAL = """Generate YouTube SEO for this clip.
-
-Topic: {video_title}
-Clip: {transcript}
-
-Requirements:
-- Title: Hinglish/English, max 100 chars, multi-segment with pipes and emojis
-- NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are on-demand clips
-- Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ 💡 ⚠️ 🏷️ #️⃣)
-- Hashtags: 2-3 total (include #Shorts), topic names, trending tags
-- Search terms: 15-25 terms, mix English + Hinglish/local terms
-
-Return valid JSON ONLY:
-{{
-  "title": "🔴 Dramatic Hook | Context | Format 🔥",
-  "description": "📝 Hook paragraph...\n\n🔥 Highlights...\n\n🏟️ Context...\n\n💡 Key Details...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
-  "hashtags": ["#Shorts", "#Topic", "...up to 3"],
-  "search_terms": ["topic action", "context", "...up to 25"]
 }}
 """
 
@@ -1041,18 +947,14 @@ def generate_clip_seo(
         salvage_tmpl = _SALVAGE_TMPL_FOOTBALL
         default_title = "Football Match"
         default_teams = "Teams"
-    elif domain == "general":
-        sys_instruction = _SYSTEM_GENERAL
-        prompt_tmpl = _PROMPT_TMPL_GENERAL
-        salvage_tmpl = _SALVAGE_TMPL_GENERAL
-        default_title = "Video Topic"
-        default_teams = "N/A"
     else:
+        # Cricket-only channel: everything non-football uses cricket templates.
         sys_instruction = _SYSTEM
         prompt_tmpl = _PROMPT_TMPL
         salvage_tmpl = _SALVAGE_TMPL
         default_title = "Cricket Match"
-        default_teams = "India vs Other"
+        # General (non-sports) clips must not get invented cricket teams.
+        default_teams = "N/A" if domain == "general" else "India vs Other"
 
     # Build prompt
     user_prompt = prompt_tmpl.format(
