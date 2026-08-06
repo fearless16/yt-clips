@@ -54,6 +54,27 @@ def _banner(phase: str) -> None:
     phase_tracker.begin(phase)
 
 
+def _verify_tokens(skip: bool = False) -> None:
+    """Phase 0 — validate OAuth tokens before any expensive work.
+
+    Expired tokens are refreshed silently; tokens that can't be refreshed
+    trigger the interactive browser re-auth flow (setup_auth.reauth).
+    """
+    if skip:
+        log.warning("Skipping token verification (--skip-token-check)")
+        return
+    phase_tracker.begin("PHASE 0 — TOKEN VERIFICATION")
+    t0 = time.perf_counter()
+    from utils.token_refresh import ensure_fresh_tokens
+    ok = ensure_fresh_tokens(auto_reauth=True)
+    if not ok:
+        log.error("Token verification FAILED — aborting before expensive phases.")
+        phase_tracker.end("failed")
+        sys.exit(1)
+    log.info("Token verification PASSED in %.1f s", time.perf_counter() - t0)
+    phase_tracker.end("done")
+
+
 def run(
     url: str,
     skip_download: bool = False,
@@ -68,11 +89,13 @@ def run(
     auto_upload: bool = True,
     auto_schedule: bool = True,
     skip_tests: bool = False,
+    skip_token_check: bool = False,
     sample_minutes: Optional[int] = None,
     sync_from_drive: bool = False,
     mode: Optional[str] = None,
 ) -> None:
     cfg = load_config()
+    _verify_tokens(skip_token_check)
     if not skip_tests and not cfg.get("testing", {}).get("enabled", False):
         skip_tests = True
     _run_tests(skip_tests)
@@ -532,6 +555,7 @@ Examples:
     parser.add_argument("--no-upload",  action="store_true", help="Disable auto-upload to YouTube (default: enabled)")
     parser.add_argument("--no-schedule", action="store_true", help="Disable auto-schedule (default: enabled)")
     parser.add_argument("-skip-tests", "--skip-tests",    action="store_true", help="Skip pre-generation pytest guard")
+    parser.add_argument("--skip-token-check", action="store_true", help="Skip Phase 0 OAuth token verification")
     parser.add_argument("--sample-minutes", type=int, default=None, help="Download only a random N-minute sample of the video")
     parser.add_argument("--sync-from-drive", action="store_true", help="Pull video + transcript from Google Drive instead of downloading")
     parser.add_argument("--mode", choices=["face_mapper", "ref_grade"], default=None,
@@ -552,6 +576,7 @@ Examples:
         auto_upload=not args.no_upload,
         auto_schedule=not args.no_schedule,
         skip_tests=args.skip_tests,
+        skip_token_check=args.skip_token_check,
         sample_minutes=args.sample_minutes,
         sync_from_drive=args.sync_from_drive,
         mode=args.mode,

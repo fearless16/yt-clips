@@ -23,15 +23,15 @@ TOKEN_FILES = {
 }
 
 
-def _needs_browser_auth():
-    """Flag that gets set if any token needs a full browser OAuth re-auth."""
-    needs_browser = False
+def _find_tokens_needing_auth() -> list[str]:
+    """Return token files that need full browser OAuth re-auth."""
+    bad = []
 
     for token_file, scopes in TOKEN_FILES.items():
         path = Path(token_file)
         if not path.exists():
             log.warning(f"⚠ {token_file} not found — will need browser auth")
-            needs_browser = True
+            bad.append(token_file)
             continue
 
         try:
@@ -55,19 +55,32 @@ def _needs_browser_auth():
 
             # Token exists but can't be refreshed
             log.warning(f"⚠ {token_file} needs full re-auth (no valid refresh_token)")
-            needs_browser = True
+            bad.append(token_file)
 
         except Exception as e:
             log.warning(f"⚠ {token_file} could not be loaded: {e}")
-            needs_browser = True
+            bad.append(token_file)
 
-    return needs_browser
+    return bad
 
 
-def ensure_fresh_tokens():
+def _reauth_browser(token_file: str) -> bool:
+    """Open the interactive browser OAuth flow for a single token."""
+    try:
+        from setup_auth import reauth
+        return bool(reauth(token_file, TOKEN_FILES[token_file]))
+    except Exception as e:
+        log.error(f"❌ Re-auth failed for {token_file}: {e}")
+        return False
+
+
+def ensure_fresh_tokens(auto_reauth: bool = False) -> bool:
     """Check all token files, refresh silently if possible.
 
-    Returns True if all tokens are ready, False if browser auth is needed.
+    When ``auto_reauth`` is True, tokens that cannot be refreshed trigger an
+    interactive browser OAuth flow (setup_auth.reauth) instead of just warning.
+
+    Returns True if all tokens are ready, False otherwise.
     """
     try:
         import google.auth.transport.requests
@@ -77,15 +90,28 @@ def ensure_fresh_tokens():
         log.warning("google-auth libraries not installed locally — can't verify tokens")
         return True
 
-    needs_browser = _needs_browser_auth()
+    bad = _find_tokens_needing_auth()
 
-    if needs_browser:
+    if not bad:
+        log.info("✓ All OAuth tokens valid")
+        return True
+
+    if not auto_reauth:
         log.warning("─" * 50)
-        log.warning("Some tokens need browser-based re-authentication.")
-        log.warning("Run this on your Mac:")
-        log.warning("  .venv/bin/python setup_auth.py")
+        log.warning("Some tokens need browser-based re-authentication:")
+        for token_file in bad:
+            log.warning(f"  - {token_file}")
+        log.warning("Run:")
+        log.warning("  python setup_auth.py")
         log.warning("Then re-push the job.")
         log.warning("─" * 50)
         return False
 
+    log.warning("Opening browser to re-authenticate: %s", ", ".join(bad))
+    for token_file in list(bad):
+        if _reauth_browser(token_file):
+            log.info(f"✓ {token_file} re-authenticated")
+        else:
+            log.error(f"❌ {token_file} still invalid after re-auth")
+            return False
     return True

@@ -87,7 +87,8 @@ def test_pipeline_integration_success_flow(tmp_path):
             skip_seo=False,
             auto_sync=True,
             auto_upload=True,
-            skip_tests=True
+            skip_tests=True,
+            skip_token_check=True
         )
         
         
