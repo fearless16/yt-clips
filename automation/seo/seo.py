@@ -266,7 +266,7 @@ You MUST return valid JSON (no markdown, no other text):
 {{
     "title": "<max 100 chars, multi-segment Hinglish title with pipes>",
     "description": "<LONG structured description, 2000-4500 chars, with emoji section headers — EVERY search term embedded naturally>",
-    "hashtags": ["<15 hashtags>"],
+    "hashtags": ["<2-3 hashtags>"],
     "search_terms": ["<25-30 search terms including Hindi transliterations> — these also appear NATURALLY in description text"]
 }}
 
@@ -277,8 +277,11 @@ You MUST return valid JSON (no markdown, no other text):
   WRONG: "कोहली ने मारा सिक्स!" (NO Hindi script)
 - Start with the MOST DRAMATIC moment from THIS CLIP
 - Use emojis: 🔴 🔥 💥 ⚡ 😱 🏏
+- NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are
+  on-demand Shorts clips, not live streams. Live framing confuses viewers
+  and the algorithm. Use a curiosity/record-style hook instead.
 - Examples:
-  "🔴 Kohli OUT on 0! | RCB vs MI IPL 2026 | Live Score #Shorts"
+  "Kohli ka RECORD-BREAKING 100! 🏏 | RCB vs MI IPL 2026"
   "Bumrah ki DEADLY Yorker! 💥 | MI vs CSK Highlights | IPL 2026"
 
 ═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED, NATURAL) ═══
@@ -320,14 +323,13 @@ Categories to cover:
 - Regional: "cricket live match today online"
 - Do NOT use ultra-generic terms like "cricket video" or "sports video"
 
-═══ HASHTAGS (exactly 15) ═══
+═══ HASHTAGS (exactly 2-3 for Shorts) ═══
+Only the most relevant 2-3. Shorts with many hashtags underperform.
 Must include:
-- #Shorts (if applicable)
-- Player hashtags: #ViratKohli #JaspritBumrah etc.
-- Team hashtags: #RCB #MI #MumbaiIndians etc.
-- Event: #IPL2026 #IPL
-- Format: #LiveCricket #CricketLive #LiveScore
-- Trending: #Cricket #T20
+- #Shorts always
+- One player or team tag: #ViratKohli or #RCB vs MI (max 2 topic tags)
+- NEVER use live-framing tags: #LiveCricket #CricketLive #LiveScore
+- Trending generic: #Cricket or #T20 only if nothing better
 """
 
 _PROMPT_TMPL_FOOTBALL = """CONTEXT:
@@ -345,7 +347,7 @@ You MUST return valid JSON (no markdown, no other text):
 {{
   "title": "<max 100 chars, multi-segment Hinglish/English title with pipes>",
   "description": "<LONG structured description, 2000-4500 chars, with emoji section headers>",
-  "hashtags": ["<15 hashtags>"],
+  "hashtags": ["<2-3 hashtags>"],
   "search_terms": ["<25-30 search terms including Hinglish transliterations>"]
 }}
 
@@ -353,8 +355,11 @@ You MUST return valid JSON (no markdown, no other text):
 - Use multi-segment format with pipes: 🔴 Hook | Match Context | Channel/Format
 - Start with the MOST DRAMATIC moment from THIS CLIP
 - Use emojis: 🔴 🔥 💥 ⚡ 😱 ⚽ 🏆
+- NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are
+  on-demand Shorts clips, not live streams. Live framing confuses viewers
+  and the algorithm. Use a curiosity/record-style hook instead.
 - Examples:
-  "🔴 Mbappé ne kardia DHAMAKA! 🤯 | France vs Argentina WC | Live Score #Shorts"
+  "Mbappé ka MAGIC moment! 🤯 | France vs Argentina WC | FIFA 2026"
   "Ronaldo's LAST World Cup? 💔 | Portugal vs Morocco Highlights | FIFA 2026"
 
 ═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED) ═══
@@ -393,14 +398,13 @@ Categories to cover:
 - Long-tail: "how to watch world cup live", "fifa live stream free"
 - Do NOT use ultra-generic terms like "sports video" or "football video"
 
-═══ HASHTAGS (exactly 15) ═══
+═══ HASHTAGS (exactly 2-3 for Shorts) ═══
+Only the most relevant 2-3. Shorts with many hashtags underperform.
 Must include:
-- #Shorts (if applicable)
-- Player hashtags: #Mbappe #Ronaldo #Messi etc.
-- Team hashtags: #France #Portugal #Argentina etc.
-- Event: #FIFAWorldCup #WorldCup2026 #FIFA2026
-- Format: #LiveFootball #FootballLive #LiveScore
-- Trending: #Football #Soccer #WorldCup
+- #Shorts always
+- One player or team tag: #Mbappe or #France (max 2 topic tags)
+- NEVER use live-framing tags: #LiveFootball #FootballLive #LiveScore
+- Trending generic: #Football or #Soccer only if nothing better
 """
 
 _PROMPT_TMPL_GENERAL = """CONTEXT:
@@ -417,7 +421,7 @@ You MUST return valid JSON (no markdown, no other text):
 {{
   "title": "<max 100 chars, multi-segment title with pipes>",
   "description": "<LONG structured description, 2000-4500 chars, with emoji section headers>",
-  "hashtags": ["<15 hashtags>"],
+  "hashtags": ["<2-3 hashtags>"],
   "search_terms": ["<25-30 search terms>"]
 }}
 
@@ -425,6 +429,9 @@ You MUST return valid JSON (no markdown, no other text):
 - Use multi-segment format with pipes: 🔴 Hook | Context | Channel/Format
 - Start with the MOST DRAMATIC moment from THIS CLIP
 - Use emojis: 🔴 🔥 💥 ⚡ 😱 
+- NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are
+  on-demand Shorts clips, not live streams. Live framing confuses viewers
+  and the algorithm. Use a curiosity/record-style hook instead.
 
 ═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED) ═══
 Write a LONG, structured description with these sections:
@@ -454,11 +461,12 @@ Categories to cover:
 - Context
 - Long-tail phrases
 
-═══ HASHTAGS (exactly 15) ═══
+═══ HASHTAGS (exactly 2-3 for Shorts) ═══
+Only the most relevant 2-3. Shorts with many hashtags underperform.
 Must include:
-- #Shorts (if applicable)
-- Topic hashtags
-- Trending hashtags
+- #Shorts always
+- Max 2 topic/trending hashtags
+- NEVER use live-framing tags (#Live #LiveScore #CricketLive)
 """
 
 _SALVAGE_TMPL_FOOTBALL = """Generate YouTube SEO for this football clip.
@@ -468,15 +476,16 @@ Clip: {transcript}
 
 Requirements:
 - Title: Hinglish/English, max 100 chars, multi-segment with pipes and emojis
+- NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are on-demand clips
 - Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ ⚽ ⚠️ 🏷️ #️⃣)
-- Hashtags: 10-15, include #Shorts, player names, teams, event
+- Hashtags: 2-3 total (include #Shorts), player names, teams, event
 - Search terms: 15-25 terms, mix English + Hinglish transliteration (aaj ka match, world cup live stream)
 
 Return valid JSON ONLY:
 {{
   "title": "🔴 Dramatic Hook | Match Context | Format 🔥",
   "description": "📝 Hook paragraph...\n\n🔥 Match Situation...\n\n🏟️ Match Info...\n\n⚽ Key Players...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
-  "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#FIFA2026", "...up to 15"],
+  "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#FIFA2026", "...up to 3"],
   "search_terms": ["player action", "match context", "aaj ka match", "world cup live", "...up to 25"]
 }}
 """
@@ -488,15 +497,16 @@ Clip: {transcript}
 
 Requirements:
 - Title: Hinglish/English, max 100 chars, multi-segment with pipes and emojis
+- NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are on-demand clips
 - Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ 💡 ⚠️ 🏷️ #️⃣)
-- Hashtags: 10-15, include #Shorts, topic names, trending tags
+- Hashtags: 2-3 total (include #Shorts), topic names, trending tags
 - Search terms: 15-25 terms, mix English + Hinglish/local terms
 
 Return valid JSON ONLY:
 {{
   "title": "🔴 Dramatic Hook | Context | Format 🔥",
   "description": "📝 Hook paragraph...\n\n🔥 Highlights...\n\n🏟️ Context...\n\n💡 Key Details...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
-  "hashtags": ["#Shorts", "#Topic", "...up to 15"],
+  "hashtags": ["#Shorts", "#Topic", "...up to 3"],
   "search_terms": ["topic action", "context", "...up to 25"]
 }}
 """
@@ -508,15 +518,16 @@ Clip: {transcript}
 
 Requirements:
 - Title: Hinglish (Hindi in English/Roman letters, NO Devanagari), max 100 chars, multi-segment with pipes and emojis
+- NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are on-demand clips
 - Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ 🏏 ⚠️ 🏷️ #️⃣)
-- Hashtags: 10-15, include #Shorts, player names, teams, event
+- Hashtags: 2-3 total (include #Shorts), player names, teams, event
 - Search terms: 15-25 terms, mix English + Hindi transliteration (aaj ka match, live cricket score)
 
 Return valid JSON ONLY:
 {{
   "title": "🔴 Dramatic Hinglish hook | Match Context | Format 🔥",
   "description": "📝 Hook paragraph...\n\n🔥 Match Situation...\n\n🏟️ Match Info...\n\n🏏 Key Players...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
-  "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#IPL2026", "...up to 15"],
+  "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#IPL2026", "...up to 3"],
   "search_terms": ["player action", "match context", "aaj ka match", "live cricket score", "...up to 25"]
 }}
 """
@@ -609,7 +620,7 @@ def _inject_viral_elements(title: str, description: str, hashtags: List[str],
     if team_names:
         team_hashtags = [f"#{t.replace(' ','')}" for t in team_names if t]
         hashtags = list(dict.fromkeys(team_hashtags + hashtags))
-        hashtags = _rank_and_optimize_tags(hashtags, description)[:5]
+        hashtags = _rank_and_optimize_tags(hashtags, description)[:3]
 
     return {"title": title, "description": description, "hashtags": hashtags}
 
@@ -707,11 +718,49 @@ def _consolidate_seo(title: str, description: str, hashtags: List[str],
     }
 
 
+def _shorts_hashtag_cap() -> int:
+    """Read seo.max_hashtags from config, crash-proof and clamped to [1, 15].
+
+    Null/float/string config values or an out-of-range number silently fall
+    back to the default of 3 instead of raising (a misconfig must never take
+    down the whole SEO path or zero out every Short's hashtags).
+    """
+    try:
+        cap = int(cfg.get("seo", {}).get("max_hashtags", 3))
+    except (TypeError, ValueError):
+        cap = 3
+    return min(max(cap, 1), 15)
+
+
+_HASHTAG_TOKEN = re.compile(r"#[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _cap_description_hashtags(description: str, hashtags: List[str]) -> str:
+    """Strip every hashtag token from the description body, then re-append a
+    canonical capped block.
+
+    YouTube renders the first 3 #-prefixed tokens in the description as chips
+    above the title, and the rest as plain body text. To guarantee the VISIBLE
+    hashtags on an uploaded Short are exactly the capped, #Shorts-first set,
+    we remove all stray ``#Word`` tokens from the body and append the final
+    ``hashtags`` list as one clean block at the end.
+    """
+    body = _HASHTAG_TOKEN.sub("", description or "")
+    body = re.sub(r"[ \t]{2,}", " ", body).rstrip()
+    block = " ".join(hashtags)
+    if not block:
+        return body[:4500]
+    return (body + "\n\n" + block)[:4500]
+
+
 def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: bool = True) -> Dict:
     """Ensure title length, description length, hashtag count, search term count.
 
-    Enforces strict caps: title≤100, description≤4500, hashtags≤15, terms≤30.
+    Enforces strict caps: title≤100, description≤4500, hashtags≤15 (Shorts:
+    seo.max_hashtags, default 3), terms≤30.
     Strips generic poison terms from search_terms.
+    For Shorts, the description hashtag block is scrubbed to the same cap so
+    the visible hashtags match the metadata (upload uses description text).
     YouTube API limits: title=100 chars, description=5000 bytes, tags=500 chars.
     We stay under API limits with margin for safety.
     """
@@ -730,7 +779,20 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
         if t_clean.lower() not in seen:
             seen.add(t_clean.lower())
             deduped.append(f"#{t_clean}")
-    out["hashtags"] = deduped[:15]
+
+    if is_shorts:
+        # Shorts get 2-3 hashtags max; #Shorts always leads the list.
+        cap = _shorts_hashtag_cap()
+        shorts_hashtags = [t for t in deduped if t.lstrip("#").lower() == "shorts"]
+        others = [t for t in deduped if t.lstrip("#").lower() != "shorts"]
+        if not shorts_hashtags:
+            shorts_hashtags = ["#Shorts"]
+        deduped = shorts_hashtags + others
+    else:
+        cap = 15
+    out["hashtags"] = deduped[:cap]
+    if is_shorts:
+        out["description"] = _cap_description_hashtags(out["description"], out["hashtags"])
 
     terms = out.get("search_terms") or []
     if isinstance(terms, str):

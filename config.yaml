@@ -213,6 +213,8 @@ seo:
   inject_viral_elements: false
   # Sleep between SEO calls for each clip (seconds). Longer = less rate limiting.
   inter_clip_sleep_s: 30
+  # Max hashtags for Shorts uploads — champions use 2-3, not 15.
+  max_hashtags: 3
 
 # ── SEO Learner ─────────────────────────────────────────────────────────────────
 # Self-improving SEO system — learns from past performance to boost future clips.
