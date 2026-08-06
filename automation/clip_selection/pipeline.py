@@ -27,8 +27,47 @@ cfg = load_config()
 log = get_logger("clip_pipeline")
 
 
-# ── Copied from highlight.py for audio RMS extraction ──────────────────
+def _compute_speed_factor(
+    window_duration: float,
+    target_duration: float,
+    max_speedup: float,
+) -> float:
+    """Return the speed multiplier needed to fit a window within the target.
 
+    Mirrors ``highlight._compute_speed_factor`` — windows at or below target
+    run at 1.0x, longer windows are compressed to complete within the target
+    seconds, capped at ``max_speedup``.
+    """
+    if window_duration <= 0 or target_duration <= 0:
+        return 1.0
+    if window_duration <= target_duration:
+        return 1.0
+    cap = max(1.0, max_speedup)
+    return round(min(cap, window_duration / target_duration), 2)
+
+
+def _build_clip_yaml_entry(
+    start: float,
+    end: float,
+    score: float,
+    text: str,
+    target_duration: float,
+    max_speedup: float,
+) -> dict:
+    """Build a clip YAML entry, attaching the duration-compression speed_factor."""
+    duration = max(0.0, end - start)
+    return {
+        "start": fmt_ts(start),
+        "end": fmt_ts(end),
+        "start_sec": round(start, 2),
+        "end_sec": round(end, 2),
+        "score": round(score, 2),
+        "speed_factor": _compute_speed_factor(duration, target_duration, max_speedup),
+        "text": text,
+    }
+
+
+# ── Copied from highlight.py for audio RMS extraction ──────────────────
 def _extract_audio_rms(video_path: str, chunk_seconds: float = 1.0) -> list[tuple[float, float]]:
     import subprocess
     import wave
@@ -385,6 +424,9 @@ def detect_highlights(
 
     top.sort(key=lambda w: w["start"])
 
+    target_duration = float(h_cfg.get("target_duration", 22.0))
+    max_speedup = float(h_cfg.get("max_speedup", 1.6))
+
     # ── Build YAML output ─────────────────────────────────────────────────
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     yaml_data = {}
@@ -398,14 +440,14 @@ def detect_highlights(
         ]
         window_text = " ".join(window_text_parts).strip() or "Cricket Highlights"
 
-        yaml_data[key] = {
-            "start": fmt_ts(w["start"]),
-            "end": fmt_ts(w["end"]),
-            "start_sec": round(w["start"], 2),
-            "end_sec": round(w["end"], 2),
-            "score": round(w.get("final_score", w.get("score", 0)), 2),
-            "text": window_text,
-        }
+        yaml_data[key] = _build_clip_yaml_entry(
+            start=w["start"],
+            end=w["end"],
+            score=w.get("final_score", w.get("score", 0)),
+            text=window_text,
+            target_duration=target_duration,
+            max_speedup=max_speedup,
+        )
 
         if "agent_scores" in w:
             yaml_data[key]["agent_scores"] = {
@@ -424,13 +466,15 @@ def detect_highlights(
             "start_ts": fmt_ts(w["start"]),
             "end_ts": fmt_ts(w["end"]),
             "score": w.get("final_score", w.get("score", 0)),
+            "speed_factor": yaml_data[key]["speed_factor"],
             "text": window_text,
             "agent_scores": w.get("agent_scores", {}),
             "hook_score": w.get("hook_score"),
         })
 
-        log.info("  %s: %s -> %s (score=%.1f)", key, fmt_ts(w["start"]),
-                 fmt_ts(w["end"]), w.get("final_score", 0))
+        log.info("  %s: %s -> %s (score=%.1f, speed=%.2fx)", key, fmt_ts(w["start"]),
+                 fmt_ts(w["end"]), w.get("final_score", 0),
+                 yaml_data[key]["speed_factor"])
 
     with open(output_path, "w", encoding="utf-8") as f:
         yaml.dump(yaml_data, f, default_flow_style=False, allow_unicode=True)

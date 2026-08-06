@@ -64,6 +64,25 @@ def _sanitize_lighting_filter(value) -> str:
     return candidate
 
 
+def _merge_highlight_speed(strategy: dict, info: dict) -> dict:
+    """Merge a highlight-level speed_factor into the export strategy.
+
+    The duration-compression speed (from the clip YAML, computed so interesting
+    content fits within the target seconds) is combined with the frame-analysis
+    speed. The stronger of the two wins, since both aim to shorten output.
+    """
+    if not isinstance(strategy, dict):
+        strategy = {}
+    if not isinstance(info, dict):
+        return strategy
+    yaml_speed = _normalize_speed(info.get("speed_factor", 1.0))
+    if yaml_speed <= 1.0:
+        return strategy
+    current = _normalize_speed(strategy.get("speed_factor", 1.0))
+    strategy["speed_factor"] = max(current, yaml_speed)
+    return strategy
+
+
 def _sanitize_strategy(raw_strategy) -> Dict:
     if not isinstance(raw_strategy, dict):
         raw_strategy = {}
@@ -803,6 +822,9 @@ def export_clip(
 
     # ── Premium Render Path ──────────────────────────────────────────────────
     if premium_enabled:
+        if strategy.get("speed_factor", 1.0) > 1.0:
+            log.warning("[%s] Premium render ignores speed_factor %.2fx — clip may exceed target duration",
+                        clip_id, strategy.get("speed_factor", 1.0))
         try:
             from premium_render import PremiumRender
             pr = PremiumRender()
@@ -830,6 +852,9 @@ def export_clip(
         log.info("[%s] Using variable speed: %.2fx", clip_id, speed)
     else:
         speed = _normalize_speed(global_speed)
+        if analysis_speed > 1.0:
+            log.warning("[%s] Variable speed disabled — speed_factor %.2fx ignored, using global %.2fx",
+                        clip_id, analysis_speed, speed)
         log.info("[%s] Variable speed disabled, using global speed: %.2fx", clip_id, speed)
 
     try:
@@ -1145,6 +1170,10 @@ def export_all(
         analysis = analyze_clip(video_path, start, end,
                                 transcript_segments=transcript_segments, clip_id=clip_id)
         strategy = analysis.get("export_strategy", {})
+        # Duration-compression speed from the clip YAML (interesting content
+        # must complete within the target seconds) overrides the frame-analysis speed.
+        strategy = _merge_highlight_speed(strategy, info)
+        analysis["export_strategy"] = strategy
         if strategy.get("should_drop", False):
             layout = analysis.get("layout", {}).get("layout_type", "unknown")
             # Degraded mode: override to center crop instead of dropping

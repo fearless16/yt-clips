@@ -145,11 +145,13 @@ class TestConfigDurationPreference:
         from utils.config import load_config
         cfg = load_config()
         hl = cfg.get("highlight", {})
-        # After config change, these should exist
+        # After config change, these should exist.
+        # Research-backed: interesting content must complete within 20-25s
+        # (vidIQ study + low-sub/high-view Shorts channel audit).
         assert "preferred_duration_min" in hl
         assert "preferred_duration_max" in hl
-        assert hl["preferred_duration_min"] >= 30
-        assert hl["preferred_duration_max"] <= 50
+        assert hl["preferred_duration_min"] <= 20
+        assert hl["preferred_duration_max"] <= 28
 
 
 # ---------------------------------------------------------------------------
