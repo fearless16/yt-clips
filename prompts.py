@@ -230,7 +230,7 @@ Constraints:
   CORRECT: "Kohli ne maara SIX!" / "Bumrah ki deadly YORKER!"
   WRONG: "कोहली ने मारा सिक्स!"
 - Description: English, structured with emoji headers (📝 🔥 🏟️ 🏏 ⚠️ 🏷️ #️⃣)
-- Include Hindi transliterated search terms (aaj ka match, live cricket score)
+- Include Hindi transliterated search terms (aaj ka match, match highlights). NEVER use live-framing search terms like "live score", "live stream", or "live match" — these are on-demand Shorts clips, not live streams.
 - CRITICAL: Only use player names and events from the transcript.
 - NEVER invent or hallucinate player names or match events.
 

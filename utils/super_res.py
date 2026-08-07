@@ -279,11 +279,15 @@ class SuperResEnhancer:
         output_path: str,
         target_w: int = 1080,
         target_h: int = 1920,
+        vf: str = "",
     ) -> bool:
         """
         Upscale video using cv2 for reading (fast) + ffmpeg for encoding (H.264 quality).
         cv2 VideoCapture is 2-3x faster than ffmpeg subprocess for frame extraction.
         ffmpeg H.264 encode preserves quality (mp4v would be lower quality).
+
+        vf: optional ffmpeg -vf filter (e.g. hook overlay drawtext) applied at
+            final resolution during the encode pass.
         """
         if not self.available:
             log.warning("Super-res not available; copying input unchanged")
@@ -363,8 +367,10 @@ class SuperResEnhancer:
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-shortest",
-                output_path,
             ]
+            if vf:
+                cmd_encode.extend(["-vf", vf])
+            cmd_encode.append(output_path)
             r = subprocess.run(cmd_encode, capture_output=True, text=True)
             if r.returncode != 0:
                 log.error("Encode failed: %s", r.stderr[-300:])

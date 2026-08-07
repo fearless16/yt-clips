@@ -38,6 +38,192 @@ MIN_OUTPUT_BYTES = 5_000
 SAFE_LIGHTING_FILTERS = ("eq=", "curves=", "hue=", "unsharp=", "hqdn3d=")
 
 
+# ── Hook Overlay (First 2s Retention) ─────────────────────────────────────────
+_HOOK_TEXT_MAP = {
+    "wicket": "🎯 WICKET!",
+    "six": "🔥 MASSIVE SIX!",
+    "four": "⚡ FOUR!",
+    "crowd_eruption": "👥 CROWD GOES WILD!",
+    "commentator_scream": "😱 UNBELIEVABLE!",
+    "reaction_face": "🤯 INSANE!",
+    "controversy": "⚠️ CONTROVERSY!",
+    "milestone": "🏆 MILESTONE!",
+    "drama": "🎭 DRAMA!",
+    "instant_payoff": "💥 PAYOFF!",
+    "generic_start": "🏏 CRICKET HIGHLIGHTS",
+}
+
+
+def _generate_hook_overlay_text(hook_analysis: Dict) -> str:
+    """Generate engaging overlay text from hook analysis.
+
+    Args:
+        hook_analysis: Dict from hook_auditor.analyze_clip_hook()
+
+    Returns:
+        Short text (max ~3 words / 30 chars) for mobile-first readability.
+    """
+    if not isinstance(hook_analysis, dict) or not hook_analysis:
+        return _HOOK_TEXT_MAP["generic_start"]
+
+    hook_type = hook_analysis.get("hook_type", "generic_start")
+    hook_score = hook_analysis.get("hook_score", 0)
+    hook_types = hook_analysis.get("hook_types_found", [])
+
+    # Use primary hook type, fallback to first found
+    primary = hook_type if hook_type in _HOOK_TEXT_MAP else (
+        hook_types[0] if hook_types else "generic_start"
+    )
+
+    text = _HOOK_TEXT_MAP.get(primary, _HOOK_TEXT_MAP["generic_start"])
+
+    # For weak hooks, still show something engaging
+    if hook_score < 30 and primary != "generic_start":
+        text = _HOOK_TEXT_MAP["generic_start"]
+
+    # Ensure max length for mobile readability (3 words ~ 30 chars)
+    if len(text) > 30:
+        text = text[:27] + "..."
+
+    return text
+
+
+def _build_hook_overlay_filter(
+    overlay_text: str,
+    duration: float = 2.0,
+    position: str = "bottom",
+    font_size: int = 80,
+    font_color: str = "white",
+    stroke_color: str = "black",
+    stroke_width: int = 3,
+    font_file: str = "",
+) -> str:
+    """Build ffmpeg drawtext filter for hook overlay.
+
+    Args:
+        overlay_text: Text to display
+        duration: How long to show (seconds)
+        position: "top", "bottom", or "center"
+        font_size: Font size in pixels
+        font_color: Font color
+        stroke_color: Outline color
+        stroke_width: Outline width
+        font_file: Optional path to .ttf font file
+
+    Returns:
+        ffmpeg drawtext filter string with time-limited enable.
+    """
+    # Escape single quotes and colons for ffmpeg filter
+    safe_text = overlay_text.replace("'", r"\'").replace(":", r"\:")
+
+    # Position calculation
+    if position == "top":
+        y_expr = "20"
+    elif position == "center":
+        y_expr = "(h-text_h)/2"
+    else:  # bottom
+        y_expr = "h-text_h-80"  # 80px from bottom (above YouTube UI)
+
+    x_expr = "(w-text_w)/2"  # Center horizontally
+
+    # Build fontfile option if provided.
+    # Windows paths (C:\Windows\Fonts\arial.ttf) break filter parsing:
+    # normalize backslashes to forward slashes and escape the drive colon so
+    # the filter is parseable on real ffmpeg.
+    if font_file:
+        safe_font = font_file.replace("\\", "/").replace(":", r"\:")
+        fontfile_opt = f":fontfile='{safe_font}'"
+    else:
+        fontfile_opt = ""
+
+    # Time-limited enable: show only for first N seconds
+    enable_expr = f"enable='between(t,0,{duration})'"
+
+    return (
+        f"drawtext="
+        f"text='{safe_text}'"
+        f":fontsize={font_size}"
+        f":fontcolor={font_color}"
+        f":borderw={stroke_width}"
+        f":bordercolor={stroke_color}"
+        f":x={x_expr}"
+        f":y={y_expr}"
+        f"{fontfile_opt}"
+        f":{enable_expr}"
+    )
+
+
+def _build_hook_overlay_from_analysis(
+    hook_analysis: Dict,
+    output_duration: Optional[float],
+) -> str:
+    """Build the drawtext filter for a clip's hook analysis, or "" if absent/disabled.
+
+    Central helper so the merge path AND the super-res final pass share one
+    source of truth for config + text generation.
+    """
+    if not isinstance(hook_analysis, dict) or not hook_analysis:
+        return ""
+
+    # Check config for hook overlay enabled
+    hook_cfg = cfg.get("export", {}).get("hook_overlay", {})
+    if not hook_cfg.get("enabled", True):
+        return ""
+
+    overlay_text = _generate_hook_overlay_text(hook_analysis)
+    if not overlay_text:
+        return ""
+
+    # Cap overlay duration at clip duration
+    overlay_dur = min(hook_cfg.get("duration", 2.0), output_duration or 2.0)
+    if overlay_dur <= 0:
+        return ""
+
+    return _build_hook_overlay_filter(
+        overlay_text=overlay_text,
+        duration=overlay_dur,
+        position=hook_cfg.get("position", "bottom"),
+        font_size=hook_cfg.get("font_size", 80),
+        font_color=hook_cfg.get("font_color", "white"),
+        stroke_color=hook_cfg.get("stroke_color", "black"),
+        stroke_width=hook_cfg.get("stroke_width", 3),
+        font_file=hook_cfg.get("font_file", ""),
+    )
+
+
+def _merge_hook_overlay_filter(
+    filter_base: str,
+    hook_analysis: Dict,
+    output_duration: Optional[float],
+    native_res: bool = False,
+) -> str:
+    """Merge hook overlay filter into the filter chain.
+
+    Args:
+        filter_base: Existing filter chain string (simple chain OR graph)
+        hook_analysis: Hook analysis dict from hook_auditor
+        output_duration: Clip output duration (seconds)
+        native_res: If True, hook overlay is skipped (applied at final res)
+
+    Returns:
+        Updated filter chain with hook overlay.
+    """
+    if native_res:
+        return filter_base
+
+    overlay_filter = _build_hook_overlay_from_analysis(hook_analysis, output_duration)
+    if not overlay_filter:
+        return filter_base
+
+    # Append to the END of the chain. For a simple chain this continues the
+    # same filter path; for a graph (guest_cam_on vstack) it continues the
+    # final segment — which IS the graph output. We must NOT rely on a
+    # "[v_tmp]" label here: that label is appended later by the logo wrap, so
+    # it does not exist at merge time (the old code silently dropped the
+    # overlay on vstack layouts).
+    return f"{filter_base},{overlay_filter}"
+
+
 def _compact_text(text: str, max_lines: int = 20) -> str:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return "\n".join(lines[-max_lines:])
@@ -686,6 +872,10 @@ def _build_enhance_stack(
         if fade_out > 0:
             filter_base += f",fade=t=out:st={max(0.0, output_duration - fade_out):.6f}:d={fade_out:.6f}"
 
+    # ── Hook overlay (first 2s retention) ──────────────────────────────────────
+    hook_analysis = analysis.get("hook_analysis", {}) if isinstance(analysis, dict) else {}
+    filter_base = _merge_hook_overlay_filter(filter_base, hook_analysis, output_duration, native_res)
+
     # ── Logo overlay ──────────────────────────────────────────────────────────
     logo_path = cfg["thumbnail"].get("template_path", "channel_logo.png")
     logo_enabled = Path(logo_path).exists() if use_logo is None else use_logo
@@ -894,9 +1084,14 @@ def export_clip(
                     output_file.parent.mkdir(parents=True, exist_ok=True)
                     target_w = int(cfg["export"]["width"])
                     target_h = int(cfg["export"]["height"])
+                    # Hook overlay applied at FINAL res during the upscale encode
+                    # (baking it into native frames would scale it 4x).
+                    hook_overlay = _build_hook_overlay_from_analysis(
+                        analysis.get("hook_analysis"), output_duration)
                     success = sr.upscale_video(
                         native_path, output_path,
                         target_w=target_w, target_h=target_h,
+                        vf=hook_overlay,
                     )
                     # Clean up temp native-res file
                     try:
@@ -1184,6 +1379,31 @@ def export_all(
             analysis["layout"]["face_in_frame"] = True
             analysis["layout"]["face_cx"] = None  # Force center detection
             analysis["layout"]["face_cy"] = None
+
+        # Hook analysis for first-2s retention overlay
+        # Uses transcript text from highlight info or segments
+        clip_text = info.get("text", "")
+        if not clip_text and transcript_segments:
+            # Extract transcript text for this clip window
+            clip_segments = [
+                seg for seg in transcript_segments
+                if seg["end"] > start and seg["start"] < end
+            ]
+            clip_text = " ".join(seg.get("text", "") for seg in clip_segments)
+        clip_duration = end - start
+        try:
+            from automation.clip_selection.hook_auditor import analyze_clip_hook
+            hook_result = analyze_clip_hook(
+                clip_path="",  # Not needed for text-only analysis
+                transcript_text=clip_text,
+                start_sec=start,
+                clip_duration=clip_duration,
+            )
+            analysis["hook_analysis"] = hook_result
+        except Exception as e:
+            log.debug("[%s] Hook analysis skipped: %s", clip_id, e)
+            analysis["hook_analysis"] = {}
+
         filtered_items.append((clip_id, start, end, info, analysis))
 
     log.info("Pre-filter: %d/%d clips passed (degraded mode for dropped)", len(filtered_items), len(items))

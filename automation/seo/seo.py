@@ -213,8 +213,11 @@ _SYSTEM = (
     "for titles and mix Hindi/English for maximum reach. "
     "Generate RICH, LONG, STRUCTURED descriptions with emoji section headers — "
     "not short corporate summaries. Think like a top cricket YouTuber with 500K subs. "
-    "Include Hindi transliterated search terms (e.g., 'aaj ka match', 'live cricket score') "
+    "Include Hindi transliterated search terms (e.g., 'aaj ka match', 'match highlights') "
     "alongside English terms for bilingual discoverability. "
+    "NEVER use live-framing search terms like 'live score', 'live stream', or 'live match' — "
+    "these are on-demand Shorts clips, not live streams. Live framing confuses viewers "
+    "and the algorithm. "
     "CRITICAL: Use player names, teams, and events from the transcript AND/OR on-screen text (OCR). "
     "Only use entities that appear in at least one of these sources. "
     "NEVER invent or hallucinate player names or match events. "
@@ -283,7 +286,7 @@ keyword list, tag block, or comma-separated term list.
 
 2. 🔥 Current Match Situation (3-5 lines): What's happening in the match.
    Score, key dismissals, partnerships, run rate. Embed search terms
-   like "rcb vs mi live score", "ipl 2026 match 54" naturally.
+   like "rcb vs mi match highlights", "ipl 2026 match 54" naturally.
 
 3. 👉 CTA: "If you love cricket, please SUBSCRIBE! We are growing together."
 
@@ -303,12 +306,15 @@ keyword list, tag block, or comma-separated term list.
 ═══ SEARCH TERMS (25-30 terms, mix English + Hindi transliteration) ═══
 Categories to cover:
 - Player + action: "virat kohli six", "bumrah yorker"
-- Match context: "rcb vs mi live score", "ipl 2026 match 54"
-- Hindi transliterated: "aaj ka match", "live cricket match", "aaj ka match live"
-- Hindi script terms: "लाइव क्रिकेट स्कोर" (yes, include Devanagari in search terms)
-- Long-tail: "how to watch ipl live", "ipl live stream free"
-- Channel/format: "cricket live commentary hindi", "ipl live score today"
-- Regional: "cricket live match today online"
+- Match context: "rcb vs mi highlights", "ipl 2026 match 54"
+- Hindi transliterated: "aaj ka match", "match highlights", "aaj ka match dhamaal"
+- Hindi script terms: "क्रिकेट मैच हाइलाइट्स" (yes, include Devanagari in search terms)
+- Long-tail: "how to watch ipl match", "ipl match clips"
+- Channel/format: "cricket commentary hindi", "ipl match review"
+- Regional: "cricket match today online"
+- NEVER use live-framing terms like "live score", "live stream", "live match" —
+  these are on-demand Shorts clips, not live streams. Live framing confuses
+  viewers and the algorithm.
 - Do NOT use ultra-generic terms like "cricket video" or "sports video"
 
 ═══ HASHTAGS (exactly 2-3 for Shorts) ═══
@@ -380,10 +386,13 @@ Write a LONG, structured description with these sections:
 ═══ SEARCH TERMS (25-30 terms, mix English + Hinglish) ═══
 Categories to cover:
 - Player + action: "mbappe goal highlights", "ronaldo free kick"
-- Match context: "france vs argentina live score", "fifa world cup 2026 live"
-- Hinglish transliterated: "aaj ka match", "world cup live stream", "aaj ka match live"
+- Match context: "france vs argentina highlights", "fifa world cup 2026 match"
+- Hinglish transliterated: "aaj ka match", "world cup match", "aaj ka match dhamaal"
 - Hindi/transliterated: "वर्ल्ड कप 2026", "aaj ka football match"
-- Long-tail: "how to watch world cup live", "fifa live stream free"
+- Long-tail: "how to watch world cup match", "fifa match clips"
+- NEVER use live-framing terms like "live score", "live stream", "live match" —
+  these are on-demand Shorts clips, not live streams. Live framing confuses
+  viewers and the algorithm.
 - Do NOT use ultra-generic terms like "sports video" or "football video"
 
 ═══ HASHTAGS (exactly 2-3 for Shorts) ═══
@@ -406,14 +415,14 @@ Requirements:
 - NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are on-demand clips
 - Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ ⚽ ⚠️ 🏷️ #️⃣)
 - Hashtags: 2-3 total (include #Shorts), player names, teams, event
-- Search terms: 15-25 terms, mix English + Hinglish transliteration (aaj ka match, world cup live stream)
+- Search terms: 15-25 terms, mix English + Hinglish transliteration (aaj ka match, world cup match); NEVER use live-framing search terms — these are on-demand clips
 
 Return valid JSON ONLY:
 {{
   "title": "🔴 Dramatic Hook | Match Context | Format 🔥",
   "description": "📝 Hook paragraph...\n\n🔥 Match Situation...\n\n🏟️ Match Info...\n\n⚽ Key Players...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
   "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#FIFA2026", "...up to 3"],
-  "search_terms": ["player action", "match context", "aaj ka match", "world cup live", "...up to 25"]
+  "search_terms": ["player action", "match context", "aaj ka match", "world cup match", "...up to 25"]
 }}
 """
 
@@ -427,14 +436,14 @@ Requirements:
 - NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are on-demand clips
 - Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ 🏏 ⚠️ 🏷️ #️⃣)
 - Hashtags: 2-3 total (include #Shorts), player names, teams, event
-- Search terms: 15-25 terms, mix English + Hindi transliteration (aaj ka match, live cricket score)
+- Search terms: 15-25 terms, mix English + Hindi transliteration (aaj ka match, cricket match score); NEVER use live-framing search terms — these are on-demand clips
 
 Return valid JSON ONLY:
 {{
   "title": "🔴 Dramatic Hinglish hook | Match Context | Format 🔥",
   "description": "📝 Hook paragraph...\n\n🔥 Match Situation...\n\n🏟️ Match Info...\n\n🏏 Key Players...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
   "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#IPL2026", "...up to 3"],
-  "search_terms": ["player action", "match context", "aaj ka match", "live cricket score", "...up to 25"]
+  "search_terms": ["player action", "match context", "aaj ka match", "cricket match score", "...up to 25"]
 }}
 """
 
@@ -638,7 +647,71 @@ def _shorts_hashtag_cap() -> int:
     return min(max(cap, 1), 15)
 
 
-_HASHTAG_TOKEN = re.compile(r"#[A-Za-z_][A-Za-z0-9_]*")
+_HASHTAG_TOKEN = re.compile(r"#[A-Za-z_\u0900-\u097F][A-Za-z0-9_\u0900-\u097F]*")
+
+# Live-framing detection — this channel uploads on-demand Shorts clips, never
+# live streams. Any tag/term that frames the clip as live ('live score', 'live
+# stream', 'livestream', Devanagari 'लाइव') misleads the algorithm and
+# suppresses CTR.
+_LIVE_FRAMING_RE = re.compile(r"\blive\b", re.IGNORECASE)
+_DEVA_LIVE_TERMS = ("लाइव", "लाईव")
+
+# Words that form live-framing compounds with 'live' as a standalone segment:
+# livestream / livecricket / live_score / liveshorts (prefix), cricketlive /
+# matchlive / shorts (suffix), or multi-token cricketlivematch. Only these
+# combine; '#Liverpool', '#Lively', '#Relive', '#Alive' are plain words and
+# must survive.
+_LIVE_FRAMING_WORDS = (
+    "stream", "streaming", "score", "scoring", "cricket", "match",
+    "football", "commentary", "updates", "coverage", "tv", "watch",
+    "ball", "batting", "ipl", "t20", "blog", "shorts", "short",
+)
+# Longest-first so multi-token compounds group cleanly without backtracking
+# surprises (stream/streaming, score/scoring, short/shorts).
+_LIVE_FRAMING_WORDS_OR = "|".join(
+    sorted(_LIVE_FRAMING_WORDS, key=len, reverse=True))
+_LIVE_COMPOUND_RE = re.compile(
+    r"\blive(?:_|-)?(?:%s)+\b"           # livescore, liveshorts, livecricketmatch
+    r"|\b(?:%s)+live\b"                  # cricketlive, matchlive, scorelive
+    r"|\b(?:%s)+live(?:_|-)?(?:%s)+\b"   # cricketlivematch, scorelivetv
+    % (_LIVE_FRAMING_WORDS_OR, _LIVE_FRAMING_WORDS_OR,
+       _LIVE_FRAMING_WORDS_OR, _LIVE_FRAMING_WORDS_OR),
+    re.IGNORECASE,
+)
+
+
+def _is_live_framed_search_term(term: str) -> bool:
+    """True if a search term frames the clip as a live stream.
+
+    Catches: standalone 'live' word ('ipl 2026 live'), separator forms
+    ('live-stream', 'live_score'), single-token compounds ('livestream',
+    'livecricket', 'cricketlive'), and Devanagari 'लाइव'/'लाईव'. On-demand
+    words that merely contain 'live' as a substring ('alive and kicking',
+    'olive', 'deliver', 'lively') survive untouched.
+    """
+    t = term.lower()
+    if any(deva in t for deva in _DEVA_LIVE_TERMS):
+        return True
+    # Separator-normalized: 'live-score'/'live_score' → 'live score'
+    norm = re.sub(r"[_\-]+", " ", t)
+    if _LIVE_FRAMING_RE.search(norm):
+        return True
+    return bool(_LIVE_COMPOUND_RE.search(t))
+
+
+def _is_live_framed_hashtag(tag: str) -> bool:
+    """True if a hashtag is a live-framing tag (#LiveCricket, #CricketLive).
+
+    Live-framing tags are compound words where 'live' is a standalone framing
+    segment (#LiveScore, #CricketLive, #live, #लाइव). Plain words that merely
+    contain 'live' (#Alive, #Relive, #Liverpool, #Lively) survive.
+    """
+    name = tag.lstrip("#").lower()
+    if any(deva in name for deva in _DEVA_LIVE_TERMS):
+        return True
+    if _LIVE_FRAMING_RE.search(re.sub(r"[_\-]+", " ", name)):
+        return True
+    return bool(_LIVE_COMPOUND_RE.search(name))
 
 
 def _cap_description_hashtags(description: str, hashtags: List[str]) -> str:
@@ -672,7 +745,11 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     """
     out = dict(item)
     out["is_shorts"] = is_shorts
-    out["title"] = (out.get("title") or "")[:100]
+    title = _LIVE_FRAMING_RE.sub("", out.get("title") or "")
+    # Compound live-framing must also be stripped from the title, not just
+    # standalone 'live' words ('LIVESTREAM'/'LiveScore' in a title).
+    title = _LIVE_COMPOUND_RE.sub("", title)
+    out["title"] = re.sub(r"[ \t]{2,}", " ", title).strip()[:100]
     out["description"] = (out.get("description") or "")[:4500]
 
     htags = out.get("hashtags") or []
@@ -682,6 +759,8 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     deduped = []
     for t in htags:
         t_clean = t.lstrip("#").strip()
+        if _is_live_framed_hashtag(t_clean):
+            continue
         if t_clean.lower() not in seen:
             seen.add(t_clean.lower())
             deduped.append(f"#{t_clean}")
@@ -710,10 +789,35 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
         # Strip generic poison terms that kill channel performance
         if st_clean.lower() in GENERIC_POISON_TERMS:
             continue
+        # Strip live-framing terms — on-demand Shorts must not be tagged live
+        if _is_live_framed_search_term(st_clean):
+            continue
         if st_clean.lower() not in seen:
             seen.add(st_clean.lower())
             deduped_t.append(st_clean)
     out["search_terms"] = deduped_t[:30]
+
+    # Defense-in-depth: models sometimes emit a 'tags' key outside the JSON
+    # schema; upload.py merges it straight into the YouTube API tags. Filter it
+    # through the same poison + live-framing rules as search_terms.
+    tags = out.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    elif not isinstance(tags, list):
+        # Malformed (dict/int) tags must never leak keys/values as API tags.
+        tags = []
+    deduped_tags = []
+    seen_tags = set()
+    for tg in tags:
+        tg_clean = tg.strip().lstrip("#")
+        if tg_clean.lower() in GENERIC_POISON_TERMS:
+            continue
+        if _is_live_framed_search_term(tg_clean):
+            continue
+        if tg_clean.lower() not in seen_tags:
+            seen_tags.add(tg_clean.lower())
+            deduped_tags.append(tg_clean)
+    out["tags"] = deduped_tags[:30]
 
     return out
 
