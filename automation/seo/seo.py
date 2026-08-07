@@ -745,19 +745,24 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     """
     out = dict(item)
     out["is_shorts"] = is_shorts
-    title = _LIVE_FRAMING_RE.sub("", out.get("title") or "")
+    title = str(out.get("title") or "")
+    title = _LIVE_FRAMING_RE.sub("", title)
     # Compound live-framing must also be stripped from the title, not just
     # standalone 'live' words ('LIVESTREAM'/'LiveScore' in a title).
     title = _LIVE_COMPOUND_RE.sub("", title)
     out["title"] = re.sub(r"[ \t]{2,}", " ", title).strip()[:100]
-    out["description"] = (out.get("description") or "")[:4500]
+    out["description"] = str(out.get("description") or "")[:4500]
 
     htags = out.get("hashtags") or []
     if isinstance(htags, str):
         htags = [htags]
+    elif not isinstance(htags, list):
+        htags = []
     seen = set()
     deduped = []
     for t in htags:
+        if not isinstance(t, str):
+            continue
         t_clean = t.lstrip("#").strip()
         if _is_live_framed_hashtag(t_clean):
             continue
@@ -782,9 +787,13 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     terms = out.get("search_terms") or []
     if isinstance(terms, str):
         terms = [terms]
+    elif not isinstance(terms, list):
+        terms = []
     seen = set()
     deduped_t = []
     for st in terms:
+        if not isinstance(st, str):
+            continue
         st_clean = st.strip()
         # Strip generic poison terms that kill channel performance
         if st_clean.lower() in GENERIC_POISON_TERMS:

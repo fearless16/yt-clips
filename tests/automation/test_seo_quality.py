@@ -208,6 +208,26 @@ class TestNoGenericFallback:
         result = _enforce_limits(item)
         assert not _validate_seo_quality(result)
 
+    def test_enforce_limits_malformed_llm_output_does_not_crash(self):
+        """_enforce_limits exists to sanitize LLM output; a model emitting a
+        non-string title/description or None/int inside hashtags/search_terms
+        must NOT crash the whole SEO batch — it must be coerced/skipped."""
+        from automation.seo.seo import _enforce_limits
+        items = [
+            {"title": 123, "description": "d", "hashtags": ["#Shorts"], "search_terms": ["x"]},
+            {"title": "X", "description": 123, "hashtags": ["#Shorts"], "search_terms": ["x"]},
+            {"title": "X", "description": "d", "hashtags": ["#Shorts", None, 5], "search_terms": ["x"]},
+            {"title": "X", "description": "d", "hashtags": ["#Shorts"], "search_terms": ["x", None, 42]},
+        ]
+        for item in items:
+            result = _enforce_limits(item)
+            assert isinstance(result["title"], str)
+            assert isinstance(result["description"], str)
+            assert all(isinstance(h, str) for h in result["hashtags"]), \
+                f"non-str hashtag leaked: {result['hashtags']!r}"
+            assert all(isinstance(s, str) for s in result["search_terms"]), \
+                f"non-str search term leaked: {result['search_terms']!r}"
+
     def test_enforce_limits_strips_generic_title(self):
         """Titles like 'Cricket Highlights' are generic garbage."""
         from automation.seo.seo import _validate_seo_quality
