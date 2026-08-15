@@ -226,6 +226,8 @@ seo:
   inter_clip_sleep_s: 30
   # Max hashtags for Shorts uploads — champions use 2-3, not 15.
   max_hashtags: 3
+  # Minimum words in description — research-backed: high-view Shorts use 18-40 words
+  min_description_words: 20
 
 # ── SEO Learner ─────────────────────────────────────────────────────────────────
 # Self-improving SEO system — learns from past performance to boost future clips.

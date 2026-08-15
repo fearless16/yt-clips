@@ -213,6 +213,8 @@ _SYSTEM = (
     "for titles and mix Hindi/English for maximum reach. "
     "Generate RICH, LONG, STRUCTURED descriptions with emoji section headers — "
     "not short corporate summaries. Think like a top cricket YouTuber with 500K subs. "
+    "Descriptions must be rich and multi-word — aim for at least 30 words, never a "
+    "thin one-line blurb. "
     "Include Hindi transliterated search terms (e.g., 'aaj ka match', 'match highlights') "
     "alongside English terms for bilingual discoverability. "
     "NEVER use live-framing search terms like 'live score', 'live stream', or 'live match' — "
@@ -279,6 +281,7 @@ You MUST return valid JSON (no markdown, no other text):
 Write a LONG, structured description with these sections. ALL search terms
 must be embedded NATURALLY within the paragraph text — do NOT append any
 keyword list, tag block, or comma-separated term list.
+Write at least 30 words of rich description (aim for 40-60 words) — thin one-line descriptions destroy Shorts discoverability.
 
 1. 📝 HOOK (2-3 lines): Dramatic summary of what happened in the clip.
    Use the most exciting moment as the opening line. Naturally work in
@@ -357,7 +360,9 @@ You MUST return valid JSON (no markdown, no other text):
   "Ronaldo's LAST World Cup? 💔 | Portugal vs Morocco Highlights | FIFA 2026"
 
 ═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED) ═══
-Write a LONG, structured description with these sections:
+Write a LONG, structured description with these sections. Write at least
+30 words of rich description (aim for 40-60 words) — thin one-line
+descriptions destroy Shorts discoverability.
 
 1. 📝 HOOK (2-3 lines): Dramatic summary of what happened in the clip.
    Use the most exciting moment as the opening line.
@@ -413,7 +418,7 @@ Clip: {transcript}
 Requirements:
 - Title: Hinglish/English, max 100 chars, multi-segment with pipes and emojis
 - NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are on-demand clips
-- Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ ⚽ ⚠️ 🏷️ #️⃣)
+- Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ ⚽ ⚠️ 🏷️ #️⃣). Write at least 30 words of rich description (aim for 40-60 words) — thin one-line descriptions destroy Shorts discoverability.
 - Hashtags: 2-3 total (include #Shorts), player names, teams, event
 - Search terms: 15-25 terms, mix English + Hinglish transliteration (aaj ka match, world cup match); NEVER use live-framing search terms — these are on-demand clips
 
@@ -434,7 +439,7 @@ Clip: {transcript}
 Requirements:
 - Title: Hinglish (Hindi in English/Roman letters, NO Devanagari), max 100 chars, multi-segment with pipes and emojis
 - NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are on-demand clips
-- Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ 🏏 ⚠️ 🏷️ #️⃣)
+- Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ 🏏 ⚠️ 🏷️ #️⃣). Write at least 30 words of rich description (aim for 40-60 words) — thin one-line descriptions destroy Shorts discoverability.
 - Hashtags: 2-3 total (include #Shorts), player names, teams, event
 - Search terms: 15-25 terms, mix English + Hindi transliteration (aaj ka match, cricket match score); NEVER use live-framing search terms — these are on-demand clips
 
@@ -647,6 +652,23 @@ def _shorts_hashtag_cap() -> int:
     return min(max(cap, 1), 15)
 
 
+def _min_description_words() -> int:
+    """Read seo.min_description_words from config, crash-proof default 20.
+
+    Bools, nulls, floats, strings, and non-positive values silently fall back
+    to 20 so a misconfig can never zero out or explode the word floor. Value
+    is clamped to a sane range so a huge typo can't reject every description.
+    """
+    try:
+        raw = cfg.get("seo", {}).get("min_description_words", 20)
+        if isinstance(raw, bool):
+            return 20
+        words = int(raw)
+    except (TypeError, ValueError):
+        return 20
+    return min(max(words, 1), 40)
+
+
 _HASHTAG_TOKEN = re.compile(r"#[A-Za-z_\u0900-\u097F][A-Za-z0-9_\u0900-\u097F]*")
 
 # Live-framing detection — this channel uploads on-demand Shorts clips, never
@@ -851,6 +873,11 @@ def _validate_seo_quality(item: Dict) -> bool:
 
     # 3. Description must have substance (at least 100 chars for rich SEO)
     if len(description) < 100:
+        return False
+
+    # 3b. Description must have enough words — thin one-liners destroy discoverability
+    min_words = _min_description_words()
+    if len(description.split()) < min_words:
         return False
 
     # 4. Title must not contain Devanagari script (kills discoverability)
