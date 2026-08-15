@@ -63,8 +63,10 @@ class TestNaturalEmbedding:
         """Hashtags at end are OK — they're #hashtag format, not keyword dumps."""
         item = make_item(
             "Sky high! 🔥 | Suryakumar Yadav 360°",
-            "Suryakumar Yadav played an incredible 360 degree shot. "
-            "Pure innovation. Subscribe for more cricket action!\n\n"
+            "Suryakumar Yadav played an incredible 360 degree shot with pure "
+            "innovation and swagger. This was a masterclass in modern batting, "
+            "full of flair and fearless stroke play. Subscribe for more cricket "
+            "action!\n\n"
             "#Shorts #SuryakumarYadav #MI #IPL2026 #Cricket #Six",
         )
         assert _validate_seo_quality(item)
