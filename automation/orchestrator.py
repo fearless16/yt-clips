@@ -9,7 +9,7 @@ Stages:
     6. Generate final cut instructions
     7. SEO (selected clips only)
     8. Sync / Upload
-    9. Self-learning updates prompt weights / rules
+    9. Runtime telemetry + canonical Shorts Intelligence persistence
 
 Usage::
 
@@ -143,6 +143,17 @@ def run(
     log.info("[START] pipeline run_id=%s url=%s", rid, url)
 
     cfg = _cfg()
+    if learn_only:
+        try:
+            from automation.seo.analytics import sync_clip_performance_from_youtube
+
+            added = sync_clip_performance_from_youtube(config_path="config.yaml")
+            log.info("[shorts_intelligence] canonical sync added=%d", added)
+        except Exception as exc:
+            result.failures.append(f"shorts_intelligence: {exc}")
+        result.total_seconds = time.monotonic() - start
+        return result
+
     paths = cfg.get("paths", {})
     dl_cfg = cfg.get("download", {})
 
@@ -166,7 +177,7 @@ def run(
     # Hoisted config flag — shared across stages 3-5, 6 (hook audit), 8b (update_performance)
     use_new_selector = cfg.get("clip_selection", {}).get("enabled", True)
 
-    # ── Stages 1-8 — skipped when learn_only ────────────────────────
+    # ── Stages 1-8 ──────────────────────────────────────────────────
     if not learn_only:
 
         # ── Stage 1a: Transcript fetch ──────────────────────────
@@ -623,7 +634,7 @@ def run(
 
     # Stage 9: telemetry and canonical persistence
     result.total_seconds = time.monotonic() - start
-    if result.exported or learn_only:
+    if result.exported:
         try:
             with run_phase(log, "stage 9a Analytics", "analytics", run_id=rid):
                 from automation.seo.analytics import Analytics

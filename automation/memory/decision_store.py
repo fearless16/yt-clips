@@ -1,4 +1,4 @@
-"""Decision store — append-only event store and derived learned state store."""
+"""Thread-safe append-only runtime event store."""
 
 from copy import deepcopy
 from threading import Lock
@@ -45,34 +45,3 @@ class DecisionStore:
     def clear(self) -> None:
         with self._lock:
             self._events.clear()
-
-
-class LearnedStateStore:
-    def __init__(self) -> None:
-        self._state: dict[str, str] = {}
-        self._lock = Lock()
-
-    def set(
-        self,
-        key: str,
-        value_json: str,
-        derived_from_event_id: str | None = None,
-    ) -> None:
-        with self._lock:
-            self._state[key] = value_json
-
-    def get(self, key: str) -> str | None:
-        with self._lock:
-            return self._state.get(key)
-
-    def get_all(self) -> dict[str, str]:
-        with self._lock:
-            return dict(self._state)
-
-    def delete(self, key: str) -> None:
-        with self._lock:
-            self._state.pop(key, None)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._state.clear()

@@ -1,4 +1,4 @@
-"""Event models — immutable event types and learned state entries for the append-only event store."""
+"""Immutable runtime event types for the append-only in-memory store."""
 
 import json
 from dataclasses import dataclass, field
@@ -18,9 +18,6 @@ class EventType(str, Enum):
     validation_failed = "validation_failed"
     infra_failed = "infra_failed"
     deferred = "deferred"
-    policy_updated = "policy_updated"
-    trend_ingested = "trend_ingested"
-    trend_decayed = "trend_decayed"
 
 
 @dataclass(frozen=True)
@@ -44,11 +41,3 @@ class ClipEvent:
             json.loads(self.payload_json)
         except json.JSONDecodeError as e:
             raise ValueError(f"payload_json is not valid JSON: {e}")
-
-
-@dataclass(frozen=True)
-class LearnedStateEntry:
-    state_key: str
-    value_json: str
-    derived_from_event_id: str | None
-    updated_at: str

@@ -21,7 +21,6 @@ class RuntimeConfig:
     local_metadata_root: str = "shorts"
     enabled: bool = True
     shadow_mode: bool = True
-    sync_on_pipeline: bool = False
     max_recommendations: int = 8
     max_selection_adjustment_points: float = 3.0
     learner: LearnerConfig = LearnerConfig()
@@ -52,7 +51,6 @@ class RuntimeConfig:
             local_metadata_root=str(section.get("local_metadata_root") or "shorts"),
             enabled=bool(section.get("enabled", True)),
             shadow_mode=bool(section.get("shadow_mode", True)),
-            sync_on_pipeline=bool(section.get("sync_on_pipeline", False)),
             max_recommendations=max(0, int(section.get("max_recommendations", 8))),
             max_selection_adjustment_points=max(
                 0.0, float(section.get("max_selection_adjustment_points", 3.0))

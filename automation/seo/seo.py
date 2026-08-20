@@ -48,23 +48,6 @@ def _get_ai() -> "AIClient":
     return _ai_instance
 
 
-def _maybe_auto_benchmark():
-    """Lazy auto-benchmark: runs once on first SEO call if enabled in config."""
-    if not getattr(_maybe_auto_benchmark, "_done", False):
-        _maybe_auto_benchmark._done = True
-        if cfg.get("ai", {}).get("auto_benchmark", False):
-            try:
-                from .seo_learner import run_auto_benchmark, get_best_model
-                log.info("Auto-benchmark enabled — discovering best model...")
-                run_auto_benchmark()
-                best_provider, best_model = get_best_model()
-                if best_provider and best_model:
-                    log.info("Applying best model: %s/%s", best_provider, best_model)
-                    _get_ai()._provider = best_provider
-                    _get_ai()._model = best_model
-            except Exception as e:
-                log.warning("Auto-benchmark failed: %s", e)
-
 class SEOGenerationError(Exception):
     """Raised when all AI providers fail during SEO generation."""
 

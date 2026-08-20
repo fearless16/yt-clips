@@ -5,7 +5,7 @@ Two-tier approach:
 2. LLM arbiter pass for top candidates (optional, refines rankings)
 
 Weights are auto-built from agent class attributes — single source of truth.
-Override at call time via ``weights=`` parameter (e.g. from weight_learner.py).
+Explicit call-time overrides remain available for controlled experiments.
 """
 
 import json
