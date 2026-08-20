@@ -54,23 +54,18 @@ Quick links:
 
 ---
 
-## Self-Learner Module (`self_learner/`)
+## Shorts Intelligence (`shorts_intelligence/`)
 
-**SQLite-backed persistent-memory learning engine.** Zero FaceOS deps.
+Canonical cricket Shorts outcome learner. It accepts only this channel's exact
+Shorts shelf, joins real YouTube Analytics outcomes, and uses calibrated,
+recency-aware evidence. Generated metadata is never treated as an outcome.
 
 ```bash
-.venv/bin/python -m pytest tests/test_self_learner.py -v --cov=self_learner --cov-report=term-missing
+.venv/bin/python -m pytest tests/shorts_intelligence/ -v
+.venv/bin/python -m shorts_intelligence sync
+.venv/bin/python -m shorts_intelligence status
 ```
 
-### Key APIs
-
-| Class | Module | Role |
-|-------|--------|------|
-| `PersistentMemory` | `self_learner/memory.py` | Thread-safe SQLite KV store with TTL, confidence, source |
-| `KnowledgeBase` | `self_learner/knowledge.py` | Fact storage with relation index |
-| `Learner` | `self_learner/learner.py` | Observe events, extract patterns, predict |
-| `Runner` | `self_learner/runner.py` | CLI: `observe`, `predict`, `insights`, `stats`, `daemon` |
-
-### Integration
-
-Wired into `automation/orchestrator.py` Stage 9 — observes pipeline metrics after every run with `auto_upload` or `auto_schedule`.```
+`shorts_intelligence.db` is the only persistent learning database. Selection
+adjustments are bounded and cannot alter clip boundaries or bypass the
+complete-thought gate.

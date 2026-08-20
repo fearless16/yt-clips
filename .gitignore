@@ -83,9 +83,9 @@ kaggle_monitor.py
 .hypothesis/
 
 # Learner databases (SQLite — not for version control)
-self_learner.db
-automation.db
-clip_learner.db
+shorts_intelligence.db
+shorts_intelligence.db-wal
+shorts_intelligence.db-shm
 
 # Auto-generated adaptive config
 clip_selection_weights.json

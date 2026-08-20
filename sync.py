@@ -205,10 +205,10 @@ def sync_to_drive(
     return uploaded_ids
 
 
-# ─── DB Persistence (self-learner.db + automation.db + clip_learner.db) ─────────
+# ─── DB Persistence ───────────────────────────────────────────────────────────
 
 DB_FOLDER = "db"  # Google Drive subfolder for database files
-DB_FILES = ["self_learner.db", "automation.db", "clip_learner.db"]
+DB_FILES = ["shorts_intelligence.db"]
 
 
 def _drive_service():
@@ -222,7 +222,7 @@ def _drive_service():
 
 
 def sync_db_to_drive() -> bool:
-    """Upload self_learner.db, automation.db, clip_learner.db to Google Drive.
+    """Upload the canonical Shorts Intelligence DB to Google Drive.
 
     Stores under yt-clips/db/ so it doesn't mix with shortcut videos.
     Returns True if at least one file was uploaded.
@@ -279,7 +279,7 @@ def sync_db_to_drive() -> bool:
 
 
 def restore_db_from_drive() -> bool:
-    """Download self_learner.db, automation.db, clip_learner.db from Google Drive.
+    """Download the canonical Shorts Intelligence DB from Google Drive.
 
     Only overwrites if the local file is missing or older.
     Returns True if at least one file was restored.
