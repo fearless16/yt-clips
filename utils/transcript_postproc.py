@@ -53,6 +53,7 @@ CRICKET_SPELLING: Dict[str, str] = {
     "yashasvi": "Yashasvi",
     "jaiswal": "Jaiswal",
     "suryakumar": "Suryakumar",
+    "yuvi": "Yuvraj",
     # Venues / terms
     "wankede": "Wankhede",
     "wankhede": "Wankhede",

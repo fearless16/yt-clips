@@ -587,7 +587,7 @@ class BrutalRejectionAgent(Agent):
         reasons = []
 
         # Too short — can't build any hook
-        if duration < 6:
+        if duration < 3:
             rejection_score += 30
             reasons.append("too_short")
 

@@ -7,6 +7,8 @@ from typing import Dict, List, Set
 # Spelling corrections for common Whisper audio transcript errors
 CRICKET_SPELLING_CORRECTIONS = {
     # Players
+    "yuvi": "Yuvraj Singh",
+    "yuvraj": "Yuvraj Singh",
     "coaly": "Kohli",
     "koli": "Kohli",
     "virat koli": "Virat Kohli",
@@ -89,6 +91,7 @@ CRICKET_SPELLING_CORRECTIONS = {
 
 # Canonical player names for SEO tag enrichment
 CRICKET_PLAYERS: Set[str] = {
+    "Yuvraj Singh",
     "Virat Kohli", "Rohit Sharma", "Jasprit Bumrah", "MS Dhoni", "Hardik Pandya",
     "Suryakumar Yadav", "Rishabh Pant", "Shubman Gill", "Yashasvi Jaiswal",
     "Ravindra Jadeja", "KL Rahul", "Shreyas Iyer", "Rinku Singh", "Axar Patel",
@@ -114,15 +117,62 @@ CRICKET_TEAMS: Set[str] = {
 }
 
 def correct_cricket_spelling(text: str) -> str:
-    """Replace misheard/lowercase cricket names with canonical spelling."""
-    import re
-    corrected = text
-    # Sort keys by length descending to replace longer phrases first (e.g. 'mitchell stark' before 'stark')
-    for misheard in sorted(CRICKET_SPELLING_CORRECTIONS.keys(), key=len, reverse=True):
-        pattern = r"\b" + re.escape(misheard) + r"\b"
-        replacement = CRICKET_SPELLING_CORRECTIONS[misheard]
-        corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
-    return corrected
+    """Resolve cricket aliases/mishearings in one pass without recursive expansion."""
+    if not text:
+        return text
+    corrections = dict(CRICKET_SPELLING_CORRECTIONS)
+    # Identity entries make the longest canonical phrase win before a short
+    # alias inside it ("Yuvraj Singh" must not become "Yuvraj Singh Singh").
+    for canonical in CRICKET_SPELLING_CORRECTIONS.values():
+        corrections.setdefault(canonical.lower(), canonical)
+    aliases = sorted(corrections, key=len, reverse=True)
+    pattern = re.compile(
+        r"\b(?:" + "|".join(re.escape(alias) for alias in aliases) + r")\b",
+        re.IGNORECASE,
+    )
+    return pattern.sub(
+        lambda match: corrections[match.group(0).lower()],
+        text,
+    )
+
+
+_STRONG_CRICKET_TERMS = {
+    "cricket", "ipl", "bbl", "psl", "t20", "odi", "test match",
+    "wicket", "bowled", "lbw", "stumped", "batsman", "batter", "bowler",
+    "yorker", "googly", "doosra", "powerplay", "run rate", "super over",
+    "century", "half-century", "hattrick", "innings", "crease", "over",
+    "six", "four", "chauka", "chhakka", "sixer", "boundary",
+}
+_WEAK_CRICKET_TERMS = {"shot", "coach", "captain", "team", "target", "chase"}
+
+
+def _cricket_relevance_score(text: str) -> int:
+    """Return a conservative cricket relevance score for one text fragment."""
+    if not text:
+        return 0
+    corrected = correct_cricket_spelling(text)
+    low = corrected.lower()
+    entities = find_canonical_entities(corrected)
+    score = 3 if entities["players"] else 0
+    score += 2 if entities["teams"] and any(
+        term in low for term in _STRONG_CRICKET_TERMS
+    ) else 0
+    score += min(3, sum(1 for term in _STRONG_CRICKET_TERMS if re.search(
+        r"\b" + re.escape(term) + r"\b", low
+    )))
+    score += min(1, sum(1 for term in _WEAK_CRICKET_TERMS if re.search(
+        r"\b" + re.escape(term) + r"\b", low
+    )))
+    if re.search(r"\b\d{1,3}/\d{1,2}\b", low):
+        score += 2
+    return score
+
+
+def is_cricket_content(text: str, source_context: str = "") -> bool:
+    """Hard cricket-only gate with source context for ambiguous clip phrases."""
+    clip_score = _cricket_relevance_score(text)
+    source_score = _cricket_relevance_score(source_context)
+    return clip_score >= 2 or (clip_score >= 1 and source_score >= 2)
 
 
 def find_canonical_entities(text: str) -> Dict[str, List[str]]:
@@ -137,11 +187,21 @@ def find_canonical_entities(text: str) -> Dict[str, List[str]]:
     if not text:
         return {"players": [], "teams": []}
     low = text.lower()
+    surname_counts: Dict[str, int] = {}
+    for player_name in CRICKET_PLAYERS:
+        surname = player_name.split()[-1].lower()
+        surname_counts[surname] = surname_counts.get(surname, 0) + 1
     players = []
     for name in sorted(CRICKET_PLAYERS, key=len, reverse=True):
-        # Match the full canonical name or its last token (e.g. "Bumrah").
+        # A surname is safe only when it identifies exactly one known player.
+        # "Singh", "Sharma" and "Yadav" must never fan out into fake entities.
         last = name.split()[-1].lower()
-        if name.lower() in low or (len(last) > 3 and re.search(r"\b" + re.escape(last) + r"\b", low)):
+        unique_last_name = surname_counts.get(last) == 1
+        if name.lower() in low or (
+            unique_last_name
+            and len(last) > 3
+            and re.search(r"\b" + re.escape(last) + r"\b", low)
+        ):
             players.append(name)
     teams = []
     for name in sorted(CRICKET_TEAMS, key=len, reverse=True):

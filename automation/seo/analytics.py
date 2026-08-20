@@ -2,13 +2,131 @@
 
 import json
 import logging
+import re
 import sqlite3
+from datetime import date
 from pathlib import Path
 
+from automation._cache import TTLCache
 from automation.memory.event_models import EventType
 from automation.memory.decision_store import DecisionStore
 
 log = logging.getLogger("analytics")
+YT_API_CACHE = TTLCache(maxsize=4, ttl=300)
+_YOUTUBE_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+
+
+def _build_youtube_analytics_service():
+    """Build the authorized Analytics API client, or return ``None``."""
+    token_path = Path("yt_analytics_token.json")
+    if not token_path.exists():
+        log.warning("YouTube Analytics token not found at %s", token_path)
+        return None
+    try:
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        scopes = [
+            "https://www.googleapis.com/auth/youtube.readonly",
+            "https://www.googleapis.com/auth/yt-analytics.readonly",
+        ]
+        credentials = Credentials.from_authorized_user_file(str(token_path), scopes)
+        if not credentials.valid and credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+            token_path.write_text(credentials.to_json(), encoding="utf-8")
+        if not credentials.valid:
+            log.warning("YouTube Analytics credentials are invalid")
+            return None
+        return build("youtubeAnalytics", "v2", credentials=credentials)
+    except Exception as exc:
+        log.warning("YouTube Analytics client unavailable: %s", exc)
+        return None
+
+
+def _analytics_rows(service, video_ids: list[str]) -> list[dict]:
+    """Fetch one analytics row per video ID with a five-minute response cache."""
+    cache_key = f"{date.today().isoformat()}:{','.join(video_ids)}"
+    cached = YT_API_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    response = service.reports().query(
+        ids="channel==MINE",
+        startDate="2005-01-01",
+        endDate=date.today().isoformat(),
+        metrics="views,engagedViews,averageViewDuration,averageViewPercentage",
+        dimensions="video",
+        filters=f"video=={','.join(video_ids)}",
+    ).execute()
+    headers = [header.get("name") for header in response.get("columnHeaders", [])]
+    rows = [dict(zip(headers, row)) for row in response.get("rows", [])]
+    YT_API_CACHE.set(cache_key, rows)
+    return rows
+
+
+def sync_clip_performance_from_youtube(learner=None, service=None) -> int:
+    """Sync uploaded clip views and retention metrics into ``clip_learner.db``.
+
+    Dependencies may be injected for tests. Authentication or API failures are
+    non-fatal because analytics feedback must never block clip generation.
+    """
+    owns_learner = learner is None
+    if owns_learner:
+        from automation.clip_selection.clip_learner import ClipLearner
+        learner = ClipLearner()
+    try:
+        clips = learner.get_all_clips()
+        by_video: dict[str, list[str]] = {}
+        for clip in clips:
+            video_id = clip.get("youtube_video_id")
+            clip_id = clip.get("clip_id")
+            if (
+                isinstance(video_id, str)
+                and _YOUTUBE_VIDEO_ID_RE.fullmatch(video_id)
+                and isinstance(clip_id, str)
+            ):
+                by_video.setdefault(video_id, []).append(clip_id)
+        if not by_video:
+            return 0
+
+        service = service or _build_youtube_analytics_service()
+        if service is None:
+            return 0
+
+        updated = 0
+        video_ids = sorted(by_video)
+        for offset in range(0, len(video_ids), 200):
+            batch = video_ids[offset:offset + 200]
+            for row in _analytics_rows(service, batch):
+                video_id = str(row.get("video", ""))
+                if video_id not in by_video:
+                    continue
+                views = max(0, int(row.get("views", 0) or 0))
+                engaged = max(0, int(row.get("engagedViews", 0) or 0))
+                retention = max(0.0, min(1.0, float(
+                    row.get("averageViewPercentage", 0.0) or 0.0
+                ) / 100.0))
+                continued = max(0.0, min(1.0, engaged / views)) if views else 0.0
+                avg_duration = max(0.0, float(row.get("averageViewDuration", 0.0) or 0.0))
+                for clip_id in by_video[video_id]:
+                    learner.update_performance(
+                        clip_id=clip_id,
+                        youtube_video_id=video_id,
+                        views=views,
+                        estimated_retention=retention,
+                        completion_rate=continued,
+                        avg_view_duration_seconds=avg_duration,
+                    )
+                    updated += 1
+        log.info("Synced YouTube performance for %d clips", updated)
+        return updated
+    except Exception as exc:
+        log.warning("YouTube performance sync failed: %s", exc)
+        return 0
+    finally:
+        if owns_learner:
+            learner.close()
 
 
 class Analytics:
@@ -141,6 +259,7 @@ def generate_daily_insights() -> dict:
     DecisionStore (which was always empty cross-session).
     """
     try:
+        sync_clip_performance_from_youtube()
         clip_data = _count_from_clip_learner()
         learner_data = _count_from_self_learner()
         exports = _latest_exports(5)

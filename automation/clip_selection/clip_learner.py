@@ -94,10 +94,18 @@ class ClipLearner:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             conn.execute(
-                """INSERT OR REPLACE INTO clip_performance
+                """INSERT INTO clip_performance
                    (clip_id, video_title, match_context, selected_rank,
                     final_score, agent_scores_json, rejection_reasons, uploaded_at, last_updated)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(clip_id) DO UPDATE SET
+                     video_title = excluded.video_title,
+                     match_context = excluded.match_context,
+                     selected_rank = excluded.selected_rank,
+                     final_score = excluded.final_score,
+                     agent_scores_json = excluded.agent_scores_json,
+                     rejection_reasons = excluded.rejection_reasons,
+                     last_updated = excluded.last_updated""",
                 (
                     clip_id, video_title, match_context, selected_rank,
                     final_score, json.dumps(agent_scores, default=str),
@@ -146,16 +154,20 @@ class ClipLearner:
         now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             conn.execute(
-                """UPDATE clip_performance SET
-                   youtube_video_id = ?,
-                   views = ?,
-                   estimated_retention = ?,
-                   completion_rate = ?,
-                   avg_view_duration_seconds = ?,
-                   last_updated = ?
-                   WHERE clip_id = ?""",
-                (youtube_video_id, views, estimated_retention,
-                 completion_rate, avg_view_duration_seconds, now, clip_id),
+                """INSERT INTO clip_performance
+                   (clip_id, youtube_video_id, views, estimated_retention,
+                    completion_rate, avg_view_duration_seconds, uploaded_at,
+                    last_updated)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(clip_id) DO UPDATE SET
+                     youtube_video_id = excluded.youtube_video_id,
+                     views = excluded.views,
+                     estimated_retention = excluded.estimated_retention,
+                     completion_rate = excluded.completion_rate,
+                     avg_view_duration_seconds = excluded.avg_view_duration_seconds,
+                     last_updated = excluded.last_updated""",
+                (clip_id, youtube_video_id, views, estimated_retention,
+                 completion_rate, avg_view_duration_seconds, now, now),
             )
             conn.commit()
 

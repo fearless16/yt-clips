@@ -56,14 +56,16 @@ def test_get_rotated_hashtags_by_domain():
 
 
 @patch("automation.seo.trends.fetch_youtube_suggestions")
+@patch("automation.seo.trends.fetch_youtube_search_signals")
 @patch("automation.seo.trends.fetch_google_trends_in")
 @patch("automation.seo.trends.fetch_competitor_signals")
 @patch("automation.seo.trends.fetch_cricbuzz_live_score")
 def test_get_trending_context_skips_cricket_for_football(
-    mock_cricbuzz, mock_competitor, mock_google, mock_yt_suggest
+    mock_cricbuzz, mock_competitor, mock_google, mock_yt_search, mock_yt_suggest
 ):
     """Should not call Cricbuzz when domain is football, and should query with dynamic topic."""
     mock_yt_suggest.return_value = ["Mbappe skills", "France World Cup"]
+    mock_yt_search.return_value = ["Mbappe World Cup fan reaction"]
     mock_google.return_value = ["World Cup 2026"]
     mock_competitor.return_value = ["France fanbase Mbappe"]
     mock_cricbuzz.return_value = {"scorecard": "100/0", "url": "mock"}
@@ -85,32 +87,16 @@ def test_get_trending_context_skips_cricket_for_football(
 
 
 @patch("automation.seo.seo._get_ai")
-def test_generate_seo_uses_correct_system_prompt_for_football(mock_get_ai):
-    """SEO generator should use football-specific system instruction and prompt template for football content."""
-    mock_ai = MagicMock()
-    mock_seo_response = json.dumps({
-        "title": "🔴 Mbappe vs Messi World Cup Final | Highlights | Live Match Today 🔥",
-        "description": "📝 Mbappe scored 2 goals in 97 seconds in the 2022 World Cup final against Argentina. This watch-along covers the epic match highlights and fan reactions live! Subscribe for more football content.",
-        "hashtags": ["#Shorts", "#Mbappe", "#Messi"],
-        "search_terms": ["mbappe vs messi", "world cup final"]
-    })
-    mock_ai.generate_seo_text.return_value = mock_seo_response
-    mock_get_ai.return_value = mock_ai
+def test_generator_rejects_football_before_ai(mock_get_ai):
+    """The channel generator is cricket-only, including direct API calls."""
+    from automation.seo.seo import SEOGenerationError
 
-    generate_clip_seo(
-        clip_id="clip_002",
-        transcript="Mbappe is the best player",
-        video_title="Mbappé vs Messi World Cup Final",
-        scorecard="",
-        trend_topics=["Mbappe", "World Cup"],
-        live_stream_url="",
-        teams=[]
-    )
+    with pytest.raises(SEOGenerationError, match="non-cricket"):
+        generate_clip_seo(
+            clip_id="clip_002",
+            transcript="Mbappe is the best player",
+            video_title="Mbappé vs Messi World Cup Final",
+            trend_topics=["Mbappe", "World Cup"],
+        )
 
-    assert mock_ai.generate_seo_text.called
-    called_args, called_kwargs = mock_ai.generate_seo_text.call_args
-    system_inst = called_kwargs.get("system_instruction", "")
-
-    # System instruction must be football/soccer-specific, not mention "cricket YouTuber" or "cricket strategist"
-    assert "football" in system_inst.lower() or "soccer" in system_inst.lower()
-    assert "cricket" not in system_inst.lower()
+    mock_get_ai.assert_not_called()

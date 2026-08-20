@@ -307,7 +307,10 @@ class TestSEOQualityGate:
         from automation.seo.seo import _validate_seo_quality
         item = {
             "title": "Kohli ne maara CHHAKKA! 🔥",
-            "description": "📝 Virat Kohli smashes a massive six over long-on! The crowd at Chinnaswamy goes absolutely wild as King Kohli deposits the bowler into the stands. Subscribe for more!",
+            "description": (
+                "Virat Kohli batting analysis explains the complete Hinglish "
+                "cricket discussion without inventing an opponent or score. " * 20
+            ),
             "hashtags": ["#Shorts", "#Kohli", "#RCBvsCSK"],
             "search_terms": ["kohli six wankhede", "RCB vs CSK highlights"],
         }

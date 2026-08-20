@@ -5,6 +5,7 @@ Imported by agents.py, cricket_heuristics.py, pipeline.py.
 
 CRICKET_PLAYERS = {
     "virat", "kohli", "rohit", "sharma", "dhoni", "msd", "sachin", "tendulkar",
+    "yuvi", "yuvraj",
     "bumrah", "jasprit", "hardik", "pandya", "rahul", "ishan",
     "kishan", "surya", "sky", "yadav", "gill", "shubman", "iyer", "shreyas",
     "jaddu", "jadeja", "ashwin", "ravi", "kuldeep", "chahal", "shami",

@@ -39,6 +39,27 @@ ACCESS_ERROR_HINTS = (
 )
 
 
+def _video_metadata_payload(video_info: dict, url: str) -> dict:
+    """Keep the source evidence needed by downstream clip SEO.
+
+    yt-dlp returns much more than the old title/url pair.  Store only stable,
+    useful fields so the SEO model can understand the original upload without
+    receiving the entire extractor response or unrelated private metadata.
+    """
+    source_tags = video_info.get("tags") or []
+    if not isinstance(source_tags, list):
+        source_tags = []
+    return {
+        "title": str(video_info.get("title") or "Cricket Highlights"),
+        "description": str(video_info.get("description") or ""),
+        "url": url,
+        "channel": str(video_info.get("channel") or video_info.get("uploader") or ""),
+        "upload_date": str(video_info.get("upload_date") or ""),
+        "duration": video_info.get("duration"),
+        "source_tags": [str(tag) for tag in source_tags if str(tag).strip()][:50],
+    }
+
+
 def _is_colab() -> bool:
     return bool(os.environ.get("COLAB_GPU") or Path("/content").exists())
 
@@ -378,7 +399,12 @@ def download(url: str, output_path: Optional[str] = None, sample_minutes: Option
         meta_file = Path(paths_cfg["input"]) / "video_metadata.json"
         meta_file.parent.mkdir(parents=True, exist_ok=True)
         with open(meta_file, "w", encoding="utf-8") as f:
-            json.dump({"title": video_title, "url": url}, f, indent=4)
+            json.dump(
+                _video_metadata_payload(video_info, url),
+                f,
+                ensure_ascii=False,
+                indent=4,
+            )
             
         if sample_minutes is not None and sample_minutes > 0:
             duration = video_info.get("duration", 0)

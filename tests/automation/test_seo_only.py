@@ -113,25 +113,20 @@ class TestSEOOnlyTranscriptLoading:
 
 class TestSEOOnlyRun:
 
-    @patch("automation.seo_only._get_ai")
-    def test_generates_seo_for_discovered_clips(self, mock_get_ai, tmp_path):
+    @patch("automation.seo_only._generate_seo_for_clip")
+    def test_generates_seo_for_discovered_clips(self, mock_generate, tmp_path):
         from automation.seo_only import run_seo_only
 
         (tmp_path / "clip1.mp4").write_bytes(b"\x00" * 1000)
         (tmp_path / "clip2.mp4").write_bytes(b"\x00" * 1000)
 
-        mock_ai = MagicMock()
-        seo_response = json.dumps({
-            "title": "🔴 Kohli ne maara CHHAKKA! 💥 | RCB vs CSK IPL 2026 | Live Score #Shorts",
-            "description": "📝 Virat Kohli smashes massive six over long-on, crowd goes crazy in Wankhede! RCB chasing 185 and Kohli is on fire with back-to-back boundaries. Subscribe for more cricket highlights!",
-            "hashtags": ["#Shorts", "#Kohli", "#RCBvsCSK", "#IPL2026", "#ViratKohli",
-                         "#RCB", "#CSK", "#LiveCricket", "#Cricket", "#T20"],
-            "search_terms": ["kohli six wankhede", "RCB vs CSK highlights",
-                             "aaj ka match", "ipl 2026 live", "kohli batting today"],
-        })
-        mock_ai.generate_fastest_first.return_value = seo_response
-        mock_ai.generate_seo_text.return_value = seo_response
-        mock_get_ai.return_value = mock_ai
+        mock_generate.return_value = {
+            "title": "Kohli ka Batting Debate",
+            "description": "Grounded long cricket description. " * 50,
+            "hashtags": ["#Shorts", "#ViratKohli"],
+            "search_terms": [f"virat kohli batting analysis {i}" for i in range(8)],
+            "tags": ["Virat Kohli", "cricket analysis"],
+        }
 
         result = run_seo_only(str(tmp_path))
         assert result["processed"] == 2
@@ -139,3 +134,4 @@ class TestSEOOnlyRun:
         # Metadata files should exist
         assert (tmp_path / "clip1_metadata.json").exists()
         assert (tmp_path / "clip2_metadata.json").exists()
+        assert mock_generate.call_count == 2

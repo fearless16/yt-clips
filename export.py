@@ -6,6 +6,7 @@ import os
 import shlex
 import shutil
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from threading import Lock
@@ -38,6 +39,30 @@ MIN_OUTPUT_BYTES = 5_000
 SAFE_LIGHTING_FILTERS = ("eq=", "curves=", "hue=", "unsharp=", "hqdn3d=")
 
 
+def _new_export_batch_id() -> str:
+    """Return a sortable batch ID that cannot collide within one second."""
+    return f"{time.strftime('%Y-%m-%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+
+def _is_exportable_cricket_highlight(text: str, source_context: str) -> bool:
+    """Defense-in-depth gate for stale/manual highlight YAML files."""
+    from automation.seo.cricket_context import is_cricket_content
+    return is_cricket_content(text, source_context)
+
+
+def _load_export_cricket_context() -> str:
+    """Load source metadata used to disambiguate short cricket reactions."""
+    pieces = []
+    input_dir = Path(cfg.get("paths", {}).get("input", "input"))
+    for filename in ("video_metadata.json", "match_context.json"):
+        path = input_dir / filename
+        try:
+            pieces.append(json.dumps(json.loads(path.read_text(encoding="utf-8")), ensure_ascii=False))
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+    return " ".join(pieces)
+
+
 # ── Hook Overlay (First 2s Retention) ─────────────────────────────────────────
 _HOOK_TEXT_MAP = {
     "wicket": "🎯 WICKET!",
@@ -50,7 +75,7 @@ _HOOK_TEXT_MAP = {
     "milestone": "🏆 MILESTONE!",
     "drama": "🎭 DRAMA!",
     "instant_payoff": "💥 PAYOFF!",
-    "generic_start": "🏏 CRICKET HIGHLIGHTS",
+    "generic_start": "",
 }
 
 
@@ -64,22 +89,33 @@ def _generate_hook_overlay_text(hook_analysis: Dict) -> str:
         Short text (max ~3 words / 30 chars) for mobile-first readability.
     """
     if not isinstance(hook_analysis, dict) or not hook_analysis:
-        return _HOOK_TEXT_MAP["generic_start"]
+        return ""
 
     hook_type = hook_analysis.get("hook_type", "generic_start")
     hook_score = hook_analysis.get("hook_score", 0)
     hook_types = hook_analysis.get("hook_types_found", [])
+    if not isinstance(hook_types, (list, tuple, set)):
+        hook_types = []
+    hook_types = [item for item in hook_types if isinstance(item, str)]
 
-    # Use primary hook type, fallback to first found
-    primary = hook_type if hook_type in _HOOK_TEXT_MAP else (
-        hook_types[0] if hook_types else "generic_start"
-    )
+    try:
+        if float(hook_score) < 30:
+            return ""
+    except (TypeError, ValueError):
+        return ""
 
-    text = _HOOK_TEXT_MAP.get(primary, _HOOK_TEXT_MAP["generic_start"])
+    # Use a known, specific hook only. Unknown/generic analysis should not
+    # invent an overlay that is unrelated to the clip.
+    primary = hook_type if hook_type in _HOOK_TEXT_MAP and hook_type != "generic_start" else None
+    if primary is None:
+        primary = next(
+            (item for item in hook_types if item in _HOOK_TEXT_MAP and item != "generic_start"),
+            None,
+        )
+    if primary is None:
+        return ""
 
-    # For weak hooks, still show something engaging
-    if hook_score < 30 and primary != "generic_start":
-        text = _HOOK_TEXT_MAP["generic_start"]
+    text = _HOOK_TEXT_MAP[primary]
 
     # Ensure max length for mobile readability (3 words ~ 30 chars)
     if len(text) > 30:
@@ -1293,9 +1329,10 @@ def export_all(
         candidate = Path(cfg["paths"]["transcripts"]) / f"{Path(video_path).stem}.json"
         transcript_path = str(candidate) if candidate.exists() else None
     transcript_segments = _load_transcript_segments(transcript_path)
+    source_cricket_context = _load_export_cricket_context()
 
     log.info("🚀 Export phase starting...")
-    out_dir = Path(cfg["paths"]["shorts"]) / time.strftime("%Y-%m-%d_%H%M%S")
+    out_dir = Path(cfg["paths"]["shorts"]) / _new_export_batch_id()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Prepare SEO context once (trend fetch is expensive)
@@ -1390,6 +1427,9 @@ def export_all(
                 if seg["end"] > start and seg["start"] < end
             ]
             clip_text = " ".join(seg.get("text", "") for seg in clip_segments)
+        if not _is_exportable_cricket_highlight(clip_text, source_cricket_context):
+            log.warning("[%s] Cricket-only export gate rejected non-cricket clip", clip_id)
+            continue
         clip_duration = end - start
         try:
             from automation.clip_selection.hook_auditor import analyze_clip_hook

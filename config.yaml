@@ -46,17 +46,17 @@ highlight:
   # Audio energy spike detection
   audio_energy_threshold: 0.25         # ↓ from 0.3 — catch more excitement moments
   # Minimum/maximum clip duration (seconds)
-  min_duration: 8                       # ↓ from 10 — short punchy clips do better
-  max_duration: 24                      # Strict <25s for YouTube Shorts
+  min_duration: 3                       # shortest useful complete thought
+  max_duration: 20                      # prefer sub-20s; never hard-cut a sentence
   # Short duration guard — interesting content must complete within the target.
   # Windows longer than target are compressed via speed_factor at export time.
-  target_duration: 20                   # research-backed <25s window (vidIQ + competitor audit)
+  target_duration: 12                   # compress complete thoughts toward a tight Short
   max_speedup: 1.6                      # cap so audio never becomes unwatchable
   # Preferred duration range (scorer boosts clips in this range)
-  preferred_duration_min: 15            # Sweet spot for retention
-  preferred_duration_max: 24            # ↓ from 25 — align with target_duration
+  preferred_duration_min: 5             # short, self-contained reactions/discussion
+  preferred_duration_max: 15            # align with minimal complete-thought target
   # Merge nearby highlights that are closer than this (seconds)
-  merge_gap: 8
+  merge_gap: 0                           # never glue separate thoughts across silence
   # How many highlights to extract at most
   max_clips: 15                         # ↑ from 10 — more candidates = more content
   # Words-per-minute threshold for "fast speech" detection
@@ -141,9 +141,9 @@ export:
   crop_smooth_factor: 0.2
   # ─── Cinematic Transitions ─────────────────────────────────────────────────
   transitions:
-    fade_in_duration: 0.5               # seconds — smooth fade from black on open
+    fade_in_duration: 0.0               # disabled — first frame starts immediately
     fade_out_duration: 0.5              # seconds — smooth fade to black on close
-    audio_fade_in: 0.3                  # seconds — audio crossfade in
+    audio_fade_in: 0.0                  # disabled — audio starts immediately
     audio_fade_out: 0.4                 # seconds — audio crossfade out
   # ─── Hook Overlay (First 2s Retention) ─────────────────────────────────────
   # MUST be nested under export: — code reads cfg["export"]["hook_overlay"].
@@ -219,6 +219,13 @@ testing:
 
 # ── SEO ────────────────────────────────────────────────────────────────────────
 seo:
+  title_max_chars: 70                   # mobile-first, one clear clip premise
+  min_search_terms: 8                   # enough current intent coverage without generic filler
+  max_search_terms: 15                  # focused, grounded phrases only
+  description_min_chars: 1200           # reject thin AI blurbs
+  description_target_chars: 3200        # use room for clip + verified match context
+  description_max_chars: 4000           # safe margin below YouTube's 5000-char limit
+  max_tag_chars: 450                    # safe margin below YouTube's 500-char tags limit
   # Inject random hardcoded viral hooks/CTAs into descriptions. OFF by default:
   # the product contract prefers per-clip LLM-generated hooks over generic copy.
   inject_viral_elements: false
@@ -226,8 +233,6 @@ seo:
   inter_clip_sleep_s: 30
   # Max hashtags for Shorts uploads — champions use 2-3, not 15.
   max_hashtags: 3
-  # Minimum words in description — research-backed: high-view Shorts use 18-40 words
-  min_description_words: 20
 
 # ── SEO Learner ─────────────────────────────────────────────────────────────────
 # Self-improving SEO system — learns from past performance to boost future clips.

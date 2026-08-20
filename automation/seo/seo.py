@@ -19,6 +19,12 @@ from utils.ai_client import AIClient
 from .trends import TEAM_MAPPINGS
 from automation._cache import TTLCache
 from utils.ocr import extract_ocr_entities
+from .cricket_context import (
+    correct_cricket_spelling,
+    find_canonical_entities,
+    is_cricket_content,
+)
+from .context_engine import build_cricket_evidence_pack
 
 SUGGEST_CACHE = TTLCache(maxsize=16, ttl=600)
 TREND_CACHE = TTLCache(maxsize=4, ttl=300)
@@ -206,32 +212,23 @@ SEO_BLOCKED_PROVIDERS = {"nvidia", "groq"}
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
 _SYSTEM = (
-    "You are an elite YouTube SEO strategist for cricket content, optimized for the "
-    "June 2026 YouTube algorithm. You understand CTR optimization, watch-time signals, "
-    "engagement rate boosting, and discoverability through long-tail search terms. "
-    "Your audience is Indian and Pakistani cricket fans — use Hinglish (Hindi in Roman letters) "
-    "for titles and mix Hindi/English for maximum reach. "
-    "Generate RICH, LONG, STRUCTURED descriptions with emoji section headers — "
-    "not short corporate summaries. Think like a top cricket YouTuber with 500K subs. "
-    "Descriptions must be rich and multi-word — aim for at least 30 words, never a "
-    "thin one-line blurb. "
-    "Include Hindi transliterated search terms (e.g., 'aaj ka match', 'match highlights') "
-    "alongside English terms for bilingual discoverability. "
-    "NEVER use live-framing search terms like 'live score', 'live stream', or 'live match' — "
-    "these are on-demand Shorts clips, not live streams. Live framing confuses viewers "
-    "and the algorithm. "
-    "CRITICAL: Use player names, teams, and events from the transcript AND/OR on-screen text (OCR). "
-    "Only use entities that appear in at least one of these sources. "
-    "NEVER invent or hallucinate player names or match events. "
-    "CRITICAL: Every search term must appear NATURALLY within the description paragraphs. "
-    "NEVER append a keyword list, tag block, or comma-separated term list at the end. "
-    "The description must read as a natural, flowing document. "
+    "You generate metadata only for cricket Shorts on @cricketwithprajjwal2.0, "
+    "for an Indian Hindi-English audience. Treat the source video title, source "
+    "video description, complete clip transcript, OCR, approved search queries, "
+    "and explicitly verified match facts as the entire evidence boundary. Resolve "
+    "cricket aliases to canonical people and teams. Never invent a player, team, "
+    "score, venue, match event, date, record, injury, or trend. Write one specific "
+    "mobile-readable Hinglish title and a long, unique, natural description using "
+    "the configured character budget. Embed selected approved queries naturally; "
+    "never append a keyword or tag dump. These are on-demand Shorts, so never frame "
+    "them as live streams or live scores. Keep YouTube API tags separate from the "
+    "description and use only grounded aliases, entities, and phrases. "
     "Return ONLY valid JSON — no markdown, no explanation, no extra text."
 )
 
 _SYSTEM_FOOTBALL = (
     "You are an elite YouTube SEO strategist for football/soccer content, optimized for the "
-    "June 2026 YouTube algorithm. You understand CTR optimization, watch-time signals, "
+    "current evidence supplied at generation time. You understand CTR optimization, watch-time signals, "
     "engagement rate boosting, and discoverability through long-tail search terms. "
     "Your audience is global football fans — use a mix of English and popular Hinglish "
     "for titles and descriptions for maximum reach. "
@@ -243,6 +240,60 @@ _SYSTEM_FOOTBALL = (
     "NEVER invent or hallucinate player names or match events. "
     "Return ONLY valid JSON — no markdown, no explanation, no extra text."
 )
+
+_CRICKET_ONLY_PROMPT_TMPL = """CRICKET SHORT CONTEXT:
+  Source video title: {video_title}
+  Source video description: {video_description}
+  Verified match facts: {match_facts}
+  Current YouTube search evidence: {trend_topics}
+  Research sources: {research_sources}
+  Teams explicitly supplied: {teams}
+
+COMPLETE CLIP TRANSCRIPT: {transcript}
+
+APPROVED GROUNDED SEARCH QUERIES (select 8-15 exactly from this list):
+{approved_search_queries}
+
+Return ONLY this valid JSON object:
+{{
+  "title": "<specific Hinglish title>",
+  "description": "<long, unique, natural, evidence-grounded description>",
+  "hashtags": ["#Shorts", "<1-2 exact topic tags>"],
+  "search_terms": ["<8-15 exact approved queries>"],
+  "tags": ["<grounded YouTube API tags within the configured budget>"]
+}}
+
+STRICT RULES:
+- TITLE: maximum 70 characters, one clear premise, mobile-readable. Lead with
+  the canonical player/team and the exact opinion or event from this clip.
+- Never write LIVE, Live Score, Live Stream, Highlights, or #Shorts in title.
+- DESCRIPTION: target {description_target_chars} characters; maximum {description_max_chars} characters.
+  Use the available budget for a detailed,
+  unique Hinglish/English explanation of the source video, this clip's complete
+  thought, and verified match context. Put the strongest 1-2 phrases in the
+  opening lines and weave every selected search query naturally into prose.
+  Never append a keyword dump or repeat sentences merely to reach the target.
+  If a match fact is absent, omit it instead of guessing.
+- HASHTAGS: exactly 2-3; #Shorts plus only grounded player/team/event tags.
+- SEARCH TERMS: 8-15 entries copied exactly from the approved list.
+- TAGS: grounded spellings, aliases, teams, and match phrases only. Tags are a
+  separate API field; never paste a tag list into the description.
+- Treat canonical entity grounding appended below as authoritative.
+"""
+
+_CRICKET_ONLY_SALVAGE_TMPL = """Generate grounded metadata for this cricket Short.
+Clip transcript: {transcript}
+Source title: {video_title}
+
+Return only JSON with title, description, hashtags, search_terms, and tags.
+- Title: maximum 70 characters; one specific Hinglish premise; no LIVE/#Shorts.
+- Description: long and evidence-grounded, target {description_target_chars}
+  characters and never exceed {description_max_chars} characters; no invented
+  match facts or keyword dump.
+- Hashtags: exactly 2-3 including #Shorts.
+- Search terms: 8-15 specific grounded cricket phrases.
+- Never invent a player, team, score, or event.
+"""
 
 _PROMPT_TMPL = """CONTEXT:
   Match: {video_title}
@@ -257,13 +308,13 @@ TASK: Generate RICH, LONG YouTube SEO for this specific clip.
 
 You MUST return valid JSON (no markdown, no other text):
 {{
-    "title": "<max 100 chars, multi-segment Hinglish title with pipes>",
-    "description": "<LONG structured description, 2000-4500 chars, with emoji section headers — EVERY search term embedded naturally>",
+    "title": "<max 70 chars, specific mobile-readable Hinglish title>",
+    "description": "<LONG structured description, 1200-4000 chars — EVERY selected search query embedded naturally>",
     "hashtags": ["<2-3 hashtags>"],
-    "search_terms": ["<25-30 search terms including Hindi transliterations> — these also appear NATURALLY in description text"]
+    "search_terms": ["<8-15 grounded search queries> — these also appear NATURALLY in description text"]
 }}
 
-═══ TITLE FORMAT (max 100 chars) ═══
+═══ TITLE FORMAT (max 70 chars) ═══
 - Use multi-segment format with pipes: 🔴 Hook | Match Context | Channel/Format
 - MUST be Hinglish (Hindi in Roman/English letters, NEVER Devanagari script)
   CORRECT: "Kohli ne maara SIX! 🔥" / "Bumrah ki deadly YORKER!"
@@ -277,11 +328,11 @@ You MUST return valid JSON (no markdown, no other text):
   "Kohli ka RECORD-BREAKING 100! 🏏 | RCB vs MI IPL 2026"
   "Bumrah ki DEADLY Yorker! 💥 | MI vs CSK Highlights | IPL 2026"
 
-═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED, NATURAL) ═══
+═══ DESCRIPTION FORMAT (1200-4000 chars, STRUCTURED, NATURAL) ═══
 Write a LONG, structured description with these sections. ALL search terms
 must be embedded NATURALLY within the paragraph text — do NOT append any
 keyword list, tag block, or comma-separated term list.
-Write at least 30 words of rich description (aim for 40-60 words) — thin one-line descriptions destroy Shorts discoverability.
+Use the configured long-description character budget without repetition or unsupported facts.
 
 1. 📝 HOOK (2-3 lines): Dramatic summary of what happened in the clip.
    Use the most exciting moment as the opening line. Naturally work in
@@ -306,7 +357,7 @@ Write at least 30 words of rich description (aim for 40-60 words) — thin one-l
 7. #️⃣ Hashtags:
    List all hashtags at the end of description.
 
-═══ SEARCH TERMS (25-30 terms, mix English + Hindi transliteration) ═══
+═══ SEARCH TERMS (8-15 grounded queries, mix English + Hindi transliteration) ═══
 Categories to cover:
 - Player + action: "virat kohli six", "bumrah yorker"
 - Match context: "rcb vs mi highlights", "ipl 2026 match 54"
@@ -342,13 +393,13 @@ TASK: Generate RICH, LONG YouTube SEO for this specific football/soccer clip.
 
 You MUST return valid JSON (no markdown, no other text):
 {{
-  "title": "<max 100 chars, multi-segment Hinglish/English title with pipes>",
-  "description": "<LONG structured description, 2000-4500 chars, with emoji section headers>",
+  "title": "<max 70 chars, specific mobile-readable Hinglish/English title>",
+  "description": "<LONG structured description, 1200-4000 chars>",
   "hashtags": ["<2-3 hashtags>"],
-  "search_terms": ["<25-30 search terms including Hinglish transliterations>"]
+  "search_terms": ["<8-15 grounded search queries including Hinglish transliterations>"]
 }}
 
-═══ TITLE FORMAT (max 100 chars) ═══
+═══ TITLE FORMAT (max 70 chars) ═══
 - Use multi-segment format with pipes: 🔴 Hook | Match Context | Channel/Format
 - Start with the MOST DRAMATIC moment from THIS CLIP
 - Use emojis: 🔴 🔥 💥 ⚡ 😱 ⚽ 🏆
@@ -359,10 +410,10 @@ You MUST return valid JSON (no markdown, no other text):
   "Mbappé ka MAGIC moment! 🤯 | France vs Argentina WC | FIFA 2026"
   "Ronaldo's LAST World Cup? 💔 | Portugal vs Morocco Highlights | FIFA 2026"
 
-═══ DESCRIPTION FORMAT (2000-4500 chars, STRUCTURED) ═══
+═══ DESCRIPTION FORMAT (1200-4000 chars, STRUCTURED) ═══
 Write a LONG, structured description with these sections. Write at least
-30 words of rich description (aim for 40-60 words) — thin one-line
-descriptions destroy Shorts discoverability.
+the configured long-description character budget without repetition or
+unsupported facts.
 
 1. 📝 HOOK (2-3 lines): Dramatic summary of what happened in the clip.
    Use the most exciting moment as the opening line.
@@ -388,7 +439,7 @@ descriptions destroy Shorts discoverability.
 8. #️⃣ Hashtags:
    List all hashtags at the end of description.
 
-═══ SEARCH TERMS (25-30 terms, mix English + Hinglish) ═══
+═══ SEARCH TERMS (8-15 grounded queries, mix English + Hinglish) ═══
 Categories to cover:
 - Player + action: "mbappe goal highlights", "ronaldo free kick"
 - Match context: "france vs argentina highlights", "fifa world cup 2026 match"
@@ -416,18 +467,18 @@ Match: {video_title}
 Clip: {transcript}
 
 Requirements:
-- Title: Hinglish/English, max 100 chars, multi-segment with pipes and emojis
+- Title: Hinglish/English, max 70 chars, specific and mobile-readable
 - NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are on-demand clips
-- Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ ⚽ ⚠️ 🏷️ #️⃣). Write at least 30 words of rich description (aim for 40-60 words) — thin one-line descriptions destroy Shorts discoverability.
+- Description: LONG grounded description (1200-4000 chars) using the configured budget without repetition.
 - Hashtags: 2-3 total (include #Shorts), player names, teams, event
-- Search terms: 15-25 terms, mix English + Hinglish transliteration (aaj ka match, world cup match); NEVER use live-framing search terms — these are on-demand clips
+- Search terms: 8-15 grounded queries; NEVER use live-framing search terms — these are on-demand clips
 
 Return valid JSON ONLY:
 {{
   "title": "🔴 Dramatic Hook | Match Context | Format 🔥",
   "description": "📝 Hook paragraph...\n\n🔥 Match Situation...\n\n🏟️ Match Info...\n\n⚽ Key Players...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
   "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#FIFA2026", "...up to 3"],
-  "search_terms": ["player action", "match context", "aaj ka match", "world cup match", "...up to 25"]
+  "search_terms": ["player action", "match context", "aaj ka match", "world cup match", "...up to 15"]
 }}
 """
 
@@ -437,18 +488,18 @@ Match: {video_title}
 Clip: {transcript}
 
 Requirements:
-- Title: Hinglish (Hindi in English/Roman letters, NO Devanagari), max 100 chars, multi-segment with pipes and emojis
+- Title: Hinglish (Hindi in English/Roman letters, NO Devanagari), max 70 chars, specific and mobile-readable
 - NEVER use "Live Score", "LIVE", or "#Shorts" in the title — these are on-demand clips
-- Description: LONG structured English description (1500-4000 chars) with emoji section headers (📝 🔥 🏟️ 🏏 ⚠️ 🏷️ #️⃣). Write at least 30 words of rich description (aim for 40-60 words) — thin one-line descriptions destroy Shorts discoverability.
+- Description: LONG grounded description (1200-4000 chars) using the configured budget without repetition.
 - Hashtags: 2-3 total (include #Shorts), player names, teams, event
-- Search terms: 15-25 terms, mix English + Hindi transliteration (aaj ka match, cricket match score); NEVER use live-framing search terms — these are on-demand clips
+- Search terms: 8-15 grounded queries; NEVER use live-framing search terms — these are on-demand clips
 
 Return valid JSON ONLY:
 {{
   "title": "🔴 Dramatic Hinglish hook | Match Context | Format 🔥",
   "description": "📝 Hook paragraph...\n\n🔥 Match Situation...\n\n🏟️ Match Info...\n\n🏏 Key Players...\n\n⚠️ Disclaimer...\n\n🏷️ Tags...\n\n#️⃣ Hashtags...",
   "hashtags": ["#Shorts", "#PlayerName", "#TeamName", "#IPL2026", "...up to 3"],
-  "search_terms": ["player action", "match context", "aaj ka match", "cricket match score", "...up to 25"]
+  "search_terms": ["player action", "match context", "aaj ka match", "cricket match score", "...up to 15"]
 }}
 """
 
@@ -631,11 +682,34 @@ def _consolidate_seo(title: str, description: str, hashtags: List[str],
             unique_terms.append(st_clean)
 
     return {
-        "title": title.strip()[:100],
-        "description": description.strip()[:4500],
+        "title": title.strip()[:70],
+        "description": description.strip()[:_description_max_chars()],
         "hashtags": unique_hashtags[:15],
-        "search_terms": unique_terms[:30],
+        "search_terms": unique_terms[:15],
     }
+
+
+def _seo_config_int(key: str, default: int, low: int, high: int) -> int:
+    try:
+        value = cfg.get("seo", {}).get(key, default)
+        if isinstance(value, bool):
+            return default
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(value, low), high)
+
+
+def _description_min_chars() -> int:
+    return _seo_config_int("description_min_chars", 1200, 100, 3900)
+
+
+def _description_target_chars() -> int:
+    return _seo_config_int("description_target_chars", 3200, 500, 4000)
+
+
+def _description_max_chars() -> int:
+    return _seo_config_int("description_max_chars", 4000, 500, 4900)
 
 
 def _shorts_hashtag_cap() -> int:
@@ -749,15 +823,18 @@ def _cap_description_hashtags(description: str, hashtags: List[str]) -> str:
     body = _HASHTAG_TOKEN.sub("", description or "")
     body = re.sub(r"[ \t]{2,}", " ", body).rstrip()
     block = " ".join(hashtags)
+    max_chars = _description_max_chars()
     if not block:
-        return body[:4500]
-    return (body + "\n\n" + block)[:4500]
+        return body[:max_chars]
+    suffix = "\n\n" + block
+    return body[:max(0, max_chars - len(suffix))].rstrip() + suffix
 
 
 def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: bool = True) -> Dict:
     """Ensure title length, description length, hashtag count, search term count.
 
-    Enforces strict caps: title≤100, description≤4500, hashtags≤15 (Shorts:
+    Enforces config caps: title≤100, description below YouTube's 5000-char
+    ceiling, hashtags≤15 (Shorts:
     seo.max_hashtags, default 3), terms≤30.
     Strips generic poison terms from search_terms.
     For Shorts, the description hashtag block is scrubbed to the same cap so
@@ -772,8 +849,13 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     # Compound live-framing must also be stripped from the title, not just
     # standalone 'live' words ('LIVESTREAM'/'LiveScore' in a title).
     title = _LIVE_COMPOUND_RE.sub("", title)
-    out["title"] = re.sub(r"[ \t]{2,}", " ", title).strip()[:100]
-    out["description"] = str(out.get("description") or "")[:4500]
+    try:
+        title_cap = int(cfg.get("seo", {}).get("title_max_chars", 70))
+    except (TypeError, ValueError):
+        title_cap = 70
+    title_cap = max(30, min(100, title_cap))
+    out["title"] = re.sub(r"[ \t]{2,}", " ", title).strip()[:title_cap]
+    out["description"] = str(out.get("description") or "")[:_description_max_chars()]
 
     htags = out.get("hashtags") or []
     if isinstance(htags, str):
@@ -826,7 +908,12 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
         if st_clean.lower() not in seen:
             seen.add(st_clean.lower())
             deduped_t.append(st_clean)
-    out["search_terms"] = deduped_t[:30]
+    try:
+        term_cap = int(cfg.get("seo", {}).get("max_search_terms", 15))
+    except (TypeError, ValueError):
+        term_cap = 15
+    term_cap = max(5, min(30, term_cap)) if is_shorts else 30
+    out["search_terms"] = deduped_t[:term_cap]
 
     # Defense-in-depth: models sometimes emit a 'tags' key outside the JSON
     # schema; upload.py merges it straight into the YouTube API tags. Filter it
@@ -848,7 +935,16 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
         if tg_clean.lower() not in seen_tags:
             seen_tags.add(tg_clean.lower())
             deduped_tags.append(tg_clean)
-    out["tags"] = deduped_tags[:30]
+    tag_budget = _seo_config_int("max_tag_chars", 450, 50, 500)
+    budgeted_tags = []
+    used_chars = 0
+    for tag in deduped_tags:
+        added = len(tag) + (1 if budgeted_tags else 0)
+        if used_chars + added > tag_budget:
+            continue
+        budgeted_tags.append(tag)
+        used_chars += added
+    out["tags"] = budgeted_tags
 
     return out
 
@@ -871,13 +967,8 @@ def _validate_seo_quality(item: Dict) -> bool:
     if title.lower().rstrip("!.?") in GENERIC_TITLES:
         return False
 
-    # 3. Description must have substance (at least 100 chars for rich SEO)
-    if len(description) < 100:
-        return False
-
-    # 3b. Description must have enough words — thin one-liners destroy discoverability
-    min_words = _min_description_words()
-    if len(description.split()) < min_words:
+    # 3. Description must use the configured long-form evidence budget.
+    if len(description) < _description_min_chars():
         return False
 
     # 4. Title must not contain Devanagari script (kills discoverability)
@@ -1058,6 +1149,10 @@ def generate_clip_seo(
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
     video_path: str = "",
+    video_description: str = "",
+    approved_search_queries: Optional[List[str]] = None,
+    match_facts: Optional[List[str]] = None,
+    research_sources: Optional[List[Dict]] = None,
 ) -> Dict:
     """Generate SEO metadata for a single clip using fastest-first parallel model racing.
 
@@ -1070,41 +1165,33 @@ def generate_clip_seo(
     """
     trend_topics = trend_topics or []
     teams = teams or []
+    match_facts = match_facts or ([scorecard] if scorecard else [])
+    research_sources = research_sources or []
 
     if not transcript:
-        transcript = "Cricket Live"
+        raise SEOGenerationError(f"SEO blocked for {clip_id}: empty/non-cricket transcript")
+    transcript = correct_cricket_spelling(transcript)
+    video_title = correct_cricket_spelling(video_title)
+    video_description = correct_cricket_spelling(video_description)
+    scorecard = correct_cricket_spelling(scorecard)
+    grounding_context = " ".join((video_title, video_description, scorecard, transcript))
+    if not is_cricket_content(transcript, grounding_context):
+        raise SEOGenerationError(f"SEO blocked for {clip_id}: non-cricket content")
+
     teams_str = ", ".join(teams)
     trend_str = ", ".join(trend_topics[:5]) if trend_topics else ""
 
-    # Detect domain dynamically
-    from .trends import detect_video_domain
-    domain, query, keywords = detect_video_domain(video_title or "", transcript or "")
-
-    # Select prompt templates based on domain
-    if domain == "football":
-        sys_instruction = _SYSTEM_FOOTBALL
-        prompt_tmpl = _PROMPT_TMPL_FOOTBALL
-        salvage_tmpl = _SALVAGE_TMPL_FOOTBALL
-        default_title = "Football Match"
-        default_teams = "Teams"
-    else:
-        # Cricket-only channel: everything non-football uses cricket templates.
-        sys_instruction = _SYSTEM
-        prompt_tmpl = _PROMPT_TMPL
-        salvage_tmpl = _SALVAGE_TMPL
-        default_title = "Cricket Match"
-        # General (non-sports) clips must not get invented cricket teams.
-        default_teams = "N/A" if domain == "general" else "India vs Other"
-
-    # Build prompt
-    user_prompt = prompt_tmpl.format(
-        video_title=video_title or default_title,
-        scorecard=scorecard or "N/A",
-        trend_topics=trend_str or "N/A",
-        live_stream_url=live_stream_url or "N/A",
-        teams=teams_str or default_teams,
-        transcript=transcript,
+    # This channel is cricket-only. Football/general prompt routes remain
+    # unavailable even if a mixed-niche source reaches this function.
+    sys_instruction = _SYSTEM
+    prompt_tmpl = _CRICKET_ONLY_PROMPT_TMPL
+    salvage_tmpl = (
+        _CRICKET_ONLY_SALVAGE_TMPL
+        .replace("{description_target_chars}", str(_description_target_chars()))
+        .replace("{description_max_chars}", str(_description_max_chars()))
     )
+    default_title = "Cricket Match"
+    default_teams = "N/A"
 
     # OPTIONAL OCR entity extraction (degraded gracefully if easyocr unavailable)
     ocr_entities = extract_ocr_entities(video_path) if video_path else {}
@@ -1114,7 +1201,50 @@ def generate_clip_seo(
         pn = "; ".join(ocr_entities.get("player_names", []))
         os = "; ".join(ocr_entities.get("on_screen_text", []))
         ocr_text = f"\n\nON-SCREEN TEXT (OCR from video):\n  Scoreboard: {sb or '(none)'}\n  Player names: {pn or '(none)'}\n  Raw text: {os or '(none)'}"
+    research_context = {
+        "match_facts": match_facts,
+        "topics": trend_topics,
+        "search_queries": approved_search_queries or [],
+        "sources": research_sources,
+    }
+    evidence_pack = build_cricket_evidence_pack(
+        video_title=video_title,
+        video_description=video_description,
+        clip_transcript=transcript,
+        ocr_entities=ocr_entities,
+        research_context=research_context,
+    )
+    approved_queries = evidence_pack["approved_search_queries"]
+    grounded_entities = evidence_pack["grounded_entities"]
+    grounding_context = " ".join((
+        video_title,
+        video_description,
+        transcript,
+        " ".join(evidence_pack["match_facts"]),
+        ocr_text,
+    ))
+    user_prompt = prompt_tmpl.format(
+        video_title=video_title or default_title,
+        video_description=video_description or "N/A",
+        match_facts="\n".join(evidence_pack["match_facts"]) or "N/A",
+        trend_topics=trend_str or "N/A",
+        research_sources=json.dumps(evidence_pack["sources"], ensure_ascii=False) or "N/A",
+        teams=teams_str or default_teams,
+        transcript=transcript,
+        approved_search_queries="\n".join(f"- {query}" for query in approved_queries),
+        description_target_chars=_description_target_chars(),
+        description_max_chars=_description_max_chars(),
+    )
+    if ocr_text:
         user_prompt += ocr_text
+
+    user_prompt += (
+        "\n\nENTITY GROUNDING (canonical cricket knowledge):\n"
+        f"Grounded players: {', '.join(grounded_entities['players']) or 'none'}\n"
+        f"Grounded teams: {', '.join(grounded_entities['teams']) or 'none'}\n"
+        "Resolve aliases exactly as listed above. Never reinterpret an alias as "
+        "a technical acronym and never invent another player."
+    )
 
     # Inject learner intelligence into the prompt
     learner_ctx = _get_learner_context()
@@ -1145,6 +1275,54 @@ def generate_clip_seo(
                                      model_override=model_override,
                                      sys_instruction=sys_instruction,
                                      salvage_tmpl=salvage_tmpl)
+    result = _enforce_limits(result, is_shorts=is_shorts)
+
+    rendered_text = " ".join([
+        str(result.get("title", "")),
+        str(result.get("description", "")),
+        " ".join(str(item) for item in result.get("hashtags", []) or []),
+        " ".join(str(item) for item in result.get("search_terms", []) or []),
+        " ".join(str(item) for item in result.get("tags", []) or []),
+    ])
+    rendered_entities = find_canonical_entities(rendered_text)
+    extra_players = set(rendered_entities["players"]) - set(grounded_entities["players"])
+    extra_teams = set(rendered_entities["teams"]) - set(grounded_entities["teams"])
+    if extra_players or extra_teams:
+        extras = sorted(extra_players | extra_teams)
+        raise SEOGenerationError(
+            f"SEO blocked for {clip_id}: ungrounded entities {', '.join(extras)}"
+        )
+
+    output_queries = result.get("search_terms") or []
+    approved_keys = {query.casefold() for query in approved_queries}
+    unapproved = [
+        query for query in output_queries
+        if str(query).strip().casefold() not in approved_keys
+    ]
+    min_queries = _seo_config_int("min_search_terms", 8, 1, 15)
+    max_queries = _seo_config_int("max_search_terms", 15, min_queries, 30)
+    if unapproved:
+        raise SEOGenerationError(
+            f"SEO blocked for {clip_id}: unapproved search queries "
+            + ", ".join(str(query) for query in unapproved)
+        )
+    if not min_queries <= len(output_queries) <= max_queries:
+        raise SEOGenerationError(
+            f"SEO blocked for {clip_id}: expected {min_queries}-{max_queries} "
+            f"grounded search queries, got {len(output_queries)}"
+        )
+    description_key = re.sub(
+        r"\s+", " ", str(result.get("description") or "")
+    ).casefold()
+    missing_queries = [
+        str(query) for query in output_queries
+        if re.sub(r"\s+", " ", str(query)).strip().casefold() not in description_key
+    ]
+    if missing_queries:
+        raise SEOGenerationError(
+            f"SEO blocked for {clip_id}: search queries not embedded in description "
+            + ", ".join(missing_queries)
+        )
 
     return result
 
@@ -1250,10 +1428,11 @@ def _escalation_seo(clip_id: str, user_prompt: str,
     Called when Tier 1 fails. Uses a different model/provider if available.
     """
     # Try single-provider generation with a more constrained prompt
-    salvage_prompt = salvage_tmpl.format(
+    salvage_rules = salvage_tmpl.format(
         video_title=video_title or "Video Match",
         transcript=transcript,
     )
+    salvage_prompt = user_prompt.rstrip() + "\n\nESCALATION RULES:\n" + salvage_rules
     try:
         ai = _get_ai()
         if model_override:
@@ -1376,6 +1555,7 @@ def process_all_seo(highlights_path: str, output_dir: str,
 
     # Load video metadata once
     video_title = ""
+    video_description = ""
     live_stream_url = ""
     meta_file = Path(cfg["paths"]["input"]) / "video_metadata.json"
     if meta_file.exists():
@@ -1383,6 +1563,7 @@ def process_all_seo(highlights_path: str, output_dir: str,
             with open(meta_file, "r", encoding="utf-8") as f:
                 meta = json.load(f)
                 video_title = meta.get("title", "")
+                video_description = meta.get("description", "")
                 live_stream_url = meta.get("live_stream_url", "")
         except Exception:
             pass
@@ -1390,20 +1571,6 @@ def process_all_seo(highlights_path: str, output_dir: str,
     if not video_path:
         dl_fn = cfg.get("download", {}).get("output_filename", "video.mp4")
         video_path = str(Path(cfg["paths"]["input"]) / dl_fn)
-
-    # Fetch trend context ONCE for the whole session (cached)
-    trend_cache_key = f"trend:{video_title[:50]}"
-    trend = TREND_CACHE.get(trend_cache_key)
-    if trend is None:
-        log.info("Fetching trend context...")
-        trend = get_trending_context(domain="cricket", region="IN", video_title=video_title)
-        TREND_CACHE.set(trend_cache_key, trend)
-    else:
-        log.info("Using cached trend context")
-    live_stream_url = live_stream_url or trend.get("live_stream_url", "")
-    scorecard = trend.get("scorecard", "")
-    trend_topics = trend.get("topics", [])
-    teams = trend.get("teams", [])
 
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     all_results = []
@@ -1423,14 +1590,29 @@ def process_all_seo(highlights_path: str, output_dir: str,
         log.info("SEO [%d/%d]: %s", idx, len(clips), clip_id)
 
         try:
+            trend_cache_key = f"trend:{video_title[:60]}:{transcript[:80]}"
+            trend = TREND_CACHE.get(trend_cache_key)
+            if trend is None:
+                trend = get_trending_context(
+                    domain="cricket",
+                    region="IN",
+                    video_title=video_title,
+                    video_description=video_description,
+                    transcript=transcript,
+                )
+                TREND_CACHE.set(trend_cache_key, trend)
             result = generate_clip_seo(
                 clip_id=clip_id,
                 transcript=transcript,
                 video_title=video_title,
-                scorecard=scorecard,
-                trend_topics=trend_topics,
-                live_stream_url=live_stream_url,
-                teams=teams,
+                video_description=video_description,
+                scorecard=trend.get("scorecard", ""),
+                trend_topics=trend.get("topics", []),
+                live_stream_url=(live_stream_url or trend.get("live_stream_url", "")),
+                teams=trend.get("teams", []),
+                approved_search_queries=trend.get("search_queries", []),
+                match_facts=trend.get("match_facts", []),
+                research_sources=trend.get("sources", []),
                 video_path=video_path,
             )
             all_results.append(result)

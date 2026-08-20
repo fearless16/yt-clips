@@ -26,23 +26,6 @@ cfg = load_config()
 log = get_logger("seo_only", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 
-# Lazy AI client — same pattern as seo.py
-_ai_instance = None
-_ai_lock = __import__("threading").Lock()
-
-
-def _get_ai():
-    """Thread-safe lazy AIClient singleton."""
-    global _ai_instance
-    if _ai_instance is not None:
-        return _ai_instance
-    with _ai_lock:
-        if _ai_instance is None:
-            from utils.ai_client import AIClient
-            _ai_instance = AIClient()
-    return _ai_instance
-
-
 # ── Clip discovery ───────────────────────────────────────────────────────────
 
 def _metadata_is_valid(meta_path: Path) -> bool:
@@ -163,49 +146,31 @@ def _generate_seo_for_clip(
     clip_id: str,
     transcript: str,
     video_title: str = "",
+    video_description: str = "",
 ) -> Optional[Dict]:
-    """Generate SEO metadata for a single clip using AI.
-
-    Uses the SAME system prompt and quality gate as the main SEO pipeline.
-    Generic garbage is rejected — no exceptions.
-    """
-    from automation.seo.seo import (
-        _SYSTEM, _parse_json_response, _enforce_limits, _validate_seo_quality
-    )
-
-    prompt = f"""CONTEXT:
-  Match: {video_title or 'Cricket Match'}
-
-CLIP TRANSCRIPT: {transcript or 'Cricket highlight clip'}
-
-Generate YouTube Shorts SEO for this clip.
-Return ONLY valid JSON:
-{{
-  "title": "<max 80 chars, Hinglish hook for THIS CLIP>",
-  "description": "<English, casual, max 500 chars>",
-  "hashtags": ["#Shorts", "<max 4 more>"],
-  "search_terms": ["<max 5 search terms>"]
-}}"""
-
+    """Use the one canonical cricket SEO engine for exported clips too."""
+    from automation.seo.seo import generate_clip_seo
+    from automation.seo.trends import get_trending_context
     try:
-        response = _get_ai().generate_seo_text(
-            prompt=prompt,
-            system_instruction=_SYSTEM,
+        research = get_trending_context(
+            domain="cricket",
+            region="IN",
+            video_title=video_title,
+            video_description=video_description,
+            transcript=transcript,
         )
-        parsed = _parse_json_response(response)
-        if not parsed or "title" not in parsed:
-            log.warning("[seo_only] AI returned unparseable for %s", clip_id)
-            return None
-
-        result = _enforce_limits(parsed, is_shorts=True)
-
-        # Quality gate — reject generic garbage
-        if not _validate_seo_quality(result):
-            log.warning("[seo_only] Quality gate rejected %s: title='%s'",
-                       clip_id, result.get('title', '')[:60])
-            return None
-
-        return result
+        return generate_clip_seo(
+            clip_id=clip_id,
+            transcript=transcript,
+            video_title=video_title,
+            video_description=video_description,
+            scorecard=research.get("scorecard", ""),
+            trend_topics=research.get("topics", []),
+            teams=research.get("teams", []),
+            approved_search_queries=research.get("search_queries", []),
+            match_facts=research.get("match_facts", []),
+            research_sources=research.get("sources", []),
+        )
     except Exception as e:
         log.error("[seo_only] AI failed for %s: %s", clip_id, e)
         return None
@@ -218,6 +183,7 @@ def run_seo_only(
     highlights_yaml: Optional[str] = None,
     transcript_json: Optional[str] = None,
     video_title: str = "",
+    video_description: str = "",
     skip_existing: bool = True,
     inter_clip_sleep: float = 2.0,
 ) -> Dict:
@@ -243,14 +209,18 @@ def run_seo_only(
             break
 
     # Auto-discover video title from metadata
-    if not video_title:
+    if not video_title or not video_description:
         meta_file = Path(clips_dir).parent / "input" / "video_metadata.json"
         if not meta_file.exists():
             meta_file = Path("input") / "video_metadata.json"
         if meta_file.exists():
             try:
                 with open(meta_file, encoding="utf-8") as f:
-                    video_title = json.load(f).get("title", "")
+                    source_meta = json.load(f)
+                    video_title = video_title or source_meta.get("title", "")
+                    video_description = (
+                        video_description or source_meta.get("description", "")
+                    )
             except Exception:
                 pass
 
@@ -265,7 +235,12 @@ def run_seo_only(
             clip_id, clips_dir, highlights_yaml, transcript_json
         )
 
-        seo = _generate_seo_for_clip(clip_id, transcript, video_title)
+        seo = _generate_seo_for_clip(
+            clip_id,
+            transcript,
+            video_title,
+            video_description,
+        )
         if seo:
             meta_path = Path(clips_dir) / f"{clip_id}_metadata.json"
             meta = {
@@ -274,6 +249,7 @@ def run_seo_only(
                 "description": seo.get("description", ""),
                 "hashtags": seo.get("hashtags", ["#Shorts"]),
                 "search_terms": seo.get("search_terms", []),
+                "tags": seo.get("tags", []),
                 "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "source": "seo_only",
             }

@@ -1,4 +1,4 @@
-"""Short duration guard — interesting content must fit within target (<25s).
+"""Short duration guard — preserve complete thoughts in the shortest useful clip.
 
 TDD: tests written first. Verifies:
 1. Pure speed-factor computation (window > target -> speed-up).
@@ -62,7 +62,7 @@ def test_config_has_target_duration():
     from utils.config import load_config
     hl = load_config().get("highlight", {})
     assert "target_duration" in hl
-    assert 18 <= float(hl["target_duration"]) <= 25
+    assert 5 <= float(hl["target_duration"]) <= 15
 
 
 def test_config_has_max_speedup():
@@ -169,8 +169,8 @@ def test_detect_highlights_yaml_has_speed_factor(tmp_path, monkeypatch):
     assert out_yaml.exists()
     data = yaml.safe_load(out_yaml.read_text(encoding="utf-8"))
     assert "speed_factor" in data["clip1"]
-    assert data["clip1"]["speed_factor"] == pytest.approx(1.2, abs=0.01)
-    assert highlights[0]["speed_factor"] == pytest.approx(1.2, abs=0.01)
+    assert data["clip1"]["speed_factor"] == pytest.approx(1.6, abs=0.01)
+    assert highlights[0]["speed_factor"] == pytest.approx(1.6, abs=0.01)
 
 
 def test_sanitize_strategy_preserves_merged_speed():
