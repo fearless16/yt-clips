@@ -82,7 +82,7 @@ Shared infra:
 - **Random hardcoded hooks/CTAs:** `_inject_viral_elements` uses `random.choice(VIRAL_HOOKS)` / `random.choice(ENGAGING_CTAS)` (`seo.py:476`, lists at `:62/:75`) — non-clip-specific templated copy.
 - **Shorts description bug:** `_attempt_seo_generation` calls `assemble_description()` unconditionally (`seo.py:1089`); `is_shorts` is never threaded in. The AI's <400-char Shorts description gets overwritten by the long-form LIVE/CHAPTERS/Disclaimer template → **malformed Shorts metadata** (core deliverable broken).
 - **Degradation, not escalation:** on parse failure → "salvage" branch fabricates metadata but still flags `ai_generated=True` (`seo.py:1132-1198`); on no response → transcript template with hardcoded broadcasters/chapters/disclaimer (`seo.py:1200-1279`). Docstring `seo.py:1069` ("Never uses template fallback") is false.
-- **Cricbuzz is match-blind:** `fetch_cricbuzz_live_score` ignores its `query` and scrapes a generic landing page with brittle selectors (`trends.py:164-180, 126`); empty results silently become placeholder text ("Toss details not available", `seo.py:377`).
+- **Resolved:** generic Cricbuzz scraping was replaced by query-specific scorecard discovery with source provenance and fail-closed parsing.
 - **Factual correction is partial/risky:** `correct_cricket_spelling` runs on transcript only (`seo.py:950-951`), not title/AI output; canonical `CRICKET_PLAYERS`/`CRICKET_TEAMS` (`cricket_context.py:60/104`) are **dead code**; false positives like `"head"→"Travis Head"` and hardcoded `"ipl"→"IPL 2026"`.
 
 ### 3.2 LLM orchestration — `utils/ai_client.py` — **health layer is dead code on the real path**

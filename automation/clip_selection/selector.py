@@ -107,27 +107,12 @@ class ClipSelector:
         # Quality threshold
         quality_pass = [c for c in keep if c.get("final_score", 0) >= min_quality]
         if not quality_pass:
-            # Cross-run dedup active + every candidate rejected → do NOT fall
-            # back to resurrecting rejected (duplicate) candidates; return
-            # empty so the pipeline skips upload instead of re-uploading dupes.
-            # Gate on dedup actually flagging candidates (not merely history
-            # existing): a genuine no-good-clips video with history present
-            # must still fall back to top candidates.
-            dedup_active = bool(context.get("previous_windows"))
-            dedup_flagged = any(
-                "duplicate_content" in " ".join(c.get("rejection_reasons", []))
-                for c in scored_candidates
+            log.warning(
+                "No non-rejected candidates passed quality threshold %.1f "
+                "— returning empty selection",
+                min_quality,
             )
-            if dedup_active and dedup_flagged and not keep:
-                log.warning(
-                    "Dedup: all %d candidates rejected as cross-run duplicates "
-                    "— returning empty selection (no clips to upload)",
-                    len(scored_candidates),
-                )
-                return []
-            log.warning("No candidates passed quality threshold %.1f — using top %d",
-                        min_quality, min(max_selected, len(keep)))
-            quality_pass = keep[:max_selected] if keep else scored_candidates[:max_selected]
+            return []
 
         log.info("Quality pass: %d/%d candidates above %.1f",
                  len(quality_pass), len(keep), min_quality)

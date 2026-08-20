@@ -425,20 +425,16 @@ class TestClipSelector:
         final = selector.select(scored, rms_context, max_selected=3, min_quality=0)
         assert final == []
 
-    def test_all_rejected_without_dedup_still_falls_back(self, dull_candidate,
-                                                         rms_context):
-        # Pre-existing behavior preserved: no dedup context → fallback resurrects
+    def test_all_rejected_without_dedup_returns_empty(self, dull_candidate,
+                                                      rms_context):
         selector = ClipSelector(use_llm_arbiter=False)
         scored = selector.score_candidates([dict(dull_candidate)], rms_context)
         assert scored[0].get("should_reject", False)
         final = selector.select(scored, rms_context, max_selected=1, min_quality=0)
-        assert len(final) == 1
+        assert final == []
 
-    def test_history_present_but_no_dedup_flag_still_falls_back(
+    def test_history_present_but_no_dedup_flag_returns_empty(
             self, dull_candidate, rms_context):
-        # History exists but NONE of the rejections are dedup-driven (dull_hook
-        # etc.) → must fall back to top candidates, NOT return empty. The empty
-        # return is reserved for genuinely dedup-rejected selections.
         selector = ClipSelector(use_llm_arbiter=False)
         rms_context["previous_windows"] = [
             {"start": 9999.0, "end": 10000.0},
@@ -448,7 +444,21 @@ class TestClipSelector:
         assert "duplicate_content" not in " ".join(
             scored[0].get("rejection_reasons", []))
         final = selector.select(scored, rms_context, max_selected=1, min_quality=0)
-        assert len(final) == 1
+        assert final == []
+
+    def test_non_rejected_below_quality_returns_empty(self, rms_context):
+        selector = ClipSelector(use_llm_arbiter=False)
+        scored = [{
+            "start": 10.0,
+            "end": 30.0,
+            "text": "A valid but weak cricket segment",
+            "final_score": 19.9,
+            "should_reject": False,
+        }]
+
+        final = selector.select(scored, rms_context, max_selected=1, min_quality=20.0)
+
+        assert final == []
 
 
 # ── Hook Auditor ───────────────────────────────────────────────────
@@ -569,6 +579,44 @@ class TestClipLearner:
         assert clips[0]["youtube_video_id"] == "abc123"
         assert clips[0]["views"] == 1500
 
+        learner.close()
+
+    def test_selection_upsert_preserves_performance_saved_first(self, tmp_path):
+        db = tmp_path / "test_learner.db"
+        learner = ClipLearner(db_path=db)
+
+        learner.update_performance(
+            clip_id="2026-08-20_120000/clip1",
+            youtube_video_id="yt-existing",
+            views=321,
+            estimated_retention=0.61,
+            completion_rate=0.72,
+            avg_view_duration_seconds=14.5,
+        )
+        learner.save_clip_selection(
+            clip_id="2026-08-20_120000/clip1",
+            selected_rank=1,
+            final_score=84.0,
+            agent_scores={"hook_expert": {"score": 91}},
+        )
+
+        clip = learner.get_all_clips()[0]
+        assert clip["youtube_video_id"] == "yt-existing"
+        assert clip["views"] == 321
+        assert clip["estimated_retention"] == 0.61
+        assert clip["completion_rate"] == 0.72
+        assert clip["avg_view_duration_seconds"] == 14.5
+        assert clip["final_score"] == 84.0
+        learner.close()
+
+    def test_update_performance_preserves_existing_uploaded_at(self, tmp_path):
+        learner = ClipLearner(db_path=tmp_path / "test_learner.db")
+        learner.save_clip_selection("batch/clip1", 1, 80.0, {})
+        before = learner.get_all_clips()[0]["uploaded_at"]
+
+        learner.update_performance("batch/clip1", "youtube-id", 0)
+
+        assert learner.get_all_clips()[0]["uploaded_at"] == before
         learner.close()
 
     def test_get_performance_summary(self, tmp_path):

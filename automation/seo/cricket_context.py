@@ -2,11 +2,14 @@
 cricket_context.py — Cricket player names, team names, venues, and corrections.
 """
 import re
-from typing import Dict, List, Set
+from collections import defaultdict
+from typing import Dict, Iterable, List, Optional, Set
 
 # Spelling corrections for common Whisper audio transcript errors
 CRICKET_SPELLING_CORRECTIONS = {
     # Players
+    "yuvi": "Yuvraj Singh",
+    "yuvraj": "Yuvraj Singh",
     "coaly": "Kohli",
     "koli": "Kohli",
     "virat koli": "Virat Kohli",
@@ -81,7 +84,8 @@ CRICKET_SPELLING_CORRECTIONS = {
     "narendra modi": "Narendra Modi Stadium, Ahmedabad",
     
     # Tournaments
-    "ipl": "IPL 2026",
+    # Never inject a season year: source metadata/match evidence owns the date.
+    "ipl": "IPL",
     "t20": "T20",
     "odi": "ODI",
     "wct20": "T20 World Cup",
@@ -89,6 +93,7 @@ CRICKET_SPELLING_CORRECTIONS = {
 
 # Canonical player names for SEO tag enrichment
 CRICKET_PLAYERS: Set[str] = {
+    "Yuvraj Singh",
     "Virat Kohli", "Rohit Sharma", "Jasprit Bumrah", "MS Dhoni", "Hardik Pandya",
     "Suryakumar Yadav", "Rishabh Pant", "Shubman Gill", "Yashasvi Jaiswal",
     "Ravindra Jadeja", "KL Rahul", "Shreyas Iyer", "Rinku Singh", "Axar Patel",
@@ -113,19 +118,194 @@ CRICKET_TEAMS: Set[str] = {
     "West Indies", "Sri Lanka", "Bangladesh", "Afghanistan"
 }
 
-def correct_cricket_spelling(text: str) -> str:
-    """Replace misheard/lowercase cricket names with canonical spelling."""
-    import re
-    corrected = text
-    # Sort keys by length descending to replace longer phrases first (e.g. 'mitchell stark' before 'stark')
-    for misheard in sorted(CRICKET_SPELLING_CORRECTIONS.keys(), key=len, reverse=True):
-        pattern = r"\b" + re.escape(misheard) + r"\b"
-        replacement = CRICKET_SPELLING_CORRECTIONS[misheard]
-        corrected = re.sub(pattern, replacement, corrected, flags=re.IGNORECASE)
-    return corrected
+def _runtime_player_corrections(player_names: Iterable[str]) -> Dict[str, str]:
+    """Build conservative aliases from the verified players for this video.
+
+    Runtime match/source evidence is the catalog; the global list is only a
+    seed.  First/last names are expanded only when unique inside that runtime
+    catalog. Short all-caps tokens (``UV``, ``AI``) are deliberately excluded.
+    """
+    names = list(dict.fromkeys(
+        re.sub(r"\s+", " ", str(name or "")).strip()
+        for name in player_names
+        if str(name or "").strip()
+    ))
+    alias_targets: Dict[str, Set[str]] = defaultdict(set)
+    for name in names:
+        parts = re.findall(r"[A-Za-z][A-Za-z.'-]*", name)
+        alias_targets[name.casefold()].add(name)
+        if len(parts) >= 2:
+            for token in (parts[0], parts[-1]):
+                if len(token) >= 4:
+                    alias_targets[token.casefold()].add(name)
+    return {
+        alias: next(iter(targets))
+        for alias, targets in alias_targets.items()
+        if len(targets) == 1
+    }
 
 
-def find_canonical_entities(text: str) -> Dict[str, List[str]]:
+def correct_cricket_spelling(
+    text: str,
+    player_names: Optional[Iterable[str]] = None,
+    player_aliases: Optional[Dict[str, str]] = None,
+) -> str:
+    """Resolve aliases against static seeds plus the verified runtime roster."""
+    if not text:
+        return text
+    corrections = dict(CRICKET_SPELLING_CORRECTIONS)
+    runtime_names = list(player_names or [])
+    runtime = _runtime_player_corrections(runtime_names)
+
+    # Runtime ambiguity beats a static guess. For example, if two verified
+    # players are named Rahul, plain "Rahul" must remain unresolved.
+    runtime_alias_targets: Dict[str, Set[str]] = defaultdict(set)
+    for name in runtime_names:
+        parts = re.findall(r"[A-Za-z][A-Za-z.'-]*", str(name))
+        if len(parts) >= 2:
+            for token in (parts[0], parts[-1]):
+                if len(token) >= 4:
+                    runtime_alias_targets[token.casefold()].add(str(name).strip())
+    for alias, targets in runtime_alias_targets.items():
+        if len(targets) > 1:
+            corrections.pop(alias, None)
+    corrections.update(runtime)
+    corrections.update({
+        str(alias).casefold(): str(player).strip()
+        for alias, player in (player_aliases or {}).items()
+        if len(str(alias).strip()) >= 4 and str(player).strip()
+    })
+    # Identity entries make the longest canonical phrase win before a short
+    # alias inside it ("Yuvraj Singh" must not become "Yuvraj Singh Singh").
+    for canonical in CRICKET_SPELLING_CORRECTIONS.values():
+        corrections.setdefault(canonical.lower(), canonical)
+    aliases = sorted(corrections, key=len, reverse=True)
+    pattern = re.compile(
+        r"\b(?:" + "|".join(re.escape(alias) for alias in aliases) + r")\b",
+        re.IGNORECASE,
+    )
+    return pattern.sub(
+        lambda match: corrections[match.group(0).lower()],
+        text,
+    )
+
+
+_STRONG_CRICKET_TERMS = {
+    "cricket", "ipl", "bbl", "psl", "t20", "odi", "test match",
+    "wicket", "bowled", "lbw", "stumped", "batsman", "batter", "bowler",
+    "yorker", "googly", "doosra", "powerplay", "run rate", "super over",
+    "century", "half-century", "hattrick", "innings", "crease", "over",
+    "six", "four", "chauka", "chhakka", "sixer", "boundary",
+}
+
+_NON_PLAYER_NAME_PHRASES = {
+    "team india", "india coach", "world cup", "test match", "super kings",
+    "royal challengers", "rajasthan royals", "mumbai indians",
+    "sunrisers hyderabad", "delhi capitals", "punjab kings",
+    "gujarat titans", "latest news", "match highlights", "cricket shorts",
+}
+
+
+def discover_grounded_player_names(
+    source_text: str,
+    current_search_texts: Iterable[str],
+) -> List[str]:
+    """Discover non-static players confirmed by current query-specific results.
+
+    A name is admitted when it appears in the source plus one current result,
+    or independently in at least two current results. This lets aliases such as
+    ``Cheeku`` resolve through live search evidence without trusting one title.
+    """
+    source_low = str(source_text or "").casefold()
+    counts: Dict[str, int] = defaultdict(int)
+    display: Dict[str, str] = {}
+    pattern = re.compile(r"\b[A-Z][a-z]{2,}\s+[A-Z][A-Za-z.'-]{2,}\b")
+    for text in current_search_texts:
+        in_result = set()
+        for match in pattern.findall(str(text or "")):
+            clean = re.sub(r"\s+", " ", match).strip(" .'\"")
+            key = clean.casefold()
+            if key in _NON_PLAYER_NAME_PHRASES or key in in_result:
+                continue
+            in_result.add(key)
+            display.setdefault(key, clean)
+            counts[key] += 1
+    grounded = [
+        display[key]
+        for key, count in counts.items()
+        if count >= 2 or (count >= 1 and key in source_low)
+    ]
+    return sorted(grounded, key=lambda name: (-counts[name.casefold()], name))
+
+
+def discover_grounded_player_aliases(
+    source_text: str,
+    current_search_texts: Iterable[str],
+    player_names: Iterable[str],
+) -> Dict[str, str]:
+    """Link source nicknames only when current results co-mention a player."""
+    stop = {
+        "india", "cricket", "coach", "mentor", "match", "team", "player",
+        "banao", "bana", "highlights", "shorts", "latest", "today",
+    }
+    source_tokens = {
+        token.casefold()
+        for token in re.findall(r"[A-Za-z][A-Za-z'-]+", source_text or "")
+        if len(token) >= 4 and token.casefold() not in stop
+    }
+    alias_targets: Dict[str, Set[str]] = defaultdict(set)
+    result_lows = [str(text or "").casefold() for text in current_search_texts]
+    for player in player_names:
+        player_key = str(player).casefold()
+        player_tokens = set(re.findall(r"[a-z]+", player_key))
+        for alias in source_tokens - player_tokens:
+            if any(
+                player_key in result
+                and re.search(r"\b" + re.escape(alias) + r"\b", result)
+                for result in result_lows
+            ):
+                alias_targets[alias].add(str(player))
+    return {
+        alias: next(iter(targets))
+        for alias, targets in alias_targets.items()
+        if len(targets) == 1
+    }
+_WEAK_CRICKET_TERMS = {"shot", "coach", "captain", "team", "target", "chase"}
+
+
+def _cricket_relevance_score(text: str) -> int:
+    """Return a conservative cricket relevance score for one text fragment."""
+    if not text:
+        return 0
+    corrected = correct_cricket_spelling(text)
+    low = corrected.lower()
+    entities = find_canonical_entities(corrected)
+    score = 3 if entities["players"] else 0
+    score += 2 if entities["teams"] and any(
+        term in low for term in _STRONG_CRICKET_TERMS
+    ) else 0
+    score += min(3, sum(1 for term in _STRONG_CRICKET_TERMS if re.search(
+        r"\b" + re.escape(term) + r"\b", low
+    )))
+    score += min(1, sum(1 for term in _WEAK_CRICKET_TERMS if re.search(
+        r"\b" + re.escape(term) + r"\b", low
+    )))
+    if re.search(r"\b\d{1,3}/\d{1,2}\b", low):
+        score += 2
+    return score
+
+
+def is_cricket_content(text: str, source_context: str = "") -> bool:
+    """Hard cricket-only gate with source context for ambiguous clip phrases."""
+    clip_score = _cricket_relevance_score(text)
+    source_score = _cricket_relevance_score(source_context)
+    return clip_score >= 2 or (clip_score >= 1 and source_score >= 2)
+
+
+def find_canonical_entities(
+    text: str,
+    player_names: Optional[Iterable[str]] = None,
+) -> Dict[str, List[str]]:
     """Find canonical players/teams mentioned in *text* (post-correction).
 
     Wires the canonical name sets into SEO enrichment so tags/hashtags can be
@@ -137,11 +317,27 @@ def find_canonical_entities(text: str) -> Dict[str, List[str]]:
     if not text:
         return {"players": [], "teams": []}
     low = text.lower()
+    player_catalog = set(CRICKET_PLAYERS)
+    player_catalog.update(
+        re.sub(r"\s+", " ", str(name or "")).strip()
+        for name in (player_names or [])
+        if str(name or "").strip()
+    )
+    surname_counts: Dict[str, int] = {}
+    for player_name in player_catalog:
+        surname = player_name.split()[-1].lower()
+        surname_counts[surname] = surname_counts.get(surname, 0) + 1
     players = []
-    for name in sorted(CRICKET_PLAYERS, key=len, reverse=True):
-        # Match the full canonical name or its last token (e.g. "Bumrah").
+    for name in sorted(player_catalog, key=len, reverse=True):
+        # A surname is safe only when it identifies exactly one known player.
+        # "Singh", "Sharma" and "Yadav" must never fan out into fake entities.
         last = name.split()[-1].lower()
-        if name.lower() in low or (len(last) > 3 and re.search(r"\b" + re.escape(last) + r"\b", low)):
+        unique_last_name = surname_counts.get(last) == 1
+        if name.lower() in low or (
+            unique_last_name
+            and len(last) > 3
+            and re.search(r"\b" + re.escape(last) + r"\b", low)
+        ):
             players.append(name)
     teams = []
     for name in sorted(CRICKET_TEAMS, key=len, reverse=True):

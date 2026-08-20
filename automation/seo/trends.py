@@ -8,12 +8,14 @@ Sources (live when available):
   4) Cricbuzz live scores (web scraping)
   5) [NEW] YouTube Data API / channel search for your own live stream URL
 """
+import json
 import random
 import re
+import threading
 import urllib.parse
 import xml.etree.ElementTree as ET
+from functools import lru_cache
 from typing import Dict, List, Tuple, Optional
-from datetime import datetime
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -21,13 +23,22 @@ from bs4 import BeautifulSoup
 
 from utils.config import load_config
 from utils.logger import get_logger
-from utils.resilience import CircuitBreaker, retry_with_backoff
+from utils.resilience import CircuitBreaker
+from automation.seo.cricket_context import (
+    correct_cricket_spelling,
+    discover_grounded_player_aliases,
+    discover_grounded_player_names,
+    find_canonical_entities,
+    is_cricket_content,
+)
+from automation.seo.context_engine import build_grounded_search_queries
 
 cfg = load_config()
 log = get_logger("trends", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 # Circuit breakers for external APIs
 _cricbuzz_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
+_http_local = threading.local()
 
 TEAM_MAPPINGS = {
     "csk": "CSK", "chennai": "CSK", "chennai super kings": "CSK",
@@ -44,12 +55,21 @@ TEAM_MAPPINGS = {
 
 
 def _session() -> requests.Session:
+    existing = getattr(_http_local, "session", None)
+    if existing is not None:
+        return existing
     s = requests.Session()
     retries = Retry(total=2, backoff_factor=1.0, status_forcelist=[429, 500, 502, 503, 504])
     adapter = HTTPAdapter(max_retries=retries, pool_connections=4, pool_maxsize=8)
     s.mount("https://", adapter)
     s.mount("http://", adapter)
-    s.headers.update({"User-Agent": "Mozilla/5.0"})
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 Chrome/131 Safari/537.36"
+        )
+    })
+    _http_local.session = s
     return s
 
 
@@ -139,60 +159,80 @@ def get_rotated_hashtags(match_type: str = "ipl", seed: Optional[int] = None, do
         return tags
 
 
-def parse_cricbuzz_scorecard(html: str) -> str:
-    """Parse Cricbuzz scorecard HTML into summary text."""
-    soup = BeautifulSoup(html, "html.parser")
+def parse_cricbuzz_search_results(html: str) -> str:
+    """Return the first real Cricbuzz scorecard URL from DuckDuckGo HTML."""
+    soup = BeautifulSoup(html or "", "html.parser")
+    for anchor in soup.select("a.result__a"):
+        href = str(anchor.get("href") or "")
+        if href.startswith("//"):
+            href = "https:" + href
+        parsed = urllib.parse.urlparse(href)
+        target = urllib.parse.parse_qs(parsed.query).get("uddg", [href])[0]
+        target = urllib.parse.unquote(target)
+        target_url = urllib.parse.urlparse(target)
+        host = (target_url.hostname or "").casefold()
+        if (
+            (host == "cricbuzz.com" or host.endswith(".cricbuzz.com"))
+            and "live-cricket-scorecard" in target_url.path
+        ):
+            return target
+    return ""
+
+
+def parse_cricbuzz_match_page(html: str) -> Dict[str, List[str]]:
+    """Parse current Next.js Cricbuzz pages into facts and player entities."""
+    raw = html or ""
+    normalized = raw.replace(r'\"', '"')
+    soup = BeautifulSoup(raw, "html.parser")
+    facts = []
     title_tag = soup.find("h1")
-    match_title = title_tag.get_text(strip=True) if title_tag else "Match"
+    if title_tag:
+        title = _clean(title_tag.get_text(" ", strip=True))
+        title = re.sub(r"\s+-\s+Scorecard.*$", "", title, flags=re.I)
+        if title:
+            facts.append(title)
 
-    team_summaries = []
-    for innings_div in soup.find_all("div", class_="cb-col cb-col-100 cb-ltst-wgt-hdr"):
-        team_name_tag = innings_div.find("span", class_="cb-mat-total")
-        innings_name = innings_div.find("span", class_="cb-text-gray")
-        team_name = team_name_tag.get_text(strip=True) if team_name_tag else "Team"
-        innings = innings_name.get_text(strip=True) if innings_name else ""
+    status_match = re.search(r'"status"\s*:\s*"([^"\\]+)', normalized)
+    if status_match:
+        status = _clean(status_match.group(1))
+        if status and status not in facts:
+            facts.append(status)
 
-        top_scorers = []
-        bowler_stats = []
-
-        for score_row in innings_div.find_all("div", class_="cb-col cb-col-100 cb-scrd-itms"):
-            cells = score_row.find_all("div", class_=re.compile(r"cb-col.*"))
-            if len(cells) >= 3:
-                player = cells[0].get_text(strip=True) if len(cells) > 0 else ""
-                detail = cells[1].get_text(strip=True) if len(cells) > 1 else ""
-                runs_or_wickets = cells[2].get_text(strip=True) if len(cells) > 2 else ""
-
-                if "run" in detail.lower() or "bowl" in detail.lower():
-                    bowler_stats.append(f"{player} {detail} {runs_or_wickets}")
-                elif "b" in detail or "c" in detail:
-                    top_scorers.append(f"{player} {detail} {runs_or_wickets}")
-
-        parts = [f"{team_name} {innings}"]
-        if top_scorers:
-            parts.append("  Top: " + ", ".join(top_scorers[:3]))
-        if bowler_stats:
-            parts.append("  Bowling: " + ", ".join(bowler_stats[:2]))
-        team_summaries.append("\n".join(parts))
-
-    return f"Match: {match_title}\n" + "\n\n".join(team_summaries)
+    players = []
+    seen = set()
+    for key in ("batName", "bowlName"):
+        for name in re.findall(
+            rf'"{key}"\s*:\s*"([^"\\]+)', normalized
+        ):
+            clean_name = _clean(name).removesuffix(" (c)").removesuffix(" (wk)")
+            marker = clean_name.casefold()
+            if clean_name and marker not in seen:
+                seen.add(marker)
+                players.append(clean_name)
+    return {"facts": facts, "player_names": players}
 
 
-def fetch_cricbuzz_live_score(query: str, match_type: str = "ipl") -> Dict:
-    """Fetch live scorecard from Cricbuzz for a cricket match."""
-    if not _cricbuzz_breaker.allow_request():
-        return {"scorecard": "", "url": ""}
-    try:
-        search_url = "https://www.cricbuzz.com/cricket-match/live-scores"
-        resp = _session().get(search_url, timeout=10)
-        if resp.status_code == 200:
-            parsed = parse_cricbuzz_scorecard(resp.text)
-            _cricbuzz_breaker.record_success()
-            return {"scorecard": parsed, "url": search_url}
-        _cricbuzz_breaker.record_failure()
-    except Exception as e:
-        log.warning("Cricbuzz error: %s", e)
-        _cricbuzz_breaker.record_failure()
-    return {"scorecard": "", "url": ""}
+@lru_cache(maxsize=128)
+def _find_cricbuzz_scorecard_url(query: str) -> str:
+    search = f"site:cricbuzz.com/live-cricket-scorecard {query}"
+    params = urllib.parse.urlencode({"q": search})
+    response = _session().get(
+        f"https://html.duckduckgo.com/html/?{params}", timeout=10
+    )
+    if response.status_code != 200:
+        return ""
+    return parse_cricbuzz_search_results(response.text)
+
+
+def _fetch_cricbuzz_match(query: str) -> Dict:
+    url = _find_cricbuzz_scorecard_url(query)
+    if not url:
+        return {"facts": [], "player_names": [], "source_url": ""}
+    response = _session().get(url, timeout=10)
+    if response.status_code != 200:
+        return {"facts": [], "player_names": [], "source_url": ""}
+    parsed = parse_cricbuzz_match_page(response.text)
+    return {**parsed, "source_url": url}
 
 
 def _extract_topics_from_rss(xml_text: str, max_topics: int = 12) -> List[str]:
@@ -225,10 +265,7 @@ def fetch_google_trends_in() -> List[str]:
     return []
 
 
-def _fetch_google_trends_internal() -> List[str]:
-    return fetch_google_trends_in()
-
-
+@lru_cache(maxsize=128)
 def fetch_youtube_suggestions(seed_query: str = "cricket live") -> List[str]:
     """Fetch YouTube autocomplete suggestions for a seed query."""
     results = []
@@ -252,142 +289,77 @@ def fetch_youtube_suggestions(seed_query: str = "cricket live") -> List[str]:
     return results[:30]
 
 
-def _fetch_yt_suggest_internal(seed_query: str) -> List[str]:
-    return fetch_youtube_suggestions(seed_query)
-
-
-def fetch_clip_specific_suggestions(local_keywords: List[str]) -> List[str]:
-    """Fetch YouTube suggestions based on clip-specific keywords."""
-    all_suggestions = []
-    player_queries = [kw for kw in local_keywords[:5]]
-    for kw in player_queries:
-        try:
-            params = urllib.parse.urlencode({"client": "firefox", "ds": "yt", "q": f"{kw} cricket"})
-            resp = _session().get(f"https://suggestqueries.google.com/complete/search?{params}", timeout=3)
-            if resp.status_code == 200:
-                data = resp.json()
-                suggestions = data[1] if len(data) > 1 else []
-                for s in suggestions:
-                    term = s[0] if isinstance(s, list) else s
-                    if term not in all_suggestions:
-                        all_suggestions.append(term)
-        except Exception:
-            continue
-    return all_suggestions[:20]
-
-
-def fetch_enhanced_clip_suggestions(
-    local_keywords: List[str],
-    teams: List[str] = None,
-    match_type: str = "ipl",
-) -> List[str]:
-    """Multi-question YouTube autocomplete focused on clip keywords."""
-    questions = []
-    teams = teams or []
-
-    for kw in local_keywords[:5]:
-        questions.append(f"{kw} {match_type}")
-        questions.append(f"{kw} cricket")
-    for t in teams:
-        questions.append(f"{t} {match_type}")
-        questions.append(f"{t} vs")
-    questions.extend([
-        f"{' vs '.join(teams[:2])}" if len(teams) >= 2 else "",
-        f"{match_type} 2026 highlights",
-        f"{match_type} live",
-    ])
-    questions = [q for q in questions if q.strip() and len(q) > 3]
-
-    all_suggestions = []
+def parse_youtube_search_titles(html: str, limit: int = 10) -> List[str]:
+    """Extract video titles from YouTube's server-rendered search payload."""
+    pattern = re.compile(
+        r'"videoRenderer"\s*:\s*\{.*?"title"\s*:\s*\{\s*"runs"\s*:\s*'
+        r'\[\s*\{\s*"text"\s*:\s*"((?:\\.|[^"\\])*)"',
+        re.DOTALL,
+    )
+    titles = []
     seen = set()
-    for q in questions[:12]:
+    for encoded in pattern.findall(html or ""):
         try:
-            params = urllib.parse.urlencode({"client": "firefox", "ds": "yt", "q": q})
-            resp = _session().get(f"https://suggestqueries.google.com/complete/search?{params}", timeout=3)
-            if resp.status_code != 200:
-                continue
-            data = resp.json()
-            suggestions = data[1] if len(data) > 1 else []
-            for s in suggestions[:8]:
-                term = s[0] if isinstance(s, list) else s
-                term_lower = term.lower()
-                if term_lower not in seen:
-                    seen.add(term_lower)
-                    all_suggestions.append(term)
-        except Exception:
-            continue
-    return all_suggestions[:30]
+            title = json.loads(f'"{encoded}"')
+        except (ValueError, json.JSONDecodeError):
+            title = encoded.replace(r'\"', '"')
+        title = _clean(title)
+        if title and title.casefold() not in seen:
+            seen.add(title.casefold())
+            titles.append(title)
+        if len(titles) >= limit:
+            break
+    return titles
 
 
-def _extract_tokens(texts: List[str], limit: int = 20) -> List[str]:
-    """Extract common tokens from a list of texts."""
-    tokens = []
-    for t in texts:
-        for word in t.split():
-            cleaned = word.strip("#.,!?;:")
-            if cleaned and len(cleaned) > 2:
-                tokens.append(cleaned.lower())
-    freq = {}
-    for t in tokens:
-        freq[t] = freq.get(t, 0) + 1
-    return [k for k, _ in sorted(freq.items(), key=lambda x: -x[1])[:limit]]
+@lru_cache(maxsize=128)
+def fetch_youtube_search_signals(query: str, limit: int = 10) -> List[str]:
+    """Fetch current YouTube result titles for query-specific search intent."""
+    params = urllib.parse.urlencode({"search_query": query, "hl": "en", "gl": "IN"})
+    response = _session().get(
+        f"https://www.youtube.com/results?{params}",
+        timeout=8,
+    )
+    if response.status_code != 200:
+        return []
+    return parse_youtube_search_titles(response.text, limit=limit)
 
 
-def fetch_competitor_signals() -> List[str]:
-    """Fetch competitor channel signals via search RSS."""
+def fetch_verified_match_context(query: str) -> Dict:
+    """Fetch query-specific match facts and retain their source URL.
+
+    This deliberately does not use the generic live-scores page: a random live
+    match must never become evidence for an unrelated archived clip.
+    """
+    if not query.strip() or not _cricbuzz_breaker.allow_request():
+        return {"facts": [], "player_names": [], "source_url": ""}
     try:
-        resp = _session().get(
-            "https://news.google.com/rss/search?q=cricket+live+score+today+IPL&hl=en-IN&gl=IN", timeout=10
-        )
-        if resp.status_code == 200:
-            topics = _extract_topics_from_rss(resp.text, max_topics=20)
-            return topics
-    except Exception as e:
-        log.warning("Competitor RSS error: %s", e)
-    return []
-
-
-def fetch_smart_search_summary(query: str) -> str:
-    """Fetch a summary of trending topics for a search query."""
-    try:
-        param = urllib.parse.urlencode({"q": f"{query} cricket ipl 2026", "hl": "en-IN", "gl": "IN"})
-        resp = _session().get(f"https://news.google.com/rss/search?{param}", timeout=10)
-        if resp.status_code == 200:
-            topics = _extract_topics_from_rss(resp.text, max_topics=8)
-            if topics:
-                return "\n".join(f"- {t}" for t in topics)
-    except Exception as e:
-        log.warning("Smart search error: %s", e)
-    return ""
-
-
-def fetch_match_scorecard(query: str) -> str:
-    """Fetch a match scorecard summary from Cricbuzz."""
-    if not _cricbuzz_breaker.allow_request():
-        return ""
-    try:
-        search_url = f"https://www.cricbuzz.com/api/search/{urllib.parse.quote(query)}"
-        resp = _session().get(search_url, timeout=10)
-        if resp.status_code != 200:
-            return ""
-        data = resp.json()
-        matches = data.get("matches", [])
-        if not matches:
-            return ""
-        match_id = matches[0].get("match_id", "")
-        if not match_id:
-            return ""
-
-        scorecard_url = f"https://www.cricbuzz.com/api/cricket-match/scorecard/{match_id}"
-        score_resp = _session().get(scorecard_url, timeout=10)
-        if score_resp.status_code == 200:
-            parsed = parse_cricbuzz_scorecard(score_resp.text)
-            _cricbuzz_breaker.record_success()
-            return parsed
-    except Exception as e:
-        log.warning("Scorecard fetch error: %s", e)
+        match = _fetch_cricbuzz_match(query)
+        if not match["facts"]:
+            _cricbuzz_breaker.record_failure()
+            return match
+        _cricbuzz_breaker.record_success()
+        return match
+    except Exception as exc:
+        log.warning("Verified match context error: %s", exc)
         _cricbuzz_breaker.record_failure()
-    return ""
+        return {"facts": [], "player_names": [], "source_url": ""}
+
+
+def _research_query(video_title: str, video_description: str, transcript: str) -> str:
+    """Build a compact match lookup from all local source evidence."""
+    combined = correct_cricket_spelling(
+        " ".join((video_title or "", video_description or "", transcript or ""))
+    )
+    entities = find_canonical_entities(combined)
+    entity_text = " ".join(entities["teams"] + entities["players"][:2])
+    format_terms = [
+        term for term in ("Test", "ODI", "T20", "IPL", "World Cup", "series")
+        if re.search(r"\b" + re.escape(term) + r"\b", combined, re.I)
+    ]
+    title = re.sub(r"\s+", " ", correct_cricket_spelling(video_title)).strip()
+    parts = [title, entity_text, " ".join(format_terms)]
+    return re.sub(r"\s+", " ", " ".join(part for part in parts if part)).strip()[:240]
 
 
 def detect_video_domain(video_title: str, transcript: str = "") -> Tuple[str, str, List[str]]:
@@ -409,7 +381,6 @@ def detect_video_domain(video_title: str, transcript: str = "") -> Tuple[str, st
         "rcb", "mi", "csk", "kohli", "rohit sharma", "bumrah", "dhoni", 
         "cricbuzz", "wicket", "run rate", "rinku singh", "padikkal", "patidar"
     }
-    
     fb_count = sum(1 for kw in football_kw if kw in text)
     cr_count = sum(1 for kw in cricket_kw if kw in text)
     
@@ -452,121 +423,102 @@ def detect_video_domain(video_title: str, transcript: str = "") -> Tuple[str, st
     return domain, query, keywords
 
 
-def get_trending_context(domain: str = "cricket", region: str = "IN", video_title: str = "") -> Dict:
-    """Aggregate all trend sources into a single context dict."""
-    topics = []
-    
-    detected_domain = domain
-    query_topic = f"{domain} live"
-    teams = []
-    match_type = "ipl"
-    
-    if video_title:
-        detected_domain, query_topic, keywords = detect_video_domain(video_title)
-        teams, match_type = extract_match_teams(video_title)
-    
-    trends = fetch_google_trends_in()
-    topics.extend(trends)
-    
-    if video_title and query_topic:
-        try:
-            q_encoded = urllib.parse.quote_plus(f"{query_topic} live today")
-            resp = _session().get(
-                f"https://news.google.com/rss/search?q={q_encoded}&hl={en-IN if 'region' not in locals() else region}&gl={IN if 'region' not in locals() else region}", timeout=10
-            )
-            if resp.status_code == 200:
-                topics.extend(_extract_topics_from_rss(resp.text, max_topics=20))
-        except Exception as e:
-            log.warning("Competitor RSS error: %s", e)
-    else:
-        competitor = fetch_competitor_signals()
-        topics.extend(competitor)
-        
-    yt_suggestions = fetch_youtube_suggestions(query_topic)
-    topics.extend(yt_suggestions)
-    
-    scorecard_data = {}
+def get_trending_context(
+    domain: str = "cricket",
+    region: str = "IN",
+    video_title: str = "",
+    video_description: str = "",
+    transcript: str = "",
+) -> Dict:
+    """Build current, query-specific research context with provenance."""
+    combined = " ".join((video_title, video_description, transcript))
+    detected_domain, detected_query, _ = detect_video_domain(video_title, combined)
+    if not video_title:
+        detected_domain = domain
+    elif domain == "cricket" and is_cricket_content(combined, combined):
+        detected_domain = "cricket"
+    teams, _match_type = extract_match_teams(combined)
+    query_topic = _research_query(video_title, video_description, transcript) or detected_query
+
+    try:
+        suggestions = fetch_youtube_suggestions(query_topic)
+    except Exception as exc:
+        log.warning("YouTube suggest unavailable: %s", exc)
+        suggestions = []
+    try:
+        recent_youtube_titles = fetch_youtube_search_signals(query_topic)
+    except Exception as exc:
+        log.warning("YouTube search unavailable: %s", exc)
+        recent_youtube_titles = []
+
+    match_facts = []
+    player_names = []
+    sources = []
     if detected_domain == "cricket":
-        scorecard_data = fetch_cricbuzz_live_score(video_title, match_type)
-        
-    live_stream_url = fetch_own_live_stream_url()
-    
-    seen = set()
-    unique_topics = []
-    for t in topics:
-        tl = t.lower()
-        if tl not in seen:
-            seen.add(tl)
-            unique_topics.append(t)
-    top_topics = unique_topics[:20]
-    
+        try:
+            match_context = fetch_verified_match_context(query_topic)
+        except Exception as exc:
+            log.warning("Match research unavailable: %s", exc)
+            match_context = {"facts": [], "player_names": [], "source_url": ""}
+        match_facts = list(match_context.get("facts") or [])
+        player_names = list(match_context.get("player_names") or [])
+        if match_context.get("source_url"):
+            sources.append({
+                "kind": "match",
+                "url": match_context["source_url"],
+                "query": query_topic,
+            })
+    if recent_youtube_titles:
+        sources.append({
+            "kind": "youtube_search",
+            "url": "https://www.youtube.com/results?" + urllib.parse.urlencode({
+                "search_query": query_topic,
+            }),
+            "query": query_topic,
+        })
+
+    # Global trends are allowed only when they overlap the source evidence.
+    anchors = set(re.findall(r"[a-z0-9]+", query_topic.casefold()))
+    try:
+        global_topics = fetch_google_trends_in()
+    except Exception:
+        global_topics = []
+    relevant_topics = [
+        topic for topic in global_topics
+        if set(re.findall(r"[a-z0-9]+", topic.casefold())) & anchors
+    ]
+    topics = list(dict.fromkeys([
+        *suggestions,
+        *recent_youtube_titles,
+        *relevant_topics,
+    ]))[:20]
+    discovered_players = discover_grounded_player_names(
+        combined, [*recent_youtube_titles, *suggestions]
+    )
+    player_names = list(dict.fromkeys([*player_names, *discovered_players]))
+    player_aliases = discover_grounded_player_aliases(
+        combined, [*recent_youtube_titles, *suggestions], player_names
+    )
+    search_queries = build_grounded_search_queries(
+        video_title,
+        video_description,
+        transcript,
+        suggestions,
+        player_names,
+        player_aliases,
+    )
+
     return {
-        "topics": top_topics,
-        "scorecard": scorecard_data.get("scorecard", "") if scorecard_data else "",
-        "live_stream_url": live_stream_url,
+        "topics": topics,
+        "scorecard": "\n".join(match_facts),
+        "match_facts": match_facts,
+        "player_names": player_names,
+        "player_aliases": player_aliases,
+        "search_queries": search_queries,
+        "sources": sources,
+        "research_query": query_topic,
+        "live_stream_url": fetch_own_live_stream_url(),
         "teams": teams,
         "domain": detected_domain,
+        "region": region,
     }
-
-
-KNOWN_PLAYER_NAMES = {
-    "virat kohli", "rohit sharma", "jasprit bumrah", "ms dhoni", "mahendra singh dhoni",
-    "suryakumar yadav", "kl rahul", "rishabh pant", "shreyas iyer", "shubman gill",
-    "hardik pandya", "ravindra jadeja", "jadeja", "rashid khan", "andre russell",
-    "sunil narine", "pat cummins", "mitchell starc", "josh hazlewood", "glenn maxwell",
-    "david warner", "steve smith", "kane williamson", "trent boult", "tim southee",
-    "shaheen afridi", "babar azam", "mohammad rizwan", "faf du plessis", "quinton de kock",
-    "aiden markram", "kagiso rabada", "ankit kumar", "shivam dube", "rinku singh",
-    "devon conway", "ruturaj gaikwad", "deepak chahar", "tushar deshpande",
-    "david miller", "shahrukh khan", "mohit sharma", "yuzvendra chahal", "kuldeep yadav",
-    "axar patel", "arshdeep singh", "harshal patel", "mohammed siraj", "prasidh krishna",
-    "umran malik", "t natarajan", "bhuvneshwar kumar", "jofra archer", "mark wood",
-    "sam curran", "ben stokes", "moeen ali", "chris jordan", "jason holder",
-    "kieron pollard", "dwayne bravo", "imran tahir", "tabraiz shamsi",
-    "jonny bairstow", "jason roy", "alex hales", "phil salt", "liam livingstone",
-    "harry brook", "joe root", "ben duckett", "zak crawley",
-}
-
-
-def extract_cricket_entities_from_transcript(transcript: str) -> Dict[str, List[str]]:
-    """Extract cricket-specific entities (players, teams, match context) from transcript text."""
-    text_lower = transcript.lower()
-    found_players = []
-    found_teams = []
-    match_context = []
-
-    for name in sorted(KNOWN_PLAYER_NAMES, key=lambda x: -len(x)):
-        if name in text_lower:
-            found_players.append(name.title())
-            text_lower = text_lower.replace(name, "", 1)
-
-    for abbr, full in sorted(TEAM_MAPPINGS.items(), key=lambda x: -len(x[0])):
-        if abbr in text_lower:
-            found_teams.append(full)
-
-    actions = ["six", "four", "wicket", "catch", "boundary", "century", "half-century",
-               "hat-trick", "yorker", "bouncer", "run out", "stumped", "lbw", "bowled",
-               "no ball", "wide ball", "over", "run rate", "powerplay", "target", "chase",
-               "required run rate", "rr", "super over", "dls", "drinks break", "strategic timeout"]
-    for action in actions:
-        if action in text_lower:
-            match_context.append(action)
-            text_lower = text_lower.replace(action, "", 1)
-
-    scores = re.findall(r'\d{1,3}/\d{1,2}', transcript)
-    if scores:
-        match_context.extend(scores)
-
-    return {
-        "players": list(dict.fromkeys(found_players)),
-        "teams": list(dict.fromkeys(found_teams)),
-        "match_context": list(dict.fromkeys(match_context)),
-    }
-
-
-def humanize_title(raw_title: str) -> str:
-    """Convert raw video title to SEO-friendly human-readable form."""
-    title = raw_title.strip()
-    title = re.sub(r"[#_/]", " ", title)
-    title = re.sub(r"\s+", " ", title).strip()
-    return title[:120]

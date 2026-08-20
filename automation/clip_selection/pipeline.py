@@ -6,6 +6,7 @@ Usage:
 """
 
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from utils.config import load_config
 from utils.logger import get_logger
 
 from automation.clip_selection.selector import ClipSelector
-from automation.clip_selection.arbiter import fmt_ts
+from automation.clip_selection.arbiter import _DEFAULT_WEIGHTS, fmt_ts
 from automation.clip_selection.topic_segmenter import TopicSegmenter
 from automation.clip_selection.cricket_heuristics import score_all_topics
 
@@ -25,6 +26,147 @@ from prompts import MAX_CANDIDATES, MAX_SELECTED_CLIPS, MIN_QUALITY_THRESHOLD
 
 cfg = load_config()
 log = get_logger("clip_pipeline")
+
+
+def _sentence_parts(text: str) -> list[str]:
+    """Split text only at explicit sentence/thought punctuation."""
+    parts = re.findall(r"[^.!?।]+(?:[.!?।]+|$)", text or "")
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _valid_word_timings(segment: dict) -> list[dict]:
+    words = []
+    for word in segment.get("words", []) or []:
+        try:
+            start = float(word["start"])
+            end = float(word["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end > start:
+            words.append({"start": start, "end": end, "word": word.get("word", "")})
+    return sorted(words, key=lambda item: item["start"])
+
+
+def _prepare_complete_thoughts(segments: list[dict]) -> list[dict]:
+    """Canonicalize entities, split complete thoughts, and trim outer silence."""
+    from automation.seo.cricket_context import correct_cricket_spelling
+
+    prepared: list[dict] = []
+    for segment in segments or []:
+        try:
+            seg_start = float(segment["start"])
+            seg_end = float(segment["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if seg_end <= seg_start:
+            continue
+        original_parts = _sentence_parts(str(segment.get("text", "")))
+        if not original_parts:
+            continue
+
+        timings = _valid_word_timings(segment)
+        counts = [max(1, len(re.findall(r"\b\w+\b", part))) for part in original_parts]
+        total_count = sum(counts)
+        cursor = 0
+
+        for index, (part, count) in enumerate(zip(original_parts, counts)):
+            if timings:
+                next_cursor = len(timings) if index == len(counts) - 1 else round(
+                    len(timings) * sum(counts[:index + 1]) / total_count
+                )
+                next_cursor = max(cursor + 1, min(len(timings), next_cursor))
+                selected_words = timings[cursor:next_cursor]
+                start = max(seg_start, selected_words[0]["start"] - 0.1)
+                end = min(seg_end, selected_words[-1]["end"] + 0.1)
+                cursor = next_cursor
+            else:
+                elapsed_before = sum(counts[:index]) / total_count
+                elapsed_after = sum(counts[:index + 1]) / total_count
+                start = seg_start + (seg_end - seg_start) * elapsed_before
+                end = seg_start + (seg_end - seg_start) * elapsed_after
+
+            prepared.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": correct_cricket_spelling(part),
+            })
+
+    # Word margins can overlap at a sentence boundary. Resolve to one clean cut.
+    for index in range(1, len(prepared)):
+        previous = prepared[index - 1]
+        current = prepared[index]
+        if previous["end"] > current["start"]:
+            boundary = round((previous["end"] + current["start"]) / 2.0, 3)
+            previous["end"] = boundary
+            current["start"] = boundary
+    return [item for item in prepared if item["end"] > item["start"]]
+
+
+def _filter_cricket_candidates(candidates: list[dict], source_context: str) -> list[dict]:
+    """Remove setup, gaming, tech, and other non-cricket chatter."""
+    from automation.seo.cricket_context import is_cricket_content
+    return [
+        candidate for candidate in candidates
+        if is_cricket_content(str(candidate.get("text", "")), source_context)
+    ]
+
+
+def _load_source_context(input_dir: str | Path) -> str:
+    """Load title and match metadata used to disambiguate short utterances."""
+    pieces = []
+    for filename in ("video_metadata.json", "match_context.json"):
+        path = Path(input_dir) / filename
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+            pieces.append(json.dumps(data, ensure_ascii=False))
+        except (OSError, json.JSONDecodeError, TypeError):
+            continue
+    return " ".join(pieces)
+
+
+def _write_empty_highlights(output_path: str | Path) -> None:
+    """Atomically clear stale highlights when a source has no cricket clips."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    with open(temporary, "w", encoding="utf-8") as handle:
+        yaml.safe_dump({}, handle)
+    temporary.replace(path)
+
+
+def _load_adaptive_weights(weights_path: str | Path) -> dict[str, float] | None:
+    """Load learned weights only when they match the current agent schema."""
+    path = Path(weights_path)
+    if not path.exists():
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            weights = json.load(f)
+        expected_keys = set(_DEFAULT_WEIGHTS)
+        valid = (
+            isinstance(weights, dict)
+            and set(weights) == expected_keys
+            and all(
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value > 0
+                for value in weights.values()
+            )
+            and abs(sum(float(value) for value in weights.values()) - 1.0) <= 0.02
+        )
+        if not valid:
+            log.warning(
+                "Ignoring invalid adaptive weights in %s; expected keys %s "
+                "with positive weights summing near 1",
+                path,
+                sorted(expected_keys),
+            )
+            return None
+        return {key: float(value) for key, value in weights.items()}
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        log.warning("Ignoring unreadable adaptive weights %s: %s", path, exc)
+        return None
 
 
 def _match_key(input_dir: str, output_path: str) -> str:
@@ -188,7 +330,7 @@ def _merge_windows(windows: list[dict], gap: float) -> list[dict]:
     merged = [dict(windows[0])]
     for w in windows[1:]:
         prev = merged[-1]
-        if w["start"] - prev["end"] <= gap:
+        if w["start"] - prev["end"] < gap:
             prev["end"] = max(prev["end"], w["end"])
             prev["score"] = max(prev["score"], w["score"])
             # Merge text from both windows (longer text wins)
@@ -328,7 +470,22 @@ def detect_highlights(
     with open(t_path, encoding="utf-8") as f:
         data = json.load(f)
     segments = data if isinstance(data, list) else data.get("segments", [])
-    log.info("Loaded %d transcript segments from %s", len(segments), t_path)
+    segments = _prepare_complete_thoughts(segments)
+    source_context = _load_source_context(paths["input"])
+    stream_context = " ".join([source_context] + [
+        str(segment.get("text", "")) for segment in segments
+    ])
+    from automation.seo.cricket_context import is_cricket_content
+    if not is_cricket_content(stream_context):
+        _write_empty_highlights(output_path)
+        log.warning("Cricket-only gate rejected non-cricket source; wrote empty highlights")
+        return []
+    segments = _filter_cricket_candidates(segments, source_context)
+    if not segments:
+        _write_empty_highlights(output_path)
+        log.warning("Cricket-only gate removed every non-cricket segment")
+        return []
+    log.info("Loaded %d complete cricket thoughts from %s", len(segments), t_path)
 
     # ── Audio RMS extraction ───────────────────────────────────────────────
     rms_list = _extract_audio_rms(video_path)
@@ -387,31 +544,18 @@ def detect_highlights(
              min_score, max_score, threshold, len(candidates), len(scored))
 
     min_dur = h_cfg["min_duration"]
-    max_dur = h_cfg["max_duration"]
-    video_duration = _get_video_duration(video_path)
 
     windows = []
     for c in candidates:
         seg_duration = c["end"] - c["start"]
         if seg_duration < min_dur:
-            pad = (min_dur - seg_duration) / 2
-            win_start = max(0.0, c["start"] - pad)
-            win_end = min(video_duration, c["end"] + pad) if video_duration > 0 else c["end"] + pad
-        else:
-            win_start = c["start"]
-            win_end = c["end"]
-        if win_end - win_start > max_dur:
-            win_end = win_start + max_dur
+            continue
+        win_start = c["start"]
+        win_end = c["end"]
         windows.append({"start": win_start, "end": win_end, "score": c["score"], "text": c.get("text", "")})
 
     windows.sort(key=lambda w: w["start"])
     merged = _merge_windows(windows, h_cfg["merge_gap"])
-
-    for w in merged:
-        if w["end"] - w["start"] > max_dur:
-            center = (w["start"] + w["end"]) / 2.0
-            w["start"] = max(0.0, center - max_dur / 2.0)
-            w["end"] = w["start"] + max_dur
 
     merged.sort(key=lambda w: w["score"], reverse=True)
     merged = merged[:MAX_CANDIDATES]
@@ -420,15 +564,10 @@ def detect_highlights(
     log.info("Running 7-agent clip selection on %d candidates...", len(merged))
 
     # Load learned weights + entity biases from previous runs
-    adaptive_weights = None
     weights_path = Path("clip_selection_weights.json")
-    if weights_path.exists():
-        try:
-            with open(weights_path) as f:
-                adaptive_weights = json.load(f)
-            log.info("Loaded adaptive weights from %s", weights_path)
-        except Exception:
-            pass
+    adaptive_weights = _load_adaptive_weights(weights_path)
+    if adaptive_weights is not None:
+        log.info("Loaded adaptive weights from %s", weights_path)
 
     entity_biases = {}
     biases_path = Path("clip_selection_biases.json")
@@ -550,38 +689,15 @@ def detect_highlights(
                  fmt_ts(w["end"]), w.get("final_score", 0),
                  yaml_data[key]["speed_factor"])
 
-    # Atomic write: temp file + rename so a killed run never leaves a corrupt
-    # highlights yaml that silently disables dedup. A fully-deduped re-run
-    # (top is empty) preserves the previous run's highlights file instead of
-    # clobbering the record of already-produced clips with an empty selection.
+    # Always commit the current selection atomically. An empty mapping clears
+    # stale highlights so the export phase cannot re-export a previous run.
+    tmp_output = Path(output_path).with_suffix(".tmp")
+    with open(tmp_output, "w", encoding="utf-8") as f:
+        yaml.dump(yaml_data, f, default_flow_style=False, allow_unicode=True)
+    tmp_output.replace(output_path)
     if top:
-        tmp_output = str(Path(output_path).with_suffix(".tmp"))
-        with open(tmp_output, "w", encoding="utf-8") as f:
-            yaml.dump(yaml_data, f, default_flow_style=False, allow_unicode=True)
-        Path(tmp_output).replace(output_path)
         log.info("Highlights saved -> %s (%d clips)", output_path, len(highlights))
     else:
-        if Path(output_path).exists():
-            log.warning(
-                "Dedup: empty selection — preserving existing highlights %s",
-                output_path,
-            )
-        else:
-            log.warning("No clips selected — no highlights file written to %s", output_path)
-
-    # Append this run's selection to the cross-run dedup history (sidecar)
-    # ONLY after the highlights output committed — a crash mid-run must not
-    # burn windows into history for clips that were never published. History
-    # failures degrade to a warning, never crash the pipeline.
-    if dedup_cfg.get("dedup_enabled", True) and top:
-        from automation.clip_selection.dedupe import append_windows
-        try:
-            append_windows(history_path, [
-                {"start": w["start"], "end": w["end"]} for w in top
-            ])
-            log.info("Cross-run dedup: appended %d windows to history", len(top))
-        except Exception as e:
-            log.warning("Cross-run dedup: failed to append history %s: %s",
-                        history_path, e)
+        log.warning("No clips selected — wrote empty highlights mapping to %s", output_path)
 
     return highlights

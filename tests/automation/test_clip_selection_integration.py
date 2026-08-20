@@ -4,6 +4,7 @@ Uses proper pytest fixtures instead of standalone runner.
 """
 
 import json
+import yaml
 import pytest
 import sys
 from pathlib import Path
@@ -171,8 +172,7 @@ class TestIntegration:
 
 
 class TestPipelineDedupeWiring:
-    """detect_highlights() must load previous windows from the history sidecar
-    and reject overlapping re-runs — the M4 wiring gap from review."""
+    """Selector reads dedup history but never commits unexported selections."""
 
     def test_detect_highlights_dedups_across_runs(self, tmp_path):
         from unittest.mock import patch
@@ -220,25 +220,18 @@ class TestPipelineDedupeWiring:
                     output_path=str(out / "video.yaml"),
                 )
                 assert first, "first run should select clips"
-                history = load_previous_windows(out / "AbC123xyz98.dedupe_history.yaml")
-                assert len(history) > 0, "history must persist after first run"
+                history_path = out / "AbC123xyz98.dedupe_history.yaml"
+                assert load_previous_windows(history_path) == []
 
-                # Second run: same transcript → same windows re-selected → dedup
-                # must reject them all, leaving an empty selection (no fallback
-                # resurrection when previous_windows present).
+                # Selection alone is not terminal success. Without a root
+                # pipeline export/upload commit, the same windows remain retryable.
                 second = pipe.detect_highlights(
                     transcript_path=str(transcript),
                     video_path="/fake/video.mp4",
                     output_path=str(out / "video.yaml"),
                 )
-                assert second == [], \
-                    "re-run of identical content must yield zero clips, got %d" % len(second)
-
-                # And the previously written highlights YAML must survive the
-                # empty re-run instead of being clobbered.
-                surviving = load_previous_windows(out / "video.yaml")
-                assert len(surviving) > 0, \
-                    "deduped re-run must preserve the previous highlights yaml"
+                assert second
+                assert load_previous_windows(history_path) == []
             finally:
                 pipe.cfg["paths"]["highlights"] = original_paths
                 pipe.cfg["paths"]["input"] = original_input

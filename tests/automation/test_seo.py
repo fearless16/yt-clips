@@ -347,22 +347,26 @@ class TestProcessAllSEOFailureMarker:
         marker_data = json.loads(markers[0].read_text())
         assert marker_data["clip_id"] == "clip_001"
 
-    @patch("automation.seo.seo._get_ai")
-    def test_metadata_written_on_success(self, mock_get_ai, tmp_path, monkeypatch):
+    @patch("automation.seo.seo.generate_clip_seo")
+    def test_metadata_written_on_success(self, mock_generate, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "data").mkdir()
         (tmp_path / "input").mkdir()
 
-        mock_ai = MagicMock()
-        seo_response = json.dumps({
+        mock_generate.return_value = {
             "title": "Kohli ne maara CHHAKKA! 🔥 #Shorts",
-            "description": "📝 Virat Kohli smashes massive six over long-on in IPL 2026! The crowd goes wild as King Kohli deposits the bowler into the stands. Subscribe for more cricket!",
+            "description": "Virat Kohli grounded cricket analysis. " * 40,
             "hashtags": ["#Shorts", "#IPL"],
-            "search_terms": ["kohli six ipl wankhede"],
-        })
-        mock_ai.generate_fastest_first.return_value = seo_response
-        mock_ai.generate_seo_text.return_value = seo_response
-        mock_get_ai.return_value = mock_ai
+            "search_terms": [f"virat kohli cricket analysis {i}" for i in range(8)],
+        }
+        monkeypatch.setattr(
+            "automation.seo.trends.get_trending_context",
+            lambda **kwargs: {
+                "scorecard": "", "topics": [], "teams": [],
+                "search_queries": [], "match_facts": [], "sources": [],
+                "live_stream_url": "",
+            },
+        )
 
         h_path = self._make_highlights_yaml(tmp_path, {
             "clip_001": {"text": "Kohli ne maara six!", "start": 0, "end": 15},
@@ -386,6 +390,11 @@ class TestProcessAllSEOFailureMarker:
         mock_ai.generate_text.side_effect = Exception("fail")
         mock_ai.generate_seo_text.side_effect = Exception("fail")
         mock_get_ai.return_value = mock_ai
+        monkeypatch.setitem(
+            __import__("automation.seo.seo", fromlist=["cfg"]).cfg["seo"],
+            "inter_clip_sleep_s",
+            0,
+        )
 
         h_path = self._make_highlights_yaml(tmp_path, {
             "c1": {"text": "clip1 text", "start": 0, "end": 10},
@@ -450,8 +459,8 @@ class TestInterClipSleepConfigurable:
 
 class TestRetryFailedSEO:
 
-    @patch("automation.seo.seo._get_ai")
-    def test_retry_recovers_failed_clip(self, mock_get_ai, tmp_path, monkeypatch):
+    @patch("automation.seo.seo.generate_clip_seo")
+    def test_retry_recovers_failed_clip(self, mock_generate, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / "data").mkdir()
 
@@ -467,16 +476,12 @@ class TestRetryFailedSEO:
         }
         (out_dir / "clip_retry_seo_failed.json").write_text(json.dumps(marker))
 
-        mock_ai = MagicMock()
-        seo_response = json.dumps({
+        mock_generate.return_value = {
             "title": "Kohli ne maara CHHAKKA! 🔥 Recovered",
-            "description": "📝 Virat Kohli smashes massive six over long-on in IPL 2026! The crowd goes crazy as King Kohli hits back-to-back boundaries. RCB chasing big total!",
+            "description": "Virat Kohli grounded cricket analysis. " * 40,
             "hashtags": ["#Shorts"],
-            "search_terms": ["kohli six wankhede"],
-        })
-        mock_ai.generate_fastest_first.return_value = seo_response
-        mock_ai.generate_seo_text.return_value = seo_response
-        mock_get_ai.return_value = mock_ai
+            "search_terms": [f"virat kohli analysis {i}" for i in range(8)],
+        }
 
         from automation.seo.seo import retry_failed_seo
         result = retry_failed_seo(str(out_dir))
@@ -558,7 +563,10 @@ class TestSEOModelRestrictions:
         mock_ai = MagicMock()
         mock_ai.generate_seo_text.return_value = json.dumps({
             "title": "Kohli ne maara CHHAKKA! 🔥",
-            "description": "📝 Virat Kohli smashes massive six in IPL 2026! The crowd at Chinnaswamy goes absolutely wild as King Kohli deposits the delivery into the second tier!",
+            "description": (
+                "Virat Kohli batting analysis explains this grounded cricket "
+                "moment without inventing a score or opponent. " * 20
+            ),
             "hashtags": ["#Shorts", "#IPL"],
             "search_terms": ["kohli six ipl"],
         })
@@ -580,7 +588,10 @@ class TestSEOModelRestrictions:
         mock_ai = MagicMock()
         mock_ai.generate_text.return_value = json.dumps({
             "title": "Override model SEO title! 🔥",
-            "description": "📝 Custom model generated SEO for this cricket clip. Amazing moment captured from the match! The crowd goes wild as the bowler strikes. Subscribe for more!",
+            "description": (
+                "Custom model generated a detailed grounded cricket discussion "
+                "without inventing a score, player, or opponent. " * 20
+            ),
             "hashtags": ["#Shorts"],
             "search_terms": ["test term"],
         })

@@ -243,46 +243,32 @@ class TestNoGenericFlow:
         for attr in ("_PROMPT_TMPL_GENERAL", "_SALVAGE_TMPL_GENERAL", "_SYSTEM_GENERAL"):
             assert not hasattr(seo, attr), f"{attr} must be removed — cricket-only channel"
 
-    def test_general_domain_uses_cricket_template(self, monkeypatch):
+    def test_general_domain_is_rejected_before_ai(self, monkeypatch):
         import automation.seo.seo as seo
         from automation.seo.trends import detect_video_domain
 
         assert detect_video_domain("Top 10 Gadgets Under 5000")[0] == "general", \
             "test precondition: title must route to general domain"
 
-        captured = {}
-        def fake_attempt(clip_id, user_prompt, transcript, video_title, is_shorts,
-                         provider_override=None, model_override=None,
-                         sys_instruction=None, salvage_tmpl=None):
-            captured["sys_instruction"] = sys_instruction
-            captured["salvage_tmpl"] = salvage_tmpl
-            captured["user_prompt"] = user_prompt
-            return {"title": "t", "description": "d", "hashtags": [], "search_terms": []}
+        def fail_attempt(*args, **kwargs):
+            pytest.fail("AI must not run for a non-cricket source")
 
-        monkeypatch.setattr(seo, "_attempt_seo_generation", fake_attempt)
-        seo.generate_clip_seo(
-            "clip_generic", "A discussion about the latest tech trends and gadgets.",
-            video_title="Top 10 Gadgets Under 5000",
-        )
-        assert captured["sys_instruction"] is seo._SYSTEM
-        assert captured["salvage_tmpl"] is seo._SALVAGE_TMPL
-        assert "Match: Top 10 Gadgets Under 5000" in captured["user_prompt"]
-        assert "India vs Other" not in captured["user_prompt"], \
-            "general clip must not be injected with invented cricket teams"
+        monkeypatch.setattr(seo, "_attempt_seo_generation", fail_attempt)
+        with pytest.raises(seo.SEOGenerationError, match="non-cricket"):
+            seo.generate_clip_seo(
+                "clip_generic", "A discussion about the latest tech trends and gadgets.",
+                video_title="Top 10 Gadgets Under 5000",
+            )
 
-    def test_general_domain_gets_neutral_teams(self, monkeypatch):
+    def test_general_domain_never_gets_cricket_metadata(self, monkeypatch):
         import automation.seo.seo as seo
 
-        captured = {}
-        def fake_attempt(clip_id, user_prompt, transcript, video_title, is_shorts,
-                         provider_override=None, model_override=None,
-                         sys_instruction=None, salvage_tmpl=None):
-            captured["user_prompt"] = user_prompt
-            return {"title": "t", "description": "d", "hashtags": [], "search_terms": []}
-
-        monkeypatch.setattr(seo, "_attempt_seo_generation", fake_attempt)
-        seo.generate_clip_seo(
-            "clip_generic", "A discussion about gadgets.",
-            video_title="Top 10 Gadgets Under 5000",
+        monkeypatch.setattr(
+            seo, "_attempt_seo_generation",
+            lambda *args, **kwargs: pytest.fail("non-cricket SEO must stay blocked"),
         )
-        assert "Teams in this match: N/A" in captured["user_prompt"]
+        with pytest.raises(seo.SEOGenerationError, match="non-cricket"):
+            seo.generate_clip_seo(
+                "clip_generic", "A discussion about gadgets.",
+                video_title="Top 10 Gadgets Under 5000",
+            )

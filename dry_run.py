@@ -103,6 +103,23 @@ _FAKE_TRANSCRIPT = {
     "source": "api",
 }
 
+
+def _ensure_skipped_transcript_fixture(
+    paths: dict, video_path: str, skip_transcribe: bool
+) -> Path | None:
+    """Create a temporary transcript only when a dry-run skips transcription."""
+    if not skip_transcribe:
+        return None
+    transcript_dir = Path(paths.get("transcripts", "transcripts"))
+    transcript_path = transcript_dir / f"{Path(video_path).stem}.json"
+    if transcript_path.exists():
+        return None
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path.write_text(
+        json.dumps(_FAKE_TRANSCRIPT, ensure_ascii=False), encoding="utf-8"
+    )
+    return transcript_path
+
 _FAKE_HIGHLIGHTS = {
     "clip1": {"start": 30, "end": 55, "label": "Kohli Six", "text": "coaly hits a massive six"},
     "clip2": {"start": 60, "end": 85, "label": "Yorker", "text": "bumra bowls a perfect yorker"},
@@ -675,6 +692,9 @@ def dry_run(url: str,
 
     # ── Ensure input directory exists for fake video ──────────────────────
     Path(input_dir).mkdir(parents=True, exist_ok=True)
+    temporary_transcript = _ensure_skipped_transcript_fixture(
+        paths, video_path, skip_transcribe
+    )
 
     # ── Run the REAL orchestrator with API patches ────────────────────────
     try:
@@ -714,6 +734,9 @@ def dry_run(url: str,
             'exported': [], 'uploaded_count': 0, 'failures': [str(e)],
             'transcript_source': 'none', 'selected_clips': 0, 'seo_generated': 0,
         })()
+    finally:
+        if temporary_transcript is not None:
+            temporary_transcript.unlink(missing_ok=True)
 
     # ── Gather results ─────────────────────────────────────────────────────
     result.exported = pipeline_result.exported if hasattr(pipeline_result, 'exported') else []

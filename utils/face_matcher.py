@@ -4,16 +4,13 @@ import numpy as np
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-from utils.face_detect import detect_faces_yunet
+from utils.face_detect import detect_faces
 
 log = logging.getLogger("face_matcher")
 
 _HOST_ENCODINGS: Optional[List[np.ndarray]] = None
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PHOTOS_DIR = _PROJECT_ROOT / "photos"
-_YUNET_PATH = _PROJECT_ROOT / "face_detection_yunet_2023mar.onnx"
-
-
 MIN_FACE_AREA = 2000
 
 def _extract_embedding(frame_bgr: np.ndarray, bbox: Tuple[int, int, int, int]) -> Optional[np.ndarray]:
@@ -42,25 +39,8 @@ def _compute_similarity(emb1: np.ndarray, emb2: np.ndarray) -> float:
 
 
 def _detect_faces_ref(img: np.ndarray) -> List[Tuple[int, int, int, int]]:
-    """Detect faces in reference photo using YuNet."""
-    if _YUNET_PATH.exists():
-        try:
-            h, w = img.shape[:2]
-            yunet = cv2.FaceDetectorYN.create(
-                str(_YUNET_PATH), "", (w, h), 0.5, 0.3, 5000
-            )
-            yunet.setInputSize((w, h))
-            _, faces = yunet.detect(img)
-            if faces is not None:
-                results = []
-                for f in faces:
-                    x, y, fw, fh = int(f[0]), int(f[1]), int(f[2]), int(f[3])
-                    results.append((x, y, fw, fh))
-                if results:
-                    return results
-        except Exception as e:
-            log.debug("YuNet detection failed for reference photo: %s", e)
-    return []
+    """Detect reference faces with the same DirectML SCRFD runtime."""
+    return detect_faces(img, score_threshold=0.5)
 
 
 def get_host_encodings() -> List[np.ndarray]:
@@ -78,7 +58,7 @@ def get_host_encodings() -> List[np.ndarray]:
         _HOST_ENCODINGS = []
         return []
 
-    log.info("Encoding %d reference photos from %s (YuNet + LAB histogram)...",
+    log.info("Encoding %d reference photos from %s (SCRFD GPU + LAB histogram)...",
              len(photo_paths), _PHOTOS_DIR)
     for path in photo_paths:
         try:
@@ -108,7 +88,7 @@ def find_host_in_frame(frame_bgr: np.ndarray, facecam_bounds: dict = None) -> Op
         return None
 
     try:
-        faces = detect_faces_yunet(frame_bgr, score_threshold=0.5)
+        faces = detect_faces(frame_bgr, score_threshold=0.5)
 
         if not faces and facecam_bounds:
             fc_x = facecam_bounds.get("x", 0)
@@ -120,7 +100,7 @@ def find_host_in_frame(frame_bgr: np.ndarray, facecam_bounds: dict = None) -> Op
             x2, y2 = min(fw, fc_x + fc_w), min(fh, fc_y + fc_h)
             if x2 > x1 and y2 > y1:
                 facecam_crop = frame_bgr[y1:y2, x1:x2]
-                faces = detect_faces_yunet(facecam_crop, score_threshold=0.5)
+                faces = detect_faces(facecam_crop, score_threshold=0.5)
                 if faces:
                     faces = [(x + x1, y + y1, w, h) for (x, y, w, h) in faces]
                     log.debug("Face found via facecam-region crop (%d,%d %dx%d)",

@@ -25,6 +25,32 @@ import numpy as np
 import pytest
 
 
+SEO_QUERIES = [
+    "virat kohli six",
+    "virat kohli batting",
+    "kohli six analysis",
+    "virat kohli cricket opinion",
+    "virat kohli rcb discussion",
+    "virat kohli csk match",
+    "virat kohli six explained",
+    "virat kohli cricket discussion",
+]
+
+
+def _grounded_long_seo_result():
+    description = ". ".join(SEO_QUERIES) + ". " + (
+        "This detailed Hinglish cricket discussion explains the complete Kohli "
+        "batting opinion without inventing a score, venue, or match event. " * 16
+    )
+    return {
+        "title": "Kohli ke SIX par Seedhi Baat!",
+        "description": description,
+        "search_terms": SEO_QUERIES,
+        "hashtags": ["#Shorts", "#ViratKohli", "#RCB"],
+        "tags": ["Virat Kohli", "Kohli batting", "RCB cricket"],
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1. OBSERVABILITY — run_phase contract
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -143,7 +169,7 @@ class TestLLMOrchestration:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestSEOContract:
-    """SEO must never produce generic fallback; Shorts keep short desc;
+    """SEO must never produce generic fallback; Shorts keep long grounded SEO;
     retry_failed_seo closes the loop."""
 
     def test_no_generic_safe_defaults_in_tags(self):
@@ -157,22 +183,19 @@ class TestSEOContract:
                    "t20 cricket live", "best cricket moments"}
         assert not (set(out["search_terms"]) & generic)
 
-    def test_shorts_preserves_llm_short_description(self):
+    def test_shorts_preserves_llm_long_grounded_description(self):
         from automation.seo.seo import generate_clip_seo
-        ai_json = json.dumps({
-            "title": "KOHLI SIX! 🔥 | RCB vs CSK IPL 2026 | Live #Shorts",
-            "description": "📝 Kohli ne maara six! Massive shot over long-on sends the crowd into a frenzy at Chinnaswamy! RCB chasing big total and Kohli is on fire. Subscribe for more! #Shorts",
-            "search_terms": ["kohli six", "ipl live", "aaj ka match", "rcb vs csk live"],
-            "hashtags": ["#Shorts", "#Kohli", "#RCB", "#IPL2026", "#LiveCricket"],
-        })
+        ai_json = json.dumps(_grounded_long_seo_result())
         with patch("utils.ai_client.AIClient.generate_fastest_first",
                    return_value=ai_json), \
              patch("utils.ai_client.AIClient.generate_seo_text",
                    return_value=ai_json):
             res = generate_clip_seo("c1", "kohli six", "RCB vs CSK",
-                                    is_shorts=True)
+                                    is_shorts=True,
+                                    approved_search_queries=SEO_QUERIES)
         assert "CHAPTERS" not in res["description"]
         assert "Kohli" in res["description"]
+        assert len(res["description"]) >= 1200
         assert res["is_shorts"] is True
 
     def test_total_failure_raises_seo_generation_error(self):
@@ -204,14 +227,9 @@ class TestSEOContract:
         ctx = json.loads((tmp_path / "clipQ_seo_failed.json").read_text())
         assert ctx["transcript"] == "kohli six"
 
-        # Now recover — must pass quality gate (title≥10, desc≥20)
-        good = json.dumps({"title": "🔴 Kohli ne maara CHHAKKA! 💥 | RCB vs MI IPL 2026",
-                           "description": "📝 Virat Kohli smashes massive six over long-on in IPL 2026! The crowd at Chinnaswamy goes crazy as Kohli deposits the bowler into the stands. Subscribe for more!",
-                           "search_terms": ["kohli six wankhede", "aaj ka match", "ipl 2026 live"], "hashtags": ["#Shorts", "#Kohli", "#IPL2026"]})
-        with patch("utils.ai_client.AIClient.generate_fastest_first",
-                   return_value=good), \
-             patch("utils.ai_client.AIClient.generate_seo_text",
-                   return_value=good):
+        # Now recover through the canonical generator seam.
+        with patch("automation.seo.seo.generate_clip_seo",
+                   return_value=_grounded_long_seo_result()):
             r = retry_failed_seo(str(tmp_path))
         assert r["recovered"] == 1
         assert (tmp_path / "clipQ_metadata.json").exists()
@@ -503,9 +521,7 @@ class TestModelDiversity:
         seo_ai = _get_ai()
         original_provider = seo_ai._provider
         original_model = seo_ai._model
-        good = json.dumps({"title": "🔴 Kohli ne maara CHHAKKA! 💥 | RCB vs CSK IPL 2026 #Shorts",
-                           "description": "📝 Virat Kohli smashes massive six over long-on in IPL 2026! The crowd at Chinnaswamy goes wild as King Kohli hits back-to-back boundaries. Subscribe for more!",
-                           "search_terms": ["kohli six wankhede", "aaj ka match", "ipl 2026 live"], "hashtags": ["#Shorts", "#Kohli", "#IPL2026"]})
+        good = json.dumps(_grounded_long_seo_result())
         with patch("utils.ai_client.AIClient.generate_fastest_first",
                    return_value=good), \
              patch("utils.ai_client.AIClient.generate_seo_text",
@@ -515,7 +531,8 @@ class TestModelDiversity:
             generate_clip_seo("c1", "kohli six", "RCB vs CSK",
                               provider_override="openrouter",
                               model_override="some-model",
-                              is_shorts=True)
+                              is_shorts=True,
+                              approved_search_queries=SEO_QUERIES)
         # Shared singleton must be unchanged
         assert seo_ai._provider == original_provider
         assert seo_ai._model == original_model

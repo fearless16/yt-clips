@@ -115,16 +115,50 @@ class TestHookOverlayTextGeneration:
             "first_20_words": "and he takes a single to rotate the strike",
         }
         text = _generate_hook_overlay_text(hook_analysis)
-        # Should still generate something engaging for weak hooks
-        assert len(text) > 0
-        assert len(text) <= 30
+        assert text == ""
 
     def test_generate_overlay_text_empty_analysis(self):
         from export import _generate_hook_overlay_text
         hook_analysis = {}
         text = _generate_hook_overlay_text(hook_analysis)
-        assert len(text) > 0
-        assert len(text) <= 30
+        assert text == ""
+
+    def test_generate_overlay_text_unknown_hook(self):
+        from export import _generate_hook_overlay_text
+        text = _generate_hook_overlay_text({
+            "hook_type": "unknown",
+            "hook_score": 90,
+            "hook_types_found": [],
+        })
+        assert text == ""
+
+    def test_generate_overlay_text_weak_known_hook(self):
+        from export import _generate_hook_overlay_text
+        text = _generate_hook_overlay_text({
+            "hook_type": "six",
+            "hook_score": 20,
+            "hook_types_found": ["six"],
+        })
+        assert text == ""
+
+    @pytest.mark.parametrize("malformed", ["six", {"six": True}, 42, None])
+    def test_malformed_hook_types_found_is_ignored(self, malformed):
+        from export import _generate_hook_overlay_text
+        text = _generate_hook_overlay_text({
+            "hook_type": "unknown",
+            "hook_score": 90,
+            "hook_types_found": malformed,
+        })
+        assert text == ""
+
+    def test_weak_hook_analysis_builds_no_filter(self):
+        from export import _build_hook_overlay_from_analysis
+        result = _build_hook_overlay_from_analysis({
+            "hook_type": "six",
+            "hook_score": 20,
+            "hook_types_found": ["six"],
+        }, output_duration=20.0)
+        assert result == ""
 
 
 class TestHookOverlayFilter:
@@ -459,6 +493,12 @@ class TestHookOverlayConfig:
         font_size = hook_cfg.get("font_size", 80)
         assert isinstance(font_size, int)
         assert 40 <= font_size <= 150
+
+    def test_opening_video_and_audio_fades_are_disabled(self):
+        from utils.config import load_config
+        transitions = load_config()["export"]["transitions"]
+        assert transitions["fade_in_duration"] == 0
+        assert transitions["audio_fade_in"] == 0
 
 
 class TestHookOverlayEdgeCases:

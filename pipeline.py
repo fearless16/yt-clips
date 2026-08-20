@@ -14,6 +14,8 @@ Usage:
 import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import argparse
+import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -52,6 +54,219 @@ def _run_tests(skip: bool = False) -> None:
 
 def _banner(phase: str) -> None:
     phase_tracker.begin(phase)
+
+
+def _stable_match_key(url: str | None) -> str | None:
+    """Return a stable selector-history key for a source URL when available."""
+    if not url:
+        return None
+    from automation.clip_selection.pipeline import _extract_youtube_id, _slugify
+    return _extract_youtube_id(url) or _slugify(url)
+
+
+def _load_input_metadata(config: dict) -> dict:
+    """Load downloader metadata without allowing malformed data to abort a run."""
+    metadata_path = Path(config.get("paths", {}).get("input", "input")) / "video_metadata.json"
+    try:
+        with open(metadata_path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _load_video_title(config: dict, video_path: str | Path) -> str:
+    """Use source metadata for learning instead of the generic local filename."""
+    title = _load_input_metadata(config).get("title")
+    return title.strip() if isinstance(title, str) and title.strip() else Path(video_path).stem
+
+
+def _local_video_fingerprint(video_path: str | Path) -> str | None:
+    """Create a stable, bounded-cost identity for a local video file."""
+    path = Path(video_path)
+    if not path.is_file():
+        return None
+    try:
+        size = path.stat().st_size
+        digest = hashlib.sha256(str(size).encode("ascii"))
+        with open(path, "rb") as handle:
+            digest.update(handle.read(1024 * 1024))
+            if size > 1024 * 1024:
+                handle.seek(max(0, size - 1024 * 1024))
+                digest.update(handle.read(1024 * 1024))
+        return f"local-{digest.hexdigest()[:20]}"
+    except OSError:
+        return None
+
+
+def _resolve_match_key(url: str | None, video_path: str | Path, config: dict) -> str | None:
+    """Resolve dedup identity, avoiding the shared QUICK-mode ``local`` key."""
+    from automation.clip_selection.pipeline import _extract_youtube_id
+    from urllib.parse import parse_qs, urlparse
+
+    raw_url = url or ""
+    parsed = urlparse(raw_url)
+    local_placeholder = (
+        parsed.netloc.lower() in {"youtu.be", "www.youtu.be"}
+        and parsed.path.strip("/").lower() == "local"
+    ) or parse_qs(parsed.query).get("v", [""])[0].lower() == "local"
+    youtube_id = _extract_youtube_id(raw_url)
+    if youtube_id and youtube_id.lower() != "local":
+        return youtube_id
+
+    if local_placeholder or (youtube_id and youtube_id.lower() == "local"):
+        metadata = _load_input_metadata(config)
+        for field in ("url", "webpage_url", "original_url", "live_stream_url"):
+            metadata_id = _extract_youtube_id(str(metadata.get(field, "")))
+            if metadata_id and metadata_id.lower() != "local":
+                return metadata_id
+        return _local_video_fingerprint(video_path)
+
+    return _stable_match_key(url)
+
+
+def _detect_highlights(
+    transcript_path: str,
+    video_path: str,
+    highlights_path: str,
+    url: str | None,
+    config: dict,
+) -> list[dict]:
+    """Route highlight detection according to ``clip_selection.enabled``."""
+    if config.get("clip_selection", {}).get("enabled", False):
+        from automation.clip_selection.pipeline import detect_highlights
+        match_key = _resolve_match_key(url, video_path, config)
+        if match_key:
+            return detect_highlights(
+                transcript_path,
+                video_path,
+                highlights_path,
+                match_key=match_key,
+            )
+        return detect_highlights(transcript_path, video_path, highlights_path)
+
+    from highlight import detect_highlights
+    return detect_highlights(transcript_path, video_path, highlights_path)
+
+
+def _clip_learning_id(clip_path: str | Path) -> str:
+    """Namespace a clip key by its export batch directory."""
+    path = Path(clip_path)
+    return f"{path.parent.name}/{path.stem}"
+
+
+def _record_upload_performance(
+    clip_path: str | Path,
+    youtube_video_id: str | None,
+    learner=None,
+) -> None:
+    """Record a successful upload against its collision-free learning ID."""
+    if not youtube_video_id:
+        return
+    owns_learner = learner is None
+    if owns_learner:
+        from automation.clip_selection.clip_learner import ClipLearner
+        learner = ClipLearner()
+    try:
+        learner.update_performance(
+            clip_id=_clip_learning_id(clip_path),
+            youtube_video_id=youtube_video_id,
+            views=0,
+        )
+    except Exception as exc:
+        log.warning("[clip_learner] upload performance save failed: %s", exc)
+    finally:
+        if owns_learner:
+            learner.close()
+
+
+def _persist_clip_selections(
+    highlights_path: str,
+    exported: list[Path],
+    video_title: str,
+    learner,
+) -> None:
+    """Persist top-level highlight YAML entries using batch-scoped clip IDs."""
+    import yaml
+
+    with open(highlights_path, "r", encoding="utf-8") as f:
+        highlight_data = yaml.safe_load(f) or {}
+    if not isinstance(highlight_data, dict) or not exported:
+        return
+
+    exported_stems = {Path(path).stem for path in exported}
+    batch_name = Path(exported[0]).parent.name
+    rank = 0
+    for clip_key, clip_data in highlight_data.items():
+        if not isinstance(clip_data, dict):
+            continue
+        rank += 1
+        if clip_key not in exported_stems:
+            continue
+        learner.save_clip_selection(
+            clip_id=f"{batch_name}/{clip_key}",
+            video_title=video_title,
+            selected_rank=rank,
+            final_score=clip_data.get("final_score", clip_data.get("score", 0.0)),
+            agent_scores=clip_data.get("agent_scores", {}),
+            rejection_reasons=clip_data.get("rejection_reasons", []),
+        )
+
+
+def _accept_upload_result(
+    clip_path: str | Path,
+    youtube_video_id: str | None,
+    failures: list[dict],
+    learner=None,
+) -> bool:
+    """Treat an upload as successful only when YouTube returned a video ID."""
+    if not isinstance(youtube_video_id, str) or not youtube_video_id.strip():
+        failures.append({
+            "phase": "YouTube Upload",
+            "clip_id": Path(clip_path).name,
+            "error": "upload returned no video ID",
+        })
+        return False
+    _record_upload_performance(clip_path, youtube_video_id.strip(), learner)
+    return True
+
+
+def _commit_successful_dedup(
+    highlights_path: str,
+    successful_stems: set[str],
+    match_key: str | None,
+    config: dict,
+) -> None:
+    """Commit only exported/published windows to cross-run dedup history."""
+    if not successful_stems or not match_key:
+        return
+    clip_cfg = config.get("clip_selection", {})
+    if not clip_cfg.get("enabled", False) or not clip_cfg.get("dedup_enabled", True):
+        return
+
+    import yaml
+    from automation.clip_selection.dedupe import append_windows
+
+    try:
+        with open(highlights_path, encoding="utf-8") as handle:
+            data = yaml.safe_load(handle) or {}
+        windows = []
+        if isinstance(data, dict):
+            for clip_id, entry in data.items():
+                if clip_id not in successful_stems or not isinstance(entry, dict):
+                    continue
+                start = entry.get("start_sec", entry.get("start"))
+                end = entry.get("end_sec", entry.get("end"))
+                from automation.clip_selection.dedupe import _parse_timestamp
+                start_sec = _parse_timestamp(start)
+                end_sec = _parse_timestamp(end)
+                if start_sec is not None and end_sec is not None and end_sec > start_sec:
+                    windows.append({"start": start_sec, "end": end_sec})
+        if windows:
+            history_dir = Path(config.get("paths", {}).get("highlights", Path(highlights_path).parent))
+            append_windows(history_dir / f"{match_key}.dedupe_history.yaml", windows)
+    except Exception as exc:
+        log.warning("Cross-run dedup commit failed: %s", exc)
 
 
 def _verify_tokens(skip: bool = False) -> None:
@@ -143,6 +358,7 @@ def run(
     stem = Path(video_path).stem
     transcript_path = str(Path(paths["transcripts"]) / f"{stem}.json")
     highlights_path = str(Path(paths["highlights"])  / f"{stem}.yaml")
+    match_key = _resolve_match_key(url, video_path, cfg)
 
     # ── Phase 2: Transcribe ────────────────────────────────────────────────────
     _banner("PHASE 2 — TRANSCRIPTION")
@@ -217,8 +433,13 @@ def run(
             sys.exit(1)
     else:
         t0 = time.perf_counter()
-        from highlight import detect_highlights
-        highlights = detect_highlights(transcript_path, video_path, highlights_path)
+        highlights = _detect_highlights(
+            transcript_path,
+            video_path,
+            highlights_path,
+            url,
+            cfg,
+        )
         log.info("Phase 3 complete in %.1f s — %d highlights", time.perf_counter() - t0, len(highlights))
 
     # Verify highlights file exists before proceeding
@@ -252,6 +473,35 @@ def run(
         from export import export_all
         exported = export_all(highlights_path, video_path, transcript_path=transcript_path)
         log.info("Phase 4 complete in %.1f s — %d clips exported", time.perf_counter() - t0, len(exported))
+
+    # Persist only clips that actually reached disk. Do this before upload and
+    # analytics so a later network failure cannot erase selection provenance.
+    if exported:
+        try:
+            from automation.clip_selection.clip_learner import ClipLearner
+            clip_learner = ClipLearner()
+            try:
+                _persist_clip_selections(
+                    highlights_path,
+                    exported,
+                    _load_video_title(cfg, video_path),
+                    clip_learner,
+                )
+            finally:
+                clip_learner.close()
+            log.info("[clip_learner] saved %d successful exports", len(exported))
+        except Exception as exc:
+            log.warning("[clip_learner] selection save failed: %s", exc)
+
+        # Export is terminal success when upload is disabled. When upload is
+        # enabled, dedup is committed later and only for real YouTube IDs.
+        if not auto_upload:
+            _commit_successful_dedup(
+                highlights_path,
+                {Path(path).stem for path in exported},
+                match_key,
+                cfg,
+            )
 
     # ── Phase 4.25: Selective Enhancement (optional, config- or mode-driven) ──
     # Mode precedence: --mode CLI flag > config toggle
@@ -346,6 +596,7 @@ def run(
 
     # ── Phase 6: YouTube Upload (optional) ────────────────────────────────────
     uploaded_count = 0
+    successful_upload_stems: set[str] = set()
     if auto_upload and exported:
         _banner("PHASE 6 — YOUTUBE UPLOAD")
         t0 = time.perf_counter()
@@ -390,13 +641,17 @@ def run(
                         log.info("⏰ Slot: %s → %s", clip_path.stem, slot.strftime("%Y-%m-%d %H:%M IST"))
 
                 try:
-                    upload_video(
+                    youtube_video_id = upload_video(
                         str(clip_path),
                         str(meta_path),
                         privacy=cfg["youtube"]["privacy_status"],
                         publish_at=publish_at,
                     )
-                    uploaded_count += 1
+                    if _accept_upload_result(clip_path, youtube_video_id, failures):
+                        uploaded_count += 1
+                        successful_upload_stems.add(clip_path.stem)
+                    else:
+                        log.error("Upload returned no video ID for %s", clip_path.name)
                 except Exception as e:
                     log.error("Upload failed for %s: %s", clip_path.name, e)
                     failures.append({"phase": "YouTube Upload", "clip_id": clip_path.name, "error": str(e)})
@@ -405,6 +660,12 @@ def run(
 
         log.info("Phase 6 complete in %.1f s — %d/%d clips uploaded",
                  time.perf_counter() - t0, uploaded_count, len(exported))
+        _commit_successful_dedup(
+            highlights_path,
+            successful_upload_stems,
+            match_key,
+            cfg,
+        )
 
     # ── Phase 7: Analytics & SEO Learning ──────────────────────────────────────
     if exported:
@@ -450,32 +711,7 @@ def run(
         except Exception as e:
             log.warning("[self_learner] observation failed: %s", e)
 
-        # 8b: Save clip selection data to clip_learner.db
-        try:
-            from automation.clip_selection.clip_learner import ClipLearner
-            _cl = ClipLearner()
-            highlights_yaml = highlights_path if Path(highlights_path).exists() else None
-            clip_scores = {}
-            if highlights_yaml:
-                import yaml
-                with open(highlights_yaml, "r", encoding="utf-8") as f:
-                    hl_data = yaml.safe_load(f) or {}
-                for i, clip_data in enumerate(hl_data.get("clips", []), 1):
-                    clip_id = clip_data.get("id", f"clip{i}")
-                    _cl.save_clip_selection(
-                        clip_id=clip_id,
-                        video_title=Path(video_path).stem,
-                        selected_rank=i,
-                        final_score=clip_data.get("score", 0.0),
-                        agent_scores_json=clip_data.get("agent_scores"),
-                        rejection_reasons=clip_data.get("rejection_reasons"),
-                    )
-            _cl.close()
-            log.info("[clip_learner] saved clip selection data")
-        except Exception as e:
-            log.warning("[clip_learner] save failed: %s", e)
-
-        # 8c: Sync DBs to Drive
+        # 8b: Sync DBs to Drive (clip selections were saved immediately after export)
         try:
             from sync import sync_db_to_drive
             sync_db_to_drive()

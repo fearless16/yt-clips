@@ -1,7 +1,6 @@
 import json
 import subprocess
 import threading
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
@@ -151,7 +150,7 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
             "is_dynamic_match": True
         }
 
-    # ── 2. YuNet DNN face detection ────────────────────────
+    # Compatibility symbol now routes to SCRFD on DirectML GPU.
     from utils.face_detect import detect_faces_yunet
     faces = detect_faces_yunet(frame_bgr, score_threshold=0.5)
     if not faces:
@@ -174,8 +173,6 @@ def detect_face_crop(frame_bgr: np.ndarray, frame_width: int, frame_height: int)
         host_encs = get_host_encodings()
     except Exception:
         pass
-
-    # detection + tracking always use GPU (DirectML)
 
     best_face = None
     best_score = -1.0

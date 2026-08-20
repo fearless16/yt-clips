@@ -1,8 +1,6 @@
 import argparse
 import json
-import shutil
 import subprocess
-import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -13,7 +11,7 @@ import numpy as np
 
 from utils.config import load_config
 from utils.logger import get_logger
-from utils.face_detect import detect_faces, detect_faces_yunet
+from utils.face_detect import detect_faces, get_backend_info
 
 cfg = load_config()
 log = get_logger("video_analyzer", cfg["logging"]["log_file"], cfg["logging"]["level"])
@@ -24,7 +22,10 @@ def _detect_faces(frame: np.ndarray) -> List[Tuple[int, int, int, int]]:
     return [(y, x + w, y + h, x) for (x, y, w, h) in bboxes]
 
 
-def _analyze_lighting(frame: np.ndarray) -> Dict[str, float]:
+def _analyze_lighting(
+    frame: np.ndarray,
+    faces: Optional[List[Tuple[int, int, int, int]]] = None,
+) -> Dict[str, float]:
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
 
@@ -36,7 +37,7 @@ def _analyze_lighting(frame: np.ndarray) -> Dict[str, float]:
     nonzero = hist[hist > 0]
     entropy = float(-np.sum(nonzero * np.log2(nonzero)))
 
-    faces = _detect_faces(frame)
+    faces = _detect_faces(frame) if faces is None else faces
     face_brightness = 0.0
     face_contrast = 0.0
     face_area_ratio = 0.0
@@ -100,7 +101,7 @@ def _load_reference_embeddings(photos_dir: Path) -> List[np.ndarray]:
                 img = cv2.imread(str(img_path))
                 if img is None:
                     continue
-                faces = detect_faces_yunet(img, score_threshold=0.5)
+                faces = detect_faces(img, score_threshold=0.5, min_area=2000)
                 if faces:
                     best = max(faces, key=lambda r: r[2] * r[3])
                     emb = _extract_face_embedding(img, best)
@@ -275,12 +276,15 @@ def analyze_video(
     duration = probe.get("duration", 0)
 
     ref_embeddings = _load_reference_embeddings(photos_path)
+    face_backend = get_backend_info()
+    log.info("Face detector: %s (GPU=%s)",
+             face_backend["active_provider"], face_backend["gpu_enabled"])
 
     if ref_path.exists():
         try:
             img = cv2.imread(str(ref_path))
             if img is not None:
-                faces = detect_faces_yunet(img, score_threshold=0.5)
+                faces = detect_faces(img, score_threshold=0.5, min_area=2000)
                 if faces:
                     best = max(faces, key=lambda r: r[2] * r[3])
                     emb = _extract_face_embedding(img, best)
@@ -292,13 +296,13 @@ def analyze_video(
 
     per_frame = []
     for ts, frame in _sample_frames(video_path, interval_sec=sample_interval):
-        lighting = _analyze_lighting(frame)
+        faces = _detect_faces(frame)
+        lighting = _analyze_lighting(frame, faces)
         face_detected = lighting["face_count"] > 0
 
         ref_match = 0.0
         if face_detected and ref_embeddings:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            faces = _detect_faces(frame)
             if faces:
                 best_face = max(faces, key=lambda r: (r[2]-r[0]) * (r[1]-r[3]))
                 ref_match = _match_face_to_references(rgb, best_face, ref_embeddings)
@@ -328,6 +332,8 @@ def analyze_video(
         "duration_sec": round(duration, 1),
         "frames_sampled": len(per_frame),
         "frames_with_face": len(with_face),
+        "face_detection_backend": face_backend["active_provider"],
+        "face_detection_gpu": face_backend["gpu_enabled"],
         "face_detection_rate": round(len(with_face) / max(1, len(per_frame)) * 100, 1),
         "avg_quality": round(np.mean(all_scores), 4) if all_scores else 0,
         "max_quality": round(max(all_scores), 4) if all_scores else 0,
