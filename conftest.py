@@ -35,7 +35,6 @@ KNOWN_FAILURES = {
     "tests/test_ai_client.py::TestGenerateSeoText::test_seo_text_never_calls_ollama_fallback",
     "tests/test_pipeline_overhaul.py::TestLLMOrchestration::test_racer_returns_empty_on_total_failure_not_generic",
     "tests/test_pipeline_overhaul.py::TestDryRun::test_dry_run_full_passes",
-    "tests/test_self_learner.py::TestPersistentMemory::test_serialize_non_json_value",
     "tests/test_video_analyzer_sampling.py::TestFfmpegNv12Pipe::test_software_nv12_pipe_produces_frames",
     "tests/test_video_analyzer_sampling.py::TestFfmpegNv12Pipe::test_software_nv12_is_faster_than_hw_bgr24",
     "tests/test_video_analyzer_sampling.py::TestVideoAnalyzerIntegration::test_sample_frames_returns_valid_frames",

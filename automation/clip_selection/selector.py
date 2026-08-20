@@ -1,4 +1,4 @@
-"""ClipSelector — orchestrates all 7 agents + Final Arbiter.
+"""ClipSelector — orchestrates all registered agents + Final Arbiter.
 
 Replaces the old `_parallel_score_candidates` + `_refine_highlights_with_ai`
 in ``highlight.py``.
@@ -20,7 +20,7 @@ log = get_logger("clip_selector")
 
 
 class ClipSelector:
-    """Runs all 7 agents on candidates, then Final Arbiter ranks them."""
+    """Runs all registered agents on candidates, then ranks them."""
 
     def __init__(self, use_llm_arbiter: bool = True, weights: dict[str, float] | None = None):
         self.agents = ALL_AGENTS
@@ -33,7 +33,7 @@ class ClipSelector:
         context: dict,
         max_workers: int = 8,
     ) -> list[dict]:
-        """Score all candidates through all 7 agents in parallel.
+        """Score all candidates through all registered agents in parallel.
 
         Args:
             candidates: List of candidate dicts with start/end/text
@@ -181,7 +181,7 @@ def select_best_clips(
         match_context: Optional match info (players, teams, highlights)
         max_selected: Max clips to return
         use_llm_arbiter: Whether to run LLM refinement
-        weights: Optional learned agent weights (from weight_learner)
+        weights: Optional explicit agent weights supplied by the caller
 
     Returns:
         Final ranked clips with agent scores attached.

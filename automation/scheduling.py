@@ -1,7 +1,6 @@
 """Upload scheduling utilities — day gating and priority day routing.
 
-Uses learner data to avoid dead days (e.g. Thursday) and prefer
-high-performing days (Friday, Sunday, Wednesday).
+Uses explicit config to avoid dead days and prefer configured days.
 """
 from datetime import datetime, timedelta
 from typing import Optional

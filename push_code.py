@@ -2,7 +2,7 @@
 push_code.py — Push tokens and .env to Google Drive.
 Code is synced via git + tunnel; Drive only stores credentials.
 
-Persistent files (e.g. self_learner.db) use a separate list with locked
+Persistent files (e.g. shorts_intelligence.db) use a separate list with locked
 upload semantics: NEVER delete, only create-once / update-in-place. If the
 local copy is missing, restore from Drive rather than treating absence as
 "the new state".
@@ -32,8 +32,7 @@ TOKEN_FILES = [
 # Persistent files: never deleted, only create-once / update-in-place.
 # If missing locally but present on Drive, restore (don't push "missing").
 PERSISTENT_FILES = [
-    "self_learner.db",
-    "clip_learner.db",
+    "shorts_intelligence.db",
 ]
 
 try:

@@ -18,7 +18,7 @@ from utils.config import load_config
 from utils.logger import get_logger
 
 from automation.clip_selection.selector import ClipSelector
-from automation.clip_selection.arbiter import _DEFAULT_WEIGHTS, fmt_ts
+from automation.clip_selection.arbiter import fmt_ts
 from automation.clip_selection.topic_segmenter import TopicSegmenter
 from automation.clip_selection.cricket_heuristics import score_all_topics
 
@@ -133,40 +133,6 @@ def _write_empty_highlights(output_path: str | Path) -> None:
     with open(temporary, "w", encoding="utf-8") as handle:
         yaml.safe_dump({}, handle)
     temporary.replace(path)
-
-
-def _load_adaptive_weights(weights_path: str | Path) -> dict[str, float] | None:
-    """Load learned weights only when they match the current agent schema."""
-    path = Path(weights_path)
-    if not path.exists():
-        return None
-    try:
-        with open(path, encoding="utf-8") as f:
-            weights = json.load(f)
-        expected_keys = set(_DEFAULT_WEIGHTS)
-        valid = (
-            isinstance(weights, dict)
-            and set(weights) == expected_keys
-            and all(
-                isinstance(value, (int, float))
-                and not isinstance(value, bool)
-                and value > 0
-                for value in weights.values()
-            )
-            and abs(sum(float(value) for value in weights.values()) - 1.0) <= 0.02
-        )
-        if not valid:
-            log.warning(
-                "Ignoring invalid adaptive weights in %s; expected keys %s "
-                "with positive weights summing near 1",
-                path,
-                sorted(expected_keys),
-            )
-            return None
-        return {key: float(value) for key, value in weights.items()}
-    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-        log.warning("Ignoring unreadable adaptive weights %s: %s", path, exc)
-        return None
 
 
 def _match_key(input_dir: str, output_path: str) -> str:
@@ -563,27 +529,8 @@ def detect_highlights(
     # ── 7-Agent scoring ────────────────────────────────────────────────────
     log.info("Running 7-agent clip selection on %d candidates...", len(merged))
 
-    # Load learned weights + entity biases from previous runs
-    weights_path = Path("clip_selection_weights.json")
-    adaptive_weights = _load_adaptive_weights(weights_path)
-    if adaptive_weights is not None:
-        log.info("Loaded adaptive weights from %s", weights_path)
-
-    entity_biases = {}
-    biases_path = Path("clip_selection_biases.json")
-    if biases_path.exists():
-        try:
-            with open(biases_path) as f:
-                entity_biases = json.load(f)
-            log.info("Loaded entity biases: %d top players, %d avoid",
-                     len(entity_biases.get("top_players", [])),
-                     len(entity_biases.get("avoid_players", [])))
-        except Exception:
-            pass
-
     selector = ClipSelector(
         use_llm_arbiter=cfg.get("clip_selection", {}).get("use_llm_arbiter", True),
-        weights=adaptive_weights,
     )
 
     # Load match context
@@ -602,7 +549,6 @@ def detect_highlights(
         "max_rms": max_rms,
         "transcript_segments": segments,
         "match_context": match_context,
-        "entity_bias": entity_biases,
         "topics": topics,
         "topic_heuristics": topic_heuristics,
     }
@@ -628,6 +574,20 @@ def detect_highlights(
 
     # Score all candidates through 7 agents
     scored_candidates = selector.score_candidates(merged, context_for_agents)
+
+    # Canonical learner is a bounded tie-breaker only. Every candidate here was
+    # already built by _prepare_complete_thoughts(), so it cannot shorten or cut.
+    for candidate in scored_candidates:
+        candidate["complete_thought"] = True
+    try:
+        from shorts_intelligence.bridge import apply_selection_policy
+
+        matched = apply_selection_policy(cfg, scored_candidates)
+        if matched:
+            mode = "shadow" if cfg.get("shorts_intelligence", {}).get("shadow_mode", True) else "active"
+            log.info("Shorts Intelligence %s policy matched %d candidates", mode, matched)
+    except Exception as exc:
+        log.warning("Shorts Intelligence policy unavailable: %s", exc)
 
     # Filter and select top clips
     min_quality = cfg.get("clip_selection", {}).get("min_quality", 20.0)
@@ -683,6 +643,11 @@ def detect_highlights(
             "text": window_text,
             "agent_scores": w.get("agent_scores", {}),
             "hook_score": w.get("hook_score"),
+            "intelligence_adjustment": w.get("intelligence_adjustment", 0.0),
+            "intelligence_shadow_adjustment": w.get(
+                "intelligence_shadow_adjustment", 0.0
+            ),
+            "intelligence_segments": w.get("intelligence_segments", []),
         })
 
         log.info("  %s: %s -> %s (score=%.1f, speed=%.2fx)", key, fmt_ts(w["start"]),

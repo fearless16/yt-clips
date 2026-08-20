@@ -55,40 +55,6 @@ def test_pipeline_uses_legacy_selector_when_disabled():
     selector.assert_not_called()
 
 
-def test_pipeline_persists_only_successful_exports_with_batch_ids(tmp_path):
-    import pipeline
-
-    highlights_path = tmp_path / "highlights.yaml"
-    highlights_path.write_text(yaml.safe_dump({
-        "clip1": {
-            "score": 81.0,
-            "agent_scores": {"hook_expert": {"score": 90}},
-            "rejection_reasons": [],
-        },
-        "clip2": {
-            "final_score": 76.0,
-            "agent_scores": {"emotion_expert": {"score": 85}},
-        },
-    }), encoding="utf-8")
-    batch_dir = tmp_path / "shorts" / "2026-08-20_120000"
-    exported = [batch_dir / "clip1.mp4"]
-    learner = MagicMock()
-
-    pipeline._persist_clip_selections(
-        str(highlights_path), exported, "India vs Australia", learner,
-    )
-
-    assert learner.save_clip_selection.call_count == 1
-    assert learner.save_clip_selection.call_args_list[0].kwargs == {
-        "clip_id": "2026-08-20_120000/clip1",
-        "video_title": "India vs Australia",
-        "selected_rank": 1,
-        "final_score": 81.0,
-        "agent_scores": {"hook_expert": {"score": 90}},
-        "rejection_reasons": [],
-    }
-
-
 def test_pipeline_reads_actual_video_title_from_metadata(tmp_path):
     import json
     import pipeline
@@ -104,29 +70,13 @@ def test_pipeline_reads_actual_video_title_from_metadata(tmp_path):
     ) == "India vs Australia Final"
 
 
-def test_pipeline_records_upload_for_same_collision_free_clip_id(tmp_path):
-    import pipeline
-
-    clip_path = tmp_path / "shorts" / "2026-08-20_120000" / "clip1.mp4"
-    learner = MagicMock()
-
-    pipeline._record_upload_performance(clip_path, "youtube-id-123", learner)
-
-    learner.update_performance.assert_called_once_with(
-        clip_id="2026-08-20_120000/clip1",
-        youtube_video_id="youtube-id-123",
-        views=0,
-    )
-
-
 def test_none_upload_id_is_failure_and_not_success(tmp_path):
     import pipeline
 
     failures = []
-    learner = MagicMock()
     clip = tmp_path / "batch" / "clip1.mp4"
 
-    success = pipeline._accept_upload_result(clip, None, failures, learner)
+    success = pipeline._accept_upload_result(clip, None, failures)
 
     assert success is False
     assert failures == [{
@@ -134,23 +84,18 @@ def test_none_upload_id_is_failure_and_not_success(tmp_path):
         "clip_id": "clip1.mp4",
         "error": "upload returned no video ID",
     }]
-    learner.update_performance.assert_not_called()
 
 
 def test_real_upload_id_is_success(tmp_path):
     import pipeline
 
     failures = []
-    learner = MagicMock()
     clip = tmp_path / "batch" / "clip1.mp4"
 
-    success = pipeline._accept_upload_result(
-        clip, "youtube-id-123", failures, learner,
-    )
+    success = pipeline._accept_upload_result(clip, "youtube-id-123", failures)
 
     assert success is True
     assert failures == []
-    learner.update_performance.assert_called_once()
 
 
 def test_dedup_commits_only_terminal_success_stems(tmp_path):
@@ -233,25 +178,3 @@ def test_export_batch_ids_are_collision_resistant():
 
     assert first != second
     assert len(first) > len("2026-08-20_120000")
-
-
-def test_clip_pipeline_rejects_stale_adaptive_weight_schema(tmp_path):
-    import json
-    from automation.clip_selection.arbiter import _DEFAULT_WEIGHTS
-    import automation.clip_selection.pipeline as clip_pipeline
-
-    weights_path = tmp_path / "clip_selection_weights.json"
-    weights_path.write_text(json.dumps({
-        "hook_expert": 0.35,
-        "emotion_expert": 0.20,
-        "viral_potential": 0.15,
-        "cricket_context": 0.10,
-        "viewer_psychology": 0.10,
-        "retention_expert": 0.05,
-        "technical_quality": 0.05,
-    }), encoding="utf-8")
-
-    assert clip_pipeline._load_adaptive_weights(weights_path) is None
-
-    weights_path.write_text(json.dumps(_DEFAULT_WEIGHTS), encoding="utf-8")
-    assert clip_pipeline._load_adaptive_weights(weights_path) == _DEFAULT_WEIGHTS

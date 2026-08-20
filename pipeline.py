@@ -155,69 +155,38 @@ def _clip_learning_id(clip_path: str | Path) -> str:
     return f"{path.parent.name}/{path.stem}"
 
 
-def _record_upload_performance(
-    clip_path: str | Path,
-    youtube_video_id: str | None,
-    learner=None,
-) -> None:
-    """Record a successful upload against its collision-free learning ID."""
-    if not youtube_video_id:
-        return
-    owns_learner = learner is None
-    if owns_learner:
-        from automation.clip_selection.clip_learner import ClipLearner
-        learner = ClipLearner()
-    try:
-        learner.update_performance(
-            clip_id=_clip_learning_id(clip_path),
-            youtube_video_id=youtube_video_id,
-            views=0,
-        )
-    except Exception as exc:
-        log.warning("[clip_learner] upload performance save failed: %s", exc)
-    finally:
-        if owns_learner:
-            learner.close()
-
-
-def _persist_clip_selections(
+def _record_short_intelligence_exports(
+    config: dict,
     highlights_path: str,
     exported: list[Path],
-    video_title: str,
-    learner,
-) -> None:
-    """Persist top-level highlight YAML entries using batch-scoped clip IDs."""
-    import yaml
+) -> int:
+    """Fail-soft shadow capture for successfully exported clips."""
+    if not exported or not config.get("shorts_intelligence", {}).get("enabled", False):
+        return 0
+    try:
+        import yaml
+        from shorts_intelligence.bridge import record_exported
 
-    with open(highlights_path, "r", encoding="utf-8") as f:
-        highlight_data = yaml.safe_load(f) or {}
-    if not isinstance(highlight_data, dict) or not exported:
-        return
-
-    exported_stems = {Path(path).stem for path in exported}
-    batch_name = Path(exported[0]).parent.name
-    rank = 0
-    for clip_key, clip_data in highlight_data.items():
-        if not isinstance(clip_data, dict):
-            continue
-        rank += 1
-        if clip_key not in exported_stems:
-            continue
-        learner.save_clip_selection(
-            clip_id=f"{batch_name}/{clip_key}",
-            video_title=video_title,
-            selected_rank=rank,
-            final_score=clip_data.get("final_score", clip_data.get("score", 0.0)),
-            agent_scores=clip_data.get("agent_scores", {}),
-            rejection_reasons=clip_data.get("rejection_reasons", []),
-        )
+        with open(highlights_path, "r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle) or {}
+        highlights = []
+        if isinstance(payload, dict):
+            highlights = [
+                {"id": clip_id, **clip_data}
+                for clip_id, clip_data in payload.items()
+                if isinstance(clip_data, dict)
+            ]
+        return record_exported(config, highlights, exported)
+    except Exception as exc:
+        log.warning("[shorts_intelligence] export shadow capture failed: %s", exc)
+        return 0
 
 
 def _accept_upload_result(
     clip_path: str | Path,
     youtube_video_id: str | None,
     failures: list[dict],
-    learner=None,
+    intelligence_config: dict | None = None,
 ) -> bool:
     """Treat an upload as successful only when YouTube returned a video ID."""
     if not isinstance(youtube_video_id, str) or not youtube_video_id.strip():
@@ -227,7 +196,17 @@ def _accept_upload_result(
             "error": "upload returned no video ID",
         })
         return False
-    _record_upload_performance(clip_path, youtube_video_id.strip(), learner)
+    if intelligence_config is not None:
+        try:
+            from shorts_intelligence.bridge import record_upload
+
+            record_upload(
+                intelligence_config,
+                _clip_learning_id(clip_path),
+                youtube_video_id.strip(),
+            )
+        except Exception as exc:
+            log.warning("[shorts_intelligence] upload link failed: %s", exc)
     return True
 
 
@@ -474,24 +453,12 @@ def run(
         exported = export_all(highlights_path, video_path, transcript_path=transcript_path)
         log.info("Phase 4 complete in %.1f s — %d clips exported", time.perf_counter() - t0, len(exported))
 
-    # Persist only clips that actually reached disk. Do this before upload and
-    # analytics so a later network failure cannot erase selection provenance.
     if exported:
-        try:
-            from automation.clip_selection.clip_learner import ClipLearner
-            clip_learner = ClipLearner()
-            try:
-                _persist_clip_selections(
-                    highlights_path,
-                    exported,
-                    _load_video_title(cfg, video_path),
-                    clip_learner,
-                )
-            finally:
-                clip_learner.close()
-            log.info("[clip_learner] saved %d successful exports", len(exported))
-        except Exception as exc:
-            log.warning("[clip_learner] selection save failed: %s", exc)
+        shadow_count = _record_short_intelligence_exports(
+            cfg, highlights_path, exported,
+        )
+        if shadow_count:
+            log.info("[shorts_intelligence] shadow-captured %d exports", shadow_count)
 
         # Export is terminal success when upload is disabled. When upload is
         # enabled, dedup is committed later and only for real YouTube IDs.
@@ -573,6 +540,8 @@ def run(
             else:
                 log.info("SEO metadata already exists for %d clips — skipping", len(seo_results))
 
+            _record_short_intelligence_exports(cfg, highlights_path, exported)
+
         # Generate Thumbnails (Frame extraction or AI)
         # This searches for mp4s and matching metadata in the folder
         process_all_thumbnails(export_dir)
@@ -647,7 +616,12 @@ def run(
                         privacy=cfg["youtube"]["privacy_status"],
                         publish_at=publish_at,
                     )
-                    if _accept_upload_result(clip_path, youtube_video_id, failures):
+                    if _accept_upload_result(
+                        clip_path,
+                        youtube_video_id,
+                        failures,
+                        intelligence_config=cfg,
+                    ):
                         uploaded_count += 1
                         successful_upload_stems.add(clip_path.stem)
                     else:
@@ -667,55 +641,24 @@ def run(
             cfg,
         )
 
-    # ── Phase 7: Analytics & SEO Learning ──────────────────────────────────────
+    # Phase 7: canonical Shorts Intelligence status.
     if exported:
-        _banner("PHASE 7 — ANALYTICS & SEO LEARNING")
+        _banner("PHASE 7 — SHORTS INTELLIGENCE")
         try:
-            from automation.seo.analytics import generate_daily_insights
-            summary = generate_daily_insights()
-            if summary:
-                print(f"  Total clips tracked : {summary.get('total_clips', 0)}")
-                print(f"  Published to YT     : {summary.get('published', 0)}")
-                print(f"  Total views         : {summary.get('total_views', 0)}")
-                print(f"  Avg clip score      : {summary.get('avg_score', 0.0)}")
-                print(f"  Learner memories    : {summary.get('memories', 0)}")
-                print(f"  Processed events    : {summary.get('processed_events', 0)}")
-                print(f"  Recent exports      : {summary.get('recent_exports', 0)}")
-        except FileNotFoundError as e:
-            if "yt_channel_token.json" in str(e) or "client_secrets" in str(e):
-                log.warning("Analytics skipped — need yt_channel_token.json with youtube.readonly scope")
-            else:
-                log.warning("Analytics failed: %s", e)
-        except Exception as e:
-            log.warning("Analytics failed: %s", e)
+            from shorts_intelligence.bridge import shadow_status
 
-    # ── Phase 8: Self-Learning & DB Updates ─────────────────────────────────
+            log.info("[shorts_intelligence] %s", shadow_status(cfg))
+        except Exception as e:
+            log.warning("Shorts Intelligence status failed: %s", e)
+
+    # Phase 8: canonical DB persistence.
     if exported:
-        _banner("PHASE 8 — SELF-LEARNING & DB")
+        _banner("PHASE 8 — DB PERSISTENCE")
         t0 = time.perf_counter()
-
-        # 8a: Record pipeline metrics to self_learner.db
-        try:
-            from self_learner.learner import Learner as SelfLearner
-            _sl = SelfLearner()
-            _sl.observe("pipeline_run", {
-                "duration": time.perf_counter() - start_total,
-                "exported": len(exported),
-                "uploaded": uploaded_count,
-                "selected_clips": len(exported),
-                "failures": len(failures),
-                "transcript_source": transcript_source if 'transcript_source' in dir() else "unknown",
-            })
-            _sl.close()
-            log.info("[self_learner] pipeline_run observed")
-        except Exception as e:
-            log.warning("[self_learner] observation failed: %s", e)
-
-        # 8b: Sync DBs to Drive (clip selections were saved immediately after export)
         try:
             from sync import sync_db_to_drive
             sync_db_to_drive()
-            log.info("[db_sync] DBs synced to Drive")
+            log.info("[db_sync] canonical DB synced to Drive")
         except Exception as e:
             log.warning("[db_sync] failed: %s", e)
 

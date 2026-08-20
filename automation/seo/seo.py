@@ -69,78 +69,15 @@ class SEOGenerationError(Exception):
     """Raised when all AI providers fail during SEO generation."""
 
 
-def _load_learner_state() -> Optional[Dict]:
-    """Load learned entity/format scores from self_learner.db.
-
-    Returns:
-        Dict with entity_scores and format_scores JSON, or None on failure.
-    """
-    try:
-        import sqlite3
-        db_path = Path("self_learner.db")
-        if not db_path.exists():
-            return None
-        conn = sqlite3.connect(str(db_path))
-        try:
-            c = conn.cursor()
-            result = {}
-            for key in ("entity_scores", "format_scores"):
-                row = c.execute(
-                    "SELECT value_json FROM learned_state WHERE state_key=?", (key,)
-                ).fetchone()
-                if row:
-                    result[key] = row[0]
-            return result if result else None
-        finally:
-            conn.close()
-    except Exception:
-        return None
-
-
 def _get_learner_context() -> str:
-    """Build a context string from learner data for SEO prompt injection.
-
-    Gives the AI knowledge of what entities and formats perform best
-    on THIS channel, so titles/tags are biased toward proven winners.
-
-    Returns:
-        Multi-line context string, or empty string if no data.
-    """
-    state = _load_learner_state()
-    if not state:
-        return ""
-
-    lines = []
+    """Build evidence-only channel context from the canonical learner."""
     try:
-        if "entity_scores" in state:
-            data = json.loads(state["entity_scores"])
-            players = data.get("players", {})
-            if players:
-                top = sorted(players.items(), key=lambda x: x[1].get("score", 0), reverse=True)[:5]
-                avoid = [name for name, info in players.items()
-                         if info.get("n", 0) > 10 and info.get("avg_views", 0) < 150]
-                player_strs = [f"{name}({info['avg_views']:.0f} avg views)" for name, info in top]
-                lines.append(f"TOP PLAYERS: {', '.join(player_strs)}")
-                if avoid:
-                    lines.append(f"AVOID (low ROI): {', '.join(avoid)}")
+        from shorts_intelligence.bridge import recommendation_context
 
-            teams = data.get("teams", {})
-            if teams:
-                top_t = sorted(teams.items(), key=lambda x: x[1].get("score", 0), reverse=True)[:3]
-                team_strs = [f"{name}({info['avg_views']:.0f} avg)" for name, info in top_t]
-                lines.append(f"TOP TEAMS: {', '.join(team_strs)}")
-
-        if "format_scores" in state:
-            fdata = json.loads(state["format_scores"])
-            hooks = fdata.get("hook_types", {})
-            if hooks:
-                top_h = sorted(hooks.items(), key=lambda x: x[1].get("score", 0), reverse=True)[:3]
-                hook_strs = [f"{name}({info['avg_views']:.0f} avg)" for name, info in top_h]
-                lines.append(f"BEST HOOKS: {', '.join(hook_strs)}")
-    except (json.JSONDecodeError, KeyError, TypeError):
-        pass
-
-    return "\n".join(lines)
+        return recommendation_context(cfg)
+    except Exception as exc:
+        log.warning("Shorts Intelligence context unavailable: %s", exc)
+        return ""
 
 
 STOP_WORDS = {
@@ -1263,24 +1200,10 @@ def generate_clip_seo(
     # Inject learner intelligence into the prompt
     learner_ctx = _get_learner_context()
     if learner_ctx:
-        # Get dynamic video count from DB
-        try:
-            import sqlite3
-            db_path = Path("self_learner.db")
-            if db_path.exists():
-                conn = sqlite3.connect(str(db_path))
-                try:
-                    n_videos = conn.execute(
-                        "SELECT COUNT(DISTINCT event_id) FROM processed_events"
-                    ).fetchone()[0] // 4  # 4 learners per event
-                finally:
-                    conn.close()
-            else:
-                n_videos = 0
-        except Exception:
-            n_videos = 0
-        count_label = f"{n_videos}" if n_videos > 0 else "recent"
-        user_prompt += f"\n\nCHANNEL INTELLIGENCE (from past {count_label} videos):\n{learner_ctx}\nUse this data to bias titles/tags toward proven winners."
+        user_prompt += (
+            "\n\nCHANNEL INTELLIGENCE (measured Shorts outcomes only):\n"
+            f"{learner_ctx}\nUse only supported priors; never override grounded facts."
+        )
 
     # Call AI with parallel fastest-first
     result = _attempt_seo_generation(clip_id, user_prompt, transcript, video_title,
@@ -1591,14 +1514,6 @@ def process_all_seo(highlights_path: str, output_dir: str,
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     all_results = []
 
-    # Initialize SEO learner for tracking
-    seo_learner = None
-    try:
-        from self_learner import SEOLearner
-        seo_learner = SEOLearner()
-    except Exception:
-        pass
-
     clips = list(highlights.items())
     failures = []
     for idx, (clip_id, info) in enumerate(clips, start=1):
@@ -1635,21 +1550,6 @@ def process_all_seo(highlights_path: str, output_dir: str,
             )
             all_results.append(result)
 
-            # Track SEO outcome
-            if seo_learner and result.get("ai_generated"):
-                from self_learner import SEOPerformance
-                seo_learner.record_seo_outcome(SEOPerformance(
-                    clip_id=clip_id,
-                    title=result.get("title", ""),
-                    description=result.get("description", ""),
-                    hashtags=result.get("hashtags", []),
-                    tags=result.get("tags", []),
-                    is_shorts=result.get("is_shorts", True),
-                    provider=result.get("provider", "unknown"),
-                    model=result.get("model", "unknown"),
-                    upload_success=True,
-                ))
-
             # Save individual file immediately (atomic: temp + replace so an
             # interrupted run never leaves a truncated metadata file behind)
             per_clip_path = Path(output_dir) / f"{clip_id}_metadata.json"
@@ -1671,33 +1571,11 @@ def process_all_seo(highlights_path: str, output_dir: str,
                 json.dump(marker_data, f)
             all_results.append({"_seo_failed": True, "clip_id": clip_id})
 
-            # Track failed SEO
-            if seo_learner:
-                from self_learner import SEOPerformance
-                seo_learner.record_seo_outcome(SEOPerformance(
-                    clip_id=clip_id,
-                    title="",
-                    description="",
-                    hashtags=[],
-                    tags=[],
-                    is_shorts=True,
-                    provider="unknown",
-                    model="unknown",
-                    upload_success=False,
-                ))
-
         # Breathing room between clips — configurable, default 30s
         if idx < len(clips):
             sleep_s = cfg.get("seo", {}).get("inter_clip_sleep_s", 30)
             log.info("Sleeping %.1fs before next SEO call...", sleep_s)
             time.sleep(sleep_s)
-
-    # Close SEO learner
-    if seo_learner:
-        try:
-            seo_learner.close()
-        except Exception:
-            pass
 
     if failures:
         log.warning("SEO failures for %d clip(s): %s", len(failures), failures)

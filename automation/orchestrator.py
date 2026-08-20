@@ -30,19 +30,14 @@ from pathlib import Path
 from typing import Any
 
 from automation.memory.event_models import EventType, ClipEvent
-from automation.memory.decision_store import DecisionStore, LearnedStateStore
+from automation.memory.decision_store import DecisionStore
 from automation.providers.provider_health import ProviderHealth
-from automation.learner.learner import Learner as AutomationLearner
-from automation.learner.policy_updater import PolicyUpdater
-from automation.learner.preference_engine import PreferenceEngine
-from automation.learner.replay import ReplayEngine
 
 from utils.logger import get_logger, run_phase, new_run_id
 
 log = get_logger("orchestrator")
 
 _DECISION_STORE: DecisionStore = DecisionStore()
-_LEARNED_STATE: LearnedStateStore = LearnedStateStore()
 _PROVIDER_HEALTH: ProviderHealth = ProviderHealth()
 
 
@@ -161,6 +156,7 @@ def run(
     stem = Path(video_path).stem
     transcript_path = str(Path(transcripts_dir) / f"{stem}.json")
     highlights_path = str(Path(highlights_dir) / f"{stem}.yaml")
+    highlights: list[dict] = []
 
     # Dedup-history namespace: derive a stable per-match key from the run URL
     # so skip-download / drive-sync runs (which never write video_metadata.json)
@@ -283,37 +279,6 @@ def run(
                             "total": len(highlights),
                         })
 
-                    # Save clip selection data for Phase 4 learning
-                    if use_new_selector and highlights:
-                        try:
-                            from automation.clip_selection.clip_learner import ClipLearner
-                            _learner = ClipLearner()
-                            for rank_idx, h in enumerate(highlights, 1):
-                                agent_scores = h.get("agent_scores", {})
-                                _learner.save_clip_selection(
-                                    clip_id=f"{stem}/{h['id']}",
-                                    selected_rank=rank_idx,
-                                    final_score=h.get("final_score", 0),
-                                    agent_scores=agent_scores,
-                                    video_title=_title,
-                                )
-                                hook_score = h.get("hook_score")
-                                if hook_score is not None:
-                                    _learner.save_hook_analysis(
-                                        clip_id=f"{stem}/{h['id']}",
-                                        hook_score=hook_score,
-                                        hook_type=agent_scores.get("hook_expert", {}).get("reasoning", "unknown"),
-                                        swipe_risk="low" if hook_score >= 30 else "high",
-                                        swipe_risks=[],
-                                        first_20_words=" ".join(h.get("text", "").split()[:20]),
-                                        agent_hook_score=agent_scores.get("hook_expert", {}).get("score"),
-                                    )
-                            _learner.close()
-                            log.info("[clip_learner] saved selection data for %d clips",
-                                     len(highlights))
-                        except Exception as e:
-                            log.warning("[clip_learner] save failed: %s", e)
-
                     _PROVIDER_HEALTH.record_success("llm")
                     ph.set(selected=result.selected_clips)
             except Exception as e:
@@ -335,6 +300,21 @@ def run(
                         _emit_event(f"{stem}/{clip_path.stem}", EventType.exported, {
                             "path": str(clip_path),
                         })
+                    if result.exported:
+                        try:
+                            from shorts_intelligence.bridge import record_exported
+
+                            shadow_count = record_exported(cfg, highlights, result.exported)
+                            if shadow_count:
+                                log.info(
+                                    "[shorts_intelligence] shadow-captured %d exports",
+                                    shadow_count,
+                                )
+                        except Exception as e:
+                            log.warning(
+                                "[shorts_intelligence] export shadow capture failed: %s",
+                                e,
+                            )
                     # Phase 3 — Hook audit: analyze first 3s of each exported clip
                     if result.exported and use_new_selector:
                         try:
@@ -343,11 +323,7 @@ def run(
                                 from automation.clip_selection.hook_auditor import (
                                     HookAuditor,
                                 )
-                                from automation.clip_selection.clip_learner import (
-                                    ClipLearner,
-                                )
                                 _auditor = HookAuditor()
-                                _learner = ClipLearner()
                                 highlights_by_id = {
                                     h["id"]: h for h in highlights
                                 }
@@ -387,18 +363,6 @@ def run(
                                         start_sec=source_start,
                                         clip_duration=duration,
                                     )
-                                    _learner.save_hook_analysis(
-                                        clip_id=f"{stem}/{clip_id}",
-                                        hook_score=hook_result["hook_score"],
-                                        hook_type=hook_result["hook_type"],
-                                        swipe_risk=hook_result["swipe_risk"],
-                                        swipe_risks=hook_result.get(
-                                            "swipe_risks", []
-                                        ),
-                                        first_20_words=hook_result.get(
-                                            "first_20_words", ""
-                                        ),
-                                    )
                                     _emit_event(
                                         f"{stem}/{clip_id}",
                                         EventType.candidate_scored,
@@ -409,7 +373,6 @@ def run(
                                         },
                                     )
                                     hook_audited += 1
-                                _learner.close()
                                 ph.set(audited=hook_audited)
                                 log.info(
                                     "[hook_audit] %d clips analyzed",
@@ -623,22 +586,18 @@ def run(
                                 {"privacy": privacy, "publish_at": publish_at,
                                  "youtube_video_id": video_id},
                             )
-                            # Phase 4 — record YouTube video ID for later analytics
-                            if video_id and use_new_selector:
+                            if video_id:
                                 try:
-                                    from automation.clip_selection.clip_learner import (
-                                        ClipLearner,
+                                    from shorts_intelligence.bridge import record_upload
+
+                                    record_upload(
+                                        cfg,
+                                        f"{clip_path.parent.name}/{clip_path.stem}",
+                                        video_id,
                                     )
-                                    _learner = ClipLearner()
-                                    _learner.update_performance(
-                                        clip_id=f"{stem}/{clip_path.stem}",
-                                        youtube_video_id=video_id,
-                                        views=0,
-                                    )
-                                    _learner.close()
                                 except Exception as e:
                                     log.warning(
-                                        "[clip_learner] update_performance failed: %s",
+                                        "[shorts_intelligence] upload link failed: %s",
                                         e,
                                     )
                         except Exception as e:
@@ -662,7 +621,7 @@ def run(
         elif result.exported and not has_auth:
             log.info("[stage 8b] Upload skipped — no auth (cookies.txt or yt_channel_token.json)")
 
-    # ── Stage 9: Self-learning ──────────────────────────────────────────
+    # Stage 9: telemetry and canonical persistence
     result.total_seconds = time.monotonic() - start
     if result.exported or learn_only:
         try:
@@ -674,198 +633,7 @@ def run(
         except Exception as e:
             result.failures.append(f"stage9a: {e}")
 
-        try:
-            with run_phase(log, "stage 9b Self-Learner",
-                           "self_learner", run_id=rid):
-                from self_learner import (
-                    Learner as SelfLearner,
-                    SEOLearner,
-                    TrendAnalyzer,
-                    TrendPoint,
-                    RecommendationEngine,
-                )
-
-                # Initialize all learners
-                learner = SelfLearner()
-                seo_learner = SEOLearner()
-                trend_analyzer = TrendAnalyzer()
-                rec_engine = RecommendationEngine(
-                    seo_learner=seo_learner,
-                    trend_analyzer=trend_analyzer,
-                )
-
-                # Record pipeline observation
-                learner.observe("pipeline_run", {
-                    "duration": result.total_seconds,
-                    "exported": len(result.exported),
-                    "uploaded": result.uploaded_count,
-                    "selected": result.selected_clips,
-                    "failures": len(result.failures),
-                    "transcript_source": result.transcript_source,
-                })
-                log.info("[self_learner] observed pipeline_run %s", rid)
-
-                # Record trends
-                trend_analyzer.record_metric(TrendPoint(
-                    metric="duration",
-                    value=result.total_seconds,
-                ))
-                trend_analyzer.record_metric(TrendPoint(
-                    metric="exported_count",
-                    value=float(len(result.exported)),
-                ))
-                trend_analyzer.record_metric(TrendPoint(
-                    metric="failures_count",
-                    value=float(len(result.failures)),
-                ))
-                trend_analyzer.record_metric(TrendPoint(
-                    metric="selected_clips",
-                    value=float(result.selected_clips),
-                ))
-
-                # Analyze trends and log insights
-                for trend in trend_analyzer.get_all_trends():
-                    if trend.direction != "stable":
-                        log.info("[self_learner] trend: %s is %s (slope=%.3f, confidence=%.2f)",
-                                 trend.metric, trend.direction, trend.slope, trend.confidence)
-
-                # Detect anomalies
-                for metric in ("duration", "failures_count"):
-                    anomalies = trend_analyzer.detect_anomalies(metric)
-                    if anomalies:
-                        log.warning("[self_learner] anomaly in %s: %d unusual values detected",
-                                    metric, len(anomalies))
-
-                # Generate and log recommendations
-                recommendations = rec_engine.generate_recommendations()
-                for rec in recommendations[:3]:  # Log top 3
-                    log.info("[self_learner] recommendation [%s/%s]: %s -> %s",
-                             rec.category, rec.priority, rec.title, rec.action)
-
-                # Close resources
-                rec_engine.close()
-                trend_analyzer.close()
-                seo_learner.close()
-                learner.close()
-        except Exception as e:
-            result.failures.append(f"stage9b: {e}")
-
-        try:
-            with run_phase(log, "stage 9c Automation Learner",
-                           "automation_learner", run_id=rid):
-                _automation_learner = AutomationLearner(_DECISION_STORE, _LEARNED_STATE)
-                updater = PolicyUpdater(_automation_learner)
-                updater.update_from_events(_DECISION_STORE.get_all_events())
-                replay_engine = ReplayEngine(
-                    _DECISION_STORE, _LEARNED_STATE, _automation_learner,
-                )
-                if not replay_engine.verify():
-                    log.info("[automation_learner] state divergence detected, replaying...")
-                    replay_engine.replay()
-                prefs = PreferenceEngine(
-                    _automation_learner, _DECISION_STORE,
-                ).compute_preferences()
-                log.info("[automation_learner] processed %d events, prefs=%s",
-                         _DECISION_STORE.count(), prefs)
-        except Exception as e:
-            result.failures.append(f"stage9c: {e}")
-
-        try:
-            with run_phase(log, "stage 9e Cricket Learning Engine",
-                           "cricket_learner", run_id=rid):
-                from automation.learner import (
-                    PersistentStateStore, ProcessedEventLog, LearningDispatcher,
-                    FormatLearner, EntityLearner, TrendEngine, TimingLearner,
-                    DurationLearner, CricketScorer, CricketRecommendationEngine,
-                )
-                _cricket_state = PersistentStateStore()
-                try:
-                    _cricket_log = ProcessedEventLog(_cricket_state._conn)
-                    _fmt = FormatLearner(_cricket_state)
-                    _ent = EntityLearner(_cricket_state)
-                    _trend = TrendEngine(_cricket_state)
-                    _tim = TimingLearner(_cricket_state)
-                    _dur = DurationLearner(_cricket_state)
-                    _dispatcher = LearningDispatcher(
-                        _fmt, _ent, _tim, _dur, _trend, _cricket_log
-                    )
-                    all_events = _DECISION_STORE.get_all_events()
-                    updated = _dispatcher.dispatch_batch(all_events)
-                    _trend.decay_all()
-                    _trend.prune_expired()
-                    _scorer = CricketScorer(_fmt, _ent, _trend, _tim, _dur, _cricket_state)
-                    _recs = CricketRecommendationEngine(
-                        _fmt, _ent, _trend, _tim, _dur, _cricket_state
-                    )
-                    recommendations = _recs.generate_all()
-                    for rec in recommendations[:5]:
-                        log.info("[cricket_learner] [%s/%s] %s — %s",
-                                 rec.priority, rec.category,
-                                 rec.recommendation, rec.reason)
-                    metrics_events = _DECISION_STORE.get_events(
-                        event_type=EventType.metrics_received
-                    )
-                    if len(metrics_events) >= 20:
-                        _scorer.recalibrate_weights(metrics_events[-20:])
-                        log.info("[cricket_learner] weights recalibrated: %s",
-                                 _scorer.get_weights())
-                    log.info("[cricket_learner] dispatched %d updates from %d events, "
-                             "%d active trends, %d recommendations",
-                             updated, len(all_events),
-                             len(_trend.get_active()), len(recommendations))
-                finally:
-                    _cricket_state.close()
-        except Exception as e:
-            result.failures.append(f"stage9e: {e}")
-
-        # ── Stage 9f: ClipSelector feedback loop ──────────────────────
-        # Learn adaptive agent weights + entity biases from clip_learner.db
-        # and persist them so the next pipeline run biases toward proven winners.
-        if use_new_selector:
-            try:
-                with run_phase(log, "stage 9f ClipSelector Feedback",
-                               "clip_feedback", run_id=rid) as ph:
-                    from automation.clip_selection.weight_learner import (
-                        recalibrate_weights,
-                        load_entity_biases,
-                    )
-                    import json as _json
-
-                    adaptive_weights = recalibrate_weights(
-                        db_path="clip_learner.db",
-                        min_clips=cfg.get("clip_selection", {}).get(
-                            "learning_min_clips", 10
-                        ),
-                        drift_rate=cfg.get("clip_selection", {}).get(
-                            "learning_drift_rate", 0.3
-                        ),
-                    )
-                    # Persist weights for next run
-                    weights_path = Path("clip_selection_weights.json")
-                    with open(weights_path, "w", encoding="utf-8") as f:
-                        _json.dump(adaptive_weights, f, indent=2, ensure_ascii=False)
-
-                    entity_biases = load_entity_biases("self_learner.db")
-                    biases_path = Path("clip_selection_biases.json")
-                    with open(biases_path, "w", encoding="utf-8") as f:
-                        _json.dump(entity_biases, f, indent=2, default=str, ensure_ascii=False)
-
-                    log.info(
-                        "[clip_feedback] adaptive weights persisted: %s",
-                        {k: round(v, 3) for k, v in adaptive_weights.items()},
-                    )
-                    if entity_biases:
-                        log.info(
-                            "[clip_feedback] entity biases persisted: "
-                            "%d top players, %d avoid players",
-                            len(entity_biases.get("top_players", [])),
-                            len(entity_biases.get("avoid_players", [])),
-                        )
-                    ph.set(weights_updated=True)
-            except Exception as e:
-                log.warning("[clip_feedback] Failed: %s", e)
-                result.failures.append(f"stage9f: {e}")
-
+        # Runtime provider health is observational only.
         try:
             with run_phase(log, "stage 9d Provider Health",
                            "provider_health", run_id=rid):
@@ -882,7 +650,15 @@ def run(
         except Exception as e:
             result.failures.append(f"stage9d: {e}")
 
-        # ── Stage 9e: DB Persistence ─────────────────────────────
+        try:
+            from shorts_intelligence.bridge import shadow_status
+
+            shadow = shadow_status(cfg)
+            log.info("[shorts_intelligence] %s", shadow)
+        except Exception as e:
+            log.warning("[shorts_intelligence] shadow status failed: %s", e)
+
+        # Canonical DB persistence.
         try:
             from sync import sync_db_to_drive
             sync_db_to_drive()

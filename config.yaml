@@ -177,6 +177,25 @@ youtube:
   upload_max_retries: 6                 # Max transient-error retries per upload
   upload_deadline_seconds: 1800         # Hard wall-clock cap per upload (prevents hangs)
 
+# ─── Shorts Intelligence v2 ─────────────────────────────────────────────────
+# Isolated canonical learner. Promotion requires a leak-free temporal replay.
+shorts_intelligence:
+  enabled: true
+  shadow_mode: false                    # promoted: model beats channel + legacy holdouts
+  sync_on_pipeline: false               # API sync stays explicit: python -m shorts_intelligence sync
+  db_path: "shorts_intelligence.db"
+  channel_id: "UCQtCMKPc41MHd7hujVuGm5g"
+  handle: "@CricketWithPrajjwal2.0"
+  token_path: "yt_analytics_token.json"
+  local_metadata_root: "shorts"
+  max_recommendations: 8
+  max_selection_adjustment_points: 3.0  # bounded tie-breaker; never changes clip boundaries
+  learner:
+    prior_strength: 12.0                # shrink tiny samples toward channel baseline
+    min_segment_samples: 6
+    half_life_days: 120.0               # recent uploads matter more
+    confidence_z: 1.64                  # one-sided 95% evidence threshold
+
 # ─── Upload Schedule ─────────────────────────────────────────────────────────
 # Controls the jittered hourly scheduling strategy.
 # Jitter ensures every upload hour has a different minute offset (e.g. 8:05, 9:12).
