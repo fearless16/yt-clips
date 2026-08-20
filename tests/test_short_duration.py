@@ -1,4 +1,4 @@
-"""Short duration guard — interesting content must fit within target (20-25s).
+"""Short duration guard — interesting content must fit within target (<25s).
 
 TDD: tests written first. Verifies:
 1. Pure speed-factor computation (window > target -> speed-up).
@@ -148,7 +148,7 @@ def test_detect_highlights_yaml_has_speed_factor(tmp_path, monkeypatch):
 
     transcript = tmp_path / "clip.json"
     transcript.write_text(
-        json.dumps([{"start": 5.0, "end": 35.0, "text": "Huge six from Kohli, the crowd goes absolutely wild"}]),
+        json.dumps([{"start": 5.0, "end": 29.0, "text": "Huge six from Kohli, the crowd goes absolutely wild"}]),
         encoding="utf-8",
     )
     out_yaml = tmp_path / "clips.yaml"
@@ -169,8 +169,8 @@ def test_detect_highlights_yaml_has_speed_factor(tmp_path, monkeypatch):
     assert out_yaml.exists()
     data = yaml.safe_load(out_yaml.read_text(encoding="utf-8"))
     assert "speed_factor" in data["clip1"]
-    assert data["clip1"]["speed_factor"] == pytest.approx(1.36, abs=0.01)
-    assert highlights[0]["speed_factor"] == pytest.approx(1.36, abs=0.01)
+    assert data["clip1"]["speed_factor"] == pytest.approx(1.2, abs=0.01)
+    assert highlights[0]["speed_factor"] == pytest.approx(1.2, abs=0.01)
 
 
 def test_sanitize_strategy_preserves_merged_speed():

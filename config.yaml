@@ -47,14 +47,14 @@ highlight:
   audio_energy_threshold: 0.25         # ↓ from 0.3 — catch more excitement moments
   # Minimum/maximum clip duration (seconds)
   min_duration: 8                       # ↓ from 10 — short punchy clips do better
-  max_duration: 30                      # Strict <30s for YouTube Shorts
+  max_duration: 24                      # Strict <25s for YouTube Shorts
   # Short duration guard — interesting content must complete within the target.
   # Windows longer than target are compressed via speed_factor at export time.
-  target_duration: 22                   # research-backed 20-25s window (vidIQ + competitor audit)
+  target_duration: 20                   # research-backed <25s window (vidIQ + competitor audit)
   max_speedup: 1.6                      # cap so audio never becomes unwatchable
   # Preferred duration range (scorer boosts clips in this range)
   preferred_duration_min: 15            # Sweet spot for retention
-  preferred_duration_max: 25            # ↓ from 29 — align with target_duration
+  preferred_duration_max: 24            # ↓ from 25 — align with target_duration
   # Merge nearby highlights that are closer than this (seconds)
   merge_gap: 8
   # How many highlights to extract at most
