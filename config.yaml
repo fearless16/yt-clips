@@ -65,8 +65,8 @@ highlight:
   silence_penalty_seconds: 1.5
 
 # ─── Premium Mode ──────────────────────────────────────────────────────────────
-# Cheap path = MediaPipe BlazeFace (utils/face_detect.py, CPU) + EMA crop.
-# Premium path = YOLOv8-face (GPU) + ByteTrack + Kalman + bezier crop.
+# Standard path = SCRFD-10G on DirectML GPU (utils/face_detect.py) + EMA crop.
+# Premium cloud path = YOLOv8-face (CUDA GPU) + ByteTrack + Kalman + bezier crop.
 premium:
   enabled: false                     # Set true on Colab T4 for studio-grade quality
   face_enhancement: true             # GFPGAN face restoration (GPU only)

@@ -24,8 +24,18 @@ _QUERY_SUFFIXES = (
 )
 
 
-def _clean(value: object) -> str:
-    return re.sub(r"\s+", " ", correct_cricket_spelling(str(value or ""))).strip()
+def _clean(
+    value: object,
+    player_names: Optional[Iterable[str]] = None,
+    player_aliases: Optional[Dict[str, str]] = None,
+) -> str:
+    return re.sub(
+        r"\s+", " ",
+        correct_cricket_spelling(
+            str(value or ""), player_names=player_names,
+            player_aliases=player_aliases,
+        ),
+    ).strip()
 
 
 def _clean_query(value: object) -> str:
@@ -62,6 +72,8 @@ def build_grounded_search_queries(
     video_description: str,
     clip_transcript: str,
     suggestions: Optional[Iterable[str]] = None,
+    player_names: Optional[Iterable[str]] = None,
+    player_aliases: Optional[Dict[str, str]] = None,
 ) -> List[str]:
     """Return 8-15 queries tied to source/clip entities and current suggest.
 
@@ -69,11 +81,12 @@ def build_grounded_search_queries(
     local evidence.  If the network is unavailable, deterministic combinations
     preserve the same grounding contract without inventing match facts.
     """
-    title = _clean(video_title)
-    description = _clean(video_description)
-    transcript = _clean(clip_transcript)
+    runtime_players = list(player_names or [])
+    title = _clean(video_title, runtime_players, player_aliases)
+    description = _clean(video_description, runtime_players, player_aliases)
+    transcript = _clean(clip_transcript, runtime_players, player_aliases)
     evidence = " ".join((title, description, transcript))
-    entities = find_canonical_entities(evidence)
+    entities = find_canonical_entities(evidence, runtime_players)
     anchors = _query_anchors(evidence, entities)
 
     accepted = []
@@ -113,13 +126,22 @@ def build_cricket_evidence_pack(
     research_context: Optional[Dict] = None,
 ) -> Dict:
     """Fuse local and fetched evidence while keeping provenance explicit."""
-    title = _clean(video_title)
-    description = _clean(video_description)
-    transcript = _clean(clip_transcript)
     research = research_context or {}
+    runtime_players = [
+        _clean(name) for name in research.get("player_names", [])
+        if str(name).strip()
+    ]
+    runtime_aliases = {
+        str(alias).casefold(): str(player)
+        for alias, player in (research.get("player_aliases") or {}).items()
+    }
+    title = _clean(video_title, runtime_players, runtime_aliases)
+    description = _clean(video_description, runtime_players, runtime_aliases)
+    transcript = _clean(clip_transcript, runtime_players, runtime_aliases)
     ocr = ocr_entities or {}
     match_facts = [
-        _clean(fact) for fact in research.get("match_facts", [])
+        _clean(fact, runtime_players, runtime_aliases)
+        for fact in research.get("match_facts", [])
         if str(fact).strip()
     ]
     ocr_text = " ".join(
@@ -131,7 +153,7 @@ def build_cricket_evidence_pack(
         title,
         description,
         transcript,
-        _clean(ocr_text),
+        _clean(ocr_text, runtime_players, runtime_aliases),
         " ".join(match_facts),
     ))
     approved = build_grounded_search_queries(
@@ -139,12 +161,16 @@ def build_cricket_evidence_pack(
         description,
         transcript,
         research.get("search_queries") or [],
+        runtime_players,
+        runtime_aliases,
     )
     return {
         "source_video": {"title": title, "description": description},
         "clip_transcript": transcript,
         "ocr": ocr,
-        "grounded_entities": find_canonical_entities(grounding_text),
+        "grounded_entities": find_canonical_entities(grounding_text, runtime_players),
+        "player_names": runtime_players,
+        "player_aliases": runtime_aliases,
         "match_facts": match_facts,
         "current_topics": [str(topic) for topic in research.get("topics", []) if str(topic).strip()],
         "approved_search_queries": approved,

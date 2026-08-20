@@ -14,22 +14,33 @@ log = get_logger("face_detect", cfg.get("logging", {}).get("log_file", "logs/pip
 SCRFD_MODEL_PATH = Path(__file__).resolve().parent.parent / "scrfd_10g_bnkps.onnx"
 
 _LOCK = threading.Lock()
+_INFERENCE_LOCK = threading.Lock()
 _SESSION: Optional[object] = None
 
 _INPUT_SIZE = 640
 _CANVAS: Optional[np.ndarray] = None
 
+def _select_gpu_provider(available: List[str]) -> str:
+    """Select the fastest supported GPU EP and explicitly reject CPU-only runs."""
+    for provider in (
+        "TensorrtExecutionProvider",
+        "CUDAExecutionProvider",
+        "DmlExecutionProvider",
+        "ROCMExecutionProvider",
+    ):
+        if provider in available:
+            return provider
+    raise RuntimeError(
+        "No ONNX Runtime GPU execution provider is available for face detection. "
+        "Install onnxruntime-directml on Windows/AMD or onnxruntime-gpu on CUDA."
+    )
+
+
 try:
     import onnxruntime as ort
-    _HAS_DML = "DmlExecutionProvider" in ort.get_available_providers()
-except ImportError:
-    _HAS_DML = False
-
-if not _HAS_DML:
-    raise RuntimeError(
-        "DirectML GPU not available for ONNX Runtime. "
-        "Install onnxruntime-directml and ensure your AMD GPU supports DirectML."
-    )
+    _GPU_PROVIDER = _select_gpu_provider(ort.get_available_providers())
+except ImportError as exc:
+    raise RuntimeError("ONNX Runtime GPU package is required for face detection") from exc
 
 
 def _download_model(url: str, dest: Path) -> bool:
@@ -61,12 +72,38 @@ def get_session() -> object:
                 if not _ensure_scrfd_model():
                     raise RuntimeError("SCRFD model not found and download failed")
                 import onnxruntime as ort
+                options = ort.SessionOptions()
+                if _GPU_PROVIDER == "DmlExecutionProvider":
+                    # DirectML requires sequential execution and no memory pattern.
+                    options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+                    options.enable_mem_pattern = False
+                options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+                # A silently CPU-placed node makes GPU telemetry dishonest and
+                # can turn long-stream analysis into an hours-long job.
+                options.add_session_config_entry("session.disable_cpu_ep_fallback", "1")
                 _SESSION = ort.InferenceSession(
                     str(SCRFD_MODEL_PATH),
-                    providers=["DmlExecutionProvider", "CPUExecutionProvider"],
+                    sess_options=options,
+                    providers=[
+                        (_GPU_PROVIDER, {"device_id": "0"})
+                        if _GPU_PROVIDER == "DmlExecutionProvider"
+                        else _GPU_PROVIDER
+                    ],
                 )
-                log.info("SCRFD face detector initialized (DirectML GPU)")
+                log.info("SCRFD face detector initialized (%s)", _GPU_PROVIDER)
     return _SESSION
+
+
+def get_backend_info() -> dict:
+    """Expose the real active provider for diagnostics and run manifests."""
+    providers = list(get_session().get_providers())
+    active = providers[0] if providers else ""
+    return {
+        "active_provider": active,
+        "providers": providers,
+        "gpu_enabled": active != "CPUExecutionProvider" and bool(active),
+        "model": str(SCRFD_MODEL_PATH),
+    }
 
 
 def detect_faces_yunet(
@@ -74,37 +111,22 @@ def detect_faces_yunet(
     score_threshold: float = 0.5,
     input_size: Tuple[int, int] = (640, 640),
 ) -> List[Tuple[int, int, int, int]]:
-    """Detect faces using YuNet via OpenCV DNN."""
-    yunet_path = Path(__file__).resolve().parent.parent / "face_detection_yunet_2023mar.onnx"
-    if not yunet_path.exists():
-        log.debug("YuNet model not found")
-        return []
+    """Backward-compatible name routed to the DirectML SCRFD GPU backend.
 
-    try:
-        h, w = frame.shape[:2]
-        yunet = cv2.FaceDetectorYN.create(str(yunet_path), "", input_size, score_threshold, 0.3, 5000)
-        frame_resized = cv2.resize(frame, input_size)
-        _, faces = yunet.detect(frame_resized)
-        if faces is None:
-            return []
-        sx = w / input_size[0]
-        sy = h / input_size[1]
-        results = []
-        for f in faces:
-            x = int(f[0] * sx)
-            y = int(f[1] * sy)
-            fw = int(f[2] * sx)
-            fh = int(f[3] * sy)
-            results.append((x, y, fw, fh))
-        if results:
-            log.debug("YuNet detected %d face(s)", len(results))
-        return results
-    except Exception as e:
-        log.debug("YuNet detection failed: %s", e)
-        return []
+    Older callers and tests patch this symbol, so removing it would be a noisy
+    API break. ``input_size`` is retained for signature compatibility only.
+    """
+    del input_size
+    return detect_faces(frame, score_threshold=score_threshold)
 
 
-def _decode_scrfd(outputs, input_size: int, scale: float, score_threshold: float) -> List[Tuple[int, int, int, int]]:
+def _decode_scrfd(
+    outputs,
+    input_size: int,
+    scale: float,
+    score_threshold: float,
+    original_shape: Optional[Tuple[int, int]] = None,
+) -> List[Tuple[int, int, int, int]]:
     strides = [8, 16, 32]
     dets_list = []
     for idx, stride in enumerate(strides):
@@ -117,12 +139,14 @@ def _decode_scrfd(outputs, input_size: int, scale: float, score_threshold: float
         mask = scores_flat >= score_threshold
         if not np.any(mask):
             continue
+        # SCRFD has two anchors per cell and one face-confidence value per
+        # anchor. They are not background/face class pairs; keep both.
         aidx = np.arange(n * 2, dtype=np.intp)[mask]
-        aidx = aidx[aidx % 2 == 0]       # face class only (even indices)
         if len(aidx) == 0:
             continue
         selected_scores = scores_flat[aidx]
-        selected_bbox = bboxes[aidx]
+        # Distances are predicted in feature-map units.
+        selected_bbox = bboxes[aidx] * float(stride)
         i_vals = aidx // 2
         col = (i_vals % fm_w).astype(np.float32)
         row = (i_vals // fm_w).astype(np.float32)
@@ -143,8 +167,10 @@ def _decode_scrfd(outputs, input_size: int, scale: float, score_threshold: float
     dets = dets[keep]
     if len(dets) == 0:
         return []
-    ow = int(input_size / scale)
-    oh = int(input_size / scale)
+    if original_shape is None:
+        oh = ow = int(input_size / scale)
+    else:
+        oh, ow = original_shape
     x1 = np.maximum(0, (dets[:, 0] / scale).astype(np.int32))
     y1 = np.maximum(0, (dets[:, 1] / scale).astype(np.int32))
     x2 = np.minimum(ow, (dets[:, 2] / scale).astype(np.int32))
@@ -185,18 +211,23 @@ def _detect_onnx(frame: np.ndarray, score_threshold: float) -> List[Tuple[int, i
     scale = min(input_size / w, input_size / h)
     nw, nh = int(w * scale), int(h * scale)
 
-    if _CANVAS is None or _CANVAS.shape[0] != input_size:
-        _CANVAS = np.zeros((input_size, input_size, 3), dtype=np.uint8)
-    elif _CANVAS.shape[1] != input_size:
-        _CANVAS = np.zeros((input_size, input_size, 3), dtype=np.uint8)
+    # DirectML does not support concurrent Run() calls on one session. The
+    # lock also protects the reusable canvas from cross-thread corruption.
+    with _INFERENCE_LOCK:
+        if _CANVAS is None or _CANVAS.shape[:2] != (input_size, input_size):
+            _CANVAS = np.zeros((input_size, input_size, 3), dtype=np.uint8)
+        else:
+            _CANVAS.fill(0)
 
-    _CANVAS[:nh, :nw] = cv2.resize(frame, (nw, nh))
-    rgb = cv2.cvtColor(_CANVAS, cv2.COLOR_BGR2RGB)
-    blob = np.transpose(rgb.astype(np.float32) / 255.0, (2, 0, 1))[np.newaxis, :]
+        _CANVAS[:nh, :nw] = cv2.resize(frame, (nw, nh))
+        rgb = cv2.cvtColor(_CANVAS, cv2.COLOR_BGR2RGB)
+        blob = np.transpose(rgb.astype(np.float32) / 255.0, (2, 0, 1))[np.newaxis, :]
 
-    input_name = session.get_inputs()[0].name
-    outputs = session.run(None, {input_name: blob})
-    faces = _decode_scrfd(outputs, input_size, scale, score_threshold)
+        input_name = session.get_inputs()[0].name
+        outputs = session.run(None, {input_name: blob})
+    faces = _decode_scrfd(
+        outputs, input_size, scale, score_threshold, original_shape=(h, w)
+    )
     if faces:
         log.debug("GPU detected %d face(s)", len(faces))
     return faces

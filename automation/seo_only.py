@@ -13,7 +13,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import logging
 import os
 import time
 from pathlib import Path
@@ -169,6 +168,8 @@ def _generate_seo_for_clip(
             teams=research.get("teams", []),
             approved_search_queries=research.get("search_queries", []),
             match_facts=research.get("match_facts", []),
+            grounded_players=research.get("player_names", []),
+            grounded_aliases=research.get("player_aliases", {}),
             research_sources=research.get("sources", []),
         )
     except Exception as e:

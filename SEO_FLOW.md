@@ -80,7 +80,7 @@ The `run()` function executes 9 stages. SEO-relevant stages:
 
 **File:** `automation/seo/trends.py`
 
-Before any SEO is generated, `get_trending_context()` is called **once** per pipeline run (results cached in `TREND_CACHE` for 300s). This function aggregates **6 sources**:
+Before SEO generation, `get_trending_context()` builds query-specific evidence from five sources. Network calls are bounded and reusable HTTP sessions/caches avoid duplicate work.
 
 ### Source 1: Google Trends RSS (India)
 ```python
@@ -88,25 +88,25 @@ fetch_google_trends_in()  # https://trends.google.com/trending/rss?geo=IN
 ```
 Why: Shows what India is searching for right now. Cricket is region-specific, so geo=IN is critical.
 
-### Source 2: YouTube Suggest API
+### Source 2: YouTube Suggest + current search results
 ```python
-fetch_youtube_suggestions("cricket live")
+fetch_youtube_suggestions(query_topic)
+fetch_youtube_search_signals(query_topic)
 # Hits: https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q=...
 ```
-Why: YouTube's own autocomplete reveals what users actually type. This is the single best signal for what search terms to target. The seed query "cricket live" is intentionally broad to capture general cricket intent.
+Why: Autocomplete supplies search language while current result titles ground players, aliases and active topics in the specific clip context.
 
-### Source 3: Competitor Signals (Google News RSS)
+### Source 3: Relevant Google Trends topics
 ```python
-fetch_competitor_signals()
-# https://news.google.com/rss/search?q=cricket+live+score+today+IPL&hl=en-IN&gl=IN
+fetch_google_trends_in()
 ```
-Why: News headlines reveal what topics are being actively covered by other cricket channels. If everyone is covering a specific match moment, it's trending.
+Why: Only topics overlapping the clip's grounded query are retained; unrelated global trends are discarded.
 
-### Source 4: Cricbuzz Live Scores
+### Source 4: Query-specific Cricbuzz scorecard
 ```python
-fetch_cricbuzz_live_score(video_title, match_type)
+fetch_verified_match_context(query_topic)
 ```
-Why: Injects actual match context (score, top scorers, bowling figures) into the SEO prompt. This makes titles factually accurate instead of generic. Protected by a `CircuitBreaker` (3 failures → 60s cooldown).
+Why: Injects sourced match facts and player names from the matching scorecard instead of an unrelated generic live-scores page. Protected by a circuit breaker.
 
 ### Source 5: Own Live Stream URL
 ```python
@@ -114,7 +114,7 @@ fetch_own_live_stream_url(channel_id)
 ```
 Why: If the channel is currently live streaming, the live URL is injected into the prompt so the AI can reference the live stream.
 
-### Source 6: Team Extraction from Video Title
+### Source 5: Team extraction from all local evidence
 ```python
 extract_match_teams(video_title)
 ```

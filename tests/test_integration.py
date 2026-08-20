@@ -65,6 +65,10 @@ def test_pipeline_integration_success_flow(tmp_path):
         clip_path.write_bytes(b"dummy clip content")
         return [clip_path]
         
+    # Import before mocking load_config so the module-level config cannot leak
+    # this test's minimal fixture into later tests through sys.modules.
+    import highlight  # noqa: F401
+
     with patch("utils.config.load_config", return_value=mock_config), \
          patch("download.download", return_value=video_file), \
          patch("transcribe.transcribe", side_effect=mock_transcribe), \

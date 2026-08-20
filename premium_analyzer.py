@@ -9,6 +9,7 @@ Usage:
     result = pa.analyze_clip(video_path, start, end)
 """
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -587,7 +588,8 @@ class PremiumAnalyzer:
         exts = {".jpg", ".jpeg", ".png", ".webp"}
         repo_root = Path(__file__).resolve().parent
         out: List[np.ndarray] = []
-        seen = set()
+        seen_paths = set()
+        seen_content = set()
         for ref in refs:
             if not ref:
                 continue
@@ -602,12 +604,17 @@ class PremiumAnalyzer:
                 continue
             for q in paths:
                 key = str(q.resolve())
-                if key in seen:
+                if key in seen_paths:
                     continue
-                seen.add(key)
+                seen_paths.add(key)
                 try:
+                    digest = hashlib.sha256(q.read_bytes()).digest()
+                    if digest in seen_content:
+                        log.info("Skipping duplicate identity reference %s", q)
+                        continue
                     img = cv2.imread(str(q))
                     if img is not None:
+                        seen_content.add(digest)
                         out.append(img)
                 except Exception as e:
                     log.warning("Failed to load identity reference %s: %s", q, e)

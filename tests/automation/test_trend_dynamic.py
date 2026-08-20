@@ -1,8 +1,7 @@
 """TDD tests for dynamic domain/topic detection and trend routing in SEO.
 """
-import json
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from automation.seo.trends import detect_video_domain, get_trending_context, get_rotated_hashtags
 from automation.seo.seo import generate_clip_seo
@@ -58,24 +57,17 @@ def test_get_rotated_hashtags_by_domain():
 @patch("automation.seo.trends.fetch_youtube_suggestions")
 @patch("automation.seo.trends.fetch_youtube_search_signals")
 @patch("automation.seo.trends.fetch_google_trends_in")
-@patch("automation.seo.trends.fetch_competitor_signals")
-@patch("automation.seo.trends.fetch_cricbuzz_live_score")
-def test_get_trending_context_skips_cricket_for_football(
-    mock_cricbuzz, mock_competitor, mock_google, mock_yt_search, mock_yt_suggest
+def test_get_trending_context_uses_dynamic_football_queries(
+    mock_google, mock_yt_search, mock_yt_suggest
 ):
     """Should not call Cricbuzz when domain is football, and should query with dynamic topic."""
     mock_yt_suggest.return_value = ["Mbappe skills", "France World Cup"]
     mock_yt_search.return_value = ["Mbappe World Cup fan reaction"]
     mock_google.return_value = ["World Cup 2026"]
-    mock_competitor.return_value = ["France fanbase Mbappe"]
-    mock_cricbuzz.return_value = {"scorecard": "100/0", "url": "mock"}
-
     context = get_trending_context(
         video_title="France ki Fanbase PHAT GAYI! Mbappé Effect"
     )
 
-    # Cricbuzz must not be called because it is a football video
-    mock_cricbuzz.assert_not_called()
     assert context["scorecard"] == ""
 
     # YouTube suggestions should have been called with football queries, not "cricket live"

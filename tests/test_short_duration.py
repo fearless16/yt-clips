@@ -155,6 +155,8 @@ def test_detect_highlights_yaml_has_speed_factor(tmp_path, monkeypatch):
 
     monkeypatch.setattr(highlight, "_extract_audio_rms", lambda *a, **k: [(0.0, 1.0)])
     monkeypatch.setattr(highlight, "_get_video_duration", lambda *a: 60.0)
+    from utils.config import load_config
+    monkeypatch.setattr(highlight, "cfg", load_config())
     monkeypatch.setitem(highlight.cfg["highlight"], "use_ai_refinement", False)
 
     def fake_parallel(candidates, segments, rms_map, avg_rms, max_rms):

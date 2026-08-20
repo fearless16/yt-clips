@@ -1152,6 +1152,8 @@ def generate_clip_seo(
     video_description: str = "",
     approved_search_queries: Optional[List[str]] = None,
     match_facts: Optional[List[str]] = None,
+    grounded_players: Optional[List[str]] = None,
+    grounded_aliases: Optional[Dict[str, str]] = None,
     research_sources: Optional[List[Dict]] = None,
 ) -> Dict:
     """Generate SEO metadata for a single clip using fastest-first parallel model racing.
@@ -1166,14 +1168,24 @@ def generate_clip_seo(
     trend_topics = trend_topics or []
     teams = teams or []
     match_facts = match_facts or ([scorecard] if scorecard else [])
+    grounded_players = grounded_players or []
+    grounded_aliases = grounded_aliases or {}
     research_sources = research_sources or []
 
     if not transcript:
         raise SEOGenerationError(f"SEO blocked for {clip_id}: empty/non-cricket transcript")
-    transcript = correct_cricket_spelling(transcript)
-    video_title = correct_cricket_spelling(video_title)
-    video_description = correct_cricket_spelling(video_description)
-    scorecard = correct_cricket_spelling(scorecard)
+    transcript = correct_cricket_spelling(
+        transcript, grounded_players, grounded_aliases
+    )
+    video_title = correct_cricket_spelling(
+        video_title, grounded_players, grounded_aliases
+    )
+    video_description = correct_cricket_spelling(
+        video_description, grounded_players, grounded_aliases
+    )
+    scorecard = correct_cricket_spelling(
+        scorecard, grounded_players, grounded_aliases
+    )
     grounding_context = " ".join((video_title, video_description, scorecard, transcript))
     if not is_cricket_content(transcript, grounding_context):
         raise SEOGenerationError(f"SEO blocked for {clip_id}: non-cricket content")
@@ -1206,6 +1218,8 @@ def generate_clip_seo(
         "topics": trend_topics,
         "search_queries": approved_search_queries or [],
         "sources": research_sources,
+        "player_names": grounded_players,
+        "player_aliases": grounded_aliases,
     }
     evidence_pack = build_cricket_evidence_pack(
         video_title=video_title,
@@ -1284,7 +1298,9 @@ def generate_clip_seo(
         " ".join(str(item) for item in result.get("search_terms", []) or []),
         " ".join(str(item) for item in result.get("tags", []) or []),
     ])
-    rendered_entities = find_canonical_entities(rendered_text)
+    rendered_entities = find_canonical_entities(
+        rendered_text, grounded_entities["players"]
+    )
     extra_players = set(rendered_entities["players"]) - set(grounded_entities["players"])
     extra_teams = set(rendered_entities["teams"]) - set(grounded_entities["teams"])
     if extra_players or extra_teams:
@@ -1612,6 +1628,8 @@ def process_all_seo(highlights_path: str, output_dir: str,
                 teams=trend.get("teams", []),
                 approved_search_queries=trend.get("search_queries", []),
                 match_facts=trend.get("match_facts", []),
+                grounded_players=trend.get("player_names", []),
+                grounded_aliases=trend.get("player_aliases", {}),
                 research_sources=trend.get("sources", []),
                 video_path=video_path,
             )
