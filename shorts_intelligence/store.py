@@ -558,6 +558,8 @@ class ShortsStore:
                 features[str(key)] = str(value).casefold()
         return {
             "video_id": row["video_id"],
+            "title": row["title"],
+            "duration_seconds": duration,
             "captured_at": row["captured_at"],
             "evidence_at": row["published_at"],
             "outcome_score": max(0.0, min(1.0, outcome)),

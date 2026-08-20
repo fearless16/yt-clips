@@ -286,57 +286,6 @@ class TestTranscriptionCorrection:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 5. SELF-LEARNING — retention/CTR activates scoring
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestSelfLearning:
-    """Real Analytics signals (retention, CTR) must activate the previously-dead
-    scoring branches and produce different scores than view-only."""
-
-    def test_retention_ctr_changes_score(self):
-        from automation.seo.seo_learner import SEOLearner
-        learner = SEOLearner.__new__(SEOLearner)
-        # View-only
-        score_basic = learner._calculate_performance_score(
-            {"viewCount": 1000, "likeCount": 50, "commentCount": 10})
-        # With retention + CTR
-        score_rich = learner._calculate_performance_score(
-            {"viewCount": 1000, "likeCount": 50, "commentCount": 10,
-             "retention": 0.7, "ctr": 0.08})
-        # They must differ (the branches activate)
-        assert score_rich != score_basic
-
-    def test_pattern_key_excludes_numerics(self):
-        from automation.seo.seo_learner import _stable_pattern_key
-        f1 = {"has_pipe_format": True, "title_length": 45, "has_emoji": False}
-        f2 = {"has_pipe_format": True, "title_length": 99, "has_emoji": False}
-        # Keys should be IDENTICAL despite different title_length (numeric excluded)
-        assert _stable_pattern_key(f1) == _stable_pattern_key(f2)
-
-    def test_best_model_prefers_real_over_benchmark(self):
-        from automation.seo.seo_learner import SEOLearner
-        learner = SEOLearner.__new__(SEOLearner)
-        learner.learned_insights = {
-            "model_performance": {
-                "groq/llama": {"count": 5, "avg_score": 0.8,
-                               "provider": "groq", "model": "llama"},
-            },
-            "benchmark_history": [{
-                "top_result": {"provider": "openrouter", "model": "gemini",
-                               "score": 90},
-            }],
-            "current_best_provider": None, "current_best_model": None,
-        }
-        from automation.seo.seo_learner import MIN_CLIPS_FOR_PATTERN
-        # Ensure count meets threshold
-        learner.learned_insights["model_performance"]["groq/llama"]["count"] = \
-            max(5, MIN_CLIPS_FOR_PATTERN)
-        source = learner._recompute_best_model()
-        assert source == "real"
-        assert learner.learned_insights["current_best_provider"] == "groq"
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # 6. UPLOAD — byte-safe, categoryId validated, bounded retries
 # ═══════════════════════════════════════════════════════════════════════════════
 

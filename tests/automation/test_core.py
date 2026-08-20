@@ -4,7 +4,7 @@ import pytest
 import json
 from dataclasses import fields
 
-from automation.memory.event_models import EventType, ClipEvent, LearnedStateEntry
+from automation.memory.event_models import EventType, ClipEvent
 from automation.config import load, get
 from automation.memory.feedback_schema import (
     FeedbackPayload,
@@ -12,7 +12,7 @@ from automation.memory.feedback_schema import (
     validate_feedback,
     validate_feedback_payload,
 )
-from automation.memory.decision_store import DecisionStore, LearnedStateStore
+from automation.memory.decision_store import DecisionStore
 
 
 # ── EventType ──────────────────────────────────────────────────────────────────
@@ -33,16 +33,13 @@ class TestEventType:
             "validation_failed",
             "infra_failed",
             "deferred",
-            "policy_updated",
-            "trend_ingested",
-            "trend_decayed",
         }
         actual = {e.value for e in EventType}
         assert actual == expected
-        assert len(EventType) == 15
+        assert len(EventType) == 12
 
     def test_no_extra_members(self):
-        expected_count = 15
+        expected_count = 12
         assert len(EventType) == expected_count
 
 
@@ -99,43 +96,6 @@ class TestClipEvent:
         assert isinstance(event.clip_id, str)
         assert isinstance(event.timestamp, str)
         assert isinstance(event.payload_json, str)
-
-
-# ── LearnedStateEntry ─────────────────────────────────────────────────────────
-
-
-class TestLearnedStateEntry:
-    def test_constructed_correctly(self):
-        entry = LearnedStateEntry(
-            state_key="clip:abc:score",
-            value_json='{"score": 0.95}',
-            derived_from_event_id="evt-001",
-            updated_at="2025-01-01T00:00:00Z",
-        )
-        assert entry.state_key == "clip:abc:score"
-        assert entry.value_json == '{"score": 0.95}'
-        assert entry.derived_from_event_id == "evt-001"
-        assert entry.updated_at == "2025-01-01T00:00:00Z"
-
-    def test_allows_none_derived_from_event_id(self):
-        entry = LearnedStateEntry(
-            state_key="clip:abc:score",
-            value_json='{"score": 0.95}',
-            derived_from_event_id=None,
-            updated_at="2025-01-01T00:00:00Z",
-        )
-        assert entry.derived_from_event_id is None
-
-    def test_state_key_and_value_json_are_strings(self):
-        entry = LearnedStateEntry(
-            state_key="clip:abc:score",
-            value_json='{"score": 0.95}',
-            derived_from_event_id=None,
-            updated_at="2025-01-01T00:00:00Z",
-        )
-        assert isinstance(entry.state_key, str)
-        assert isinstance(entry.value_json, str)
-        assert isinstance(entry.updated_at, str)
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -533,75 +493,3 @@ class TestDecisionStore:
         store = DecisionStore()
         store.clear()
         assert store.count() == 0
-
-
-# ── LearnedStateStore ──────────────────────────────────────────────────────────
-
-
-class TestLearnedStateStore:
-    def test_set_get_roundtrip(self):
-        store = LearnedStateStore()
-        store.set("clip:abc:score", '{"score": 0.95}', derived_from_event_id="evt-001")
-        result = store.get("clip:abc:score")
-        assert result == '{"score": 0.95}'
-
-    def test_set_without_derived_from(self):
-        store = LearnedStateStore()
-        store.set("clip:abc:tags", '["funny", "short"]')
-        result = store.get("clip:abc:tags")
-        assert result == '["funny", "short"]'
-
-    def test_get_returns_none_for_missing_key(self):
-        store = LearnedStateStore()
-        assert store.get("nonexistent") is None
-
-    def test_delete_removes_key(self):
-        store = LearnedStateStore()
-        store.set("clip:abc:score", '{"score": 0.95}')
-        store.delete("clip:abc:score")
-        assert store.get("clip:abc:score") is None
-
-    def test_delete_nonexistent_key_does_not_error(self):
-        store = LearnedStateStore()
-        store.delete("nonexistent")
-
-    def test_get_all_returns_dict(self):
-        store = LearnedStateStore()
-        store.set("a", "1")
-        store.set("b", "2")
-        all_states = store.get_all()
-        assert all_states == {"a": "1", "b": "2"}
-
-    def test_get_all_returns_copy(self):
-        store = LearnedStateStore()
-        store.set("a", "1")
-        all_states = store.get_all()
-        all_states["b"] = "2"
-        assert "b" not in store.get_all()
-
-    def test_clear_removes_all_state(self):
-        store = LearnedStateStore()
-        store.set("a", "1")
-        store.set("b", "2")
-        store.clear()
-        assert store.get_all() == {}
-        assert store.get("a") is None
-
-    def test_clear_on_empty_store_does_not_error(self):
-        store = LearnedStateStore()
-        store.clear()
-        assert store.get_all() == {}
-
-    def test_overwrite_existing_key(self):
-        store = LearnedStateStore()
-        store.set("clip:abc:score", '{"score": 0.95}')
-        store.set("clip:abc:score", '{"score": 0.99}')
-        assert store.get("clip:abc:score") == '{"score": 0.99}'
-
-    def test_multiple_keys_independent(self):
-        store = LearnedStateStore()
-        store.set("key1", "val1")
-        store.set("key2", "val2")
-        store.delete("key1")
-        assert store.get("key1") is None
-        assert store.get("key2") == "val2"

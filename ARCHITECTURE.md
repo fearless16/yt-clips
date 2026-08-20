@@ -123,7 +123,7 @@ Two analysis paths exist for crop planning during export:
 > detector is SCRFD/YuNet (ONNX, CPU). A regression test
 > (`tests/test_face_detection_gpu.py`) guards against reintroducing Haar.
 
-### Module Ownership (legacy pipeline)
+### Module Ownership (clip pipeline)
 
 | Concern | Owner module(s) | Key entry points |
 |---|---|---|
@@ -134,7 +134,7 @@ Two analysis paths exist for crop planning during export:
 | SEO generation | `automation/seo/seo.py` | `generate_clip_seo()`, `process_all_seo()` |
 | Cricket facts | `automation/seo/cricket_context.py` | `correct_cricket_spelling()`, `find_canonical_entities()` |
 | Trends/scorecard | `automation/seo/trends.py` | `get_trending_context()` |
-| Self-learning | `automation/seo/seo_learner.py`, `automation/seo/analytics.py` | `SEOLearner`, `fetch_advanced_metrics()` |
+| Shorts outcomes | `shorts_intelligence/`, `automation/seo/analytics.py` | `ShortsIntelligence`, `sync_clip_performance_from_youtube()` |
 | Transcription | `transcribe.py`, `automation/transcript.py`, `utils/transcript_postproc.py` | `transcribe()`, `fetch()`, `correct_segments()` |
 | Upload | `upload.py` | `upload_video()` |
 | Crop planning | `frame_analyzer.py` (cheap) / `premium_analyzer.py` (premium) | `FaceDetector`, `analyze_clip()` |
@@ -162,18 +162,15 @@ Two analysis paths exist for crop planning during export:
   whisper), with a guarded lexicon (no `sky→SKY` / `stark→Starc` corruption) and
   validated LLM corrections. `batch_size` now drives a real
   `BatchedInferencePipeline` on GPU.
-- **Self-learning:** ingests **real** YouTube Analytics signals (retention/CTR/
-  impressions) via `fetch_advanced_metrics()`, fixing the previously-dead
-  retention/CTR scoring branches; pattern keys exclude raw numeric features
-  (so patterns accumulate); a single `_recompute_best_model()` prefers real
-  performance over the synthetic benchmark.
+- **Shorts Intelligence:** accepts only the channel's exact Shorts shelf, joins
+  real YouTube Analytics outcomes, fits a recency-aware Bayesian segment model,
+  and stores all catalog, outcome, production, and model state in
+  `shorts_intelligence.db`. Supported effects are bounded tie-breakers and can
+  never move clip boundaries or bypass the complete-thought gate.
 - **Upload:** finite resumable chunk size (real progress + resume), byte-safe
   5000-**byte** description truncation, `categoryId` validation via
   `videoCategories.list`, bounded retries + wall-clock deadline,
   `containsSyntheticMedia`/`madeForKids` from metadata/config.
-
-> The full design rationale, evidence, and per-module findings live in
-> `docs/IMPROVEMENT_PLAN.md`.
 
 ---
 

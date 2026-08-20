@@ -1,7 +1,6 @@
-"""automation — self-correcting clip selection and learning system.
+"""Runtime orchestration, event telemetry, and provider health.
 
 Append-only event store.
-Derived state only.
 Human overrides outrank models.
 Infrastructure noise is not learning data.
 """

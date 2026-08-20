@@ -129,9 +129,9 @@ The report includes:
 - After-cropping quality analysis (sharpness, contrast, saturation, brightness drops)
 - Face position consistency across 30 sampled frames
 
-### SEO Analytics Dashboard
+### Shorts Intelligence Dashboard
 
-Standalone report from collected performance data + YouTube analytics.
+Standalone report from the canonical cricket Shorts database.
 
 ```bash
 # Generate analytics dashboard
@@ -142,9 +142,13 @@ python automation/seo/analytics_report.py -o my_report.html
 
 # Open in browser
 python automation/seo/analytics_report.py --open
+
+# Explicitly sync the shelf + Analytics and refit (no source URL needed)
+python -m automation.cli --learn
 ```
 
-Input: `data/seo_performance.json` + `logs/analytics_*.json`  
+Input: `shorts_intelligence.db` (exact channel Shorts shelf + YouTube Analytics)
+
 Output: `reports/analytics/analytics_report.html`
 
 ---
@@ -153,7 +157,7 @@ Output: `reports/analytics/analytics_report.html`
 
 | File | What |
 |---|---|
-| `ARCHITECTURE.md` | Full architecture, Face OS + legacy |
+| `ARCHITECTURE.md` | Full pipeline and Face OS architecture |
 | `AGENTS.md` | Source of truth, known bugs, next steps |
 | `face_os/STATE.md` | Face OS state reference & drift status |
 | `validate_metrics.py` | Runtime metrics validation |

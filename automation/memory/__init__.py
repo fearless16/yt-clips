@@ -8,6 +8,6 @@ from automation.memory.memtrack import (
     _sample,
     _ring,
 )
-from automation.memory.event_models import EventType, ClipEvent, LearnedStateEntry
-from automation.memory.decision_store import DecisionStore, LearnedStateStore
+from automation.memory.event_models import EventType, ClipEvent
+from automation.memory.decision_store import DecisionStore
 from automation.memory.feedback_schema import FeedbackPayload, validate_feedback_payload

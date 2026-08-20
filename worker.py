@@ -1,10 +1,7 @@
-"""
-worker.py — Autonomous background worker for yt-clips.
-Runs on Mac via launchd. Handles:
-  1. Fetch YouTube analytics (videos, shorts, lives) every run
-  2. Feed SEO learner with performance data
-  3. Generate performance report
-  4. Optionally trigger new video processing
+"""Autonomous background worker for cricket Shorts Intelligence.
+
+Handles the exact channel Shorts shelf, real YouTube Analytics outcomes,
+canonical model fitting, local reporting, and optional queued video processing.
 
 Usage:
   python worker.py              # Run analytics + learning cycle
@@ -15,8 +12,6 @@ import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import sys
 import json
-import time
-from datetime import datetime
 from pathlib import Path
 
 from utils.config import load_config
@@ -27,61 +22,34 @@ log = get_logger("worker", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 
 def run_analytics_cycle():
-    """Fetch analytics for all content types and feed the learner."""
+    """Sync exact Shorts outcomes and refit the canonical model."""
     log.info("=" * 50)
     log.info("🔄 Worker: Analytics cycle starting...")
 
     try:
-        from automation.seo.analytics import generate_daily_insights
-        result = generate_daily_insights()
-        if result:
-            log.info(f"✅ Analytics cycle complete: {result}")
-        else:
-            log.warning("⚠️ No analytics data returned")
+        from automation.seo.analytics import (
+            generate_daily_insights,
+            sync_clip_performance_from_youtube,
+        )
+        added = sync_clip_performance_from_youtube()
+        result = {"snapshots_added": added, **generate_daily_insights()}
+        log.info("Analytics cycle complete: %s", result)
     except Exception as e:
-        log.error(f"❌ Analytics cycle failed: {e}")
+        log.error("Analytics cycle failed: %s", e)
+        return None
 
-    log.info("🔄 Worker: Analytics cycle done")
-    return True
+    log.info("Worker: Analytics cycle done")
+    return result
 
 
 def print_learnings():
-    """Print current SEO learnings from the learner."""
+    """Print compact local state from the canonical database."""
     try:
-        from automation.seo.seo_learner import SEOLearner
-        learner = SEOLearner()
-        suggestions = learner.get_seo_improvement_suggestions()
-        prefs = learner.get_learned_title_preferences()
+        from shorts_intelligence.reporting import load_report
 
-        print("\n" + "=" * 60)
-        print("🧠 SEO LEARNER STATUS")
-        print("=" * 60)
-
-        clips = learner.learned_insights.get("clips", [])
-        print(f"\n📊 Data collected: {len(clips)} clips analyzed")
-
-        if prefs.get("best_patterns"):
-            print("\n✅ Winning patterns:")
-            for p, score in prefs["best_patterns"][:3]:
-                print(f"   {p} (avg: {score:.2f})")
-
-        if prefs.get("avoid_patterns"):
-            print("\n❌ Avoid patterns:")
-            for p, score in prefs["avoid_patterns"][:3]:
-                print(f"   {p} (avg: {score:.2f})")
-
-        if suggestions:
-            print("\n💡 Suggestions:")
-            for s in suggestions:
-                print(f"   • {s}")
-
-        best_prov, best_mod = learner.get_best_model()
-        if best_prov:
-            print(f"\n🏆 Best model: {best_prov}/{best_mod}")
-
-        print("=" * 60 + "\n")
+        print(json.dumps(load_report(), ensure_ascii=False, separators=(",", ":"), default=str))
     except Exception as e:
-        print(f"Error: {e}")
+        print(json.dumps({"status": "failed", "error": str(e)}, separators=(",", ":")))
 
 
 def check_new_videos():

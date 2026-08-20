@@ -63,7 +63,7 @@ REQUIRED_CONFIG_KEYS = [
 EXPECTED_PHASE_STAGES = [
     "transcript_fetch", "download", "transcribe", "highlight", "export",
     "enhancement", "seo", "thumbnails", "sync", "upload", "analytics",
-    "automation_learner", "provider_health", "event_store_validation",
+    "shorts_intelligence", "provider_health", "event_store_validation",
 ]
 
 REQUIRED_PROMPTS = [

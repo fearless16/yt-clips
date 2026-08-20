@@ -77,7 +77,7 @@ def setup_argparse():
     )
     parser.add_argument(
         "--learn", action="store_true", default=False,
-        help="Run self-learning stages only (skip download/export)",
+        help="Sync the channel Shorts shelf, Analytics outcomes, and refit the canonical model",
     )
     parser.add_argument(
         "--skip-download", action="store_true", default=False,
@@ -182,6 +182,27 @@ def main(args=None):
         print(f"Override {parsed.override} recorded for clip {clip_id}")
         return 0
 
+    if parsed.learn:
+        from automation.seo.analytics import (
+            generate_daily_insights,
+            sync_clip_performance_from_youtube,
+        )
+        try:
+            added = sync_clip_performance_from_youtube(config_path="config.yaml")
+            result = generate_daily_insights(config_path="config.yaml")
+            print(json.dumps(
+                {"snapshots_added": added, **result},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ))
+            return 0
+        except Exception as exc:
+            print(json.dumps(
+                {"status": "failed", "error": str(exc)},
+                separators=(",", ":"),
+            ))
+            return 1
+
     if parsed.url is None:
         parser.print_help()
         return 0
@@ -200,7 +221,6 @@ def main(args=None):
         auto_schedule=parsed.schedule,
         sample_minutes=parsed.sample_minutes,
         mode=parsed.mode,
-        learn_only=parsed.learn,
     )
     n = len(result.exported)
     f = len(result.failures)

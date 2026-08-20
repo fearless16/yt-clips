@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import json
-import logging
 
 from automation.memory.decision_store import DecisionStore
 from automation.memory.event_models import EventType
-
-log = logging.getLogger("analytics")
 
 
 class Analytics:
@@ -76,6 +73,8 @@ def sync_clip_performance_from_youtube(*, config_path: str = "config.yaml") -> i
     from shorts_intelligence.youtube_source import YouTubeShortsSource
 
     config = RuntimeConfig.from_yaml(config_path)
+    if not config.enabled:
+        return 0
     with ShortsStore(config.db_path, channel_id=config.channel_id) as store:
         result = ShortsIntelligence(
             store=store,
@@ -86,16 +85,13 @@ def sync_clip_performance_from_youtube(*, config_path: str = "config.yaml") -> i
 
 
 def generate_daily_insights(*, config_path: str = "config.yaml") -> dict:
-    """Return compact canonical status; network sync is explicitly configurable."""
+    """Return compact canonical status without hidden network calls."""
     from shorts_intelligence.config import RuntimeConfig
     from shorts_intelligence.store import ShortsStore
 
     config = RuntimeConfig.from_yaml(config_path)
-    if config.sync_on_pipeline:
-        try:
-            sync_clip_performance_from_youtube(config_path=config_path)
-        except Exception as exc:
-            log.warning("Shorts analytics sync failed: %s", exc)
+    if not config.enabled:
+        return {"status": "disabled"}
     with ShortsStore(config.db_path, channel_id=config.channel_id) as store:
         summary = store.summary()
         model = store.latest_model()
