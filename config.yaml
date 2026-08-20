@@ -240,13 +240,15 @@ seo:
   title_max_chars: 70                   # mobile-first, one clear clip premise
   min_search_terms: 8                   # enough current intent coverage without generic filler
   max_search_terms: 15                  # focused, grounded phrases only
+  min_primary_search_terms: 2           # phrases naturally used in public description copy
+  max_primary_search_terms: 4           # remaining research queries stay in API metadata
+  min_promise_alignment_score: 0.50     # title must match clip speech + description opening
   description_min_chars: 1200           # reject thin AI blurbs
   description_target_chars: 3200        # use room for clip + verified match context
   description_max_chars: 4000           # safe margin below YouTube's 5000-char limit
   max_tag_chars: 450                    # safe margin below YouTube's 500-char tags limit
   # Inject random hardcoded viral hooks/CTAs into descriptions. OFF by default:
   # the product contract prefers per-clip LLM-generated hooks over generic copy.
-  inject_viral_elements: false
   # Sleep between SEO calls for each clip (seconds). Longer = less rate limiting.
   inter_clip_sleep_s: 30
   # Max hashtags for Shorts uploads — champions use 2-3, not 15.

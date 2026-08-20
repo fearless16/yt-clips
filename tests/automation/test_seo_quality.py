@@ -4,8 +4,7 @@ Tests verify:
 - Generic tags/titles/search_terms are rejected
 - Groq provider works with TPM rate limiting
 - SEO quality validation catches low-effort output
-- SEOGenerator class never produces generic fallback
-- _inject_viral_elements doesn't randomly override good titles
+- Removed generic SEOGenerator cannot return
 """
 import json
 import time
@@ -17,13 +16,6 @@ import pytest
 
 class TestNoGenericFallback:
     """Generic SEO kills channel performance. Every path must be clip-specific."""
-
-    def test_rank_tags_never_returns_generic_defaults(self):
-        """Empty tags must return [] not generic defaults."""
-        from automation.seo.seo import _rank_and_optimize_tags
-        result = _rank_and_optimize_tags([], "kohli six")
-        # Must NOT produce ["#Shorts", "#Cricket", "#IPL2026"] on empty input
-        assert result == []
 
     def test_enforce_limits_rejects_generic_search_terms(self):
         """Search terms like 'cricket video' or 'sports highlights' are poison."""
@@ -196,6 +188,17 @@ class TestNoGenericFallback:
         result = _enforce_limits(item)
         assert result["tags"] == []
 
+    def test_enforce_limits_skips_non_string_items_inside_tags(self):
+        from automation.seo.seo import _enforce_limits
+        result = _enforce_limits({
+            "title": "Kohli ka CHHAKKA! 🔥",
+            "description": "Kohli hits a massive six over long-on",
+            "hashtags": ["#Shorts"],
+            "search_terms": ["kohli six"],
+            "tags": [None, 42, "Virat Kohli"],
+        })
+        assert result["tags"] == ["Virat Kohli"]
+
     def test_enforce_limits_strips_empty_title(self):
         """Empty title must not pass validation."""
         from automation.seo.seo import _enforce_limits, _validate_seo_quality
@@ -238,23 +241,6 @@ class TestNoGenericFallback:
             "search_terms": ["cricket"],
         }
         assert not _validate_seo_quality(item)
-
-
-class TestViralElementsBias:
-    """_inject_viral_elements must NEVER randomly override a good title."""
-
-    def test_inject_never_replaces_good_title(self):
-        from automation.seo.seo import _inject_viral_elements
-        original_title = "Kohli ne maara CHHAKKA! 🔥"
-        # Run 50 times — title must NEVER be randomly replaced
-        for _ in range(50):
-            result = _inject_viral_elements(
-                original_title,
-                "Kohli hits massive six",
-                ["#Shorts", "#Kohli"],
-            )
-            assert result["title"] == original_title, \
-                f"Title was randomly overridden to: {result['title']}"
 
 
 class TestGroqProvider:
@@ -346,18 +332,9 @@ class TestSEOQualityGate:
 
 
 class TestSEOGeneratorClassRemoved:
-    """The old SEOGenerator class produces generic garbage. It must not be used."""
+    """The old generic wrapper cannot be reintroduced."""
 
-    def test_seo_generator_not_used_in_pipeline(self):
-        """No code outside tests should use SEOGenerator.generate()."""
-        import ast
-        from pathlib import Path
-        repo = Path(__file__).resolve().parent.parent
-        for py in sorted(repo.rglob("*.py")):
-            if ".venv" in str(py) or "test_" in py.name or py.name == "seo.py":
-                continue
-            text = py.read_text(encoding="utf-8", errors="ignore")
-            if "SEOGenerator" in text and "from automation.seo" in text:
-                # Only imports for backward compat should exist
-                assert "SEOGenerator()" not in text or "generate(" not in text, \
-                    f"SEOGenerator used in production code: {py}"
+    def test_seo_generator_symbol_is_gone(self):
+        import automation.seo.seo as seo
+
+        assert not hasattr(seo, "SEOGenerator")

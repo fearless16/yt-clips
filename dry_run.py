@@ -51,7 +51,6 @@ REQUIRED_CONFIG_KEYS = [
     ("ai", "retry_base_delay_seconds"),
     ("ai", "retry_max_delay_seconds"),
     ("ai", "race_tier_timeout_seconds"),
-    ("seo", "inject_viral_elements"),
     ("premium", "yolo_device"),
     ("premium", "yolo_batch_size"),
     ("premium", "identity_refs"),
@@ -229,9 +228,19 @@ def _api_intercept_context(video_path: str):
                  prompt.replace("\n", " ")[:60])
         return _FAKE_SEO_JSON
 
-    def _fake_generate_text(prompt="", system_instruction=None):
+    def _fake_generate_text(self, prompt="", system_instruction=None,
+                            prefer_model=None, prefer_provider=None):
         log.info("  [FAKE AI] generate_text (prompt=%.60s...)",
                  prompt.replace("\n", " ")[:60])
+        if "candidate_id" in prompt:
+            return json.dumps({
+                "selected": [
+                    {"candidate_id": 1, "score": 90, "reason": "strong hook"},
+                    {"candidate_id": 2, "score": 85, "reason": "clear payoff"},
+                ],
+                "rejected": [],
+                "notes": {"overall_quality": "high"},
+            })
         return "Kohli hit a six. Bumrah bowled a yorker. Amazing catch."
 
     def _fake_generate_seo_text(self, prompt="", system_instruction=None):
@@ -239,7 +248,7 @@ def _api_intercept_context(video_path: str):
                  prompt.replace("\n", " ")[:60])
         return _FAKE_SEO_JSON
 
-    def _fake_generate_image(prompt="", **kwargs):
+    def _fake_generate_image(self, prompt="", **kwargs):
         log.info("  [FAKE AI] generate_image (prompt=%.60s...)", prompt[:60])
         return b"JPEG" * 1024
 

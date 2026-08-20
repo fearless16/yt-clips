@@ -307,7 +307,8 @@ class AIClient:
                  extra={"stage": "llm_cost", "metadata": {"provider": provider, "model": model, "cost": cost}})
 
     def generate_text(self, prompt: str, system_instruction: Optional[str] = None,
-                      prefer_model: Optional[str] = None) -> str:
+                      prefer_model: Optional[str] = None,
+                      prefer_provider: Optional[str] = None) -> str:
         """Text generation with error-classified failover.
 
         Error handling policy (hardcoded):
@@ -321,7 +322,7 @@ class AIClient:
         base_delay = float(ai_cfg.get("retry_base_delay_seconds", 2.0))
         max_delay = float(ai_cfg.get("retry_max_delay_seconds", 30.0))
 
-        chain = self._get_failover_chain(self._provider)
+        chain = self._get_failover_chain(prefer_provider or self._provider)
 
         available_chain = []
         for p in chain:

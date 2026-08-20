@@ -371,7 +371,6 @@ class TestConfigTunables:
         ("ai", "retry_base_delay_seconds"),
         ("ai", "retry_max_delay_seconds"),
         ("ai", "race_tier_timeout_seconds"),
-        ("seo", "inject_viral_elements"),
         ("premium", "yolo_device"),
         ("premium", "yolo_batch_size"),
         ("premium", "identity_refs"),
@@ -393,11 +392,6 @@ class TestConfigTunables:
                     missing.append(".".join(path))
                     break
         assert not missing, f"Missing config keys: {missing}"
-
-    def test_seo_inject_viral_elements_default_off(self):
-        from utils.config import load_config
-        cfg = load_config()
-        assert cfg["seo"]["inject_viral_elements"] is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

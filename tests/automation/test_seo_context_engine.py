@@ -189,7 +189,7 @@ def test_generated_queries_must_be_from_approved_evidence(monkeypatch):
         raise AssertionError("unapproved AI query must be rejected")
 
 
-def test_selected_queries_must_be_naturally_embedded_in_description(monkeypatch):
+def test_research_queries_can_stay_in_metadata_when_primary_queries_are_embedded(monkeypatch):
     import automation.seo.seo as seo
 
     monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
@@ -204,18 +204,16 @@ def test_selected_queries_must_be_naturally_embedded_in_description(monkeypatch)
         },
     )
 
-    try:
-        seo.generate_clip_seo(
-            "clip1",
-            "Yuvi ko India ka coach bana do",
-            video_title="India cricket discussion",
-            video_description="Yuvi coaching debate",
-            approved_search_queries=_approved_queries(),
-        )
-    except seo.SEOGenerationError as exc:
-        assert "not embedded in description" in str(exc)
-    else:
-        raise AssertionError("detached SEO query list must be rejected")
+    result = seo.generate_clip_seo(
+        "clip1",
+        "Yuvi ko India ka coach bana do",
+        video_title="India cricket discussion",
+        video_description="Yuvi coaching debate",
+        approved_search_queries=_approved_queries(),
+    )
+
+    assert result["search_terms"] == _approved_queries()
+    assert result["primary_search_terms"] == _approved_queries()[:2]
 
 
 def test_hallucinated_player_in_api_tags_is_rejected(monkeypatch):

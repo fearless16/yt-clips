@@ -429,6 +429,7 @@ def get_trending_context(
     video_title: str = "",
     video_description: str = "",
     transcript: str = "",
+    include_live_stream_url: bool = True,
 ) -> Dict:
     """Build current, query-specific research context with provenance."""
     combined = " ".join((video_title, video_description, transcript))
@@ -517,7 +518,7 @@ def get_trending_context(
         "search_queries": search_queries,
         "sources": sources,
         "research_query": query_topic,
-        "live_stream_url": fetch_own_live_stream_url(),
+        "live_stream_url": fetch_own_live_stream_url() if include_live_stream_url else "",
         "teams": teams,
         "domain": detected_domain,
         "region": region,

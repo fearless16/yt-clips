@@ -37,6 +37,9 @@ def test_bridge_records_only_exported_highlights_and_pending_upload(tmp_path):
         "hashtags": [f"#h{index}" for index in range(12)],
         "provider": "groq",
         "model": "model-x",
+        "packaging_version": "promise_v2",
+        "promise_alignment_score": 0.82,
+        "primary_search_terms": ["player opinion", "cricket analysis"],
     }), encoding="utf-8")
     highlights = [
         {
@@ -62,6 +65,9 @@ def test_bridge_records_only_exported_highlights_and_pending_upload(tmp_path):
         assert production["features"]["seo_title_length_bucket"] == "40_54"
         assert production["features"]["seo_description_length_bucket"] == "2500_3799"
         assert production["features"]["seo_provider"] == "groq"
+        assert production["features"]["seo_packaging_version"] == "promise_v2"
+        assert production["features"]["seo_promise_alignment_bucket"] == "75_89"
+        assert production["features"]["seo_primary_query_count_bucket"] == "2_2"
 
     status = shadow_status(_config(db))
     assert status["mode"] == "shadow"

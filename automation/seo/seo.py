@@ -1,10 +1,8 @@
 """seo.py — Per-clip SEO generation for Indian cricket Shorts.
 
-Uses parallel fastest-first model racing: fires the fastest available models
-concurrently and takes the first valid JSON response. No backoff — on failure
-the next tier of models is tried immediately. Three-tier fallback: AI → salvage
-→ transcript-aware dynamic generation. Every title is clip-specific — no
-generic templates or prefixes.
+Uses restricted SEO models with one strict escalation attempt. Every title is
+clip-specific and must promise the same thought that the clip actually opens
+with; failed attempts retain their complete research evidence for retry.
 """
 import json
 import os
@@ -16,7 +14,7 @@ from typing import List, Dict, Optional
 from utils.config import load_config
 from utils.logger import get_logger
 from utils.ai_client import AIClient
-from .trends import TEAM_MAPPINGS
+from .trends import get_trending_context
 from automation._cache import TTLCache
 from utils.ocr import extract_ocr_entities
 from .cricket_context import (
@@ -93,31 +91,19 @@ GENERIC_TITLES = {
     "sports highlights", "match highlights",
 }
 
-# ── Viral Hooks & CTAs ──────────────────────────────────────────────────────────
+PACKAGING_VERSION = "promise_v2"
 
-VIRAL_HOOKS = [
-    "Arey yeh kya ho raha hai?! 😱",
-    "Ye toh shot of the tournament! 🔥",
-    "Full drama! Dekho takraar mein aatma",
-    "Insaan ban ke dekhna ye moment! 🏏",
-    "Isse zyada close match nahi hota!",
-    "Brutal finish - sab ne socha tha nahi hoga!",
-    "Ye catch Pakka nahi tha, kya?! 🤯",
-    "Match winner ya match loser?! 😈",
-    "Hat-trick ka matlab - khaali haath jaana!",
-    "Last over dhamaal - full tension! 🔥",
-]
-
-ENGAGING_CTAS = [
-    "Aaj ke match ka full recap dekho aur like share karo!",
-    "Agar ye video pasand aaya toh LIKE + SUBSCRIBE zaroor karo!",
-    "Next match ke liye bell icon dabana na bhoolna! 🔔",
-    "Live matches ke liye channel ko subscribe karo aur notification on karo!",
-    "Ye highlight miss kaise karo? LIKE + SHARE + SUBSCRIBE!",
-    "Tension free match dekhne ke liye channel join karo now!",
-    "Aapke liye poora match ready hai - full video dekho!",
-    "Cricket ke har ek moment ke liye stay tuned!",
-]
+_PROMISE_STOP_WORDS = STOP_WORDS | GENERIC_TAGS | {
+    "ka", "ki", "ke", "ko", "ne", "hai", "hain", "tha", "thi", "aur",
+    "kyun", "kyo", "bana", "banana", "ban", "sakte", "sakta", "chahiye",
+    "short", "clip", "match", "india", "indian", "explained", "analysis",
+    "debate", "discussion", "opinion",
+}
+_PROMISE_SYNONYMS = {
+    "chhakka": "six", "chakka": "six", "sixer": "six",
+    "coaching": "coach", "coached": "coach", "bowled": "wicket",
+    "wickets": "wicket", "yorkers": "yorker", "sixes": "six",
+}
 
 # ── SEO Model Restrictions ─────────────────────────────────────────────────────
 # Only these models are trusted for SEO generation.
@@ -179,7 +165,8 @@ Return ONLY this valid JSON object:
   "title": "<specific Hinglish title>",
   "description": "<long, unique, natural, evidence-grounded description>",
   "hashtags": ["#Shorts", "<1-2 exact topic tags>"],
-  "search_terms": ["<8-15 exact approved queries>"],
+  "search_terms": ["<8-15 exact approved research queries>"],
+  "primary_search_terms": ["<2-4 phrases used naturally in the description>"],
   "tags": ["<grounded YouTube API tags within the configured budget>"]
 }}
 
@@ -191,11 +178,14 @@ STRICT RULES:
   Use the available budget for a detailed,
   unique Hinglish/English explanation of the source video, this clip's complete
   thought, and verified match context. Put the strongest 1-2 phrases in the
-  opening lines and weave every selected search query naturally into prose.
+  opening lines. Expand on the clip's one promise before broader verified
+  context; do not turn the description into a list of near-duplicate queries.
   Never append a keyword dump or repeat sentences merely to reach the target.
   If a match fact is absent, omit it instead of guessing.
 - HASHTAGS: exactly 2-3; #Shorts plus only grounded player/team/event tags.
 - SEARCH TERMS: 8-15 entries copied exactly from the approved list.
+- PRIMARY SEARCH TERMS: choose 2-4 of those entries and weave only these
+  naturally into prose. The remaining research queries stay in metadata.
 - TAGS: grounded spellings, aliases, teams, and match phrases only. Tags are a
   separate API field; never paste a tag list into the description.
 - Treat canonical entity grounding appended below as authoritative.
@@ -205,13 +195,15 @@ _CRICKET_ONLY_SALVAGE_TMPL = """Generate grounded metadata for this cricket Shor
 Clip transcript: {transcript}
 Source title: {video_title}
 
-Return only JSON with title, description, hashtags, search_terms, and tags.
+Return only JSON with title, description, hashtags, search_terms,
+primary_search_terms, and tags.
 - Title: maximum 70 characters; one specific Hinglish premise; no LIVE/#Shorts.
 - Description: long and evidence-grounded, target {description_target_chars}
   characters and never exceed {description_max_chars} characters; no invented
   match facts or keyword dump.
 - Hashtags: exactly 2-3 including #Shorts.
 - Search terms: 8-15 specific grounded cricket phrases.
+- Primary search terms: 2-4 selected search terms written naturally in prose.
 - Never invent a player, team, score, or event.
 """
 
@@ -425,139 +417,6 @@ Return valid JSON ONLY:
 
 # ── Keyword extraction ──────────────────────────────────────────────────────────
 
-def _extract_keywords(text: str, limit: int = 14) -> List[str]:
-    """Extract meaningful keywords from text.
-
-    Excludes common stop words and generic cricket terms.
-    Prioritizes player names, teams, and specific actions.
-    """
-    import re
-    players = set(TEAM_MAPPINGS.values())
-    found_players = [p for p in players if p.lower() in text.lower()]
-
-    terms = re.findall(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*", text)
-    terms = [t for t in terms if t not in STOP_WORDS and len(t) > 2]
-
-    if found_players:
-        for p in found_players:
-            if p in text and p not in terms:
-                terms.insert(0, p)
-
-    seen = set()
-    unique = []
-    for t in terms:
-        low = t.lower()
-        if low not in seen and t.lower() not in GENERIC_TAGS:
-            seen.add(low)
-            unique.append(t)
-
-    return unique[:limit]
-
-
-def _inject_viral_elements(title: str, description: str, hashtags: List[str],
-                           extra: Dict = None) -> Dict:
-    """Procedural viral optimization as safety net when AI fails.
-
-    Factors: match closeness, player performance, chase pressure, countdowns.
-    """
-    import random
-    text = (title + " " + description).lower()
-    extra = extra or {}
-
-    is_close = any(w in text for w in ["last ball","last over","super over","tie","tied"])
-    is_chase = any(w in text for w in ["chase","target","need","required","win"])
-    has_star = any(w in text for w in ["kohli","bumrah","rohit","dhoni","sky","boult",
-                                        "maxwell","pant","gill","shami","jadeja"])
-    is_record = any(w in text for w in ["record","fastest","most","first","hat-trick","century"])
-
-    hooks = VIRAL_HOOKS
-    if is_close:
-        hooks = ["Last ball thriller! Match khatam, tension baaqi! 🔥",
-                 "Kisne socha tha ye hoga? Last over drama! 😱",
-                 "Super over ka excitement - ek dum free mein!",
-                 "Boundary pe match gaya! Dekho kaun jeeta!"] + hooks
-    if is_record:
-        hooks = ["History bana di! Yeh record kabhi nahi tutega! 👑",
-                 "G.O.A.T. performance - duniya dekh rahi hai! 🐐",
-                 "Stat padding ya class? Aap decide karo! 📊",
-                 "One for the history books - highlight reel 🔥"] + hooks
-    if has_star:
-        hooks = ["King kohli ka masterclass - dekhlo kaise karte hain! 👑",
-                 "Boom boom Bumrah - yorker queen! 🔥",
-                 "Mahi maar rahe hain - dhoni finish! 🎯",
-                 "SKY high! Suryakumar ka 360 degree show! 🤯"] + hooks
-
-    # NEVER randomly override a good AI-generated title — that creates bias
-    # and destroys clip-specific SEO. Hooks are for CTA/description only.
-    viral_title = title
-    text_lower = description.lower()
-    already_has_cta = any(
-        word in text_lower for word in ["subscribe", "follow", "share", "like"]
-    )
-    cta = "" if already_has_cta else random.choice(ENGAGING_CTAS)
-    extra_cta = ""
-    if is_record or has_star:
-        extra_cta = "\n\n🔔 Hurry up! Subscribe for non-stop cricket action 🔔"
-    description = description.rstrip() + ("\n\n" + cta if cta else "") + extra_cta
-
-    team_names = extra.get("teams", [])
-    player_match = re.search(r"Player:\s*(\w+)", description)
-    if player_match:
-        pname = player_match.group(1)
-        norm_name = TEAM_MAPPINGS.get(pname.lower(), pname)
-        description = description.replace(player_match.group(0), "")
-        title = title.replace(pname, norm_name, 1)
-
-    if team_names:
-        team_hashtags = [f"#{t.replace(' ','')}" for t in team_names if t]
-        hashtags = list(dict.fromkeys(team_hashtags + hashtags))
-        hashtags = _rank_and_optimize_tags(hashtags, description)[:3]
-
-    return {"title": title, "description": description, "hashtags": hashtags}
-
-
-def _rank_and_optimize_tags(
-    tags: List[str],
-    context: str,
-    max_tags: int = 15,
-) -> List[str]:
-    """Rank hashtags by relevance, remove duplicates, respect max_tags limit.
-
-    Scores tags based on: keyword match in context, player/team match,
-    uniqueness, and trend potential. Returns top-N ordered by score.
-    """
-    if not tags:
-        return []  # NEVER return generic fallback tags — empty is better than generic
-
-    seen: set = set()
-    scored: list[tuple[float, str]] = []
-
-    for tag in tags:
-        normalized = tag.lstrip("#").strip()
-        key = normalized.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        score = 0.0
-        if normalized in context:
-            score += 10.0
-        if normalized.lower() in context.lower():
-            score += 5.0
-        if key in ("shorts", "youtubeshorts", "viral"):
-            score += 3.0
-        if any(player.lower() == key for player in TEAM_MAPPINGS.values()):
-            score += 8.0
-        for team_placeholder in ["team1", "team2"]:
-            if team_placeholder in key:
-                score -= 20.0
-        if normalized.startswith("IPL") and len(normalized) > 3:
-            score += 4.0
-        scored.append((score, tag))
-
-    scored.sort(key=lambda x: (-x[0], x[1]))
-    return [t[1:] if t.startswith("#") else t for _, t in scored[:max_tags]]
-
-
 # ── Consolidation and limits ────────────────────────────────────────────────────
 
 def _clean_dict_from_description(raw: str) -> str:
@@ -582,39 +441,23 @@ def _clean_dict_from_description(raw: str) -> str:
     return text.strip()
 
 
-def _consolidate_seo(title: str, description: str, hashtags: List[str],
-                     search_terms: List[str]) -> Dict:
-    """Remove duplicates, standardize formatting, enforce limits."""
-    seen_hashtags: set = set()
-    unique_hashtags: list[str] = []
-    for ht in hashtags:
-        ht_clean = ht.lstrip("#").strip()
-        if ht_clean.lower() not in seen_hashtags:
-            seen_hashtags.add(ht_clean.lower())
-            unique_hashtags.append(f"#{ht_clean}")
-
-    seen_terms: set = set()
-    unique_terms: list[str] = []
-    for st in search_terms:
-        st_clean = st.strip()
-        if st_clean.lower() not in seen_terms:
-            seen_terms.add(st_clean.lower())
-            unique_terms.append(st_clean)
-
-    return {
-        "title": title.strip()[:70],
-        "description": description.strip()[:_description_max_chars()],
-        "hashtags": unique_hashtags[:15],
-        "search_terms": unique_terms[:15],
-    }
-
-
 def _seo_config_int(key: str, default: int, low: int, high: int) -> int:
     try:
         value = cfg.get("seo", {}).get(key, default)
         if isinstance(value, bool):
             return default
         value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(value, low), high)
+
+
+def _seo_config_float(key: str, default: float, low: float, high: float) -> float:
+    try:
+        value = cfg.get("seo", {}).get(key, default)
+        if isinstance(value, bool):
+            return default
+        value = float(value)
     except (TypeError, ValueError):
         return default
     return min(max(value, low), high)
@@ -644,23 +487,6 @@ def _shorts_hashtag_cap() -> int:
     except (TypeError, ValueError):
         cap = 3
     return min(max(cap, 1), 15)
-
-
-def _min_description_words() -> int:
-    """Read seo.min_description_words from config, crash-proof default 20.
-
-    Bools, nulls, floats, strings, and non-positive values silently fall back
-    to 20 so a misconfig can never zero out or explode the word floor. Value
-    is clamped to a sane range so a huge typo can't reject every description.
-    """
-    try:
-        raw = cfg.get("seo", {}).get("min_description_words", 20)
-        if isinstance(raw, bool):
-            return 20
-        words = int(raw)
-    except (TypeError, ValueError):
-        return 20
-    return min(max(words, 1), 40)
 
 
 _HASHTAG_TOKEN = re.compile(r"#[A-Za-z_\u0900-\u097F][A-Za-z0-9_\u0900-\u097F]*")
@@ -750,6 +576,44 @@ def _cap_description_hashtags(description: str, hashtags: List[str]) -> str:
     return body[:max(0, max_chars - len(suffix))].rstrip() + suffix
 
 
+def _clean_title(title: object, cap: int) -> str:
+    """Remove misleading format labels and truncate at a word boundary."""
+    text = str(title or "")
+    text = _LIVE_FRAMING_RE.sub("", text)
+    text = _LIVE_COMPOUND_RE.sub("", text)
+    text = re.sub(r"(?i)(?:^|\s)#shorts\b", " ", text)
+    text = re.sub(r"^[\s|:;,.!\-–—🔴🟢⚫]+", "", text)
+    text = re.sub(r"\s*\|\s*\|+", " | ", text)
+    text = re.sub(r"[ \t]{2,}", " ", text).strip(" |:;,.!-–—")
+    if len(text) <= cap:
+        return text
+    cut = text[:cap].rstrip()
+    if len(text) > cap and not text[cap].isspace() and " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip(" |:;,.!-–—")
+
+
+def _promise_tokens(text: object) -> set[str]:
+    tokens = set()
+    for token in re.findall(r"[a-z0-9]+", str(text or "").casefold()):
+        token = _PROMISE_SYNONYMS.get(token, token)
+        if len(token) >= 3 and token not in _PROMISE_STOP_WORDS:
+            tokens.add(token)
+    return tokens
+
+
+def _promise_alignment_score(title: str, transcript: str, description: str) -> float:
+    """Score whether the public promise matches the spoken clip and opening copy."""
+    title_tokens = _promise_tokens(title)
+    if not title_tokens:
+        return 0.0
+    clip_overlap = len(title_tokens & _promise_tokens(transcript))
+    opening_overlap = len(title_tokens & _promise_tokens(description[:320]))
+    clip_score = min(1.0, clip_overlap / 2.0)
+    opening_score = min(1.0, opening_overlap / 2.0)
+    return round((clip_score + opening_score) / 2.0, 3)
+
+
 def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: bool = True) -> Dict:
     """Ensure title length, description length, hashtag count, search term count.
 
@@ -764,17 +628,12 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     """
     out = dict(item)
     out["is_shorts"] = is_shorts
-    title = str(out.get("title") or "")
-    title = _LIVE_FRAMING_RE.sub("", title)
-    # Compound live-framing must also be stripped from the title, not just
-    # standalone 'live' words ('LIVESTREAM'/'LiveScore' in a title).
-    title = _LIVE_COMPOUND_RE.sub("", title)
     try:
         title_cap = int(cfg.get("seo", {}).get("title_max_chars", 70))
     except (TypeError, ValueError):
         title_cap = 70
     title_cap = max(30, min(100, title_cap))
-    out["title"] = re.sub(r"[ \t]{2,}", " ", title).strip()[:title_cap]
+    out["title"] = _clean_title(out.get("title"), title_cap)
     out["description"] = str(out.get("description") or "")[:_description_max_chars()]
 
     htags = out.get("hashtags") or []
@@ -835,6 +694,29 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     term_cap = max(5, min(30, term_cap)) if is_shorts else 30
     out["search_terms"] = deduped_t[:term_cap]
 
+    primary = out.get("primary_search_terms") or []
+    if isinstance(primary, str):
+        primary = [primary]
+    elif not isinstance(primary, list):
+        primary = []
+    allowed = {term.casefold(): term for term in out["search_terms"]}
+    selected = []
+    for value in primary:
+        clean = str(value or "").strip()
+        canonical = allowed.get(clean.casefold())
+        if canonical and canonical not in selected:
+            selected.append(canonical)
+    # Older valid responses did not name primary phrases. Promote only phrases
+    # already present in prose; never stuff missing research queries into copy.
+    if not selected:
+        description_key = re.sub(r"\s+", " ", out["description"]).casefold()
+        selected = [
+            term for term in out["search_terms"]
+            if re.sub(r"\s+", " ", term).casefold() in description_key
+        ]
+    primary_cap = _seo_config_int("max_primary_search_terms", 4, 1, 6)
+    out["primary_search_terms"] = selected[:primary_cap]
+
     # Defense-in-depth: models sometimes emit a 'tags' key outside the JSON
     # schema; upload.py merges it straight into the YouTube API tags. Filter it
     # through the same poison + live-framing rules as search_terms.
@@ -847,6 +729,8 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     deduped_tags = []
     seen_tags = set()
     for tg in tags:
+        if not isinstance(tg, str):
+            continue
         tg_clean = tg.strip().lstrip("#")
         if tg_clean.lower() in GENERIC_POISON_TERMS:
             continue
@@ -1043,17 +927,6 @@ def _repair_truncated_json(s: str) -> Optional[Dict]:
     return None
 
 
-# ── Yield-optimized title generation ───────────────────────────────────────────
-
-def _title_viral_options(transcript: str, video_title: str = "",
-                         match_context: Dict = None) -> List[str]:
-    """Generate up to 5 title variants for A/B testing.
-
-    Uses heuristic rules: player mention, action type, match situation.
-    """
-    return [""]
-
-
 # ── Main SEO generation ─────────────────────────────────────────────────────────
 
 def generate_clip_seo(
@@ -1076,15 +949,7 @@ def generate_clip_seo(
     grounded_aliases: Optional[Dict[str, str]] = None,
     research_sources: Optional[List[Dict]] = None,
 ) -> Dict:
-    """Generate SEO metadata for a single clip using fastest-first parallel model racing.
-
-    Three-tier strategy:
-    1. AI generation (parallel fastest-first with escalation)
-    2. Keyword-based salvage (fallback if AI returns nothing valid)
-    3. Transcript-aware dynamic generation (last resort)
-
-    Returns dict with title, description, hashtags, search_terms.
-    """
+    """Generate grounded, promise-aligned metadata for one cricket clip."""
     trend_topics = trend_topics or []
     teams = teams or []
     match_facts = match_facts or ([scorecard] if scorecard else [])
@@ -1233,18 +1098,44 @@ def generate_clip_seo(
             f"SEO blocked for {clip_id}: expected {min_queries}-{max_queries} "
             f"grounded search queries, got {len(output_queries)}"
         )
-    description_key = re.sub(
-        r"\s+", " ", str(result.get("description") or "")
-    ).casefold()
+    primary_queries = result.get("primary_search_terms") or []
+    min_primary = _seo_config_int("min_primary_search_terms", 2, 1, 4)
+    max_primary = _seo_config_int("max_primary_search_terms", 4, min_primary, 6)
+    primary_keys = {str(query).strip().casefold() for query in primary_queries}
+    output_keys = {str(query).strip().casefold() for query in output_queries}
+    if not min_primary <= len(primary_queries) <= max_primary:
+        raise SEOGenerationError(
+            f"SEO blocked for {clip_id}: expected {min_primary}-{max_primary} "
+            f"primary search terms, got {len(primary_queries)}"
+        )
+    if not primary_keys <= output_keys:
+        raise SEOGenerationError(
+            f"SEO blocked for {clip_id}: primary search terms are not research queries"
+        )
+    description_key = re.sub(r"\s+", " ", str(result.get("description") or "")).casefold()
     missing_queries = [
-        str(query) for query in output_queries
+        str(query) for query in primary_queries
         if re.sub(r"\s+", " ", str(query)).strip().casefold() not in description_key
     ]
     if missing_queries:
         raise SEOGenerationError(
-            f"SEO blocked for {clip_id}: search queries not embedded in description "
+            f"SEO blocked for {clip_id}: primary search terms not embedded in description "
             + ", ".join(missing_queries)
         )
+
+    alignment = _promise_alignment_score(
+        str(result.get("title") or ""), transcript, str(result.get("description") or "")
+    )
+    minimum_alignment = _seo_config_float(
+        "min_promise_alignment_score", 0.5, 0.0, 1.0
+    )
+    if alignment < minimum_alignment:
+        raise SEOGenerationError(
+            f"SEO blocked for {clip_id}: title promise does not match clip/opening "
+            f"(alignment={alignment:.3f})"
+        )
+    result["packaging_version"] = PACKAGING_VERSION
+    result["promise_alignment_score"] = alignment
 
     return result
 
@@ -1258,7 +1149,7 @@ def _attempt_seo_generation(
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
     sys_instruction: str = _SYSTEM,
-    salvage_tmpl: str = _SALVAGE_TMPL,
+    salvage_tmpl: str = _CRICKET_ONLY_SALVAGE_TMPL,
 ) -> Dict:
     """Attempt AI SEO with two-tier escalation.
 
@@ -1276,6 +1167,7 @@ def _attempt_seo_generation(
         return ai_result
 
     esc_result = _escalation_seo(clip_id, user_prompt, transcript, video_title, is_shorts,
+                                  provider_override=provider_override,
                                   model_override=model_override,
                                   sys_instruction=sys_instruction,
                                   salvage_tmpl=salvage_tmpl)
@@ -1299,11 +1191,12 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
     """
     try:
         ai = _get_ai()
-        if model_override:
+        if model_override or provider_override:
             response = ai.generate_text(
                 prompt=user_prompt,
                 system_instruction=sys_instruction,
                 prefer_model=model_override,
+                prefer_provider=provider_override,
             )
         else:
             # Use SEO-restricted models (OpenCode Go only)
@@ -1326,6 +1219,12 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
             return None
 
         result = _enforce_limits(parsed, is_shorts=is_shorts)
+        provider = ai.get_used_provider()
+        model = ai.get_used_model()
+        if isinstance(provider, str) and provider:
+            result["provider"] = provider
+        if isinstance(model, str) and model:
+            result["model"] = model
 
         # Quality gate: reject generic garbage from AI
         if not _validate_seo_quality(result):
@@ -1342,9 +1241,10 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
 def _escalation_seo(clip_id: str, user_prompt: str,
                     transcript: str, video_title: str,
                     is_shorts: bool,
+                    provider_override: Optional[str] = None,
                     model_override: Optional[str] = None,
                     sys_instruction: str = _SYSTEM,
-                    salvage_tmpl: str = _SALVAGE_TMPL) -> Optional[Dict]:
+                    salvage_tmpl: str = _CRICKET_ONLY_SALVAGE_TMPL) -> Optional[Dict]:
     """Escalation SEO: stricter prompt with more context.
 
     Called when Tier 1 fails. Uses a different model/provider if available.
@@ -1357,11 +1257,12 @@ def _escalation_seo(clip_id: str, user_prompt: str,
     salvage_prompt = user_prompt.rstrip() + "\n\nESCALATION RULES:\n" + salvage_rules
     try:
         ai = _get_ai()
-        if model_override:
+        if model_override or provider_override:
             response = ai.generate_text(
                 prompt=salvage_prompt,
                 system_instruction=sys_instruction,
                 prefer_model=model_override,
+                prefer_provider=provider_override,
             )
         else:
             # Use SEO-restricted models (OpenCode Go only)
@@ -1374,6 +1275,12 @@ def _escalation_seo(clip_id: str, user_prompt: str,
         parsed = _parse_json_response(response)
         if parsed and "title" in parsed:
             result = _enforce_limits(parsed, is_shorts=is_shorts)
+            provider = ai.get_used_provider()
+            model = ai.get_used_model()
+            if isinstance(provider, str) and provider:
+                result["provider"] = provider
+            if isinstance(model, str) and model:
+                result["model"] = model
             # Quality gate on escalation too — no generic garbage
             if not _validate_seo_quality(result):
                 log.warning("[%s] Escalation SEO failed quality gate", clip_id)
@@ -1401,6 +1308,12 @@ def generate_seo_for_exported_clip(
     provider_override: Optional[str] = None,
     model_override: Optional[str] = None,
     video_path: str = "",
+    video_description: str = "",
+    approved_search_queries: Optional[List[str]] = None,
+    match_facts: Optional[List[str]] = None,
+    grounded_players: Optional[List[str]] = None,
+    grounded_aliases: Optional[Dict[str, str]] = None,
+    research_sources: Optional[List[Dict]] = None,
 ) -> Dict:
     """Generate SEO for an already-exported clip and write metadata to disk.
 
@@ -1409,6 +1322,47 @@ def generate_seo_for_exported_clip(
     """
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     metadata_path = Path(output_dir) / f"{clip_id}_metadata.json"
+
+    # Research at the clip seam. Source-level research misses the exact spoken
+    # opinion/event and was the main cause of generic or mismatched metadata.
+    if approved_search_queries is None:
+        try:
+            research = get_trending_context(
+                domain="cricket",
+                region="IN",
+                video_title=video_title,
+                video_description=video_description,
+                transcript=transcript,
+                include_live_stream_url=False,
+            )
+        except Exception as exc:
+            log.warning("[%s] Per-clip research unavailable: %s", clip_id, exc)
+            research = {}
+        scorecard = scorecard or research.get("scorecard", "")
+        trend_topics = trend_topics or research.get("topics", [])
+        teams = teams or research.get("teams", [])
+        approved_search_queries = research.get("search_queries", [])
+        match_facts = match_facts or research.get("match_facts", [])
+        grounded_players = grounded_players or research.get("player_names", [])
+        grounded_aliases = grounded_aliases or research.get("player_aliases", {})
+        research_sources = research_sources or research.get("sources", [])
+
+    retry_payload = {
+        "clip_id": clip_id,
+        "transcript": transcript,
+        "video_title": video_title,
+        "video_description": video_description,
+        "scorecard": scorecard,
+        "trend_topics": trend_topics or [],
+        "teams": teams or [],
+        "is_shorts": is_shorts,
+        "approved_search_queries": approved_search_queries or [],
+        "match_facts": match_facts or [],
+        "grounded_players": grounded_players or [],
+        "grounded_aliases": grounded_aliases or {},
+        "research_sources": research_sources or [],
+        "video_path": video_path,
+    }
 
     try:
         result = generate_clip_seo(
@@ -1423,18 +1377,18 @@ def generate_seo_for_exported_clip(
             provider_override=provider_override,
             model_override=model_override,
             video_path=video_path,
+            video_description=video_description,
+            approved_search_queries=approved_search_queries,
+            match_facts=match_facts,
+            grounded_players=grounded_players,
+            grounded_aliases=grounded_aliases,
+            research_sources=research_sources,
         )
         if result.get("ai_generated") is False:
             log.warning("[%s] AI SEO failed — writing failure marker", clip_id)
             marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
-            marker_data = {
-                "clip_id": clip_id,
-                "transcript": transcript,
-                "video_title": video_title,
-                "is_shorts": is_shorts,
-            }
             with open(marker_path, "w", encoding="utf-8") as f:
-                json.dump(marker_data, f)
+                json.dump(retry_payload, f, ensure_ascii=True)
             if metadata_path.exists():
                 metadata_path.unlink()
             result["_seo_failed"] = True
@@ -1447,14 +1401,8 @@ def generate_seo_for_exported_clip(
     except Exception as e:
         log.error("[%s] SEO generation failed: %s", clip_id, e)
         marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
-        marker_data = {
-            "clip_id": clip_id,
-            "transcript": transcript,
-            "video_title": video_title,
-            "is_shorts": is_shorts,
-        }
         with open(marker_path, "w", encoding="utf-8") as f:
-            json.dump(marker_data, f)
+            json.dump(retry_payload, f, ensure_ascii=True)
         return {"_seo_failed": True, "error": str(e)}
 
 
@@ -1487,8 +1435,8 @@ def process_all_seo(highlights_path: str, output_dir: str,
                 video_title = meta.get("title", "")
                 video_description = meta.get("description", "")
                 live_stream_url = meta.get("live_stream_url", "")
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Could not load source video metadata for SEO: %s", exc)
 
     if not video_path:
         dl_fn = cfg.get("download", {}).get("output_filename", "video.mp4")
@@ -1500,7 +1448,7 @@ def process_all_seo(highlights_path: str, output_dir: str,
     clips = list(highlights.items())
     failures = []
     for idx, (clip_id, info) in enumerate(clips, start=1):
-        transcript = info.get("text", "Cricket Live")
+        transcript = info.get("text", "")
         log.info("SEO [%d/%d]: %s", idx, len(clips), clip_id)
 
         try:
@@ -1547,6 +1495,16 @@ def process_all_seo(highlights_path: str, output_dir: str,
                 "clip_id": clip_id,
                 "transcript": transcript,
                 "video_title": video_title,
+                "video_description": video_description,
+                "scorecard": trend.get("scorecard", ""),
+                "trend_topics": trend.get("topics", []),
+                "teams": trend.get("teams", []),
+                "approved_search_queries": trend.get("search_queries", []),
+                "match_facts": trend.get("match_facts", []),
+                "grounded_players": trend.get("player_names", []),
+                "grounded_aliases": trend.get("player_aliases", {}),
+                "research_sources": trend.get("sources", []),
+                "video_path": video_path,
                 "is_shorts": True,
             }
             marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
@@ -1595,17 +1553,16 @@ def retry_failed_seo(output_dir: str) -> dict:
     recovered = 0
     for m in markers:
         try:
-            data = json.loads(m.read_text())
+            data = json.loads(m.read_text(encoding="utf-8"))
             clip_id = data.get("clip_id", m.stem.replace("_seo_failed", ""))
-            transcript = data.get("transcript", "")
-            video_title = data.get("video_title", "")
-            is_shorts = data.get("is_shorts", True)
-            result = generate_clip_seo(
-                clip_id=clip_id,
-                transcript=transcript,
-                video_title=video_title,
-                is_shorts=is_shorts,
+            retry_keys = (
+                "transcript", "video_title", "video_description", "scorecard",
+                "trend_topics", "teams", "is_shorts", "video_path",
+                "approved_search_queries", "match_facts", "grounded_players",
+                "grounded_aliases", "research_sources",
             )
+            kwargs = {key: data[key] for key in retry_keys if key in data}
+            result = generate_clip_seo(clip_id=clip_id, **kwargs)
             if result and not result.get("_seo_failed"):
                 meta_path = out / f"{clip_id}_metadata.json"
                 tmp_path = meta_path.with_suffix(".tmp")
@@ -1628,64 +1585,3 @@ def retry_failed_seo(output_dir: str) -> dict:
 
 if __name__ == "__main__":
     process_all_seo("highlights/video.yaml", "shorts/test")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# SEOGenerator class — lightweight wrapper for programmatic use
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class SEOGenerator:
-    """Lightweight SEO metadata generator for clips.
-
-    Delegates to the function-based API for real generation.
-    Kept for backward compatibility with tests.
-    """
-
-    def __init__(
-        self,
-        decision_store: "DecisionStore",
-        analytics: "Analytics | None" = None,
-    ) -> None:
-        from automation.memory.decision_store import DecisionStore as _DS
-        from automation.seo.analytics import Analytics as _Analytics
-        self._store: _DS = decision_store
-        self._analytics: _Analytics | None = analytics
-
-    def generate(self, clip_data: dict) -> dict:
-        clip_id = clip_data.get("clip_id", "unknown")
-        title = clip_data.get("title", "")
-        transcript_summary = clip_data.get("transcript_summary", "")
-
-        seo_title = title[:60] + " - Shorts"
-        description = (
-            "\U0001f3ac " + clip_data.get("title", "") + "\n\n"
-            + transcript_summary[:200] + "\n\n"
-            + "#shorts #youtubeshorts"
-        )
-
-        words = [w for w in title.split() if len(w) > 2 and w.isalpha()]
-        title_words = words[:3]
-        tags = ["shorts", "youtubeshorts", "viral"] + title_words
-
-        return {
-            "clip_id": clip_id,
-            "title": seo_title,
-            "description": description,
-            "tags": tags,
-            "category": "Entertainment",
-        }
-
-    def generate_batch(self, clips: list[dict]) -> list[dict]:
-        return [self.generate(c) for c in clips]
-
-    def enhance_with_analytics(self, clip_data: dict) -> dict:
-        result = self.generate(clip_data)
-        if self._analytics is not None:
-            summary = self._analytics.get_summary()
-            tags = result["tags"]
-            if summary.get("avg_score", 0) > 0.7:
-                tags.append("highly_rated")
-            if summary.get("published_count", 0) > 10:
-                tags.append("popular_channel")
-            result["tags"] = tags
-        return result

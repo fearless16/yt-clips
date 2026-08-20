@@ -1335,20 +1335,22 @@ def export_all(
     out_dir = Path(cfg["paths"]["shorts"]) / _new_export_batch_id()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prepare SEO context once (trend fetch is expensive)
+    # Prepare immutable source context once. Current search/match research is
+    # intentionally performed per clip using that clip's transcript.
     seo_context = {}
     if generate_seo:
         try:
-            from automation.seo.trends import get_trending_context
             import json as _json
 
             video_title = ""
+            video_description = ""
             live_stream_url = ""
             meta_file = Path(cfg["paths"]["input"]) / "video_metadata.json"
             if meta_file.exists():
                 with open(meta_file, "r", encoding="utf-8") as f:
                     meta = _json.load(f)
                     video_title = meta.get("title", "")
+                    video_description = meta.get("description", "")
                     live_stream_url = meta.get("live_stream_url", "")
 
             # Load match context (scorecard, key players, etc.)
@@ -1367,17 +1369,16 @@ def export_all(
                             f"Highlights: {', '.join(mc.get('highlights', []))}\n"
                             f"Venue: {mc.get('venue', '')}"
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.warning("Could not load local match context: %s", exc)
 
-            trend = get_trending_context(domain="cricket", region="IN", video_title=video_title)
             seo_context = {
                 "video_title": video_title,
-                "scorecard": match_context or trend.get("scorecard", ""),
-                "trend_topics": trend.get("topics", []),
-                "live_stream_url": live_stream_url or trend.get("live_stream_url", ""),
+                "video_description": video_description,
+                "scorecard": match_context,
+                "live_stream_url": live_stream_url,
             }
-            log.info("Trend context loaded for SEO.")
+            log.info("Source context loaded for per-clip SEO research.")
         except Exception as e:
             log.warning("Could not load trend context: %s", e)
 
@@ -1533,11 +1534,11 @@ def export_all(
             from automation.seo.seo import generate_seo_for_exported_clip
             generate_seo_for_exported_clip(
                 clip_id=clip_id,
-                transcript=info.get("text", "Cricket Live"),
+                transcript=info.get("text", ""),
                 output_dir=str(output_dir),
                 video_title=ctx.get("video_title", ""),
+                video_description=ctx.get("video_description", ""),
                 scorecard=ctx.get("scorecard", ""),
-                trend_topics=ctx.get("trend_topics", []),
                 live_stream_url=ctx.get("live_stream_url", ""),
             )
             log.info("🏷  SEO done: %s", clip_id)
@@ -1583,6 +1584,7 @@ def export_all(
                 fut.result(timeout=120)
             except Exception as e:
                 log.error("SEO task error: %s", e)
+    if seo_executor is not None:
         seo_executor.shutdown(wait=False)
 
     log.info("✨ Export complete: %d clips in %s", len(exported_clips), out_dir)

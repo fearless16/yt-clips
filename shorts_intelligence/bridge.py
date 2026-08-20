@@ -68,6 +68,19 @@ def record_exported(
                         "seo_tag_count_bucket": _length_bucket(len(tags), (10, 20, 30)),
                         "seo_hashtag_count_bucket": _length_bucket(len(hashtags), (5, 10, 15)),
                     })
+                    packaging_version = metadata.get("packaging_version")
+                    if packaging_version:
+                        features["seo_packaging_version"] = str(packaging_version).casefold()
+                    if "promise_alignment_score" in metadata:
+                        alignment = round(_float(metadata["promise_alignment_score"]) * 100)
+                        features["seo_promise_alignment_bucket"] = _length_bucket(
+                            alignment, (50, 75, 90)
+                        )
+                    primary_queries = metadata.get("primary_search_terms") or []
+                    if isinstance(primary_queries, list):
+                        features["seo_primary_query_count_bucket"] = _length_bucket(
+                            len(primary_queries), (1, 2, 3)
+                        )
                     for key in ("provider", "model"):
                         if metadata.get(key):
                             features[f"seo_{key}"] = str(metadata[key]).casefold()
