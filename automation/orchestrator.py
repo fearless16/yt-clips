@@ -531,11 +531,7 @@ def run(
                     )
                     slot_map: dict[str, datetime] = {}
                     if auto_schedule:
-                        from scheduler import (
-                            _clamp_to_day_window,
-                            assign_clips_to_slots,
-                            format_for_youtube,
-                        )
+                        from scheduler import assign_clips_to_slots, format_for_youtube
                         clip_scores: dict[str, float] = {}
                         for clip_path in result.exported:
                             meta_path = clip_path.with_name(
@@ -557,6 +553,7 @@ def run(
                             clips=[p.stem for p in result.exported],
                             interval_hours=interval,
                             clip_scores=clip_scores or None,
+                            schedule_config=cfg.get("upload_schedule", {}),
                         )
                         slot_map = {stem: dt for stem, dt in assignments}
 
@@ -583,7 +580,7 @@ def run(
                                  len(assignments))
 
                     skipped_no_meta = 0
-                    for clip_idx, clip_path in enumerate(result.exported):
+                    for clip_path in result.exported:
                         meta_path = clip_path.with_name(
                             f"{clip_path.stem}_metadata.json"
                         )
@@ -595,15 +592,9 @@ def run(
                             )
                             continue
                         publish_at: str | None = None
-                        if auto_schedule and clip_idx > 0:
-                            import random
+                        if auto_schedule:
                             slot = slot_map.get(clip_path.stem)
                             if slot:
-                                # Small uniform jitter (2-3h) per clip — NOT multiplied by
-                                # clip_idx which caused clips 10+ to be 20-30h out.
-                                jitter = random.uniform(2, 3)
-                                slot += timedelta(hours=jitter)
-                                slot = _clamp_to_day_window(slot)
                                 publish_at = format_for_youtube(slot)
                         try:
                             video_id = upload_video(

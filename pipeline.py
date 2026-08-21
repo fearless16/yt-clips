@@ -595,6 +595,7 @@ def run(
                 clips=[p.stem for p in exported],
                 interval_hours=interval,
                 clip_scores=clip_scores if clip_scores else None,
+                schedule_config=cfg.get("upload_schedule", {}),
             )
             slot_map = {stem: dt for stem, dt in assignments}
             log.info("Schedule generated for %d clips (jittered hourly)", len(assignments))

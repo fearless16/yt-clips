@@ -17,7 +17,7 @@ Design:
 import hashlib
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 STATE_FILE = "scheduler_state.json"
@@ -86,30 +86,112 @@ def _slot_priority(dt: datetime) -> Tuple[int, int]:
     return (len(PRIME_WINDOWS), hour)
 
 
+def _as_ist(value: datetime) -> datetime:
+    """Interpret naive scheduling inputs as IST and normalize aware inputs."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=IST)
+    return value.astimezone(IST)
+
+
+def _at_minute(day: date, minute_of_day: int) -> datetime:
+    return datetime.combine(day, dt_time(), tzinfo=IST) + timedelta(
+        minutes=minute_of_day
+    )
+
+
 def generate_schedule(
     num_slots: int,
     interval_hours: int = 1,
     start_from: Optional[datetime] = None,
+    *,
+    day_start_hour: int = DAY_START_HOUR,
+    day_end_hour: int = DAY_END_HOUR,
+    jitter_max_minutes: int = 55,
+    spread_across_window: bool = True,
 ) -> List[datetime]:
-    """Generate *num_slots* jittered timestamps, each *interval_hours* apart.
+    """Generate future IST slots inside a configurable daily window.
 
-    Each slot's minute offset is deterministic (date+hour hash), so the same
-    day-hour always gets the same jitter.  Slots begin on the next clean hour
-    boundary (not sub-minute).  Start is clamped to DAY_START_HOUR; any slot
-    past DAY_END_HOUR rolls to the next day.
+    ``interval_hours`` controls the maximum number of uploads per day. When
+    ``spread_across_window`` is enabled, that day's clips are distributed from
+    morning to evening instead of being packed into consecutive early hours.
+    Overflow rolls to the next day without producing duplicate timestamps.
     """
-    if start_from is None:
-        start_from = _now_ist()
+    if num_slots <= 0:
+        return []
+    if not 0 <= day_start_hour < day_end_hour <= 24:
+        raise ValueError("upload window must satisfy 0 <= start < end <= 24")
+    if interval_hours <= 0:
+        raise ValueError("interval_hours must be positive")
 
-    # Round up to the next hour, then clamp start to day window
-    start = start_from.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    start = _clamp_to_day_window(start)
+    current = _as_ist(start_from or _now_ist())
+    interval_minutes = max(1, int(round(interval_hours * 60)))
+    jitter_max_minutes = max(0, min(int(jitter_max_minutes), 59))
+    window_start = day_start_hour * 60
+    window_end = day_end_hour * 60 - 1  # end hour is exclusive
+
+    next_hour = current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    first_day = current.date()
+    first_minute = window_start
+    next_hour_minute = next_hour.hour * 60
+    if current.hour >= day_end_hour or next_hour.date() != first_day:
+        first_day += timedelta(days=1)
+    elif next_hour_minute < window_start:
+        first_minute = window_start
+    elif next_hour_minute > window_end:
+        first_day += timedelta(days=1)
+    else:
+        first_minute = next_hour_minute
 
     slots: List[datetime] = []
-    for i in range(num_slots):
-        base = start + timedelta(hours=i * interval_hours)
-        jitter = _jitter_minutes(base)
-        slots.append(_clamp_to_day_window(base.replace(minute=jitter)))
+    remaining = num_slots
+    day = first_day
+    while remaining:
+        available_start = first_minute if day == first_day else window_start
+        if available_start > window_end:
+            day += timedelta(days=1)
+            continue
+
+        capacity = ((window_end - available_start) // interval_minutes) + 1
+        take = min(remaining, capacity)
+
+        if take == 1:
+            # A lone clip gets the strongest general evening slot, when future.
+            preferred = 19 * 60
+            base_minutes = [min(max(preferred, available_start), window_end)]
+        elif spread_across_window:
+            span = window_end - available_start
+            base_minutes = [
+                available_start + round(span * index / (take - 1))
+                for index in range(take)
+            ]
+        else:
+            base_minutes = [
+                available_start + index * interval_minutes for index in range(take)
+            ]
+
+        if len(base_minutes) > 1:
+            smallest_gap = min(
+                later - earlier
+                for earlier, later in zip(base_minutes, base_minutes[1:])
+            )
+            safe_jitter = min(
+                jitter_max_minutes,
+                max(0, smallest_gap - interval_minutes),
+            )
+        else:
+            safe_jitter = min(jitter_max_minutes, window_end - base_minutes[0])
+
+        for index, minute in enumerate(base_minutes):
+            base = _at_minute(day, minute)
+            # Keep the evening endpoint fixed inside the window.
+            jitter = 0 if index == len(base_minutes) - 1 else _jitter_minutes(
+                base, safe_jitter
+            )
+            slots.append(base + timedelta(minutes=jitter))
+
+        remaining -= take
+        day += timedelta(days=1)
+
     return slots
 
 
@@ -117,6 +199,7 @@ def assign_clips_to_slots(
     clips: List[str],
     interval_hours: int = 1,
     clip_scores: Optional[Dict[str, float]] = None,
+    schedule_config: Optional[Dict] = None,
 ) -> List[Tuple[str, datetime]]:
     """Map clips → jittered slots, putting the best clip(s) in prime time.
 
@@ -128,7 +211,17 @@ def assign_clips_to_slots(
     Returns:
         List of (clip_identifier, scheduled_datetime) sorted chronologically.
     """
-    slots = generate_schedule(len(clips), interval_hours)
+    schedule_config = schedule_config or {}
+    slots = generate_schedule(
+        len(clips),
+        interval_hours,
+        day_start_hour=int(schedule_config.get("day_start_hour", DAY_START_HOUR)),
+        day_end_hour=int(schedule_config.get("day_end_hour", DAY_END_HOUR)),
+        jitter_max_minutes=int(schedule_config.get("jitter_max_minutes", 55)),
+        spread_across_window=bool(
+            schedule_config.get("spread_across_window", True)
+        ),
+    )
 
     # Rank slots best → worst
     ranked: List[Tuple[Tuple[int, int], int, datetime]] = []
