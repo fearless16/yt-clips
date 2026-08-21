@@ -2,6 +2,7 @@
 
 import pytest
 import json
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from automation.memory.event_models import EventType, ClipEvent
@@ -263,3 +264,76 @@ class TestUrlMatchKey:
     def test_trailing_params_do_not_bleed_into_key(self):
         from automation.orchestrator import _url_match_key
         assert _url_match_key("https://youtu.be/AbC123xyz98?si=extra&t=30") == "AbC123xyz98"
+
+
+class TestUploadGate:
+    def test_auth_alone_never_enables_upload(self):
+        from automation.orchestrator import _should_upload
+
+        assert _should_upload(auto_upload=False, has_auth=True) is False
+
+    def test_explicit_upload_requires_auth(self):
+        from automation.orchestrator import _should_upload
+
+        assert _should_upload(auto_upload=True, has_auth=False) is False
+        assert _should_upload(auto_upload=True, has_auth=True) is True
+
+
+def test_one_click_windows_script_uses_canonical_safe_cli():
+    script = (Path(__file__).parents[2] / "make_shorts.bat").read_text(
+        encoding="utf-8"
+    )
+
+    assert "-m automation.cli" in script
+    assert "--upload" not in script
+    assert "pipeline.py" not in script
+
+
+def test_downloader_overwrites_previous_source_video():
+    from download import _base_yt_dlp_cmd
+
+    command = _base_yt_dlp_cmd({"use_aria2c": False}, "input/video.%(ext)s")
+
+    assert "--force-overwrites" in command
+
+
+def test_downloader_removes_previous_source_before_a_fresh_attempt(tmp_path):
+    from download import _cleanup_stale_downloads
+
+    destination = tmp_path / "video.mp4"
+    fragment = tmp_path / "video.webm.part"
+    destination.write_bytes(b"old-video")
+    fragment.write_bytes(b"partial")
+
+    _cleanup_stale_downloads(destination)
+
+    assert not destination.exists()
+    assert not fragment.exists()
+
+
+def test_required_download_failure_stops_all_downstream_stages(monkeypatch):
+    from automation import orchestrator
+
+    calls = []
+    monkeypatch.setattr("automation.transcript.fetch", lambda *a, **k: {})
+
+    def fail_download(*args, **kwargs):
+        calls.append("download")
+        raise RuntimeError("network unavailable")
+
+    monkeypatch.setattr("download.download", fail_download)
+    monkeypatch.setattr(
+        "transcribe.transcribe", lambda *a, **k: calls.append("transcribe")
+    )
+    monkeypatch.setattr(
+        "automation.clip_selection.pipeline.detect_highlights",
+        lambda *a, **k: calls.append("highlight") or [],
+    )
+    monkeypatch.setattr(
+        "export.export_all", lambda *a, **k: calls.append("export") or []
+    )
+
+    result = orchestrator.run("https://youtu.be/AbC123xyz98")
+
+    assert calls == ["download"]
+    assert result.failures == ["stage1c: network unavailable"]

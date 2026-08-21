@@ -405,6 +405,26 @@ def _is_screen_share_frame(frame_array: np.ndarray) -> bool:
     contrast_ratio = (bright_pixels + dark_pixels) / frame_array.size
     return bool(overall_var > 500 and edge_density > 6 and contrast_ratio > 0.18)
 
+
+def _is_obstructive_lower_third(frame_array: np.ndarray) -> bool:
+    """Detect the stream's opaque chat callout where a portrait crop cuts it in half."""
+    guard = cfg.get("layout", {}).get("source_overlay_guard", {})
+    if not guard.get("enabled", True) or frame_array.size == 0:
+        return False
+    height, width = frame_array.shape[:2]
+    region = frame_array[
+        int(height * 0.76):int(height * 0.97),
+        int(width * 0.30):int(width * 0.52),
+    ]
+    if region.size == 0:
+        return False
+    dark_ratio = float(np.mean(region < 35))
+    bright_ratio = float(np.mean(region > 180))
+    return bool(
+        dark_ratio >= float(guard.get("dark_ratio", 0.58))
+        and bright_ratio >= float(guard.get("bright_text_ratio", 0.025))
+    )
+
 def detect_layout(video_path: str, start: float, end: float) -> Dict:
     """
     Layout decision table:
@@ -428,6 +448,7 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
     black_panel_votes = []
     black_panel_side_votes = []
     screen_share_votes = []
+    obstructive_overlay_votes = []
 
     res = _run_cmd(cmd)
     if res and res.stdout:
@@ -464,6 +485,8 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
 
             if _is_screen_share_frame(frame_array):
                 screen_share_votes.append(True)
+            if _is_obstructive_lower_third(frame_array):
+                obstructive_overlay_votes.append(True)
 
     has_black_panel = len(black_panel_votes) >= 2
     has_divider = len(divider_votes) >= 2
@@ -474,6 +497,10 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
 
     # Screen share: high edge density but no split-screen
     is_screen_share = len(screen_share_votes) >= 3 and not is_split_screen
+    overlay_min_votes = int(
+        cfg.get("layout", {}).get("source_overlay_guard", {}).get("min_votes", 2)
+    )
+    obstructive_overlay = len(obstructive_overlay_votes) >= max(1, overlay_min_votes)
 
     black_panel_side = None
     if has_black_panel:
@@ -544,6 +571,8 @@ def detect_layout(video_path: str, start: float, end: float) -> Dict:
         "guest_cam_on": layout_type == "split_both_active",
         "is_screen_share": is_screen_share,
         "chat_overlay": chat_overlay,
+        "obstructive_overlay": obstructive_overlay,
+        "obstructive_overlay_votes": len(obstructive_overlay_votes),
     }
 
 def _get_video_dimensions(video_path: str) -> Dict:
@@ -750,6 +779,12 @@ def analyze_clip(
         if should_drop:
             log.info("[%s] Solo but no face detected → DROP", clip_id)
 
+    hard_reject_reason = None
+    if layout.get("obstructive_overlay", False):
+        should_drop = True
+        hard_reject_reason = "obstructive_source_overlay"
+        log.info("[%s] Source lower-third obstructs portrait crop → DROP", clip_id)
+
     # ── Chat overlay handling for 9:16 crop ────────────────────────────────────
     chat_overlay = layout.get("chat_overlay")
     exclude_chat_from_crop = False
@@ -795,6 +830,7 @@ def analyze_clip(
         "guest_cam_off": guest_cam_off,
         "is_screen_share": is_screen_share,
         "should_drop": should_drop,
+        "hard_reject_reason": hard_reject_reason,
         "active_crop": face_crop,
         "no_face": no_face,
         "speed_factor": speed_factor,

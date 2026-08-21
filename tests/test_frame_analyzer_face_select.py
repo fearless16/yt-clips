@@ -131,3 +131,15 @@ class TestAnalyzeClipEmptyFacesRegression:
         assert strategy["active_crop"] is None
         assert strategy["no_face"] is True
         assert strategy["should_drop"] is True
+
+
+def test_obstructive_source_lower_third_is_detected():
+    import frame_analyzer as fa
+
+    frame = np.full((180, 320), 100, dtype=np.uint8)
+    region = frame[136:174, 96:166]
+    region[:] = 10
+    region.flat[: max(1, int(region.size * 0.04))] = 255
+
+    assert fa._is_obstructive_lower_third(frame) is True
+    assert fa._is_obstructive_lower_third(np.full((180, 320), 100, dtype=np.uint8)) is False

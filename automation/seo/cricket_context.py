@@ -74,6 +74,20 @@ CRICKET_SPELLING_CORRECTIONS = {
     "pakistan": "Pakistan",
     "australia": "Australia",
     "england": "England",
+    "south africa": "South Africa",
+    "new zealand": "New Zealand",
+    "ireland": "Ireland",
+    "पाकिस्तान": "Pakistan",
+    "इंग्लैंड": "England",
+    "ऑस्ट्रेलिया": "Australia",
+    "साउथ अफ्रीका": "South Africa",
+    "दक्षिण अफ्रीका": "South Africa",
+    "इंडिया": "India",
+    "भारत": "India",
+    "न्यूजीलैंड": "New Zealand",
+    "आयरलैंड": "Ireland",
+    "श्रीलंका": "Sri Lanka",
+    "श्री लंका": "Sri Lanka",
     
     # Venues
     "wankhede": "Wankhede Stadium, Mumbai",
@@ -115,7 +129,7 @@ CRICKET_TEAMS: Set[str] = {
     "Kolkata Knight Riders", "Sunrisers Hyderabad", "Rajasthan Royals",
     "Delhi Capitals", "Lucknow Super Giants", "Gujarat Titans", "Punjab Kings",
     "India", "Pakistan", "Australia", "England", "South Africa", "New Zealand",
-    "West Indies", "Sri Lanka", "Bangladesh", "Afghanistan"
+    "West Indies", "Sri Lanka", "Bangladesh", "Afghanistan", "Ireland",
 }
 
 def _runtime_player_corrections(player_names: Iterable[str]) -> Dict[str, str]:
@@ -170,6 +184,14 @@ def correct_cricket_spelling(
         if len(targets) > 1:
             corrections.pop(alias, None)
     corrections.update(runtime)
+    contextual_aliases = {
+        "Tim Southee": ("सऊदी", "साउदी", "टिम साउदी"),
+        "Tom Latham": ("टॉम लेदम", "टॉम लैथम", "लेदम"),
+    }
+    runtime_keys = {str(name).casefold() for name in runtime_names}
+    for canonical, aliases_for_player in contextual_aliases.items():
+        if canonical.casefold() in runtime_keys:
+            corrections.update({alias: canonical for alias in aliases_for_player})
     corrections.update({
         str(alias).casefold(): str(player).strip()
         for alias, player in (player_aliases or {}).items()
@@ -181,7 +203,9 @@ def correct_cricket_spelling(
         corrections.setdefault(canonical.lower(), canonical)
     aliases = sorted(corrections, key=len, reverse=True)
     pattern = re.compile(
-        r"\b(?:" + "|".join(re.escape(alias) for alias in aliases) + r")\b",
+        r"(?<![A-Za-z0-9_\u0900-\u097f])(?:"
+        + "|".join(re.escape(alias) for alias in aliases)
+        + r")(?![A-Za-z0-9_\u0900-\u097f])",
         re.IGNORECASE,
     )
     return pattern.sub(
@@ -196,6 +220,16 @@ _STRONG_CRICKET_TERMS = {
     "yorker", "googly", "doosra", "powerplay", "run rate", "super over",
     "century", "half-century", "hattrick", "innings", "crease", "over",
     "six", "four", "chauka", "chhakka", "sixer", "boundary",
+}
+
+# YouTube's Hindi captions are usually Devanagari even when the streamer mixes
+# Hindi and English.  Keeping these domain words separate avoids weakening the
+# Latin-word boundary checks above while allowing the cricket-only gate to see
+# the actual commentary.
+_STRONG_HINDI_CRICKET_TERMS = {
+    "क्रिकेट", "विकेट", "रन", "गेंद", "बॉल", "बल्लेबाज", "गेंदबाज",
+    "ओवर", "पारी", "छक्का", "चौका", "बाउंड्री", "एलबीडब्ल्यू", "कैच",
+    "रन रेट", "टेस्ट मैच", "टी20", "वनडे",
 }
 
 _NON_PLAYER_NAME_PHRASES = {
@@ -219,13 +253,33 @@ def discover_grounded_player_names(
     source_low = str(source_text or "").casefold()
     counts: Dict[str, int] = defaultdict(int)
     display: Dict[str, str] = {}
+    generic_tokens = {
+        "live", "match", "test", "day", "score", "cricket", "today",
+        "highlights", "commentary", "stream", "analysis", "discussion",
+        "kya", "ka", "ki", "ke", "mein", "se", "aur", "hai", "raha",
+        "runs", "run", "rate", "ahead", "short", "shorts", "boundary",
+        "boundaries", "tez", "wahi", "phir", "har", "baar", "purana",
+        "khilaf", "sahi", "wali", "fan", "reaction", "explained",
+        "stadium", "pitch", "secret", "chhupa",
+        "liye", "mushkil", "pak", "eng", "bowling", "batting", "wicket",
+        "captaincy", "captain", "coach", "four", "six", "lead", "pressure",
+        "world", "cup", "start", "bada", "mod", "door", "sach",
+        "domination", "khatam", "sawal",
+    }
+    team_names = {team.casefold() for team in CRICKET_TEAMS}
     pattern = re.compile(r"\b[A-Z][a-z]{2,}\s+[A-Z][A-Za-z.'-]{2,}\b")
     for text in current_search_texts:
         in_result = set()
         for match in pattern.findall(str(text or "")):
             clean = re.sub(r"\s+", " ", match).strip(" .'\"")
             key = clean.casefold()
-            if key in _NON_PLAYER_NAME_PHRASES or key in in_result:
+            tokens = set(re.findall(r"[a-z]+", key))
+            if (
+                key in _NON_PLAYER_NAME_PHRASES
+                or key in team_names
+                or tokens & generic_tokens
+                or key in in_result
+            ):
                 continue
             in_result.add(key)
             display.setdefault(key, clean)
@@ -273,6 +327,14 @@ def discover_grounded_player_aliases(
 _WEAK_CRICKET_TERMS = {"shot", "coach", "captain", "team", "target", "chase"}
 
 
+def _contains_hindi_term(text: str, term: str) -> bool:
+    """Match a Devanagari term as a token, not inside words like ``करना``."""
+    return bool(re.search(
+        r"(?<![\u0900-\u097f])" + re.escape(term) + r"(?![\u0900-\u097f])",
+        text,
+    ))
+
+
 def _cricket_relevance_score(text: str) -> int:
     """Return a conservative cricket relevance score for one text fragment."""
     if not text:
@@ -287,6 +349,10 @@ def _cricket_relevance_score(text: str) -> int:
     score += min(3, sum(1 for term in _STRONG_CRICKET_TERMS if re.search(
         r"\b" + re.escape(term) + r"\b", low
     )))
+    score += min(3, sum(
+        1 for term in _STRONG_HINDI_CRICKET_TERMS
+        if _contains_hindi_term(low, term)
+    ))
     score += min(1, sum(1 for term in _WEAK_CRICKET_TERMS if re.search(
         r"\b" + re.escape(term) + r"\b", low
     )))

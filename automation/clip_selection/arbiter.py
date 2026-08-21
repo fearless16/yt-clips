@@ -159,6 +159,10 @@ def llm_arbiter_refine(
         "3. Cricket relevance (key players, big moments)\n"
         "4. Self-contained (makes sense without context)\n"
         "5. Viral potential (rare/controversial/shocking)\n\n"
+        "Source-grounding:\n"
+        "- Prefer clips that directly match the source event/title\n"
+        "- Keep an off-topic tangent only when it is exceptionally strong, self-contained, and cricket-grounded\n"
+        "- Never invent a player, match, or expansion of an ambiguous nickname\n\n"
         "Rules:\n"
         "- Reject clips that are boring, repetitive, or incomplete\n"
         "- Prefer shorter clips (15-30s) for Shorts retention\n"
@@ -167,8 +171,11 @@ def llm_arbiter_refine(
         "- Max 10 clips"
     )
 
+    source_title = str(context.get("source_title", "") or "").strip()
+    source_line = f"Source video title: {source_title}\n\n" if source_title else ""
+
     user_prompt = (
-        f"Here are {len(candidates)} scored candidates:\n\n"
+        f"{source_line}Here are {len(candidates)} scored candidates:\n\n"
         f"{candidates_str}\n\n"
         f"Transcript context:\n{transcript_text}\n\n"
         "Return JSON:\n"
@@ -211,16 +218,6 @@ def llm_arbiter_refine(
             c["ai_score"] = sel.get("score", c.get("final_score", 0))
             c["ai_reason"] = sel.get("reason", "")
             refined.append(c)
-
-        # Fill remaining slots if LLM didn't select enough
-        if len(refined) < max_selected:
-            selected_set = {s.get("candidate_id", 0) for s in selected}
-            remaining = [
-                c for i, c in enumerate(candidates)
-                if (i + 1) not in selected_set
-            ]
-            remaining.sort(key=lambda x: x.get("final_score", 0), reverse=True)
-            refined.extend(remaining[:max_selected - len(refined)])
 
         refined.sort(key=lambda x: x.get("ai_score", x.get("final_score", 0)), reverse=True)
         return refined[:max_selected]

@@ -47,12 +47,49 @@ def _valid_word_timings(segment: dict) -> list[dict]:
     return sorted(words, key=lambda item: item["start"])
 
 
+def _merge_caption_fragments(segments: list[dict]) -> list[dict]:
+    """Join rolling YouTube caption cues until a spoken sentence completes."""
+    merged: list[dict] = []
+    current: dict | None = None
+    for segment in segments or []:
+        try:
+            start = float(segment["start"])
+            end = float(segment["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        text = re.sub(r"\s+", " ", str(segment.get("text", ""))).strip()
+        if end <= start or not text:
+            continue
+
+        if current is not None and start > float(current["end"]) + 1.0:
+            merged.append(current)
+            current = None
+
+        if current is None:
+            current = {"start": start, "end": end, "text": text}
+            if segment.get("words"):
+                current["words"] = list(segment["words"])
+        else:
+            current["end"] = max(float(current["end"]), end)
+            current["text"] = f"{current['text']} {text}".strip()
+            if segment.get("words"):
+                current.setdefault("words", []).extend(segment["words"])
+
+        if re.search(r"[.!?।]+[\"')\]]*\s*$", text):
+            merged.append(current)
+            current = None
+
+    if current is not None:
+        merged.append(current)
+    return merged
+
+
 def _prepare_complete_thoughts(segments: list[dict]) -> list[dict]:
     """Canonicalize entities, split complete thoughts, and trim outer silence."""
     from automation.seo.cricket_context import correct_cricket_spelling
 
     prepared: list[dict] = []
-    for segment in segments or []:
+    for segment in _merge_caption_fragments(segments):
         try:
             seg_start = float(segment["start"])
             seg_end = float(segment["end"])
@@ -111,6 +148,26 @@ def _filter_cricket_candidates(candidates: list[dict], source_context: str) -> l
     ]
 
 
+def _filter_source_match_candidates(
+    candidates: list[dict],
+    source_title: str,
+    minimum_matches: int = 3,
+) -> list[dict]:
+    """Prefer the advertised match without turning a generic stream into a hard gate."""
+    from automation.seo.cricket_context import find_canonical_entities
+
+    source_teams = set(find_canonical_entities(source_title).get("teams", []))
+    if len(source_teams) < 2:
+        return candidates
+    matched = [
+        candidate for candidate in candidates
+        if source_teams.intersection(
+            find_canonical_entities(str(candidate.get("text", ""))).get("teams", [])
+        )
+    ]
+    return matched if len(matched) >= max(1, int(minimum_matches)) else candidates
+
+
 def _load_source_context(input_dir: str | Path) -> str:
     """Load title and match metadata used to disambiguate short utterances."""
     pieces = []
@@ -123,6 +180,17 @@ def _load_source_context(input_dir: str | Path) -> str:
         except (OSError, json.JSONDecodeError, TypeError):
             continue
     return " ".join(pieces)
+
+
+def _load_source_title(input_dir: str | Path) -> str:
+    """Return the source title without sending its keyword-stuffed description to AI."""
+    path = Path(input_dir) / "video_metadata.json"
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return str(data.get("title", "") or "").strip()[:240]
+    except (OSError, json.JSONDecodeError, TypeError):
+        return ""
 
 
 def _write_empty_highlights(output_path: str | Path) -> None:
@@ -438,6 +506,7 @@ def detect_highlights(
     segments = data if isinstance(data, list) else data.get("segments", [])
     segments = _prepare_complete_thoughts(segments)
     source_context = _load_source_context(paths["input"])
+    source_title = _load_source_title(paths["input"])
     stream_context = " ".join([source_context] + [
         str(segment.get("text", "")) for segment in segments
     ])
@@ -524,6 +593,16 @@ def detect_highlights(
     merged = _merge_windows(windows, h_cfg["merge_gap"])
 
     merged.sort(key=lambda w: w["score"], reverse=True)
+    selection_cfg = cfg.get("clip_selection", {})
+    if selection_cfg.get("prefer_source_match", True):
+        before = len(merged)
+        merged = _filter_source_match_candidates(
+            merged,
+            source_title,
+            minimum_matches=int(selection_cfg.get("source_match_min_candidates", 3)),
+        )
+        if len(merged) != before:
+            log.info("Source-match filter: %d/%d candidates match %s", len(merged), before, source_title)
     merged = merged[:MAX_CANDIDATES]
 
     # ── 7-Agent scoring ────────────────────────────────────────────────────
@@ -551,6 +630,7 @@ def detect_highlights(
         "match_context": match_context,
         "topics": topics,
         "topic_heuristics": topic_heuristics,
+        "source_title": source_title,
     }
 
     # Cross-run dedup: reject windows overlapping previously selected clips

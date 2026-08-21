@@ -172,6 +172,7 @@ def _base_yt_dlp_cmd(dl_cfg: dict, template: str) -> list[str]:
         "--format-sort", dl_cfg.get("format_sort", "res:2160,vbr,abr"),
         "--output", template,
         "--no-playlist",
+        "--force-overwrites",
         "--progress",
         "--newline",
         "--no-warnings",
@@ -273,11 +274,11 @@ def _should_log_download_line(line: str, state: dict, interval: float, percent_s
 
 def _cleanup_stale_downloads(dest: Path) -> None:
     for candidate in dest.parent.glob(f"{dest.stem}.*"):
-        if candidate == dest or not candidate.is_file():
+        if not candidate.is_file():
             continue
         try:
             candidate.unlink()
-            log.info("🧹 Removed stale download fragment: %s", candidate.name)
+            log.info("🧹 Removed previous download artifact: %s", candidate.name)
         except OSError as e:
             log.warning("Could not remove stale download fragment %s: %s", candidate, e)
 

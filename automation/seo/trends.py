@@ -115,10 +115,11 @@ def fetch_own_live_stream_url(channel_id: str = "") -> str:
 
 def extract_match_teams(video_title: str) -> Tuple[List[str], str]:
     """Extract team names and match type from video title."""
-    title_lower = video_title.lower()
-    found = []
+    corrected = correct_cricket_spelling(video_title)
+    title_lower = corrected.lower()
+    found = list(find_canonical_entities(corrected)["teams"])
     for abbr, name in sorted(TEAM_MAPPINGS.items(), key=lambda x: -len(x[0])):
-        if abbr in title_lower:
+        if abbr in title_lower and name not in found:
             found.append(name)
     match_type = "ipl"
     if "t20" in title_lower:
@@ -348,17 +349,30 @@ def fetch_verified_match_context(query: str) -> Dict:
 
 def _research_query(video_title: str, video_description: str, transcript: str) -> str:
     """Build a compact match lookup from all local source evidence."""
-    combined = correct_cricket_spelling(
-        " ".join((video_title or "", video_description or "", transcript or ""))
-    )
-    entities = find_canonical_entities(combined)
+    clip_text = correct_cricket_spelling(transcript or "")
+    clip_entities = find_canonical_entities(clip_text)
+    combined = correct_cricket_spelling(" ".join((
+        video_title or "", video_description or "", transcript or ""
+    )))
+    combined_entities = find_canonical_entities(combined)
+    teams = list(clip_entities["teams"])
+    if len(teams) < 2:
+        teams.extend(team for team in combined_entities["teams"] if team not in teams)
+    entities = {
+        "teams": teams,
+        "players": clip_entities["players"] or combined_entities["players"],
+    }
     entity_text = " ".join(entities["teams"] + entities["players"][:2])
     format_terms = [
         term for term in ("Test", "ODI", "T20", "IPL", "World Cup", "series")
         if re.search(r"\b" + re.escape(term) + r"\b", combined, re.I)
     ]
     title = re.sub(r"\s+", " ", correct_cricket_spelling(video_title)).strip()
-    parts = [title, entity_text, " ".join(format_terms)]
+    parts = (
+        [entity_text, " ".join(format_terms), "cricket"]
+        if entity_text
+        else [title, " ".join(format_terms)]
+    )
     return re.sub(r"\s+", " ", " ".join(part for part in parts if part)).strip()[:240]
 
 
@@ -455,7 +469,8 @@ def get_trending_context(
     match_facts = []
     player_names = []
     sources = []
-    if detected_domain == "cricket":
+    query_teams = find_canonical_entities(query_topic)["teams"]
+    if detected_domain == "cricket" and len(set(query_teams)) == 2:
         try:
             match_context = fetch_verified_match_context(query_topic)
         except Exception as exc:

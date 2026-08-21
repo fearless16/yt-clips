@@ -113,6 +113,32 @@ def test_research_uses_full_source_context_for_match_lookup(monkeypatch):
     assert 8 <= len(result["search_queries"]) <= 15
 
 
+def test_match_research_query_prioritizes_clip_entities_over_live_title():
+    from automation.seo.trends import _research_query
+
+    query = _research_query(
+        "England vs Pakistan live score and commentary",
+        "ENG vs PAK Test watch along",
+        "न्यूजीलैंड श्रीलंका सीरीज में कप्तानी पर सवाल",
+    )
+
+    assert query.startswith("New Zealand Sri Lanka")
+    assert "live score" not in query.casefold()
+
+
+def test_query_topic_comes_from_hindi_clip_not_generic_source_description():
+    from automation.seo.context_engine import build_grounded_search_queries
+
+    queries = build_grounded_search_queries(
+        "England vs Pakistan Test",
+        "Live score, wickets and match commentary",
+        "न्यूजीलैंड की कप्तानी छोड़ने पर बड़ा सवाल",
+    )
+
+    assert any("captaincy" in query.casefold() for query in queries)
+    assert all("wicket" not in query.casefold() for query in queries)
+
+
 def test_research_network_failure_returns_grounded_local_queries(monkeypatch):
     from automation.seo import trends
 
@@ -160,7 +186,7 @@ def test_offline_query_fallback_does_not_invent_team_india():
     assert all("india" not in query.casefold() for query in queries)
 
 
-def test_generated_queries_must_be_from_approved_evidence(monkeypatch):
+def test_generated_queries_are_replaced_by_approved_evidence(monkeypatch):
     import automation.seo.seo as seo
 
     monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
@@ -175,18 +201,19 @@ def test_generated_queries_must_be_from_approved_evidence(monkeypatch):
         },
     )
 
-    try:
-        seo.generate_clip_seo(
-            "clip1",
-            "Yuvi ko India ka coach bana do",
-            video_title="India cricket discussion",
-            video_description="Yuvi coaching debate",
-            approved_search_queries=_approved_queries(),
-        )
-    except seo.SEOGenerationError as exc:
-        assert "unapproved search queries" in str(exc)
-    else:
-        raise AssertionError("unapproved AI query must be rejected")
+    result = seo.generate_clip_seo(
+        "clip1",
+        "Yuvi ko India ka coach bana do",
+        video_title="India cricket discussion",
+        video_description="Yuvi coaching debate",
+        approved_search_queries=_approved_queries(),
+    )
+
+    assert result["search_terms"][:len(_approved_queries())] == _approved_queries()
+    assert 8 <= len(result["search_terms"]) <= 15
+    assert result["primary_search_terms"][:2] == _approved_queries()[:2]
+    assert 2 <= len(result["primary_search_terms"]) <= 4
+    assert "india cricket latest" not in result["description"].casefold()
 
 
 def test_research_queries_can_stay_in_metadata_when_primary_queries_are_embedded(monkeypatch):
@@ -212,7 +239,8 @@ def test_research_queries_can_stay_in_metadata_when_primary_queries_are_embedded
         approved_search_queries=_approved_queries(),
     )
 
-    assert result["search_terms"] == _approved_queries()
+    assert result["search_terms"][:len(_approved_queries())] == _approved_queries()
+    assert 8 <= len(result["search_terms"]) <= 15
     assert result["primary_search_terms"] == _approved_queries()[:2]
 
 

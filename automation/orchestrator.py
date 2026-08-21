@@ -41,6 +41,23 @@ _DECISION_STORE: DecisionStore = DecisionStore()
 _PROVIDER_HEALTH: ProviderHealth = ProviderHealth()
 
 
+def _should_upload(*, auto_upload: bool, has_auth: bool) -> bool:
+    """Require both explicit user intent and usable YouTube credentials."""
+    return bool(auto_upload and has_auth)
+
+
+def _abort_required_stage(
+    result: PipelineResult,
+    started_at: float,
+    failure: str,
+) -> PipelineResult:
+    """Stop before stale artifacts can leak into dependent stages."""
+    result.failures.append(failure)
+    result.total_seconds = time.monotonic() - started_at
+    log.error("[ABORT] required stage failed: %s", failure)
+    return result
+
+
 def _emit_event(
     clip_id: str,
     event_type: EventType,
@@ -227,7 +244,7 @@ def run(
                     ph.set(video_path=video_path)
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("download")
-                result.failures.append(f"stage1c: {e}")
+                return _abort_required_stage(result, start, f"stage1c: {e}")
 
         # ── Stage 2: Transcribe ─────────────────────────────────
         if not skip_transcribe:
@@ -238,7 +255,7 @@ def run(
                 _PROVIDER_HEALTH.record_success("transcriber")
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("transcriber")
-                result.failures.append(f"stage2: {e}")
+                return _abort_required_stage(result, start, f"stage2: {e}")
 
         # ── Stage 3-5: Highlight detection + agent scoring + rank ──
         if not skip_highlight:
@@ -497,7 +514,10 @@ def run(
 
         # ── Stage 8b: Upload (auto when auth exists) ─────────────
         has_auth = Path("cookies.txt").exists() or Path("yt_channel_token.json").exists()
-        if result.exported and not skip_sync and has_auth:
+        if result.exported and _should_upload(
+            auto_upload=auto_upload,
+            has_auth=has_auth,
+        ):
             try:
                 with run_phase(log, "stage 8b Upload", "upload",
                                run_id=rid) as ph:
@@ -629,8 +649,13 @@ def run(
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("youtube")
                 result.failures.append(f"stage8b: {e}")
-        elif result.exported and not has_auth:
-            log.info("[stage 8b] Upload skipped — no auth (cookies.txt or yt_channel_token.json)")
+        elif result.exported:
+            reason = (
+                "--upload was not requested"
+                if not auto_upload
+                else "no auth (cookies.txt or yt_channel_token.json)"
+            )
+            log.info("[stage 8b] Upload skipped — %s", reason)
 
     # Stage 9: telemetry and canonical persistence
     result.total_seconds = time.monotonic() - start

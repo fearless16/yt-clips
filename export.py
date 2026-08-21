@@ -343,6 +343,7 @@ def _sanitize_strategy(raw_strategy) -> Dict:
         "skip_silence": bool(raw_strategy.get("skip_silence", False)),
         "active_segments": raw_strategy.get("active_segments", []) if isinstance(raw_strategy.get("active_segments"), list) else [],
         "should_drop": bool(raw_strategy.get("should_drop", False)),
+        "hard_reject_reason": str(raw_strategy.get("hard_reject_reason", "") or ""),
     }
 
 
@@ -621,7 +622,8 @@ def _validate_output(path: str, expected_duration: float = 0.0) -> bool:
             log.error("Output duration %.1fs deviates too much from expected %.1fs: %s", duration, expected_duration, output)
             return False
 
-        if duration < 5.0:
+        min_duration = float(cfg.get("highlight", {}).get("min_duration", 3.0))
+        if duration < min_duration:
             log.error("Output is too short (%.1fs) to be a valid Short: %s", duration, output)
             return False
             
@@ -1408,6 +1410,10 @@ def export_all(
         strategy = _merge_highlight_speed(strategy, info)
         analysis["export_strategy"] = strategy
         if strategy.get("should_drop", False):
+            hard_reject_reason = strategy.get("hard_reject_reason")
+            if hard_reject_reason:
+                log.info("[%s] PRE-FILTER hard reject: %s", clip_id, hard_reject_reason)
+                continue
             layout = analysis.get("layout", {}).get("layout_type", "unknown")
             # Degraded mode: override to center crop instead of dropping
             log.info("[%s] PRE-FILTER layout=%s — trying degraded center-crop mode", clip_id, layout)

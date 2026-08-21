@@ -19,6 +19,7 @@ from automation._cache import TTLCache
 from utils.ocr import extract_ocr_entities
 from .cricket_context import (
     correct_cricket_spelling,
+    discover_grounded_player_names,
     find_canonical_entities,
     is_cricket_content,
 )
@@ -614,6 +615,58 @@ def _promise_alignment_score(title: str, transcript: str, description: str) -> f
     return round((clip_score + opening_score) / 2.0, 3)
 
 
+def _grounded_fallback_title(transcript: str, approved_queries: List[str]) -> str:
+    """Build a short public promise from spoken evidence, never match-roster guesses."""
+    corrected = correct_cricket_spelling(transcript)
+    entities = find_canonical_entities(corrected)
+    team = entities["teams"][0] if entities["teams"] else "Cricket"
+    numbers = re.findall(r"(?<!\w)\d{1,3}(?!\w)", corrected)
+    low = corrected.casefold()
+    if "रन रेट" in corrected or "run rate" in low:
+        value = f" {numbers[0]}" if numbers else ""
+        title = f"{team} Ka Run Rate{value}: Test Match Pressure"
+    elif "लीड" in corrected or " lead" in low:
+        value = f" {numbers[-1]}" if numbers else ""
+        title = f"{team}{value} Ki Lead? Test Match Ka Bada Mod"
+    elif "चौका" in corrected or re.search(r"\bfour\b", low):
+        title = f"{team} Ne Sirf Ek Chaukka Mara? Test Match Reaction"
+    elif "विकेट" in corrected or re.search(r"\bwicket\b", low):
+        title = f"{team} Wicket Pressure: Hinglish Cricket Take"
+    else:
+        query = approved_queries[0] if approved_queries else f"{team} cricket analysis"
+        title = f"{query}: Hinglish Cricket Take"
+    return _clean_title(title, _seo_config_int("title_max_chars", 70, 20, 100))
+
+
+def _grounded_fallback_description(
+    title: str,
+    transcript: str,
+    video_title: str,
+    approved_queries: List[str],
+    hashtags: List[str],
+) -> str:
+    """Create long, query-rich copy from local evidence when AI adds a player."""
+    transcript = re.sub(r"\s+", " ", transcript).strip()
+    source = re.sub(r"\s+", " ", video_title).strip()
+    queries = [str(query).strip() for query in approved_queries if str(query).strip()]
+    opening = (
+        f"{title}. Is cricket Short ka exact spoken point hai: “{transcript}” "
+        f"Yeh clip source stream “{source}” se li gayi hai aur isi moment ki "
+        "Hinglish fan reaction, match pressure aur tactical context par focused hai."
+    )
+    paragraphs = [opening]
+    for query in queries:
+        paragraphs.append(
+            f"{query} search karne wale viewers ke liye yahan seedha clip-specific "
+            "context hai: koi invented player attribution nahi, koi unrelated match "
+            "claim nahi—sirf transcript mein boli gayi cricket baat aur source match context."
+        )
+    hashtag_line = " ".join(str(tag) for tag in hashtags if str(tag).strip())
+    if hashtag_line:
+        paragraphs.append(hashtag_line)
+    return "\n\n".join(paragraphs)[:_description_max_chars()]
+
+
 def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: bool = True) -> Dict:
     """Ensure title length, description length, hashtag count, search term count.
 
@@ -1062,66 +1115,122 @@ def generate_clip_seo(
                                      salvage_tmpl=salvage_tmpl)
     result = _enforce_limits(result, is_shorts=is_shorts)
 
-    rendered_text = " ".join([
+    # Title-case two-word hallucinations can evade the static player catalog
+    # (for example, a model mapping Hindi "Southee" audio to Saud Shakeel).
+    # If a title introduces an ungrounded person, replace only the title with
+    # the first evidence-built query; the clip transcript and long description
+    # stay untouched.
+    title_people = discover_grounded_player_names(
+        str(result.get("title") or ""),
+        [str(result.get("title") or "")],
+    )
+    player_catalog = list(dict.fromkeys([
+        *grounded_entities["players"], *grounded_players,
+    ]))
+    clip_players = set(find_canonical_entities(transcript, player_catalog)["players"])
+    allowed_people = {str(name).casefold() for name in clip_players}
+    unknown_title_people = [
+        name for name in title_people if name.casefold() not in allowed_people
+    ]
+    if unknown_title_people and approved_queries:
+        result["title"] = _grounded_fallback_title(transcript, approved_queries)
+        log.warning(
+            "[%s] Replaced title with grounded topic after unknown player(s): %s",
+            clip_id,
+            ", ".join(unknown_title_people),
+        )
+
+    public_copy_text = " ".join([
         str(result.get("title", "")),
         str(result.get("description", "")),
         " ".join(str(item) for item in result.get("hashtags", []) or []),
         " ".join(str(item) for item in result.get("search_terms", []) or []),
+    ])
+    api_tag_text = " ".join(str(item) for item in result.get("tags", []) or [])
+    public_copy_players = set(
+        find_canonical_entities(public_copy_text, player_catalog)["players"]
+    ) - clip_players
+    api_tag_players = set(
+        find_canonical_entities(api_tag_text, player_catalog)["players"]
+    ) - clip_players
+    if api_tag_players and not public_copy_players:
+        raise SEOGenerationError(
+            f"SEO blocked for {clip_id}: ungrounded entities "
+            + ", ".join(sorted(api_tag_players))
+        )
+
+    rendered_text = " ".join([
+        public_copy_text,
         " ".join(str(item) for item in result.get("tags", []) or []),
     ])
     rendered_entities = find_canonical_entities(
-        rendered_text, grounded_entities["players"]
+        rendered_text, player_catalog
     )
-    extra_players = set(rendered_entities["players"]) - set(grounded_entities["players"])
+    extra_players = set(rendered_entities["players"]) - clip_players
     extra_teams = set(rendered_entities["teams"]) - set(grounded_entities["teams"])
+    if extra_players:
+        result["title"] = _grounded_fallback_title(transcript, approved_queries)
+        result["hashtags"] = ["#Shorts", "#Cricket", "#CricketShorts"]
+        result["tags"] = list(approved_queries)
+        result["description"] = _grounded_fallback_description(
+            result["title"], transcript, video_title, approved_queries,
+            result["hashtags"],
+        )
+        result = _enforce_limits(result, is_shorts=is_shorts)
+        rendered_text = " ".join([
+            str(result.get("title", "")), str(result.get("description", "")),
+            " ".join(str(item) for item in result.get("hashtags", []) or []),
+            " ".join(str(item) for item in result.get("search_terms", []) or []),
+            " ".join(str(item) for item in result.get("tags", []) or []),
+        ])
+        rendered_entities = find_canonical_entities(
+            rendered_text, player_catalog
+        )
+        extra_players = set(rendered_entities["players"]) - clip_players
+        extra_teams = set(rendered_entities["teams"]) - set(grounded_entities["teams"])
     if extra_players or extra_teams:
         extras = sorted(extra_players | extra_teams)
         raise SEOGenerationError(
             f"SEO blocked for {clip_id}: ungrounded entities {', '.join(extras)}"
         )
 
-    output_queries = result.get("search_terms") or []
-    approved_keys = {query.casefold() for query in approved_queries}
-    unapproved = [
-        query for query in output_queries
-        if str(query).strip().casefold() not in approved_keys
-    ]
     min_queries = _seo_config_int("min_search_terms", 8, 1, 15)
     max_queries = _seo_config_int("max_search_terms", 15, min_queries, 30)
-    if unapproved:
-        raise SEOGenerationError(
-            f"SEO blocked for {clip_id}: unapproved search queries "
-            + ", ".join(str(query) for query in unapproved)
-        )
+    output_queries = list(dict.fromkeys(
+        str(query).strip() for query in approved_queries if str(query).strip()
+    ))[:max_queries]
+    result["search_terms"] = output_queries
     if not min_queries <= len(output_queries) <= max_queries:
         raise SEOGenerationError(
             f"SEO blocked for {clip_id}: expected {min_queries}-{max_queries} "
             f"grounded search queries, got {len(output_queries)}"
         )
-    primary_queries = result.get("primary_search_terms") or []
     min_primary = _seo_config_int("min_primary_search_terms", 2, 1, 4)
     max_primary = _seo_config_int("max_primary_search_terms", 4, min_primary, 6)
-    primary_keys = {str(query).strip().casefold() for query in primary_queries}
     output_keys = {str(query).strip().casefold() for query in output_queries}
-    if not min_primary <= len(primary_queries) <= max_primary:
-        raise SEOGenerationError(
-            f"SEO blocked for {clip_id}: expected {min_primary}-{max_primary} "
-            f"primary search terms, got {len(primary_queries)}"
-        )
-    if not primary_keys <= output_keys:
-        raise SEOGenerationError(
-            f"SEO blocked for {clip_id}: primary search terms are not research queries"
-        )
+    primary_queries = []
+    for query in result.get("primary_search_terms") or []:
+        clean = str(query).strip()
+        if clean.casefold() in output_keys and clean not in primary_queries:
+            primary_queries.append(clean)
+        if len(primary_queries) >= max_primary:
+            break
+    for query in output_queries:
+        if len(primary_queries) >= min_primary:
+            break
+        if query not in primary_queries:
+            primary_queries.append(query)
+    result["primary_search_terms"] = primary_queries
     description_key = re.sub(r"\s+", " ", str(result.get("description") or "")).casefold()
     missing_queries = [
         str(query) for query in primary_queries
         if re.sub(r"\s+", " ", str(query)).strip().casefold() not in description_key
     ]
     if missing_queries:
-        raise SEOGenerationError(
-            f"SEO blocked for {clip_id}: primary search terms not embedded in description "
-            + ", ".join(missing_queries)
-        )
+        suffix = "\n\nSearch context: " + " | ".join(missing_queries) + "."
+        max_chars = _description_max_chars()
+        base = str(result.get("description") or "").rstrip()
+        result["description"] = base[:max(0, max_chars - len(suffix))].rstrip() + suffix
 
     alignment = _promise_alignment_score(
         str(result.get("title") or ""), transcript, str(result.get("description") or "")
@@ -1397,6 +1506,8 @@ def generate_seo_for_exported_clip(
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, metadata_path)
+            marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
+            marker_path.unlink(missing_ok=True)
         return result
     except Exception as e:
         log.error("[%s] SEO generation failed: %s", clip_id, e)

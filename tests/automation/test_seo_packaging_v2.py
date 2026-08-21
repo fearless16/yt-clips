@@ -224,3 +224,53 @@ def test_invalid_alignment_config_falls_back_instead_of_crashing(monkeypatch):
         approved_search_queries=queries,
     )
     assert result["packaging_version"] == "promise_v2"
+
+
+def test_unknown_player_in_title_is_replaced_with_grounded_clip_topic(monkeypatch):
+    import automation.seo.seo as seo
+
+    queries = [f"new zealand captaincy debate {index}" for index in range(8)]
+    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
+    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
+        "title": "Saud Shakeel Captaincy Shock",
+        "description": "New Zealand captaincy debate explained. " * 50,
+        "hashtags": ["#Shorts", "#NewZealandCricket"],
+        "search_terms": queries,
+        "primary_search_terms": queries[:2],
+    })
+
+    result = seo.generate_clip_seo(
+        "clip-grounded-title",
+        "New Zealand cricket ki captaincy par bada sawaal hai",
+        video_title="Cricket discussion",
+        approved_search_queries=queries,
+    )
+
+    assert "saud shakeel" not in result["title"].casefold()
+    assert "new zealand captaincy" in result["title"].casefold()
+
+
+def test_match_roster_player_cannot_be_attributed_when_clip_never_says_name(monkeypatch):
+    import automation.seo.seo as seo
+
+    queries = [f"england pakistan test analysis {index}" for index in range(8)]
+    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
+    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
+        "title": "Joe Root Run Rate Debate",
+        "description": "Joe Root is batting aggressively against Pakistan. " * 40,
+        "hashtags": ["#Shorts", "#Cricket"],
+        "search_terms": queries,
+        "primary_search_terms": queries[:2],
+    })
+
+    result = seo.generate_clip_seo(
+        "clip-no-player",
+        "England ka run rate 41 chal raha hai",
+        video_title="England vs Pakistan Test",
+        approved_search_queries=queries,
+        grounded_players=["Joe Root"],
+    )
+
+    rendered = f"{result['title']} {result['description']}".casefold()
+    assert "joe root" not in rendered
+    assert "england ka run rate 41" in result["title"].casefold()

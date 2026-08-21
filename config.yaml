@@ -117,6 +117,11 @@ layout:
     estimated_width: 350
     # Minimum brightness threshold to detect chat area (chat is usually brighter/darker than gameplay)
     brightness_threshold: 30
+  source_overlay_guard:
+    enabled: true
+    min_votes: 2                       # reject when opaque lower-third appears in >=2/12 samples
+    dark_ratio: 0.58                   # dark callout body in lower-left/center source region
+    bright_text_ratio: 0.0             # grayscale pipe crushes white text; dark body is the stable signal
 
 # ─── Export ───────────────────────────────────────────────────────────────────
 export:
@@ -309,6 +314,8 @@ clip_selection:
   use_llm_arbiter: true                # Run LLM Final Arbiter pass
   min_quality: 20.0                    # Min weighted score (0-100) to keep a clip
   max_selected: 10                     # Max clips to select
+  prefer_source_match: true             # For match streams, prioritize clips naming either advertised team
+  source_match_min_candidates: 3        # Fall back to all cricket clips if evidence is too sparse
   dedup_enabled: true                   # Reject windows already selected in prior runs
   dedup_overlap_threshold: 0.6         # Min window overlap ratio to reject a re-upload duplicate
                                        # (set dedup_enabled: false to force re-generate a match)

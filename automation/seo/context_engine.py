@@ -10,9 +10,21 @@ from .cricket_context import correct_cricket_spelling, find_canonical_entities
 
 _LIVE_QUERY = re.compile(r"\b(?:live|livestream|live stream|live score)\b", re.I)
 _TOPIC_TERMS = (
-    "coach", "captain", "six", "four", "wicket", "yorker", "century",
+    "coach", "captaincy", "captain", "six", "four", "wicket", "yorker", "century",
     "innings", "batting", "bowling", "selection", "debate", "analysis",
     "reaction", "test", "odi", "t20", "ipl", "world cup", "series",
+)
+
+_HINDI_TOPIC_TERMS = (
+    ("कप्तानी", "captaincy"),
+    ("कोच", "coach"),
+    ("वर्ल्ड कप", "world cup"),
+    ("विकेट", "wicket"),
+    ("छक्का", "six"),
+    ("चौका", "four"),
+    ("टेस्ट", "test"),
+    ("वनडे", "odi"),
+    ("सीरीज", "series"),
 )
 _QUERY_SUFFIXES = (
     "cricket discussion",
@@ -67,6 +79,14 @@ def _query_anchors(text: str, entities: Dict[str, List[str]]) -> set[str]:
     return anchors
 
 
+def _topic_from_text(text: str) -> str:
+    low = text.casefold()
+    for marker, topic in _HINDI_TOPIC_TERMS:
+        if marker in low:
+            return topic
+    return next((term for term in _TOPIC_TERMS if term in low), "")
+
+
 def build_grounded_search_queries(
     video_title: str,
     video_description: str,
@@ -99,8 +119,7 @@ def build_grounded_search_queries(
     subjects = entities["players"] + entities["teams"]
     subject = subjects[0] if subjects else "cricket"
     team_context = entities["teams"][0] if entities["teams"] else ""
-    low = evidence.casefold()
-    topic = next((term for term in _TOPIC_TERMS if term in low), "cricket")
+    topic = _topic_from_text(transcript) or _topic_from_text(evidence) or "cricket"
     local = [
         f"{subject} {topic}",
         f"{subject} {topic} {team_context}",

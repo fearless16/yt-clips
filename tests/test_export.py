@@ -72,3 +72,18 @@ def test_build_enhance_stack_guest_cam_off():
     }
     filter_chain = _build_enhance_stack(analysis)
     assert "crop=iw/2:ih:0:0" in filter_chain
+
+
+def test_validate_output_accepts_configured_minimum_short_duration(tmp_path, monkeypatch):
+    import json
+    import export
+
+    output = tmp_path / "short.mp4"
+    output.write_bytes(b"x" * (int(export.cfg["export"].get("min_output_bytes", 1)) + 1))
+
+    class Probe:
+        stdout = json.dumps({"format": {"duration": "3.5"}})
+
+    monkeypatch.setattr(export.subprocess, "run", lambda *args, **kwargs: Probe())
+
+    assert export._validate_output(str(output), expected_duration=3.5)

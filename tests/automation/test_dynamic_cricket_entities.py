@@ -97,3 +97,76 @@ def test_current_search_results_can_ground_unknown_player_or_nickname():
     assert players == ["Virat Kohli"]
     assert aliases == {"cheeku": "Virat Kohli"}
     assert correct_cricket_spelling(source, players, aliases).startswith("Virat Kohli")
+
+
+def test_search_headlines_do_not_turn_generic_live_phrases_into_players():
+    from automation.seo.cricket_context import discover_grounded_player_names
+
+    source = "England vs Pakistan 1st Test live score and commentary"
+    results = [
+        "England Live Match Today | Pakistan Test Day 3",
+        "Live Cricket Score | England vs Pakistan Test Live",
+    ]
+
+    assert discover_grounded_player_names(source, results) == []
+
+
+def test_hinglish_title_phrases_are_not_discovered_as_players():
+    from automation.seo.cricket_context import discover_grounded_player_names
+
+    title = "Kya Chal Raha Hai? England Run Rate Ahead"
+    assert discover_grounded_player_names(title, [title]) == []
+    assert discover_grounded_player_names("Saud Shakeel", ["Saud Shakeel"]) == [
+        "Saud Shakeel"
+    ]
+
+
+def test_search_headlines_do_not_turn_team_names_into_players():
+    from automation.seo.cricket_context import discover_grounded_player_names
+
+    assert discover_grounded_player_names(
+        "New Zealand vs Sri Lanka cricket series",
+        [
+            "New Zealand vs Sri Lanka Test series",
+            "Sri Lanka tour of New Zealand highlights",
+        ],
+    ) == []
+
+
+def test_devanagari_team_names_are_canonical_grounded_entities():
+    from automation.seo.cricket_context import (
+        correct_cricket_spelling,
+        find_canonical_entities,
+    )
+
+    corrected = correct_cricket_spelling(
+        "पाकिस्तान ने ऑस्ट्रेलिया और साउथ अफ्रीका में टेस्ट खेले"
+    )
+
+    assert set(find_canonical_entities(corrected)["teams"]) == {
+        "Pakistan",
+        "Australia",
+        "South Africa",
+    }
+
+
+def test_hindi_player_alias_resolves_only_with_verified_runtime_player():
+    from automation.seo.cricket_context import correct_cricket_spelling
+
+    text = "सऊदी ने न्यूजीलैंड की कप्तानी क्यों छोड़ी"
+    assert correct_cricket_spelling(text).startswith("सऊदी ने New Zealand")
+    assert correct_cricket_spelling(
+        text,
+        player_names=["Tim Southee"],
+    ).startswith("Tim Southee ने")
+
+
+def test_match_team_extraction_supports_international_and_hindi_teams():
+    from automation.seo.trends import extract_match_teams
+
+    teams, match_type = extract_match_teams(
+        "England vs Pakistan Test: ऑस्ट्रेलिया और साउथ अफ्रीका discussion"
+    )
+
+    assert set(teams) == {"England", "Pakistan", "Australia", "South Africa"}
+    assert match_type == "test"

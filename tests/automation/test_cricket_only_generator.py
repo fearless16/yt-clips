@@ -25,6 +25,24 @@ def test_cricket_context_gate_understands_alias_and_rejects_tech_chatter():
     assert not is_cricket_content("party abhi shuru hui hai bro")
 
 
+def test_cricket_gate_understands_hindi_youtube_captions():
+    from automation.seo.cricket_context import is_cricket_content
+
+    source = "England vs Pakistan Test cricket live commentary"
+    assert is_cricket_content(
+        "अभी तक 233 रन हो चुके हैं और इंग्लैंड के चार विकेट गिर चुके हैं",
+        source,
+    )
+    assert is_cricket_content(
+        "हैरी ब्रुक 20 बॉल पर 15 रन बनाकर खेल रहे हैं",
+        source,
+    )
+    assert not is_cricket_content(
+        "मैं अपना माइक प्लग इन करना भूल गया था",
+        source,
+    )
+
+
 def test_shared_surname_does_not_hallucinate_extra_players():
     from automation.seo.cricket_context import find_canonical_entities
 
@@ -47,6 +65,23 @@ def test_complete_thoughts_are_split_and_canonicalized():
         "This would be brilliant!",
     ]
     assert result[0]["end"] <= result[1]["start"]
+
+
+def test_rolling_caption_fragments_become_one_complete_thought():
+    from automation.clip_selection.pipeline import _prepare_complete_thoughts
+
+    result = _prepare_complete_thoughts([
+        {"start": 10.0, "end": 14.0, "text": "हैरी ब्रुक अभी"},
+        {"start": 13.0, "end": 17.0, "text": "20 बॉल पर 15 रन बनाकर"},
+        {"start": 16.0, "end": 20.0, "text": "खेल रहे हैं लेकिन उनका इंजन"},
+        {"start": 19.0, "end": 23.0, "text": "अभी गरम नहीं हुआ है यार।"},
+    ])
+
+    assert len(result) == 1
+    assert result[0]["start"] == 10.0
+    assert result[0]["end"] == 23.0
+    assert "20 बॉल पर 15 रन" in result[0]["text"]
+    assert result[0]["text"].endswith("यार।")
 
 
 def test_spoken_bounds_remove_leading_and_trailing_silence():
@@ -78,6 +113,39 @@ def test_candidate_gate_is_strictly_cricket_only():
 
     kept = _filter_cricket_candidates(candidates, "India cricket discussion")
     assert [item["text"] for item in kept] == ["Yuvi ko coach bana do"]
+
+
+def test_match_stream_candidates_prefer_source_teams():
+    from automation.clip_selection.pipeline import _filter_source_match_candidates
+
+    candidates = [
+        {"text": "England 100 runs aur bana de to Pakistan pressure mein hai"},
+        {"text": "India Ireland T20 domination khatam"},
+        {"text": "Pakistan ko England ke wickets jaldi lene honge"},
+    ]
+
+    kept = _filter_source_match_candidates(
+        candidates,
+        "England vs Pakistan 1st Test live commentary",
+        minimum_matches=2,
+    )
+
+    assert kept == [candidates[0], candidates[2]]
+
+
+def test_source_match_filter_falls_back_when_too_few_candidates_match():
+    from automation.clip_selection.pipeline import _filter_source_match_candidates
+
+    candidates = [
+        {"text": "England lead is growing"},
+        {"text": "great captaincy debate"},
+    ]
+
+    assert _filter_source_match_candidates(
+        candidates,
+        "England vs Pakistan Test",
+        minimum_matches=2,
+    ) == candidates
 
 
 def test_export_gate_blocks_stale_non_cricket_highlight():
