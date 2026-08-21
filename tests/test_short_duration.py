@@ -65,6 +65,14 @@ def test_config_has_target_duration():
     assert 5 <= float(hl["target_duration"]) <= 15
 
 
+def test_config_duration_limits_stay_below_25_seconds():
+    from utils.config import load_config
+    hl = load_config().get("highlight", {})
+    assert float(hl["max_duration"]) <= 24
+    assert float(hl["preferred_duration_max"]) <= 24
+    assert float(hl["target_duration"]) < 25
+
+
 def test_config_has_max_speedup():
     from utils.config import load_config
     hl = load_config().get("highlight", {})

@@ -2,7 +2,7 @@
 utils/drive_auth.py — Consolidated Google Drive Authentication.
 
 Single source of truth for all Drive API authentication across the project.
-Used by: sync.py, bridge.py, push_code.py
+Used by: sync.py and push_code.py.
 """
 import os
 import httplib2

@@ -1,7 +1,7 @@
 """
 utils/token_refresh.py — Check & refresh OAuth tokens before pushing jobs.
 
-Called by bridge.py before attaching tokens to job payloads.
+Called by pipeline.py and push_code.py before authenticated operations.
 If a token cannot be refreshed silently, tells the user to run setup_auth.py.
 """
 

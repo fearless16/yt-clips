@@ -120,7 +120,7 @@ class ThumbnailGenerator:
         draw = ImageDraw.Draw(img)
         try:
             font = ImageFont.truetype(self.font_path, self.font_size)
-        except:
+        except OSError:
             log.warning(f"Font not found at {self.font_path}, using default.")
             font = ImageFont.load_default()
 
@@ -242,7 +242,7 @@ def generate_thumbnail_variants(video_path: str, metadata: dict, count: int = 3)
                 font_size = int(h * 0.07)
                 try:
                     font = ImageFont.truetype(generator.font_path, font_size)
-                except:
+                except OSError:
                     font = ImageFont.load_default()
                 
                 bbox = draw.textbbox((0, 0), text, font=font)
