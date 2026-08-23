@@ -6,7 +6,56 @@
 Two pipelines in one repo:
 
 1. **Face OS** — Identity-reconstruction pipeline for portrait-mode studio video
-2. **Legacy cricket pipeline** — 16:9 live stream → 9:16 shorts automation
+2. **Cricket Shorts pipeline** — 16:9 live stream → 9:16 shorts automation
+   (selection, packaging, SEO, upload, outcome learning)
+
+---
+
+## 🚀 One-Click Run (Windows)
+
+**Desktop shortcut: `YT Clips Pipeline.lnk`**
+→ points at `run_pipeline.bat` (icon: `pipeline_icon.ico`, cwd: repo root).
+
+Double-click se ye hota hai:
+
+```
+[1/3] OAuth token check → expired ho toh browser re-auth khud kholta hai
+      (pehle PERSONAL Google account, phir CHANNEL account select karo)
+[2/3] Mode menu:
+        1) FULL     — URL poochega → download, transcribe, select, export,
+                      SEO, YouTube upload (scheduled slots pe)
+        2) QUICK    — existing input\video.mp4 + transcript reuse,
+                      local export only (no upload/sync/schedule)
+        3) DRY RUN  — saare external APIs stubbed, sirf plumbing check
+[3/3] "PIPELINE FINISHED" + pause
+```
+
+| Mode | Command jo chalta hai | Upload? |
+|---|---|---|
+| FULL | `.venv\Scripts\python.exe pipeline.py "<URL>"` | ✅ scheduled |
+| QUICK | `pipeline.py "https://youtu.be/local" --skip-download --skip-transcribe --no-upload --no-sync --no-schedule` | ❌ |
+| DRY RUN | `dry_run.py "https://youtu.be/test" --skip-download --skip-transcribe` | ❌ |
+
+### Local-only one-click (kabhi upload nahi karta)
+
+`make_shorts.bat` → `.venv\Scripts\python.exe -m automation.cli "<URL>"`
+— orchestrator flow (ingest → transcript → cricket-only selection → export →
+SEO → telemetry + canonical DB persistence). Output `shorts\<date-folder>\`
+mein jaata hai. Upload/sync ke liye explicit flags chahiye:
+
+```bash
+.venv/Scripts/python.exe -m automation.cli "<URL>" --upload    # + scheduled upload
+.venv/Scripts/python.exe -m automation.cli "<URL>" --sync      # + Drive sync
+.venv/Scripts/python.exe -m automation.cli --learn             # shelf + Analytics sync + model refit
+```
+
+Useful flags: `--skip-download --skip-transcribe --skip-highlight
+--skip-export --skip-seo --skip-enhancement --sample-minutes N`.
+
+**Outputs:** clips + `<clip>_metadata.json` → `shorts/<date-folder>/`;
+selection YAML → `highlights/`; logs → `logs/pipeline.log`.
+Secrets (`*_token.json`, `client_secrets.json`, `cookies.txt`) gitignored
+hain — Drive pe synced hote hain, kabhi commit mat karna.
 
 ---
 
@@ -27,66 +76,72 @@ Frame → Detect (MediaPipe) → Landmarks (478-point) → Canonical warp
 ### Quick Start
 
 ```bash
-.venv/bin/python -m face_os.pipeline --video clips_test/test_clip.mp4 \
+.venv/bin/python -m face_os.pipeline --video <input.mp4> \
     --reference expectation.png --photos photos/
 ```
 
-Or validate all metrics claims:
+### Test Suite
 
 ```bash
-.venv/bin/python validate_metrics.py
+.venv/Scripts/python.exe -m pytest face_os/tests/ -v
 ```
 
-### Test Suite (773 tests)
-
-```bash
-.venv/bin/python -m pytest tests/face_os/ -v
-.venv/bin/python -m pytest tests/face_os/test_strict_regression.py -v
-```
-
-### V3 Runtime Status (100 frames, test_clip.mp4)
-
-| Metric | Value |
-|---|---|
-| PhysicalRenderer activation | 96% |
-| IntrinsicDecomposer success | 100% |
-| Frame contract (1920x1080x3 uint8) | 50/50 pass |
-| Avg intrinsic confidence | 0.758 |
-| Avg decomposition error | 0.053 |
-| RendererMode transitions | 1 |
+See `face_os/STATE.md` for architecture map, drift status and entry points.
 
 ---
 
-## Legacy Cricket Pipeline
+## Cricket Shorts Pipeline (current behavior)
 
 Convert 16:9 live streams → 9:16 shorts automatically.
 
 ```bash
-./automate.sh "https://youtu.be/VIDEO_ID"
+.venv/Scripts/python.exe -m automation.cli "https://youtu.be/VIDEO_ID"
 ```
-
-### Modes
-
-**Cheap** (default): MediaPipe BlazeFace + heuristics, works anywhere  
-**Premium** (`premium.enabled: true`): YOLOv8-face + ByteTrack + Kalman + GFPGAN, GPU required  
-**Selective Enhancement** (`enhancement.selective: true`): 3-pass state→enhance→temporal
 
 ### Pipeline Flow
 
 ```
 URL → Download (yt-dlp + aria2c)
     → Transcribe (faster-whisper, Hindi/English)
-    → Highlight Detection (audio RMS + transcript scoring + Gemini AI)
-    → Frame Analysis (cheap=MediaPipe BlazeFace / premium=YOLO+ByteTrack)
-    → Export (crop + enhance + interpolate + encode)
-    → Selective Enhancement (3-pass) [optional]
-    → SEO + Thumbnails (Gemini + OpenRouter + Groq + NVIDIA)
-    → Upload to YouTube [optional]
+    → Complete-thought segmentation + cricket-only gate
+    → 7-agent clip selection (+ LLM arbiter with full clip scripts,
+      match facts, live YouTube search demand; max 3 clips/stream,
+      empty selection allowed on weak batches)
+    → Frame Analysis / Face crop
+    → Export 1080x1920 (natural pace: target 25s thoughts, speedup rare)
+    → SEO packaging v3 (promise_v3_english):
+        - Full-English public copy, Devanagari banned everywhere
+        - Title <=60 chars, one premise, 1-2 mandatory emojis
+        - Description 350-900 chars, moment-first, AI-slop gate
+        - Grounded search terms/tags (API-only), 3 hashtags
+    → Upload to YouTube [opt-in via flags]
+    → shorts_intelligence outcome learning (engaged views + avg %viewed)
 ```
+
+### Selection & Packaging Notes
+
+- Har candidate ko `content_type` (moment/comedy/debate/news) milta hai;
+  arbiter moments-with-stakes ko debate/chatter pe prefer karta hai.
+- LLM arbiter ke paas candidate ka POORA script hota hai (150-char fragment
+  nahi) — self-containedness isi se judge hoti hai.
+- Quality gate real hai: weak batch = zero clips, force-backfill nahi.
+- Learner (`shorts_intelligence.db`) sirf calibrated evidence use karta hai;
+  selection adjustments bounded hain (clip boundaries kabhi nahi badalte).
+
+```bash
+.venv/Scripts/python.exe -m shorts_intelligence status   # model state
+.venv/Scripts/python.exe -m shorts_intelligence sync     # shelf + outcomes
+```
+
+### Modes
+
+**Cheap** (default): MediaPipe BlazeFace + heuristics, works anywhere  
+**Premium** (`premium.enabled: true`): YOLOv8-face + ByteTrack + Kalman + GFPGAN, GPU required  
 
 ### Config
 
-Edit `config.yaml` for legacy pipeline.  
+Edit `config.yaml` for the cricket pipeline (`highlight`, `clip_selection`,
+`seo`, `upload_schedule`, `shorts_intelligence`).  
 Edit `face_os_config.yaml` for Face OS tuning.
 
 ### Kaggle GPU Worker
@@ -158,6 +213,17 @@ Output: `reports/analytics/analytics_report.html`
 | File | What |
 |---|---|
 | `ARCHITECTURE.md` | Full pipeline and Face OS architecture |
-| `AGENTS.md` | Source of truth, known bugs, next steps |
+| `AGENTS.md` | Source of truth, testing gates, module pointers |
 | `face_os/STATE.md` | Face OS state reference & drift status |
-| `validate_metrics.py` | Runtime metrics validation |
+| `automation/AGENTS.md` | Orchestrator + learning ownership rules |
+
+---
+
+## Validation Gates (commit se pehle, hamesha)
+
+```bash
+.venv/Scripts/python.exe -m pytest tests/ -v --ignore=tests/test_face_detect.py
+.venv/Scripts/python.exe dry_run.py https://youtu.be/test --skip-download --skip-transcribe
+```
+
+Dono pass hone chahiye — fail ho toh commit nahi.
