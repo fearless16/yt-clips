@@ -328,11 +328,26 @@ _WEAK_CRICKET_TERMS = {"shot", "coach", "captain", "team", "target", "chase"}
 
 
 def _contains_hindi_term(text: str, term: str) -> bool:
-    """Match a Devanagari term as a token, not inside words like ``करना``."""
-    return bool(re.search(
+    """Match a Hindi cricket term across scripts.
+
+    Commentary transcripts may arrive as Devanagari (raw Whisper) or as
+    Roman-Hinglish (post-transliteration). Match the Devanagari term as a
+    token in Devanagari text, and its transliterated Roman form in Roman
+    text. Using the same ``to_roman`` scheme on both sides keeps the forms
+    consistent by construction.
+    """
+    if re.search(
         r"(?<![\u0900-\u097f])" + re.escape(term) + r"(?![\u0900-\u097f])",
         text,
-    ))
+    ):
+        return True
+    from utils.devanagari import to_roman
+
+    term_roman = to_roman(term).casefold()
+    if not term_roman or term_roman == str(term).casefold():
+        return False
+    text_roman = to_roman(text).casefold()
+    return bool(re.search(r"\b" + re.escape(term_roman) + r"\b", text_roman))
 
 
 def _cricket_relevance_score(text: str) -> int:

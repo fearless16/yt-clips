@@ -504,6 +504,12 @@ def detect_highlights(
     with open(t_path, encoding="utf-8") as f:
         data = json.load(f)
     segments = data if isinstance(data, list) else data.get("segments", [])
+    # Whisper emits Devanagari for language=hi, but every downstream signal
+    # (keyword lists, classifiers, SEO grounding) operates on Roman-Hinglish.
+    # Transliterate once here so selection sees what the audience speaks.
+    from utils.devanagari import to_roman
+    for seg in segments:
+        seg["text"] = to_roman(seg.get("text", ""))
     segments = _prepare_complete_thoughts(segments)
     source_context = _load_source_context(paths["input"])
     source_title = _load_source_title(paths["input"])
