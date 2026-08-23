@@ -48,3 +48,7 @@ def pytest_collection_modifyitems(items):
                 reason="locked pre-existing baseline failure",
                 run=False,
             ))
+
+# Test suites must never fire live LLM grounding calls (cost + determinism).
+import os as _os
+_os.environ.setdefault("YT_CLIPS_LLM_GROUNDING", "0")

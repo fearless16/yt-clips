@@ -17,6 +17,10 @@ from utils.ai_client import AIClient
 from .trends import get_trending_context
 from automation._cache import TTLCache
 from utils.ocr import extract_ocr_entities
+from automation.seo.entity_grounding import (
+    extract_grounded_entities_llm,
+    name_vouched_by_topics,
+)
 from .cricket_context import (
     correct_cricket_spelling,
     discover_grounded_player_names,
@@ -599,9 +603,9 @@ def _cap_description_hashtags(description: str, hashtags: List[str]) -> str:
     block = " ".join(hashtags)
     max_chars = _description_max_chars()
     if not block:
-        return body[:max_chars]
+        return _truncate_at_word(body, max_chars)
     suffix = "\n\n" + block
-    return body[:max(0, max_chars - len(suffix))].rstrip() + suffix
+    return _truncate_at_word(body, max(0, max_chars - len(suffix))) + suffix
 
 
 def _clean_title(title: object, cap: int) -> str:
@@ -691,7 +695,7 @@ def _grounded_fallback_description(
     hashtag_line = " ".join(str(tag) for tag in hashtags if str(tag).strip())
     if hashtag_line:
         paragraphs.append(hashtag_line)
-    return "\n\n".join(paragraphs)[:_description_max_chars()]
+    return _truncate_at_word("\n\n".join(paragraphs), _description_max_chars())
 
 
 def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: bool = True) -> Dict:
@@ -716,7 +720,9 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     out["title"] = _ensure_title_emoji(
         _clean_title(out.get("title"), title_cap), title_cap
     )
-    out["description"] = str(out.get("description") or "")[:_description_max_chars()]
+    out["description"] = _truncate_at_word(
+        str(out.get("description") or ""), _description_max_chars()
+    )
 
     htags = out.get("hashtags") or []
     if isinstance(htags, str):
@@ -846,6 +852,24 @@ def _ensure_title_emoji(title: str, cap: int) -> str:
     if len(title) + 2 <= cap:
         return title.rstrip() + " 🏏"
     return title
+
+
+def _truncate_at_word(text: str, limit: int) -> str:
+    """Cut prose at a whitespace boundary so no half-word survives.
+
+    Hard slicing once produced 'explained wi' from 'explained with'; a
+    downstream \\bwi\\b match then hallucinated 'West Indies' as an entity.
+    """
+    text = str(text or "")
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    nxt = text[limit:limit + 1]
+    if nxt and not nxt.isspace():
+        space = cut.rfind(" ")
+        if space >= int(limit * 0.5):
+            cut = cut[:space]
+    return cut.rstrip()
 
 
 def _has_ai_slop(text: str) -> bool:
@@ -1083,7 +1107,17 @@ def generate_clip_seo(
         scorecard, grounded_players, grounded_aliases
     )
     grounding_context = " ".join((video_title, video_description, scorecard, transcript))
-    if not is_cricket_content(transcript, grounding_context):
+    # Reasoning-model grounding reads the (possibly transliterated) evidence
+    # before the static gate: when it vouches for real cricket entities, the
+    # keyword-based gate must not veto a genuine clip.
+    llm_ground = extract_grounded_entities_llm(
+        clip_id, transcript, video_title=video_title,
+        video_description=video_description,
+    )
+    vouched_topics = list(llm_ground.get("topic_phrases", []))
+    if not is_cricket_content(transcript, grounding_context) and not (
+        llm_ground.get("players") or llm_ground.get("teams")
+    ):
         raise SEOGenerationError(f"SEO blocked for {clip_id}: non-cricket content")
 
     teams_str = ", ".join(teams)
@@ -1177,16 +1211,25 @@ def generate_clip_seo(
     # (for example, a model mapping Hindi "Southee" audio to Saud Shakeel).
     # If a title introduces an ungrounded person, replace only the title with
     # the first evidence-built query; the clip transcript and long description
-    # stay untouched.
-    title_people = discover_grounded_player_names(
-        str(result.get("title") or ""),
-        [str(result.get("title") or "")],
-    )
+    # stay untouched. The grounding pass vouches for entities that
+    # transliteration noise hides from the static catalogs.
+    def _title_vouched(name: str) -> bool:
+        return name_vouched_by_topics(name, vouched_topics)
+
+    title_people = [
+        name for name in discover_grounded_player_names(
+            str(result.get("title") or ""),
+            [str(result.get("title") or "")],
+        )
+        if not _title_vouched(name)
+    ]
     player_catalog = list(dict.fromkeys([
         *grounded_entities["players"], *grounded_players,
+        *llm_ground.get("players", []),
     ]))
     clip_players = set(find_canonical_entities(transcript, player_catalog)["players"])
     allowed_people = {str(name).casefold() for name in clip_players}
+    allowed_people.update(str(p).casefold() for p in llm_ground.get("players", []))
     unknown_title_people = [
         name for name in title_people if name.casefold() not in allowed_people
     ]
@@ -1225,7 +1268,10 @@ def generate_clip_seo(
         rendered_text, player_catalog
     )
     extra_players = set(rendered_entities["players"]) - clip_players
-    extra_teams = set(rendered_entities["teams"]) - set(grounded_entities["teams"])
+    grounded_teams = set(grounded_entities["teams"]) | {
+        str(t) for t in llm_ground.get("teams", [])
+    }
+    extra_teams = set(rendered_entities["teams"]) - grounded_teams
     if extra_players:
         result["title"] = _grounded_fallback_title(transcript, approved_queries)
         result["hashtags"] = ["#Shorts", "#Cricket", "#CricketShorts"]
@@ -1245,7 +1291,7 @@ def generate_clip_seo(
             rendered_text, player_catalog
         )
         extra_players = set(rendered_entities["players"]) - clip_players
-        extra_teams = set(rendered_entities["teams"]) - set(grounded_entities["teams"])
+        extra_teams = set(rendered_entities["teams"]) - grounded_teams
     if extra_players or extra_teams:
         extras = sorted(extra_players | extra_teams)
         raise SEOGenerationError(
@@ -1288,7 +1334,9 @@ def generate_clip_seo(
         suffix = "\n\nSearch context: " + " | ".join(missing_queries) + "."
         max_chars = _description_max_chars()
         base = str(result.get("description") or "").rstrip()
-        result["description"] = base[:max(0, max_chars - len(suffix))].rstrip() + suffix
+        result["description"] = (
+            _truncate_at_word(base, max(0, max_chars - len(suffix))) + suffix
+        )
 
     alignment = _promise_alignment_score(
         str(result.get("title") or ""), transcript, str(result.get("description") or "")

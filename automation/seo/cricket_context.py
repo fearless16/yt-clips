@@ -239,6 +239,15 @@ _NON_PLAYER_NAME_PHRASES = {
     "gujarat titans", "latest news", "match highlights", "cricket shorts",
 }
 
+# Scoreboard abbreviations seen in stream titles/captions, mapped to the
+# canonical team names used across grounding and SEO.
+_TEAM_ABBREVIATIONS = {
+    "ind": "India", "sl": "Sri Lanka", "aus": "Australia", "eng": "England",
+    "pak": "Pakistan", "nz": "New Zealand", "rsa": "South Africa",
+    "wi": "West Indies", "ban": "Bangladesh", "afg": "Afghanistan",
+    "zim": "Zimbabwe", "ire": "Ireland",
+}
+
 
 def discover_grounded_player_names(
     source_text: str,
@@ -424,6 +433,12 @@ def find_canonical_entities(
     for name in sorted(CRICKET_TEAMS, key=len, reverse=True):
         if name.lower() in low:
             teams.append(name)
+    # Scoreboard-style abbreviations (IND, SL, AUS...) from stream titles.
+    for abbr, full in _TEAM_ABBREVIATIONS.items():
+        if full in teams:
+            continue
+        if re.search(r"\b" + abbr + r"\b", low):
+            teams.append(full)
     # De-dup while preserving order.
     return {
         "players": list(dict.fromkeys(players)),
