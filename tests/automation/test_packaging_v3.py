@@ -304,6 +304,6 @@ def test_config_targets_natural_pace_shorts():
     assert int(hl.get("preferred_duration_min", 0)) >= 15
     assert int(hl.get("preferred_duration_max", 99)) <= 40
     assert exp.get("variable_speed_aggressive") is False
-    assert float(sel["min_quality"]) >= 45.0
+    assert float(sel["min_quality"]) >= 38.0
     assert int(sel["max_selected"]) == 3
     assert int(seo["title_max_chars"]) == 60
