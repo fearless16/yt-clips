@@ -568,3 +568,92 @@ class TestRealClientContract:
                          timeout_s=5)
         assert "EXPIRED" in str(excinfo.value) or \
             excinfo.value.stage == STAGE_POLL_CONTAINER
+
+
+class TestPublishHook:
+    """provider=upload_post path: HOOK_PUBLISH bypasses the Graph flow."""
+
+    @pytest.fixture
+    def clean_hooks(self):
+        from automation.instagram import runner
+        runner._HOOKS.clear()
+        yield runner
+        runner._HOOKS.clear()
+
+    def test_publish_hook_short_circuits_graph_flow(self, tmp_path,
+                                                    insta_enabled,
+                                                    clean_hooks):
+        runner = clean_hooks
+        clip = tmp_path / "clipA"
+        clip.mkdir()
+        (clip / "clip.mp4").write_bytes(b"\x00\x01")
+        calls = {}
+
+        def fake_publish(video_path, caption, audio_name=None,
+                         clip_dir=None, state=None):
+            calls["caption"] = caption
+            calls["video"] = Path(video_path)
+            return {"media_id": "179thirdparty",
+                    "permalink": "https://instagram.com/reel/X/",
+                    "provider": "upload_post"}
+
+        runner.register_stage_hook("run_evidence_stage", lambda *a, **k: None)
+        runner.register_stage_hook("run_caption_stage",
+                                   lambda *a, **k: "Hook cap")
+        runner.register_stage_hook("run_publish_stage_unused", None)
+        runner.register_stage_hook(runner.HOOK_PUBLISH, fake_publish)
+
+        media_id = runner.process_instagram_for_clip(
+            clip, "transcript", "title", "desc")
+
+        assert media_id == "179thirdparty"
+        assert calls["video"].name == "clip.mp4"
+        state = json.loads((clip / "clip_insta_state.json").read_text(
+            encoding="utf-8"))
+        assert state["stage"] == "DONE"
+        assert state["provider"] == "upload_post"
+
+    def test_publish_hook_failure_writes_marker(self, tmp_path,
+                                                insta_enabled,
+                                                clean_hooks):
+        runner = clean_hooks
+        clip = tmp_path / "clipB"
+        clip.mkdir()
+        (clip / "clip.mp4").write_bytes(b"\x00\x01")
+
+        def boom(*a, **k):
+            raise RuntimeError("quota over")
+
+        runner.register_stage_hook("run_evidence_stage", lambda *a, **k: None)
+        runner.register_stage_hook("run_caption_stage",
+                                   lambda *a, **k: "cap")
+        runner.register_stage_hook(runner.HOOK_PUBLISH, boom)
+
+        assert runner.process_instagram_for_clip(
+            clip, "t", "ti", "d") is None
+        marker = json.loads((clip / "clip_insta_failed.json").read_text(
+            encoding="utf-8"))
+        assert "quota over" in marker["error"]
+
+    def test_seo_registers_upload_post_hook_when_provider_set(
+            self, monkeypatch):
+        import automation.instagram.seo as seo
+
+        class _Cfg(dict):
+            def get(self, k, d=None):
+                return {"instagram": {
+                    "enabled": True,
+                    "provider": "upload_post",
+                    "upload_post": {"api_key_env": "UP_KEY",
+                                    "profile": "chan"},
+                }}.get(k, d)
+
+        import automation.instagram.seo as seo
+        monkeypatch.setenv("UPLOAD_POST_API_KEY", "secret-key")
+        monkeypatch.setattr(seo, "_insta_config",
+                            lambda: {"provider": "upload_post",
+                                     "upload_post": {
+                                         "api_key_env": "UPLOAD_POST_API_KEY",
+                                         "profile": "chan"}})
+        fn = seo.make_upload_post_publish()
+        assert callable(fn)

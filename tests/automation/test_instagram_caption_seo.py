@@ -414,6 +414,8 @@ class TestStageHooks:
 
     def test_make_graph_client_builds_facebook_client(self, monkeypatch):
         from automation.instagram import credential, seo
+        monkeypatch.setattr(seo, "_insta_config",
+                            lambda: {"provider": "graph"})
         from automation.instagram.graph_client import FacebookGraphClient
         token = {"access_token": "tok", "expires_at": time.time() + 9999,
                  "ig_user_id": "17841400000000001"}

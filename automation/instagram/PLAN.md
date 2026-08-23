@@ -231,3 +231,15 @@ M7 merge `main`, flip `instagram.enabled: true`.
 - **Retry cap:** `retry_failed_insta` parks markers after 3 recorded attempts
   unless `force=True`.
 - **dry_run gate:** INSTA(STUB) PASS now requires the stub to actually execute.
+
+## 9. Provider decision (channel owner pick): upload_post first
+
+`instagram.provider: upload_post | graph` — **upload_post is the default path**:
+one REST call (`POST api.upload-post.com/api/upload`, multipart video +
+`platform[]=instagram` + caption/audio_name) publishes the Reel; Upload-Post
+owns Meta OAuth, tokens, transcoding and retries; their app is already
+Meta-reviewed so NO personal Meta app / App Review needed. Idempotency-Key =
+sha256(path|size|mtime) → marker-retry can never duplicate a Reel. Async
+fallback responses are polled via /api/uploadposts/status. Kill-switch shared:
+YT_CLIPS_INSTA_LIVE=1. API key lives ONLY in env `UPLOAD_POST_API_KEY`.
+The Graph rupload path stays as provider=graph fallback.

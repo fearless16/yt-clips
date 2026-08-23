@@ -94,8 +94,19 @@ def run_caption_stage(clip_dir, transcript, video_title,
     return payload["caption"]
 
 
+def _insta_config() -> dict:
+    try:
+        from automation.config import load as load_cfg
+        return (load_cfg() or {}).get("instagram") or {}
+    except Exception:
+        return {}
+
+
 def make_graph_client():
     """Build FacebookGraphClient from insta_token.json, or None."""
+    if str(_insta_config().get("provider") or "graph").casefold() \
+            == "upload_post":
+        return None
     try:
         from automation.instagram.credential import is_valid, load_token
     except ImportError:
@@ -152,6 +163,62 @@ def generate_insta_metadata(clip_dir, transcript, video_title,
     return payload
 
 
-_runner.register_stage_hook(_runner.HOOK_RUN_EVIDENCE, run_evidence_stage)
-_runner.register_stage_hook(_runner.HOOK_RUN_CAPTION, run_caption_stage)
-_runner.register_stage_hook(_runner.HOOK_MAKE_CLIENT, make_graph_client)
+def make_upload_post_publish():
+    """Publish-hook for provider=upload_post: one REST call per Reel.
+
+    Returns None when the provider isn't upload_post or credentials are
+    missing, so the runner falls back to the Graph flow.
+    """
+    cfg = _insta_config()
+    if str(cfg.get("provider") or "graph").casefold() != "upload_post":
+        return None
+    up_cfg = cfg.get("upload_post") or {}
+    api_key = os.environ.get(
+        str(up_cfg.get("api_key_env") or "UPLOAD_POST_API_KEY"), "").strip()
+    profile = str(up_cfg.get("profile") or "").strip()
+    if not api_key or not profile:
+        log.warning(
+            "instagram.provider=upload_post but %s/profile missing — "
+            "falling back to Graph flow",
+            up_cfg.get("api_key_env") or "UPLOAD_POST_API_KEY")
+        return None
+
+    def _publish(video_path, caption, audio_name=None, clip_dir=None,
+                 state=None):
+        from automation.instagram.upload_post_client import UploadPostClient
+        client = UploadPostClient(api_key, profile)
+        result = client.publish_reel(
+            video_path, caption, audio_name=audio_name,
+            poll_interval_s=10.0, timeout_s=900.0)
+        return {
+            "media_id": result["media_id"],
+            "permalink": result.get("permalink", ""),
+            "provider": "upload_post",
+        }
+
+    return _publish
+
+
+def _publish_via_provider(**kwargs):
+    fn = make_upload_post_publish()
+    return fn(**kwargs) if fn is not None else None
+
+
+def _register_default_hooks() -> None:
+    """Fill only EMPTY hook slots.
+
+    Import side effect must never clobber hooks a caller (or test)
+    registered before this module was first imported.
+    """
+    defaults = {
+        _runner.HOOK_RUN_EVIDENCE: run_evidence_stage,
+        _runner.HOOK_RUN_CAPTION: run_caption_stage,
+        _runner.HOOK_MAKE_CLIENT: make_graph_client,
+        _runner.HOOK_PUBLISH: _publish_via_provider,
+    }
+    for name, fn in defaults.items():
+        if name not in _runner._HOOKS:
+            _runner.register_stage_hook(name, fn)
+
+
+_register_default_hooks()

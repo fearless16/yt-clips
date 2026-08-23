@@ -25,6 +25,7 @@ FAILED_MARKER = "clip_insta_failed.json"
 HOOK_RUN_EVIDENCE = "run_evidence_stage"
 HOOK_RUN_CAPTION = "run_caption_stage"
 HOOK_MAKE_CLIENT = "make_graph_client"
+HOOK_PUBLISH = "publish"
 
 _HOOKS: dict = {}
 
@@ -183,6 +184,19 @@ def process_instagram_for_clip(clip_dir: Path, transcript: str,
         _save("UPLOAD", caption=caption)
 
         video_path = _find_clip_video(clip_dir)
+        publish_fn = resolve_stage_hook(HOOK_PUBLISH)
+        result = publish_fn(
+            video_path=video_path, caption=caption,
+            audio_name=_resolve_audio_name(clip_dir), clip_dir=clip_dir,
+            state=dict(state)) if publish_fn is not None else None
+        if result is not None:
+            _save("DONE", last_error=None, caption=caption,
+                  media_id=result["media_id"],
+                  permalink=result.get("permalink", ""),
+                  provider=str(result.get("provider") or "publish_hook"))
+            (clip_dir / FAILED_MARKER).unlink(missing_ok=True)
+            return result["media_id"]
+
         client_fn = resolve_stage_hook(HOOK_MAKE_CLIENT)
         client = client_fn() if client_fn is not None else \
             _default_graph_client()

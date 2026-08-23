@@ -334,8 +334,12 @@ logging:
 # ── Instagram Reels (SEO + upload, PLAN.md §config) ──────────────────────────
 instagram:
   enabled: false              # flips true only after creds verified + live smoke
-  api_flavor: facebook_login  # locked by research (rupload + hashtag signals)
-  ig_user_id: ""
+  provider: upload_post       # upload_post (3rd-party, no Meta app needed) | graph (self-hosted FB-Login rupload)
+  upload_post:                # active when provider=upload_post
+    api_key_env: UPLOAD_POST_API_KEY   # key from app.upload-post.com/api-keys, kept OUT of repo
+    profile: ""               # profile username configured in the Upload-Post dashboard
+  api_flavor: facebook_login  # locked by research (rupload + hashtag signals) — graph path only
+  ig_user_id: ""              # graph path only
   token_file: insta_token.json
   host_provider: none         # rupload primary; r2 fallback only if rupload blocked
   caption_target_chars: 250   # sweet spot; hard API cap 2200 never approached
