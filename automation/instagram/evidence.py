@@ -213,6 +213,67 @@ def _validate_candidate_tags(client, teams, roster, seed_phrases) -> list:
     ]
 
 
+def _entity_tag_seeds(teams, facts, roster) -> list:
+    """Deterministic tag candidates from verified entities.
+
+    Teams -> team tags + matchup forms (word + conventional abbreviation
+    combos like indvsl); series-looking fact lines contribute a compact
+    slug; top roster names become player tags. CATEGORY_TAGS are the
+    research-mandated tier-1 broad slots (R22) — fixed constants, never
+    invented topics. Every output traces to a verified entity or the
+    documented category set.
+    """
+    out: list[str] = []
+    seen: set = set()
+
+    def add(value: str) -> None:
+        phrase = _clean_phrase(value)
+        if not (2 < len(phrase) <= 30):
+            return
+        key = phrase.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(phrase)
+
+    clean_teams = [t for t in teams or [] if t]
+    for team in clean_teams:
+        add(team)
+    try:
+        from automation.seo.cricket_context import _TEAM_ABBREVIATIONS
+        abbr_map = {v.casefold(): k for k, v in _TEAM_ABBREVIATIONS.items()}
+    except Exception:
+        abbr_map = {}
+    abbrs = [abbr_map.get(t.casefold()) for t in clean_teams]
+    if len(clean_teams) >= 2:
+        add(f"{clean_teams[0]} vs {clean_teams[1]}")
+        if all(abbrs):
+            a, b = abbrs[0], abbrs[1]
+            for form in (f"{a} vs {b}", f"{a}v{b}", f"{a}vs{b}",
+                         f"{b} vs {a}", f"{b}v{a}", f"{b}vs{a}",
+                         f"{a}{b}", f"{b}{a}"):
+                add(form)
+    for fact in facts or []:
+        lowered = str(fact).casefold()
+        if " vs " in lowered or " test" in lowered or "series" in lowered:
+            compact = _clean_phrase(
+                " ".join(w for w in lowered.replace(".", " ").split()
+                         if w.isalnum() or w == "vs"))
+            if 3 < len(compact) <= 30 and compact not in seen:
+                seen.add(compact)
+                out.append(compact)
+    for player in (roster or [])[:4]:
+        parts = str(player).split()
+        if parts:
+            add(parts[-1])
+    for category in CATEGORY_TAGS:
+        add(category)
+    return out[:16]
+
+
+CATEGORY_TAGS = ("cricket", "testcricket", "indiancricket")
+
+
 def build_insta_evidence_pack(
     video_title: str,
     video_description: str,
@@ -256,6 +317,18 @@ def build_insta_evidence_pack(
         learner = []
     seeds = _collect_seed_phrases(approved_search_queries, video_title,
                                   video_description, transcript)
+
+    # Tag-shaped seeds derived from VERIFIED entities only: team names,
+    # the matchup pair, and roster surnames. These are real facts in
+    # hashtag format — never invented topics (REAL-ONLY policy holds).
+    entity_seeds = _entity_tag_seeds(provided_teams, facts,
+                                     _build_roster(grounded_players,
+                                                   match_players, canonical))
+    existing = {str(s.get("phrase", "")).casefold() for s in seeds}
+    for phrase in entity_seeds:
+        if phrase.casefold() not in existing:
+            seeds.append({"phrase": phrase, "seed": True})
+            existing.add(phrase.casefold())
 
     validated = []
     if client is not None and validate_hashtags:

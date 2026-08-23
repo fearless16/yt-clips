@@ -158,7 +158,8 @@ class TestWriteCaptionHappyPath:
 
         out = ce.write_caption(PACK, TRANSCRIPT, VIDEO_TITLE)
 
-        assert set(out) == {"caption", "hashtags", "audio_name"}
+        assert set(out) == {"caption", "hashtags", "audio_name",
+                    "tags_topped_up"}
         first_line = out["caption"].split("\n")[0]
         assert len(first_line) <= 55
         assert "bumrah" in first_line.lower()
@@ -201,10 +202,11 @@ class TestCaptionPolicyEnforcement:
         assert "CORRECTION REQUIRED" in repair_prompt
         assert "55" in repair_prompt
 
-    def test_invented_hashtag_rejected_and_repaired(self, monkeypatch):
+    def test_invented_hashtag_dropped_and_topped_up(self, monkeypatch):
+        """Invented tags are dropped; the REAL-ONLY pool fills the gap
+        deterministically — no repair LLM spend needed."""
         import automation.instagram.caption_engine as ce
-        ai = _stub_llm(monkeypatch,
-                       [_invented_hashtag_candidate(), _valid_candidate()])
+        ai = _stub_llm(monkeypatch, [_invented_hashtag_candidate()])
         monkeypatch.setattr(ce, "audit_written_copy_llm", _clean_audit)
 
         out = ce.write_caption(PACK, TRANSCRIPT, VIDEO_TITLE)
@@ -212,8 +214,8 @@ class TestCaptionPolicyEnforcement:
         names = {t[1:].lower() for t in out["hashtags"]}
         assert "viralreelsking" not in names
         assert len(out["hashtags"]) == 5
-        assert len(ai.prompts) == 2
-        assert "hashtag" in ai.prompts[1].lower()
+        assert len(ai.prompts) == 1
+        assert out["tags_topped_up"], "shortfall must come from pack"
 
     def test_unsupported_entity_scrubbed_then_repaired(self, monkeypatch):
         import automation.instagram.caption_engine as ce

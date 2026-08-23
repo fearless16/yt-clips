@@ -151,7 +151,13 @@ class TestGracefulDegradation:
         if source == "fetch_verified_match_context":
             assert pack["match_facts"] == []
         elif source == "fetch_youtube_suggestions":
-            assert pack["seed_phrases"] == []
+            # YT-suggest dies, but VERIFIED-entity tag seeds (teams/
+            # matchup/roster) legitimately survive the degradation.
+            assert all(
+                isinstance(s, dict)
+                and str(s.get("phrase", "")).strip()
+                and s.get("seed") is True
+                for s in pack["seed_phrases"])
         elif source == "_load_learner_top_captions":
             assert pack["learner_top_captions"] == []
         else:
@@ -168,7 +174,10 @@ class TestGracefulDegradation:
         pack = build_insta_evidence_pack("t", "", "", client=FakeHashtagClient(),
                                          validate_hashtags=True)
         assert pack["match_facts"] == []
-        assert pack["seed_phrases"] == []
+        # blackout leaves ONLY the fixed category tag seeds (no teams,
+        # no facts, no roster, no YT suggest in this fixture)
+        assert [s["phrase"] for s in pack["seed_phrases"]] == \
+            list(evidence.CATEGORY_TAGS)
 
 
 class TestValidateHashtagPool:

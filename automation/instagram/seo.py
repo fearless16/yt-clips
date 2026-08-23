@@ -40,10 +40,32 @@ def _read_json(path: Path):
 
 def _build_evidence(clip_dir, transcript, video_title, video_description):
     from automation.instagram.evidence import build_insta_evidence_pack
+
+    teams = []
+    try:
+        from automation.seo.entity_grounding import find_canonical_entities
+        merged = " ".join(filter(None, [video_title, video_description,
+                                        transcript]))
+        teams = find_canonical_entities(merged)["teams"][:2]
+    except Exception as exc:
+        log.warning("team grounding unavailable: %s", exc)
+
+    match_facts = None
+    try:
+        from automation.seo.trends import fetch_verified_match_context
+        facts = fetch_verified_match_context(
+            video_title or transcript[:120] or "cricket")
+        if isinstance(facts, dict):
+            match_facts = facts
+    except Exception as exc:
+        log.warning("verified match context unavailable: %s", exc)
+
     return build_insta_evidence_pack(
         video_title=video_title,
         video_description=video_description,
         transcript=transcript,
+        teams=teams,
+        match_facts=match_facts,
     )
 
 

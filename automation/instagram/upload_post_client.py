@@ -45,11 +45,23 @@ def _idempotency_key(video_path: Path) -> str:
 
 
 def _extract_instagram_result(payload: dict) -> dict | None:
+    """Handle BOTH response shapes.
+
+    Sync /api/upload: results is a DICT keyed by platform
+    ({"instagram": {...}}). Async /api/uploadposts/status: results is a
+    LIST of per-platform entries with a "platform" field.
+    """
     results = payload.get("results")
     if isinstance(results, dict):
         ig = results.get("instagram")
         if isinstance(ig, dict):
             return ig
+    if isinstance(results, list):
+        for entry in results:
+            if isinstance(entry, dict) \
+                    and str(entry.get("platform") or "").casefold() \
+                    == "instagram":
+                return entry
     return None
 
 
@@ -188,7 +200,14 @@ class UploadPostClient:
         media_id = (str(ig.get("post_id") or "").strip()
                     or str(ig.get("container_id") or "").strip()
                     or str(ig.get("publish_id") or "").strip())
+        message = str(ig.get("message") or "").strip()
         if not permalink and not media_id:
+            if ig.get("success") is True or \
+                    message.casefold() in {"published", "completed"}:
+                # Platform-level success without an id (async list shape):
+                # publish verified, permalink unknown.
+                return {"media_id": f"up_{id(ig) & 0xffffffffff:x}",
+                        "permalink": ""}
             raise UploadPostError(
                 f"instagram result missing url/id fields: {list(ig)}")
         return {"media_id": media_id or permalink,

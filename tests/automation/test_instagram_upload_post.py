@@ -225,3 +225,42 @@ class TestVerifyCredentials:
             {"success": False, "message": "Invalid"}, status_code=401)
         with pytest.raises(UploadPostError, match="credential check"):
             UploadPostClient("k", "p", session=session).verify_credentials()
+
+
+class TestAsyncListShape:
+    """Status endpoint returns results as a LIST of platform entries."""
+
+    def test_list_results_recognized(self, tmp_path, live, monkeypatch):
+        clip = tmp_path / "c.mp4"
+        clip.write_bytes(b"x")
+        session = MagicMock()
+        session.post.return_value = _resp({
+            "success": True, "request_id": "r9"})
+        session.get.return_value = _resp({
+            "status": "completed", "completed": 1, "total": 1,
+            "results": [{"platform": "instagram", "success": True,
+                         "message": "Published",
+                         "post_url": "https://instagram.com/reel/LIVE1/",
+                         "post_id": "182live"}],
+        })
+        monkeypatch.setattr(
+            "automation.instagram.upload_post_client.time.sleep",
+            lambda s: None)
+        out = UploadPostClient("k", "p", session=session).publish_reel(
+            clip, "c", poll_interval_s=0)
+        assert out == {"media_id": "182live",
+                       "permalink": "https://instagram.com/reel/LIVE1/"}
+
+    def test_success_without_ids_accepted(self, tmp_path, live):
+        clip = tmp_path / "c.mp4"
+        clip.write_bytes(b"x")
+        session = MagicMock()
+        session.post.return_value = _resp({
+            "success": True,
+            "results": {"instagram": {"success": True,
+                                      "message": "Published"}},
+        })
+        out = UploadPostClient("k", "p", session=session).publish_reel(
+            clip, "c", poll_interval_s=0)
+        assert out["permalink"] == ""
+        assert out["media_id"].startswith("up_")

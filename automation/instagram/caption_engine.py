@@ -49,12 +49,14 @@ Return ONLY this valid JSON object:
 }}}}
 
 HARD CONTRACT:
+- LANGUAGE: FULL ENGLISH ONLY. No Hindi, no Hinglish, no romanized
+  Hindi words anywhere in caption or audio_name.
 - HOOK LINE (first line): max {hook_max} chars — this is the Reels-tab fold.
-  Pattern: "{{Player/moment}} ne {{outcome}}! {{Series}}". The primary
+  Pattern: "{{Player/moment}} {{outcome}}! {{Series}}". The primary
   keyword (main player/moment from the evidence) must sit inside those
   first {hook_max} chars.
 - CAPTION BODY: total caption target {target_min}-{target_max} chars
-  (hard API max {hard_max}, hashtags excluded). Romanized Hindi/Hinglish.
+  (hard API max {hard_max}, hashtags excluded).
 - EXACTLY {tag_count} hashtags, taken ONLY from validated_hashtags/seeds
 - VARY the tag selection across posts: start your tiered pick at index
   {rotation_start} (mod pool size) of the allowed list, keeping tiers intact
@@ -290,6 +292,22 @@ def _validate_and_scrub(candidate, evidence_pack, transcript, video_title,
         if norm and norm in allowed and norm not in seen_tags:
             seen_tags.add(norm)
             valid_tags.append(allowed[norm])
+    topped_up = []
+    if len(valid_tags) < HASHTAG_COUNT:
+        # Deterministic REAL-ONLY top-up: fill the shortfall from the
+        # allowed pool (rotation order) instead of failing the whole
+        # caption over one slipped tag. Invented tags are still dropped.
+        rotation = getattr(_validate_and_scrub, "_rotation", 0)
+        pool = list(allowed.items())
+        start = (int(rotation) % len(pool)) if pool else 0
+        ordered = pool[start:] + pool[:start]
+        for norm, display in ordered:
+            if len(valid_tags) >= HASHTAG_COUNT:
+                break
+            if norm not in seen_tags:
+                seen_tags.add(norm)
+                valid_tags.append(display)
+                topped_up.append(display)
     if len(valid_tags) != HASHTAG_COUNT:
         violations.append(
             f"exactly {HASHTAG_COUNT} hashtags from validated_hashtags/"
@@ -315,6 +333,7 @@ def _validate_and_scrub(candidate, evidence_pack, transcript, video_title,
         "hashtags": valid_tags,
         "audio_name": _build_audio_name(evidence_pack, transcript,
                                         video_title),
+        "tags_topped_up": topped_up,
     }
     return package, violations
 
@@ -378,9 +397,12 @@ def write_caption(evidence_pack, transcript, video_title) -> dict:
             f"but {HASHTAG_COUNT} are required; refusing to invent tags")
     clip_id = re.sub(r"\W+", "-",
                      str(video_title or "insta-caption"))[:40] or "insta"
+    rotation_offset = _rotation_offset(evidence_pack)
     user_prompt = _build_prompt(
         evidence_pack, transcript, video_title,
-        rotation_offset=_rotation_offset(evidence_pack))
+        rotation_offset=rotation_offset)
+
+    _validate_and_scrub._rotation = int(rotation_offset)
 
     candidate = _attempt(user_prompt)
     package, violations = _validate_and_scrub(
