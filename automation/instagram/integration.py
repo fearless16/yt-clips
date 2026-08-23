@@ -27,7 +27,7 @@ def resolve_skip_instagram(skip_instagram=None) -> bool:
 
         cfg = load_config()
     except Exception:
-        return False
+        return True
     insta_cfg = cfg.get("instagram") or {}
     return not bool(insta_cfg.get("enabled", False))
 

@@ -311,15 +311,18 @@ class TestContainerStatus:
         monkeypatch.setenv("YT_CLIPS_INSTA_LIVE", "1")
         client = _client()
         get = _stub(client, "get", _Resp(
-            {"status_code": "FINISHED", "status": "Video finished"}))
+            {"status_code": "FINISHED", "status": "Video finished",
+             "id": "179media"}))
 
         status = client.container_status("c9")
 
         assert status == {"status_code": "FINISHED",
-                          "status": "Video finished"}
+                          "status": "Video finished",
+                          "id": "179media"}
         url = get.call_args.args[0]
         assert url == "https://graph.facebook.com/v21.0/c9"
-        assert get.call_args.kwargs["params"]["fields"] == "status_code,status"
+        assert get.call_args.kwargs["params"]["fields"] == \
+            "status_code,status,id"
 
     def test_error_response_raises_with_parsed_fields(self, monkeypatch):
         monkeypatch.setenv("YT_CLIPS_INSTA_LIVE", "1")

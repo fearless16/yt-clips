@@ -1551,11 +1551,51 @@ def export_all(
         except Exception as e:
             log.error("🏷  SEO failed for %s: %s", clip_id, e)
 
+    def _make_insta_executor():
+        """IG fan-out pool: None unless config enables it and env allows.
+
+        YT_CLIPS_INSTA_DRYRUN=1 forces enablement (dry_run gate).
+        """
+        import os
+        if os.environ.get("YT_CLIPS_SKIP_INSTAGRAM") == "1":
+            return None
+        if os.environ.get("YT_CLIPS_INSTA_DRYRUN") == "1":
+            return ThreadPoolExecutor(max_workers=2, thread_name_prefix="insta")
+        try:
+            from utils.config import load_config
+            cfg = load_config() or {}
+            if not (cfg.get("instagram") or {}).get("enabled", False):
+                return None
+        except Exception:
+            return None
+        return ThreadPoolExecutor(max_workers=2, thread_name_prefix="insta")
+
+    def _insta_worker(clip_id, info, clip_dir, out_dir, seo_context):
+        try:
+            from automation.instagram.runner import (
+                process_instagram_for_clip,
+                resolve_insta_transcript,
+            )
+            transcript = resolve_insta_transcript(clip_dir, info)
+            media_id = process_instagram_for_clip(
+                clip_dir=clip_dir,
+                transcript=transcript,
+                video_title=seo_context.get("video_title", ""),
+                video_description=seo_context.get("video_description", ""),
+                clip_id=clip_id,
+            )
+            if media_id:
+                log.info("📲 Instagram Reel live: %s (%s)", clip_id, media_id)
+        except Exception as e:
+            log.error("📲 Instagram worker failed for %s: %s", clip_id, e)
+
     # ── Parallel Export + Immediate SEO ──────────────────────────────────────────
     # Export clips in parallel. As each clip finishes, its SEO is submitted
     # to a separate thread pool immediately — no waiting for all exports.
     # SEO uses OpenCode Go models only (qwen3.7-max, mimo-v2.5-pro, deepseek-v4-pro).
     seo_futures = []
+    insta_executor = _make_insta_executor() if generate_seo else None
+    insta_futures = []
     with ThreadPoolExecutor(max_workers=max_workers) as export_executor:
         # SEO pool: 2 workers max (API rate limits)
         seo_executor = ThreadPoolExecutor(max_workers=2) if (generate_seo and seo_context) else None
@@ -1577,6 +1617,11 @@ def export_all(
                             _seo_worker, clip_id, info, out_dir, seo_context
                         )
                         seo_futures.append(seo_fut)
+                    if insta_executor is not None:
+                        insta_futures.append(insta_executor.submit(
+                            _insta_worker, clip_id, info,
+                            Path(path).parent, out_dir, seo_context or {},
+                        ))
                 else:
                     log.warning("[%d/%d] Export failed or dropped: %s", idx, total, clip_id)
             except Exception as e:
@@ -1592,6 +1637,16 @@ def export_all(
                 log.error("SEO task error: %s", e)
     if seo_executor is not None:
         seo_executor.shutdown(wait=False)
+
+    if insta_futures:
+        log.info("📲 Waiting for %d Instagram tasks...", len(insta_futures))
+        for fut in insta_futures:
+            try:
+                fut.result(timeout=1200)
+            except Exception as e:
+                log.error("Instagram task error: %s", e)
+    if insta_executor is not None:
+        insta_executor.shutdown(wait=False)
 
     log.info("✨ Export complete: %d clips in %s", len(exported_clips), out_dir)
     return exported_clips

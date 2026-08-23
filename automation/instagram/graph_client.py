@@ -185,9 +185,10 @@ class FacebookGraphClient(GraphClient):
     def container_status(self, creation_id: str) -> dict:
         self._require_live()
         payload = self._get(str(creation_id),
-                            params={"fields": "status_code,status"})
+                            params={"fields": "status_code,status,id"})
         return {"status_code": payload.get("status_code"),
-                "status": payload.get("status")}
+                "status": payload.get("status"),
+                "id": payload.get("id")}
 
     def publish_container(self, creation_id: str) -> Optional[str]:
         self._require_live()

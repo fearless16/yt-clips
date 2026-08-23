@@ -9,6 +9,7 @@ marker upstream).
 import json
 import re
 import threading
+from datetime import datetime, timezone
 
 from automation.seo.entity_grounding import audit_written_copy_llm
 
@@ -55,6 +56,8 @@ HARD CONTRACT:
 - CAPTION BODY: total caption target {target_min}-{target_max} chars
   (hard API max {hard_max}, hashtags excluded). Romanized Hindi/Hinglish.
 - EXACTLY {tag_count} hashtags, taken ONLY from validated_hashtags/seeds
+- VARY the tag selection across posts: start your tiered pick at index
+  {rotation_start} (mod pool size) of the allowed list, keeping tiers intact
   above. Tier mix: 1 broad + 2 mid series/team + 1 long-tail moment +
   1 rotating matchday tag. Never #reels #viral #explore or any generic tag.
 - Exactly ONE genuine reply-driving question in the body (a real cricket
@@ -196,8 +199,10 @@ def _build_audio_name(evidence_pack, transcript, video_title):
     return f"{moment}{BRAND_SUFFIX}"
 
 
-def _build_prompt(evidence_pack, transcript, video_title):
+def _build_prompt(evidence_pack, transcript, video_title,
+                  rotation_offset: int = 0):
     return _USER_TMPL.format(
+        rotation_start=int(rotation_offset),
         evidence_json=json.dumps(evidence_pack, ensure_ascii=False),
         transcript=str(transcript or "")[:4000],
         video_title=video_title or "(unknown)",
@@ -319,15 +324,12 @@ def _audit_unsupported(candidate, caption_text, transcript, video_title,
     lines = [ln for ln in caption_text.split("\n") if ln.strip()]
     hook = lines[0] if lines else ""
     description = " ".join(lines[1:])
-    try:
-        audit = audit_written_copy_llm(
-            clip_id, transcript,
-            title=hook,
-            description=description,
-            video_title=video_title,
-        )
-    except Exception:
-        return []
+    audit = audit_written_copy_llm(
+        clip_id, transcript,
+        title=hook,
+        description=description,
+        video_title=video_title,
+    )
     return [str(n) for n in (audit.get("unsupported_entities") or [])]
 
 
@@ -346,16 +348,39 @@ def _repair_prompt(user_prompt, previous, violations):
     )
 
 
+class InsufficientEvidenceError(RuntimeError):
+    """Pack cannot yield the required distinct hashtags — no LLM spend."""
+
+
+def _rotation_offset(evidence_pack) -> int:
+    """Stable per-pack offset so identical pools rotate across posts."""
+    import hashlib
+    raw = json.dumps(
+        [str((i or {}).get("tag") or "") for i in
+         evidence_pack.get("validated_hashtags") or []],
+        sort_keys=True) + datetime.now(timezone.utc).strftime("%Y%m%d")
+    return int(hashlib.sha256(raw.encode("utf-8")).hexdigest(), 16)
+
+
 def write_caption(evidence_pack, transcript, video_title) -> dict:
     """Write one grounded IG package: {caption, hashtags, audio_name}.
 
-    Raises CaptionPolicyError when even the single corrective repair pass
-    still violates the REAL-ONLY contract.
+    Raises InsufficientEvidenceError BEFORE any LLM spend when the pack
+    cannot possibly yield HASHTAG_COUNT distinct tags. Raises
+    CaptionPolicyError when even the single corrective repair pass still
+    violates the REAL-ONLY contract.
     """
     evidence_pack = dict(evidence_pack or {})
+    allowed = _allowed_tag_set(evidence_pack)
+    if len(allowed) < HASHTAG_COUNT:
+        raise InsufficientEvidenceError(
+            f"evidence pack yields only {len(allowed)} distinct hashtags "
+            f"but {HASHTAG_COUNT} are required; refusing to invent tags")
     clip_id = re.sub(r"\W+", "-",
                      str(video_title or "insta-caption"))[:40] or "insta"
-    user_prompt = _build_prompt(evidence_pack, transcript, video_title)
+    user_prompt = _build_prompt(
+        evidence_pack, transcript, video_title,
+        rotation_offset=_rotation_offset(evidence_pack))
 
     candidate = _attempt(user_prompt)
     package, violations = _validate_and_scrub(

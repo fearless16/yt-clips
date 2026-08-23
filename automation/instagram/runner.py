@@ -118,6 +118,22 @@ def _resolve_audio_name(clip_dir: Path):
     return None
 
 
+def _upload_timing() -> tuple[float, float]:
+    """(poll_interval_s, timeout_s) from config instagram block, defaults kept."""
+    defaults = (10.0, 900.0)
+    try:
+        from utils.config import load_config
+        cfg = (load_config() or {}).get("instagram") or {}
+    except Exception:
+        return defaults
+    try:
+        interval = float(cfg.get("container_poll_interval_s", defaults[0]))
+        timeout = float(cfg.get("upload_timeout_s", defaults[1]))
+        return (interval, timeout)
+    except (TypeError, ValueError):
+        return defaults
+
+
 def process_instagram_for_clip(clip_dir: Path, transcript: str,
                                video_title: str, video_description: str,
                                *, force: bool = False):
@@ -175,9 +191,26 @@ def process_instagram_for_clip(clip_dir: Path, transcript: str,
                 "Instagram GraphClient unavailable (graph_client module "
                 "missing or misconfigured)")
 
-        from automation.instagram.uploader import publish_reel
-        result = publish_reel(client, video_path, caption,
-                              audio_name=_resolve_audio_name(clip_dir))
+        poll_interval_s, upload_timeout_s = _upload_timing()
+        resume_creation_id = str(state.get("creation_id") or "").strip() or None
+
+        from automation.instagram.uploader import (
+            InstagramUploadError,
+            publish_reel,
+        )
+
+        def _on_creation(creation_id: str) -> None:
+            _write_state(clip_dir, "UPLOAD", attempts,
+                         creation_id=creation_id, caption=caption)
+
+        result = publish_reel(
+            client, video_path, caption,
+            audio_name=_resolve_audio_name(clip_dir),
+            poll_interval_s=poll_interval_s,
+            timeout_s=upload_timeout_s,
+            resume_creation_id=resume_creation_id,
+            on_creation=_on_creation,
+        )
 
         _save("DONE", last_error=None, caption=caption,
               media_id=result["media_id"], permalink=result["permalink"])
@@ -185,8 +218,9 @@ def process_instagram_for_clip(clip_dir: Path, transcript: str,
         return result["media_id"]
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
+        stage_label = getattr(exc, "stage", "") or active
         _write_failed_marker(clip_dir, transcript, video_title,
-                             video_description, stage=active, error=error)
+                             video_description, stage=stage_label, error=error)
         _write_state(clip_dir, checkpoint, attempts, last_error=error)
         return None
 
@@ -194,27 +228,42 @@ def process_instagram_for_clip(clip_dir: Path, transcript: str,
 def _default_graph_client():
     try:
         from automation.instagram.graph_client import FacebookGraphClient
-        from automation.instagram.credential import load_page_credentials
+        from automation.instagram.credential import load_token
+        token = load_token()
     except ImportError:
         return None
-    try:
-        creds = load_page_credentials()
-    except Exception:
+    if not token:
         return None
-    if not creds:
+    ig_user_id = str(token.get("ig_user_id") or "").strip()
+    access = str(token.get("access_token") or "").strip()
+    if not ig_user_id or not access:
         return None
-    token, ig_user_id = creds
     try:
-        return FacebookGraphClient(token, ig_user_id)
+        return FacebookGraphClient(access, ig_user_id)
     except Exception:
         return None
 
 
-def retry_failed_insta(shorts_root="shorts") -> dict:
+_RETRY_ATTEMPT_CAP = 3
+
+
+def resolve_insta_transcript(clip_dir, info=None) -> str:
+    """Best-effort clip transcript: export-time slice first."""
+    text = ""
+    if isinstance(info, dict):
+        text = str(info.get("text") or "").strip()
+    if not text:
+        state = _read_json(Path(clip_dir) / STATE_FILE) or {}
+        text = str(state.get("transcript") or "").strip()
+    return text
+
+
+def retry_failed_insta(shorts_root="shorts", *, force: bool = False) -> dict:
     """Consume *_insta_failed markers under shorts_root.
 
     Explicit user invocation ⇒ skip flags are bypassed (force=True).
-    Marker deleted on recovery; kept on continued failure.
+    Markers whose state.attempts hit _RETRY_ATTEMPT_CAP stay parked unless
+    force=True. Marker deleted on recovery; kept on continued failure.
     """
     root = Path(shorts_root)
     if not root.is_dir():
@@ -224,9 +273,12 @@ def retry_failed_insta(shorts_root="shorts") -> dict:
     retried = 0
     recovered = 0
     for marker in markers:
+        payload = _read_json(marker) or {}
+        state = _read_json(marker.parent / STATE_FILE) or {}
+        if not force and int(state.get("attempts", 0)) >= _RETRY_ATTEMPT_CAP:
+            continue
         retried += 1
         try:
-            payload = _read_json(marker) or {}
             media_id = process_instagram_for_clip(
                 marker.parent,
                 payload.get("transcript", ""),

@@ -35,7 +35,7 @@ class FakeGraphClient:
             item = self.statuses[0]
         if isinstance(item, dict):
             return item
-        return {"status": item}
+        return {"status_code": item}
 
     def create_reels_container(self, *, caption, share_to_feed=True,
                                audio_name=None):
@@ -111,7 +111,7 @@ class TestPublishAmbiguityRecovery:
     def test_publish_none_then_published_recovers_media_id(self):
         from automation.instagram.uploader import publish_reel
         client = FakeGraphClient(
-            statuses=["FINISHED", {"status": "PUBLISHED", "id": "179recovered"}],
+            statuses=["FINISHED", {"status_code": "PUBLISHED", "id": "179recovered"}],
             publish_result=None,
         )
         out = publish_reel(client, Path("c.mp4"), "cap", poll_interval_s=0)
@@ -485,3 +485,86 @@ class TestRetryFailedInsta:
         from automation.instagram.runner import retry_failed_insta
         assert retry_failed_insta(str(tmp_path / "nope")) == {
             "retried": 0, "recovered": 0, "still_failed": 0}
+
+
+class TestRealClientContract:
+    """Reviewer A findings 1+2: the REAL FacebookGraphClient envelope must
+    drive publish_reel — no smuggled fake shapes."""
+
+    def _client(self, monkeypatch, envelope_sequence):
+        from automation.instagram.graph_client import FacebookGraphClient
+        monkeypatch.setenv("YT_CLIPS_INSTA_LIVE", "1")
+        client = FacebookGraphClient("tok", "17841400000000")
+        calls = {"status": 0}
+
+        permalink_env = {"id": MEDIA_ID, "permalink": PERMALINK}
+
+        def fake_get(path, params=None):
+            fields = str((params or {}).get("fields") or "")
+            if "status_code" in fields:
+                calls["status"] += 1
+                return dict(envelope_sequence[min(calls["status"] - 1,
+                                                  len(envelope_sequence) - 1)])
+            return dict(permalink_env)
+
+        def fake_post(path, data=None):
+            return {"id": MEDIA_ID}
+
+        monkeypatch.setattr(client, "_get", fake_get)
+        monkeypatch.setattr(client, "_post", fake_post)
+        monkeypatch.setattr(client, "upload_video_bytes",
+                            lambda cid, p: {"success": True})
+        return client
+
+    def test_status_envelope_drives_poll_to_finish(self, tmp_path,
+                                                   monkeypatch):
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"\x00\x01")
+        envs = [
+            {"status_code": "IN_PROGRESS", "status": "In Progress: ...",
+             "id": None},
+            {"status_code": "FINISHED",
+             "status": "Finished: ready to be published.",
+             "id": "178container1"},
+        ]
+        client = self._client(monkeypatch, envs)
+        from automation.instagram.uploader import publish_reel
+        result = publish_reel(client, clip, "hook line", poll_interval_s=0)
+        assert result["media_id"] == MEDIA_ID
+
+    def test_published_envelope_recovers_without_republish(
+            self, tmp_path, monkeypatch):
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"\x00\x01")
+        envs = [{"status_code": "PUBLISHED", "status": None,
+                 "id": "179alreadylive"}]
+        client = self._client(monkeypatch, envs)
+        published = []
+
+        real_publish = client.publish_container
+
+        def spy(cid):
+            published.append(cid)
+            return real_publish(cid)
+
+        monkeypatch.setattr(client, "publish_container", spy)
+        from automation.instagram.uploader import publish_reel
+        result = publish_reel(client, clip, "hook", poll_interval_s=0)
+        assert result["media_id"] == "179alreadylive"
+        assert published == []
+
+    def test_expired_envelope_fails_fast(self, tmp_path, monkeypatch):
+        import pytest as _pytest
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"\x00\x01")
+        client = self._client(
+            monkeypatch,
+            [{"status_code": "EXPIRED", "status": None, "id": None}])
+        from automation.instagram.uploader import (InstagramUploadError,
+                                                   publish_reel,
+                                                   STAGE_POLL_CONTAINER)
+        with _pytest.raises(InstagramUploadError) as excinfo:
+            publish_reel(client, clip, "hook", poll_interval_s=0,
+                         timeout_s=5)
+        assert "EXPIRED" in str(excinfo.value) or \
+            excinfo.value.stage == STAGE_POLL_CONTAINER

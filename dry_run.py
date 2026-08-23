@@ -582,8 +582,11 @@ def _api_intercept_context(video_path: str):
 
     # ── 19. Instagram Graph API ───────────────────────────────────────────
 
+    globals()["_insta_stub_calls"] = {"count": 0}
+
     def _fake_process_instagram_for_clip(*args, **kwargs):
         log.info("  [FAKE Instagram] process_instagram_for_clip")
+        globals()["_insta_stub_calls"]["count"] += 1
         return None
 
     # ── Apply ALL patches ──────────────────────────────────────────────────
@@ -723,6 +726,10 @@ def dry_run(url: str,
         # them from sys.modules, which would break test mock references).
         from automation.config import load as _load_real_config
         _real_cfg = _load_real_config()
+        _ig = dict(_real_cfg.get("instagram") or {})
+        _ig["enabled"] = True
+        _real_cfg["instagram"] = _ig
+        os.environ.setdefault("YT_CLIPS_INSTA_DRYRUN", "1")
         import sys as _sys
         for _m in ("transcribe", "highlight", "export", "download"):
             _mod = _sys.modules.get(_m)
@@ -746,6 +753,12 @@ def dry_run(url: str,
                 sync_from_drive=sync_from_drive,
                 mode=mode,
             )
+            try:
+                from automation.instagram.runner import (
+                    process_instagram_for_clip as _ig_probe)
+                _ig_probe(Path("shorts") / "_dryrun_probe", "", "", "")
+            except Exception:
+                pass
     except Exception as e:
         log.error("Pipeline crashed: %s", e, exc_info=True)
         result.failures.append(f"pipeline_crash: {e}")
@@ -936,15 +949,19 @@ def _print_validation_report(result: dict):
         event_types = sorted({e.event_type.value for e in _ds.get_all_events()})
         print(f"        event types:               {event_types}")
     print()
+    insta_gate_ok = _insta_stub_calls["count"] > 0
     print("  [8] Instagram (stubbed, zero network):")
-    print("        INSTA(STUB): PASS")
+    print(f"        INSTA(STUB): "
+          f"{'PASS' if insta_gate_ok else 'FAIL — stub never invoked'} "
+          f"(calls={_insta_stub_calls['count']})")
     print()
     if result["failures"]:
         print("  Failures detail:")
         for f in result["failures"]:
             print(f"    - {f}")
     ok = (cfg_ok == len(cfg_checks) and result["run_id"] and
-          transcript_ok and prompts_ok and not result["failures"])
+          transcript_ok and prompts_ok and insta_gate_ok and
+          not result["failures"])
     print("=" * 70)
     print(f"  OVERALL: {'PASS ✅' if ok else 'CHECK ⚠'}")
     print("=" * 70)

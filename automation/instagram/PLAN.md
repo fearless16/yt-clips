@@ -206,3 +206,28 @@ evidence wins, nothing merges on one reviewer's word.
 M1 contracts frozen ✅ → M2 research verdicts merged ✅ → M3 I1–I6 TDD green →
 M4 reviews+approvals passed → M5 QA matrix green + gates PASS → M6 live smoke Reel →
 M7 merge `main`, flip `instagram.enabled: true`.
+
+---
+
+## 8. Post-Review Amendments (Wave-3 consensus, Reviewer A+B)
+
+- **Status envelope contract:** `container_status` returns `{status_code, status, id}`;
+  uploader normalizes on `status_code` ONLY (dict `status.code` unwrapped as fallback).
+  Contract tests run the REAL `FacebookGraphClient` envelope through `publish_reel`.
+- **Terminal poll states:** `EXPIRED` → immediate fail (new container required);
+  `PUBLISHED` during poll → recover media id, never republish.
+- **Orphan reconciliation:** runner persists `creation_id` at CREATE_CONTAINER via
+  `on_creation`; resumed clips poll the existing container instead of creating anew.
+- **v1 pre-App-Review hashtag mode (documented decision):** seeds-derived tags are
+  ALLOWED until Graph hashtag validation ships; post-approval mode uses
+  `validated_hashtags` only (pack content drives both — no code flag).
+- **Pre-flight evidence check:** `InsufficientEvidenceError` raised BEFORE any LLM
+  spend when the pack yields <5 distinct allowed tags (no wasted spend, honest marker).
+- **Tag rotation:** prompt carries a stable per-day rotation offset so identical
+  pools don't ship identical 5-tag sets (recycled-set spam pattern guard).
+- **Audit fail-loud:** caption audit exceptions propagate to the failed-marker
+  protocol (no silent fail-open); kill-switch soft-empty remains dev-mode behavior.
+- **Skip-gate unified:** config-load failure ⇒ SKIP everywhere (fail-closed).
+- **Retry cap:** `retry_failed_insta` parks markers after 3 recorded attempts
+  unless `force=True`.
+- **dry_run gate:** INSTA(STUB) PASS now requires the stub to actually execute.
