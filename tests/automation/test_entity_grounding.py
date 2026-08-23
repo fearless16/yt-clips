@@ -258,6 +258,23 @@ def test_all_dirty_queries_rebuilt_from_evidence(monkeypatch):
     assert "sri lanka" in joined or "india" in joined
 
 
+def test_builder_prefers_canonical_subjects_over_phrase_noise():
+    """Deterministic query subjects must be canonical teams even when a
+    polluted runtime roster carries capitalized phrase noise."""
+    from automation.seo.context_engine import build_grounded_search_queries
+
+    out = build_grounded_search_queries(
+        "IND vs SL Live Day 4 | Massive Target Chased",
+        "Sri Lanka need 288 more runs.",
+        "spine atak gaya bhaaee",
+        suggestions=[],
+        player_names=["Massive Target", "Ravindra Jadeja"],
+    )
+    assert out, "builder returned nothing"
+    assert all("massive target" not in q.lower() for q in out)
+    assert any("sri lanka" in q.lower() or "india" in q.lower() for q in out)
+
+
 def test_grounded_fallback_copy_is_english_v3():
     """Fallback builders write Full-English public copy, never Hinglish."""
     import automation.seo.seo as seo

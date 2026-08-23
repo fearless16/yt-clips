@@ -117,23 +117,52 @@ def build_grounded_search_queries(
             accepted.append(clean)
 
     subjects = entities["players"] + entities["teams"]
-    subject = subjects[0] if subjects else "cricket"
-    team_context = entities["teams"][0] if entities["teams"] else ""
+    # Teams first: runtime rosters can carry capitalized phrase noise from
+    # upstream discovery ("Massive Target"); canonical team names are the
+    # only subjects guaranteed to be real cricket entities.
+    if entities["teams"]:
+        subject = entities["teams"][0]
+        secondary = [
+            name for name in subjects
+            if name != subject and _is_canonical_subject(name, evidence)
+        ][:3]
+    else:
+        subject = subjects[0] if subjects else "cricket"
+        secondary = []
+    team_context = entities["teams"][1] if len(entities["teams"]) > 1 else ""
     topic = _topic_from_text(transcript) or _topic_from_text(evidence) or "cricket"
     local = [
         f"{subject} {topic}",
-        f"{subject} {topic} {team_context}",
+        f"{subject} {topic} {team_context}".rstrip(),
         f"{subject} {topic} debate",
         f"{subject} {topic} analysis",
         f"{subject} cricket opinion",
-        f"should {subject} {topic} {team_context}",
-        f"{subject} {team_context} discussion",
+        f"should {subject} {topic} {team_context}".rstrip(),
+        f"{subject} {team_context} discussion".replace("  ", " ").strip(),
         f"{subject} {topic} explained",
     ]
+    for name in secondary:
+        local.append(f"{name} {topic}")
     local.extend(f"{subject} {suffix}" for suffix in _QUERY_SUFFIXES)
 
     queries = _dedupe([*accepted, *local], limit=15)
     return queries[:15]
+
+
+def _is_canonical_subject(name: str, evidence: str) -> bool:
+    """Only roster-backed proper names qualify as secondary query subjects.
+
+    A 'player' discovered as a capitalized bigram (e.g. 'Massive Target')
+    is rejected when its tokens are common words rather than a roster name.
+    """
+    tokens = re.findall(r"[A-Za-z]+", str(name or ""))
+    if not tokens:
+        return False
+    common = {
+        "massive", "target", "huge", "total", "live", "match", "today",
+        "day", "test", "score", "runs", "wickets", "highlights", "review",
+    }
+    return not all(token.casefold() in common for token in tokens)
 
 
 def build_cricket_evidence_pack(

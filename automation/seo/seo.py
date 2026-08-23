@@ -1268,6 +1268,7 @@ def generate_clip_seo(
             # Rebuild them now from the same grounded evidence and top up.
             rebuilt = build_grounded_search_queries(
                 video_title, video_description, transcript,
+                suggestions=[],
                 player_names=grounded_players,
                 player_aliases=grounded_aliases or {},
             )
