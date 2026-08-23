@@ -275,6 +275,43 @@ def test_builder_prefers_canonical_subjects_over_phrase_noise():
     assert any("sri lanka" in q.lower() or "india" in q.lower() for q in out)
 
 
+def test_scrub_gutted_title_falls_back_to_evidence_promise(monkeypatch):
+    """When scrubbing the hallucinated name empties the title's promise,
+    an evidence-based fallback title replaces it instead of failing."""
+    import automation.seo.seo as seo
+
+    monkeypatch.setattr(seo, "extract_grounded_entities_llm", lambda *a, **k: {
+        "players": [], "teams": ["India", "Sri Lanka"], "topic_phrases": [],
+    })
+    monkeypatch.setattr(seo, "audit_written_copy_llm", lambda *a, **k: {
+        "unsupported_entities": ["Ravindra Jadeja"],
+        "supported_topics": ["jadeja six magic"],
+    })
+    queries = [f"sri lanka six reaction {i}" for i in range(8)]
+    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
+    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
+        # Entire promise rides on the hallucinated name
+        "title": "Ravindra Jadeja Six Magic",
+        "description": (
+            f"{queries[0]} aur {queries[1]}. "
+            "Ravindra Jadeja hit a huge six and the crowd erupted. " * 10
+        ),
+        "hashtags": ["#Shorts", "#Cricket"],
+        "search_terms": queries,
+        "primary_search_terms": queries[:2],
+    })
+
+    result = seo.generate_clip_seo(
+        "clip-title-fix",
+        "chhakka gaya sab shock mein",
+        video_title="IND vs SL Live Day 4",
+        approved_search_queries=queries,
+    )
+    everything = json.dumps(result, ensure_ascii=False).casefold()
+    assert "jadeja" not in everything
+    assert result["title"].strip()
+
+
 def test_grounded_fallback_copy_is_english_v3():
     """Fallback builders write Full-English public copy, never Hinglish."""
     import automation.seo.seo as seo

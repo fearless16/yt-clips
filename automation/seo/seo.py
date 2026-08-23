@@ -1288,6 +1288,25 @@ def generate_clip_seo(
                 "[%s] Rebuilt %d grounded search queries after scrub",
                 clip_id, added,
             )
+        # Scrubbing the hallucinated name can gut the title's whole promise
+        # (e.g. 'Ravindra Jadeja Six Magic' loses every token). Swap in an
+        # evidence-built title instead of letting the alignment gate fail.
+        min_alignment = _seo_config_float(
+            "min_promise_alignment_score", 0.5, 0.0, 1.0
+        )
+        if _promise_alignment_score(
+            str(result.get("title") or ""),
+            transcript,
+            str(result.get("description") or ""),
+        ) < min_alignment:
+            result["title"] = _grounded_fallback_title(
+                transcript, approved_queries
+            )
+            log.warning(
+                "[%s] Scrubbed title lost promise alignment; "
+                "replaced with evidence-based fallback",
+                clip_id,
+            )
 
     def _title_vouched(name: str) -> bool:
         return name_vouched_by_topics(name, supported_topics)
