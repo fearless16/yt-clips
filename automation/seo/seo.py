@@ -18,6 +18,7 @@ from .trends import get_trending_context
 from automation._cache import TTLCache
 from utils.ocr import extract_ocr_entities
 from automation.seo.entity_grounding import (
+    audit_written_copy_llm,
     extract_grounded_entities_llm,
     name_vouched_by_topics,
 )
@@ -1207,14 +1208,39 @@ def generate_clip_seo(
                                      salvage_tmpl=salvage_tmpl)
     result = _enforce_limits(result, is_shorts=is_shorts)
 
-    # Title-case two-word hallucinations can evade the static player catalog
-    # (for example, a model mapping Hindi "Southee" audio to Saud Shakeel).
-    # If a title introduces an ungrounded person, replace only the title with
-    # the first evidence-built query; the clip transcript and long description
-    # stay untouched. The grounding pass vouches for entities that
-    # transliteration noise hides from the static catalogs.
+    # Copy audit: the writer model can hallucinate celebrity names the clip
+    # never discusses (e.g. Ravindra Jadeja in an IND-SL gloves debate) and
+    # capitalize ordinary phrases ('Massive Target'). One reasoning call
+    # splits the copy into unsupported names (scrubbed below) and evidence-
+    # backed topics (treated as vouched by the validators).
+    copy_audit = audit_written_copy_llm(
+        clip_id, transcript,
+        title=str(result.get("title") or ""),
+        description=str(result.get("description") or ""),
+        video_title=video_title, video_description=video_description,
+    )
+    supported_topics = vouched_topics + [
+        t for t in copy_audit.get("supported_topics", []) if t not in vouched_topics
+    ]
+    for name in copy_audit.get("unsupported_entities", []):
+        pattern = re.compile(
+            r"\b" + re.escape(str(name)) + r"\b", re.IGNORECASE
+        )
+        for key in ("title", "description"):
+            if key in result and isinstance(result[key], str):
+                cleaned = pattern.sub("", result[key])
+                result[key] = re.sub(r"[ \t]{2,}", " ",
+                                     cleaned).replace(" ,", ",").strip(" -–—:;")
+        for key in ("tags", "search_terms", "hashtags"):
+            items = result.get(key) or []
+            result[key] = [
+                item for item in items if not pattern.search(str(item))
+            ]
+        log.warning("[%s] Scrubbed unsupported entity from copy: %s",
+                    clip_id, name)
+
     def _title_vouched(name: str) -> bool:
-        return name_vouched_by_topics(name, vouched_topics)
+        return name_vouched_by_topics(name, supported_topics)
 
     title_people = [
         name for name in discover_grounded_player_names(
@@ -1267,7 +1293,10 @@ def generate_clip_seo(
     rendered_entities = find_canonical_entities(
         rendered_text, player_catalog
     )
-    extra_players = set(rendered_entities["players"]) - clip_players
+    extra_players = {
+        player for player in set(rendered_entities["players"]) - clip_players
+        if not _title_vouched(player)
+    }
     grounded_teams = set(grounded_entities["teams"]) | {
         str(t) for t in llm_ground.get("teams", [])
     }
@@ -1290,7 +1319,10 @@ def generate_clip_seo(
         rendered_entities = find_canonical_entities(
             rendered_text, player_catalog
         )
-        extra_players = set(rendered_entities["players"]) - clip_players
+        extra_players = {
+            player for player in set(rendered_entities["players"]) - clip_players
+            if not _title_vouched(player)
+        }
         extra_teams = set(rendered_entities["teams"]) - grounded_teams
     if extra_players or extra_teams:
         extras = sorted(extra_players | extra_teams)

@@ -141,3 +141,103 @@ def merge_grounded_sets(
     teams = set(grounded_teams)
     teams.update(str(t).casefold() for t in llm_ground.get("teams", []))
     return people, teams
+
+
+_AUDIT_SYSTEM = (
+    "You are a cricket metadata fact-checker auditing AI-written copy against "
+    "the clip's own evidence (a noisy transliterated Hindi transcript plus "
+    "source video title/description). Two jobs: "
+    "(1) unsupported_entities — every named PERSON in the copy who is not "
+    "actually discussed or identifiable in the evidence (hallucinated "
+    "celebrity names must be caught); common noun phrases like 'Massive "
+    "Target' are NOT people. "
+    "(2) supported_topics — short lowercase phrases from the copy that the "
+    "evidence genuinely supports. Return ONLY valid JSON: "
+    '{"unsupported_entities": ["Full Name"], '
+    '"supported_topics": ["lowercase phrase"]}'
+)
+
+_AUDIT_PROMPT = """EVIDENCE:
+  Source video title: {video_title}
+  Source video description: {video_description}
+  Clip transcript (transliterated Hindi, noisy): {transcript}
+
+WRITTEN COPY TO AUDIT:
+  Title: {title}
+  Description: {description}
+
+List every person name in the copy that the evidence does not support, and
+the topic phrases it does support. Think carefully about transliteration
+noise, then return only the JSON object."""
+
+
+def _parse_audit(response: str) -> Dict[str, List[str]]:
+    match = re.search(r"\{.*\}", str(response or ""), re.DOTALL)
+    if not match:
+        return {"unsupported_entities": [], "supported_topics": []}
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return {"unsupported_entities": [], "supported_topics": []}
+    if not isinstance(data, dict):
+        return {"unsupported_entities": [], "supported_topics": []}
+
+    def _clean_list(value) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        out = []
+        for item in value:
+            text = re.sub(r"\s+", " ", str(item or "")).strip()
+            if 1 < len(text) <= 60:
+                out.append(text)
+        return list(dict.fromkeys(out))[:12]
+
+    return {
+        "unsupported_entities": _clean_list(data.get("unsupported_entities")),
+        "supported_topics": [
+            p.casefold() for p in _clean_list(data.get("supported_topics"))
+        ],
+    }
+
+
+def audit_written_copy_llm(
+    clip_id: str,
+    transcript: str,
+    title: str = "",
+    description: str = "",
+    video_title: str = "",
+    video_description: str = "",
+) -> Dict[str, List[str]]:
+    """Audit generated copy against evidence; catch hallucinated names.
+
+    Fail-soft empty result keeps legacy static-only validation. Same
+    ``YT_CLIPS_LLM_GROUNDING`` kill-switch as extraction.
+    """
+    if os.environ.get("YT_CLIPS_LLM_GROUNDING", "1").strip() != "1":
+        return {"unsupported_entities": [], "supported_topics": []}
+    if not str(title or "").strip() and not str(description or "").strip():
+        return {"unsupported_entities": [], "supported_topics": []}
+    try:
+        ai = AIClient()
+        response = ai.generate_text(
+            _AUDIT_PROMPT.format(
+                video_title=video_title or "(unknown)",
+                video_description=(video_description or "")[:500],
+                transcript=str(transcript or "")[:4000],
+                title=str(title or "")[:200],
+                description=str(description or "")[:1500],
+            ),
+            system_instruction=_AUDIT_SYSTEM,
+            prefer_model="deepseek-v4-pro",
+        )
+        audit = _parse_audit(response)
+        if audit["unsupported_entities"] or audit["supported_topics"]:
+            log.info(
+                "[%s] LLM copy-audit: unsupported=%s supported=%d",
+                clip_id, audit["unsupported_entities"],
+                len(audit["supported_topics"]),
+            )
+        return audit
+    except Exception as exc:  # noqa: BLE001 — audit must never break SEO
+        log.warning("[%s] LLM copy-audit unavailable: %s", clip_id, exc)
+        return {"unsupported_entities": [], "supported_topics": []}

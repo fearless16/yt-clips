@@ -113,3 +113,63 @@ def test_generate_clip_seo_passes_with_llm_vouched_team(tmp_path, monkeypatch):
     )
     assert result["packaging_version"] == "promise_v3_english"
     assert "India" in result["description"]
+
+
+def test_audit_written_copy_llm_parses_and_fails_soft(grounding, monkeypatch):
+    eg = grounding(json.dumps({
+        "unsupported_entities": ["Ravindra Jadeja"],
+        "supported_topics": ["Massive Target"],
+    }))
+    monkeypatch.setenv("YT_CLIPS_LLM_GROUNDING", "1")
+    out = eg.audit_written_copy_llm(
+        "c9", "india ne bada score banaya", title="India Huge Total",
+        description="Ravindra Jadeja praised the innings.")
+    assert out["unsupported_entities"] == ["Ravindra Jadeja"]
+    assert out["supported_topics"] == ["massive target"]
+
+    bad = grounding("no json here {{{")
+    assert bad.audit_written_copy_llm(
+        "c10", "t", title="T", description="D") == {
+        "unsupported_entities": [], "supported_topics": []}
+
+
+def test_kill_switch_disables_both_calls(grounding, monkeypatch):
+    eg = grounding(json.dumps({"players": ["X"]}))
+    monkeypatch.setenv("YT_CLIPS_LLM_GROUNDING", "0")
+    assert eg.extract_grounded_entities_llm("c11", "t") == {}
+    assert eg.audit_written_copy_llm(
+        "c11", "t", title="T", description="D")["unsupported_entities"] == []
+
+
+def test_copy_audit_scrubs_hallucinated_player(monkeypatch):
+    """Names the copy-audit marks unsupported are scrubbed before validation."""
+    import automation.seo.seo as seo
+
+    monkeypatch.setattr(seo, "extract_grounded_entities_llm", lambda *a, **k: {
+        "players": [], "teams": ["India"], "topic_phrases": ["grip debate"],
+    })
+    monkeypatch.setattr(seo, "audit_written_copy_llm", lambda *a, **k: {
+        "unsupported_entities": ["Ravindra Jadeja"],
+        "supported_topics": ["massive target"],
+    })
+    queries = [f"india batting grip debate {i}" for i in range(8)]
+    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
+    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
+        "title": "India Batting Grip Debate 🏏",
+        "description": (
+            f"{queries[0]} aur {queries[1]}. Massive Target discussed. "
+            "Ravindra Jadeja opinion on the batting grip with context. " * 12
+        ),
+        "hashtags": ["#Shorts", "#Cricket"],
+        "search_terms": queries,
+        "primary_search_terms": queries[:2],
+    })
+
+    result = seo.generate_clip_seo(
+        "clip-audit",
+        "batting grip ke baare mein baat",
+        video_title="India cricket discussion",
+        approved_search_queries=queries,
+    )
+    copy = (result["title"] + " " + result["description"]).casefold()
+    assert "jadeja" not in copy
