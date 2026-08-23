@@ -76,7 +76,6 @@ test_frames/
 # Colab/Kaggle specific
 colab_setup.py
 kaggle_cell.py
-kaggle_monitor.py
 .venv
 
 # Coverage & Hypothesis
