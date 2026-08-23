@@ -234,6 +234,10 @@ def llm_arbiter_refine(
         "- Reject clips that are boring, repetitive, or incomplete\n"
         "- Prefer shorter clips (15-30s) for Shorts retention\n"
         "- Prefer clips with audio peaks (crowd eruption, commentator scream)\n"
+        "- Publishable bar: these candidates already cleared a hard quality\n"
+        "  floor — pick the strongest available rather than returning empty.\n"
+        "  Go empty ONLY when EVERY candidate is unusable chatter (no cricket\n"
+        "  content, broken sentences, pure filler)\n"
         "- Return valid JSON only\n"
         "- Max 10 clips"
     )

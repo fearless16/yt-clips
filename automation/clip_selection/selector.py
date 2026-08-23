@@ -120,6 +120,19 @@ class ClipSelector:
         # LLM arbiter refinement
         if self.use_llm_arbiter and len(quality_pass) >= 2:
             final = llm_arbiter_refine(quality_pass, context, max_selected)
+            if not final:
+                # Channel needs daily output. When the arbiter abstains on a
+                # batch that already cleared the absolute floor, publish the
+                # best-available by weighted score instead of going dark.
+                log.warning(
+                    "LLM arbiter selected none of %d floor-passing candidates "
+                    "— falling back to top weighted", len(quality_pass),
+                )
+                final = sorted(
+                    quality_pass,
+                    key=lambda c: c.get("final_score", 0),
+                    reverse=True,
+                )[:max_selected]
         else:
             final = quality_pass[:max_selected]
 

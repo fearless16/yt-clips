@@ -318,7 +318,7 @@ thumbnail:
 clip_selection:
   enabled: true                        # Use 7-agent clip selector (false = old heuristic)
   use_llm_arbiter: true                # Run LLM Final Arbiter pass
-  min_quality: 45.0                    # Min weighted score (0-100); weak batches may select ZERO clips
+  min_quality: 38.0                    # Absolute floor (channel sim: real moments land 39-52); weak batches still may yield ZERO
   max_selected: 3                      # Max clips per stream — fewer, better Shorts beat spam volume
   prefer_source_match: true             # For match streams, prioritize clips naming either advertised team
   source_match_min_candidates: 3        # Fall back to all cricket clips if evidence is too sparse

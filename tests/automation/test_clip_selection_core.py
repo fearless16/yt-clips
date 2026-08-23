@@ -384,3 +384,42 @@ def test_llm_arbiter_caps_pathological_script_with_marker(monkeypatch):
     arbiter.llm_arbiter_refine(candidates, {"transcript_segments": []}, max_selected=2)
 
     assert "[script truncated]" in captured["prompt"]
+
+
+def test_selector_falls_back_to_weighted_when_arbiter_abstains(monkeypatch):
+    """Channel needs daily output: arbiter empty selection on a floor-passing
+    batch must fall back to top weighted, never go dark."""
+    import automation.clip_selection.arbiter as arbiter
+    from automation.clip_selection.selector import ClipSelector
+
+    class EmptyAI:
+        def generate_text(self, *args, **kwargs):
+            return '{"selected":[],"rejected":[]}'
+
+    monkeypatch.setattr(arbiter, "_get_ai", lambda: EmptyAI())
+    scored = [
+        {"start": 0.0, "end": 12.0, "text": "clean bowled!", "final_score": 50.0,
+         "agent_scores": {}, "rejection_reasons": [], "should_reject": False},
+        {"start": 20.0, "end": 32.0, "text": "caught at slip!", "final_score": 49.0,
+         "agent_scores": {}, "rejection_reasons": [], "should_reject": False},
+        {"start": 40.0, "end": 55.0, "text": "run out direct hit!", "final_score": 48.0,
+         "agent_scores": {}, "rejection_reasons": [], "should_reject": False},
+    ]
+
+    result = ClipSelector(use_llm_arbiter=True).select(
+        scored, {"transcript_segments": []}, max_selected=3, min_quality=38.0,
+    )
+
+    assert len(result) == 3
+    assert result[0]["final_score"] == 50.0
+
+
+def test_selector_respects_empty_batch_without_fallback():
+    from automation.clip_selection.selector import ClipSelector
+
+    selector = ClipSelector(use_llm_arbiter=True)
+    assert selector.select(
+        [{"start": 0.0, "end": 6.0, "text": "x", "final_score": 10.0,
+          "should_reject": True}],
+        {}, max_selected=3, min_quality=38.0,
+    ) == []
