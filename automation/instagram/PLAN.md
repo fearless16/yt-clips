@@ -18,16 +18,44 @@ scheduling UI, Instagram analytics ingestion into `shorts_intelligence.db` (v2 �
 
 ## 2. Architecture
 
+> **M2 RESEARCH VERDICTS LOCKED (Aug 2026):**
+> 1. **API flavor = Facebook Login (`graph.facebook.com`)** — the ONLY path with
+>    resumable byte-upload (rupload.facebook.com → NO public hosting needed at all,
+>    kills our top risk) AND real hashtag signals (`ig_hashtag_search` +
+>    `recent_media` velocity / `top_media` engagement). Instagram-Login flavor has
+>    neither. Own-account posting needs NO App Review; `Instagram Public Content
+>    Access` (hashtag reads) DOES need App Review + business verification — start
+>    immediately (weeks lead).
+> 2. **Google Drive hosting is DEAD** — Meta's fetcher rejects Drive redirect chains
+>    since 2025 (subcode 2207052-class failures). Never use it for `video_url`.
+> 3. **Hashtags: HARD CAP 5 per post (official Dec 2025)** — excess silently dropped;
+>    mega-tags (#reels/#viral/#explore) officially flagged as harmful.
+> 4. **Caption sweet spot 150–250 chars** (NOT 2200); primary keyword inside first
+>    ~55 chars (Reels-tab fold), full hook within 125. >500-char captions correlate
+>    with LOWER Reels reach.
+> 5. Publish failure may be FALSE (500 after Meta-side success) → never blind-retry:
+>    re-query container status; `PUBLISHED` ⇒ success. Platform regressions (Apr 2026
+>    `2207076`) resolve only by creating NEW containers.
+> 6. Ranking truth: watch time > likes/reach > sends/reach (sends rule non-follower
+>    reach). Hook ≤3s. Original self-edited content mandatory (repost penalty active).
+> 7. `audio_name` settable ONCE — use keyword-rich "{Moment} – CricketWithPrajjwal".
+>    `alt_text` NOT supported for Reels via API — skip.
+> 8. Trial Reels available via API (`trial_params`, SS_PERFORMANCE/MANUAL) — A/B lane.
+
 ```
 automation/instagram/
 ├── PLAN.md            ← this file (living doc)
 ├── graph_client.py    ← thin IG Graph API wrapper (container/publish/status/hashtag/insights)
-├── credential.py      ← insta_token.json load+refresh, mirrors setup_auth.py pattern
-├── host.py            ← public MP4 URL provider chain (drive primary → fallback), HEAD preflight
+│                        PRIMARY upload: upload_type=resumable → rupload.facebook.com byte PUT
+│                        FALLBACK upload: video_url provider chain (R2 presigned → B2)
+├── credential.py      ← fb_page_token load+refresh, mirrors setup_auth.py pattern
+├── host.py            ← video_url providers ONLY as fallback (drive FORBIDDEN)
 ├── evidence.py        ← InstaEvidencePack builder + REAL hashtag validation via Graph API
+│                        (gated on Public Content Access approval; until then learner DB +
+│                        Cricbuzz facts + YT-suggest SEEDS labeled as seeds — still zero AI generics)
 ├── caption_engine.py  ← LLM caption writer FROM EVIDENCE ONLY + audit/scrub (reuse entity_grounding)
 ├── seo.py             ← orchestrator: evidence → caption → audit → insta_metadata.json (staged)
-├── uploader.py        ← container → poll FINISHED → publish → verify permalink
+├── uploader.py        ← container(rupload bytes) → poll FINISHED → publish → verify permalink
 ├── runner.py          ← marker protocol, stage checkpoints, retry_failed_insta(), skip logic
 └── integration seam   ← publish_everywhere() in automation flow (thread fan-out)
 ```
@@ -37,14 +65,19 @@ automation/instagram/
 ```python
 # graph_client.py — Protocol; tests inject FakeGraphClient
 class GraphClient(Protocol):
-    def create_reels_container(self, video_url: str, caption: str, *,
-                               share_to_feed: bool = True,
-                               audio_name: str | None = None) -> str: ...   # creation_id
-    def container_status(self, creation_id: str) -> dict: ...               # status_code/error
-    def publish_container(self, creation_id: str) -> str: ...               # media_id
+    def create_reels_container(self, *, caption: str, share_to_feed: bool = True,
+                               audio_name: str | None = None,
+                               trial_params: dict | None = None) -> str: ...  # creation_id (resumable)
+    def upload_video_bytes(self, creation_id: str, video_path: Path) -> dict: ...
+        # POST rupload.facebook.com/ig-api-upload/{v}/{id} — Facebook-Login ONLY.
+        # Fallback path: create_reels_container_with_url(video_url=...) via host.py
+    def container_status(self, creation_id: str) -> dict: ...   # IN_PROGRESS|FINISHED|PUBLISHED|ERROR|EXPIRED
+    def publish_container(self, creation_id: str) -> str | None: ...
+        # None ⇒ ambiguous outcome → caller MUST re-query container_status (PUBLISHED check)
     def media_permalink(self, media_id: str) -> str: ...
-    def hashtag_search(self, q: str) -> dict: ...                           # REAL volume probe
-    def hashtag_top_media(self, hashtag_id: str, *, limit: int = 5) -> dict: ...
+    def hashtag_search(self, q: str) -> dict: ...               # REAL volume probe (post-approval)
+    def hashtag_recent_velocity(self, hashtag_id: str) -> int: ...   # recent_media 24h count
+    def hashtag_top_engagement(self, hashtag_id: str) -> float: ...  # median(likes+comments)
 
 # runner.py
 def process_instagram_for_clip(clip_dir: Path, transcript: str,
@@ -86,24 +119,29 @@ EVIDENCE → CAPTION → AUDIT → HOST → CONTAINER → PUBLISH → VERIFY →
 }
 ```
 
-Caption rules: ≤2200 chars · first 125 chars carry primary keyword + match hook ·
-keywords woven from pack only · 3–10 hashtags ALL from validated_hashtags · alt_text set ·
-no Devanagari in title-like fields · audit reuses `audit_written_copy_llm` scrub pattern ·
-policy violation → corrective LLM repair pass → still dirty → loud raise + failed marker.
+Caption rules (research-locked): **target 150–250 chars, hard cap 2200** · primary keyword
+inside first ~55 chars (Reels fold), full hook ≤125 · hook line = "{Player/moment} ne {outcome}!
+{Series}" pattern · body carries ONE reply-driving question (sends-per-reach signal; engagement
+bait forbidden) · **exactly ≤5 hashtags**, tiered: 1 broad + 2 mid series/team + 1 long-tail
+moment + 1 rotating matchday — ALL from validated_hashtags, rotated per post (recycled sets =
+spam pattern) · `audio_name` = "{Moment} – CricketWithPrajjwal" (set-once) · no Devanagari in
+title-like fields · audit reuses `audit_written_copy_llm` scrub pattern · violation → corrective
+LLM repair pass → still dirty → loud raise + failed marker.
 
 ### Config additions (`config.yaml`)
 
 ```yaml
 instagram:
   enabled: false              # flips true only after creds verified + live smoke
+  api_flavor: facebook_login  # locked by research (rupload + hashtag signals)
   ig_user_id: ""
   token_file: insta_token.json
-  host_provider: drive        # drive | r2 | tunnel
-  caption_max_chars: 2200
-  hashtags_min: 3
-  hashtags_max: 10            # hard API cap 30 — research may revise guidance
+  host_provider: none         # rupload primary; r2 fallback only if rupload blocked
+  caption_target_chars: 250   # sweet spot; hard API cap 2200 never approached
+  hashtags_count: 5           # official Dec-2025 cap; tiered rotation per post
   upload_timeout_s: 900
-  max_posts_per_day: 25
+  container_poll_interval_s: 10
+  max_posts_per_day: 25       # runtime truth via content_publishing_limit endpoint
 ```
 
 Test kill-switches: `YT_CLIPS_INSTA_LIVE=0` (default in conftest — all Graph calls stubbed),
@@ -151,16 +189,20 @@ evidence wins, nothing merges on one reviewer's word.
 | 4 | Rate limits / daily post caps | Serial post queue + `max_posts_per_day` config + backoff on error codes |
 | 5 | Token expiry mid-run | Refresh flow mirrors setup_auth; stale-callback relaunch pattern documented |
 
-## 6. Prerequisites (channel owner — arrange while researchers run)
+## 6. Prerequisites (channel owner — arrange NOW, weeks-long lead on #4)
 
-- [ ] Instagram **Professional/Business** account linked to a Facebook Page
-- [ ] Meta app with `instagram_business_basic` + `instagram_business_content_publish`
-- [ ] Account added as admin/tester on that app (dev mode works for own account)
-- [ ] Note the IG user id (graph explorer `me?fields=user_id` or Page linked IG account)
-- [ ] Drop app id/secret + long-lived token into `setup_auth.py` extension when ready
+- [ ] Instagram **Professional** account linked to a Facebook Page (FB-Login requirement)
+- [ ] Meta app: Facebook Login for Business product added
+- [ ] Scopes: `instagram_basic`, `instagram_content_publish`, `pages_show_list`,
+      `pages_read_engagement` — own-account publishing works in dev mode, NO review needed
+- [ ] **App Review + Business Verification for `Instagram Public Content Access`**
+      (unlocks REAL hashtag velocity data) — SUBMIT EARLY; until approval ships,
+      evidence pack runs in seed-only mode (learner + Cricbuzz + labeled YT-suggest seeds)
+- [ ] Cloudflare R2 bucket (fallback host only) — free tier, 10 min setup
+- [ ] Drop app id/secret + long-lived Page token into `setup_auth.py` extension when ready
 
 ## 7. Milestones
 
-M1 contracts frozen (done) → M2 research verdicts merged → M3 I1–I6 TDD green →
+M1 contracts frozen ✅ → M2 research verdicts merged ✅ → M3 I1–I6 TDD green →
 M4 reviews+approvals passed → M5 QA matrix green + gates PASS → M6 live smoke Reel →
 M7 merge `main`, flip `instagram.enabled: true`.
