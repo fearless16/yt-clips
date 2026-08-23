@@ -280,13 +280,17 @@ class TestUploadGate:
 
 
 def test_one_click_windows_script_uses_canonical_safe_cli():
-    script = (Path(__file__).parents[2] / "make_shorts.bat").read_text(
+    """run_pipeline.bat is the single Windows entry: canonical automation.cli,
+    never the legacy pipeline.py, and upload only behind explicit consent."""
+    script = (Path(__file__).parents[2] / "run_pipeline.bat").read_text(
         encoding="utf-8"
     )
 
     assert "-m automation.cli" in script
-    assert "--upload" not in script
     assert "pipeline.py" not in script
+    # Upload is opt-in: consent prompt must exist and gate the flag.
+    assert 'set /p "UPLOAD=' in script
+    assert '/i "%UPLOAD%"=="y"' in script
 
 
 def test_downloader_overwrites_previous_source_video():

@@ -22,31 +22,29 @@ Double-click se ye hota hai:
 [1/3] OAuth token check → expired ho toh browser re-auth khud kholta hai
       (pehle PERSONAL Google account, phir CHANNEL account select karo)
 [2/3] Mode menu:
-        1) FULL     — URL poochega → download, transcribe, select, export,
-                      SEO, YouTube upload (scheduled slots pe)
+        1) NEW RUN  — URL poochega → download, transcribe, select,
+                      export, SEO. Upload? alag se y/N poochhta hai.
         2) QUICK    — existing input\video.mp4 + transcript reuse,
-                      local export only (no upload/sync/schedule)
+                      local export only
         3) DRY RUN  — saare external APIs stubbed, sirf plumbing check
 [3/3] "PIPELINE FINISHED" + pause
 ```
 
 | Mode | Command jo chalta hai | Upload? |
 |---|---|---|
-| FULL | `.venv\Scripts\python.exe pipeline.py "<URL>"` | ✅ scheduled |
-| QUICK | `pipeline.py "https://youtu.be/local" --skip-download --skip-transcribe --no-upload --no-sync --no-schedule` | ❌ |
+| NEW RUN | `automation.cli "<URL>"` | sirf jab tu `y` bole (`--upload --schedule`) |
+| NEW RUN + upload | `automation.cli "<URL>" --upload --schedule` | ✅ scheduled slots pe |
+| QUICK | `automation.cli "https://youtu.be/local" --skip-download --skip-transcribe` | ❌ |
 | DRY RUN | `dry_run.py "https://youtu.be/test" --skip-download --skip-transcribe` | ❌ |
 
-### Local-only one-click (kabhi upload nahi karta)
-
-`make_shorts.bat` → `.venv\Scripts\python.exe -m automation.cli "<URL>"`
-— orchestrator flow (ingest → transcript → cricket-only selection → export →
-SEO → telemetry + canonical DB persistence). Output `shorts\<date-folder>\`
-mein jaata hai. Upload/sync ke liye explicit flags chahiye:
+**Ek hi dwaar:** `.venv/Scripts/python.exe -m automation.cli` — Windows entry
+sirf `run_pipeline.bat` hai (desktop shortcut isi ko chalata hai). Direct CLI:
 
 ```bash
-.venv/Scripts/python.exe -m automation.cli "<URL>" --upload    # + scheduled upload
-.venv/Scripts/python.exe -m automation.cli "<URL>" --sync      # + Drive sync
-.venv/Scripts/python.exe -m automation.cli --learn             # shelf + Analytics sync + model refit
+.venv/Scripts/python.exe -m automation.cli "<URL>"               # local only, no upload
+.venv/Scripts/python.exe -m automation.cli "<URL>" --upload      # + scheduled upload
+.venv/Scripts/python.exe -m automation.cli "<URL>" --sync        # + Drive sync
+.venv/Scripts/python.exe -m automation.cli --learn               # shelf + Analytics sync + model refit
 ```
 
 Useful flags: `--skip-download --skip-transcribe --skip-highlight
@@ -147,7 +145,8 @@ Edit `face_os_config.yaml` for Face OS tuning.
 ### Kaggle GPU Worker
 
 ```bash
-./automate.sh "https://youtu.be/VIDEO_ID"   # select option 2
+# Submit job to the remote watcher (tunnel URL of the GPU box):
+.venv/Scripts/python.exe -m automation.cli "https://youtu.be/VIDEO_ID" --remote --tunnel-url https://xxx.loca.lt
 python kaggle_monitor.py --monitor            # watch progress
 ```
 
