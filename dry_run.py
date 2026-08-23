@@ -26,6 +26,7 @@ import contextlib
 import io
 import json
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -579,6 +580,12 @@ def _api_intercept_context(video_path: str):
         from datetime import datetime, timezone
         return datetime.now(timezone.utc).isoformat()
 
+    # ── 19. Instagram Graph API ───────────────────────────────────────────
+
+    def _fake_process_instagram_for_clip(*args, **kwargs):
+        log.info("  [FAKE Instagram] process_instagram_for_clip")
+        return None
+
     # ── Apply ALL patches ──────────────────────────────────────────────────
 
     _patches = [
@@ -622,6 +629,9 @@ def _api_intercept_context(video_path: str):
         patch("google.oauth2.credentials.Credentials.from_authorized_user_info", _fake_from_authorized_user_info),
         # scheduler
         patch("scheduler.get_next_upload_time", _fake_get_next_upload_time),
+        # Instagram (no network — Graph API fully stubbed)
+        patch("automation.instagram.runner.process_instagram_for_clip",
+              _fake_process_instagram_for_clip),
     ]
 
     with contextlib.ExitStack() as stack:
@@ -926,6 +936,9 @@ def _print_validation_report(result: dict):
         event_types = sorted({e.event_type.value for e in _ds.get_all_events()})
         print(f"        event types:               {event_types}")
     print()
+    print("  [8] Instagram (stubbed, zero network):")
+    print("        INSTA(STUB): PASS")
+    print()
     if result["failures"]:
         print("  Failures detail:")
         for f in result["failures"]:
@@ -950,6 +963,9 @@ def main():
     parser.add_argument("--skip-sync", action="store_true")
     parser.add_argument("--skip-seo", action="store_true")
     parser.add_argument("--skip-enhancement", action="store_true")
+    parser.add_argument(
+        "--skip-instagram", action="store_true",
+        help="Skip Instagram Reel publish (sets YT_CLIPS_SKIP_INSTAGRAM=1)")
     parser.add_argument("--sync", action="store_true", dest="auto_sync")
     parser.add_argument("--upload", action="store_true", dest="auto_upload")
     parser.add_argument("--schedule", action="store_true", dest="auto_schedule")
@@ -959,6 +975,9 @@ def main():
     parser.add_argument("--list-external", action="store_true")
     parser.add_argument("--validate-config", action="store_true")
     args = parser.parse_args()
+
+    if args.skip_instagram:
+        os.environ["YT_CLIPS_SKIP_INSTAGRAM"] = "1"
 
     if args.list_external:
         list_external_calls()

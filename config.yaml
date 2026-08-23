@@ -330,3 +330,16 @@ clip_selection:
 logging:
   level: "INFO"                         # DEBUG | INFO | WARNING | ERROR
   log_file: "logs/pipeline.log"
+
+# ── Instagram Reels (SEO + upload, PLAN.md §config) ──────────────────────────
+instagram:
+  enabled: false              # flips true only after creds verified + live smoke
+  api_flavor: facebook_login  # locked by research (rupload + hashtag signals)
+  ig_user_id: ""
+  token_file: insta_token.json
+  host_provider: none         # rupload primary; r2 fallback only if rupload blocked
+  caption_target_chars: 250   # sweet spot; hard API cap 2200 never approached
+  hashtags_count: 5           # official Dec-2025 cap; tiered rotation per post
+  upload_timeout_s: 900
+  container_poll_interval_s: 10
+  max_posts_per_day: 25       # runtime truth via content_publishing_limit endpoint

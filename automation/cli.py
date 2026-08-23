@@ -100,6 +100,10 @@ def setup_argparse():
         help="Skip SEO generation (use existing metadata)",
     )
     parser.add_argument(
+        "--skip-instagram", action="store_true", default=False,
+        help="Skip Instagram Reel publish (sets YT_CLIPS_SKIP_INSTAGRAM=1)",
+    )
+    parser.add_argument(
         "--sample-minutes", type=int, default=None,
         help="Download only first N minutes of video",
     )
@@ -206,6 +210,10 @@ def main(args=None):
     if parsed.url is None:
         parser.print_help()
         return 0
+
+    import os
+    if parsed.skip_instagram:
+        os.environ["YT_CLIPS_SKIP_INSTAGRAM"] = "1"
 
     from automation.orchestrator import run
     result = run(
