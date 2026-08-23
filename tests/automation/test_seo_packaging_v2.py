@@ -30,10 +30,10 @@ def test_packaging_contract_uses_focused_queries_and_scores_promise_alignment(mo
 
     queries = _queries()
     generated = {
-        "title": "Yuvraj Singh India Coach Kyun Ban Sakte Hain?",
+        "title": "Yuvraj Singh: India Coach Case Made 🏏",
         "description": (
             f"{queries[0]} aur {queries[1]} par yeh clip ek clear opinion deta hai. "
-            + "Yuvraj Singh ke cricket brain aur India coaching role ka grounded analysis. " * 30
+            + "Yuvraj Singh ke cricket brain aur India coaching role ka grounded analysis. " * 55
         ),
         "hashtags": ["#Shorts", "#YuvrajSingh"],
         "search_terms": queries,
@@ -49,8 +49,9 @@ def test_packaging_contract_uses_focused_queries_and_scores_promise_alignment(mo
         approved_search_queries=queries,
     )
 
-    assert result["packaging_version"] == "promise_v3_english"
-    assert result["primary_search_terms"] == queries[:2]
+    assert result["packaging_version"] == "promise_v4_longtail"
+    assert result["primary_search_terms"][:2] == queries[:2]
+    assert 4 <= len(result["primary_search_terms"]) <= 8
     assert result["promise_alignment_score"] >= 0.5
 
 
@@ -176,7 +177,7 @@ def test_provider_override_is_forwarded_without_mutating_the_shared_client(monke
             captured.update(kwargs)
             return json.dumps({
                 "title": "Yuvraj Singh Coach Debate",
-                "description": "Yuvraj Singh grounded coaching discussion. " * 40,
+                "description": "Yuvraj Singh grounded coaching discussion. " * 80,
                 "hashtags": ["#Shorts", "#YuvrajSingh"],
                 "search_terms": _queries(),
             })
@@ -211,7 +212,7 @@ def test_invalid_alignment_config_falls_back_instead_of_crashing(monkeypatch):
         "title": "Yuvraj Singh Coach Debate",
         "description": (
             f"{queries[0]} aur {queries[1]}. "
-            + "Yuvraj Singh coach opinion explained with grounded context. " * 30
+            + "Yuvraj Singh coach opinion explained with grounded context. " * 60
         ),
         "hashtags": ["#Shorts", "#YuvrajSingh"],
         "search_terms": queries,
@@ -224,21 +225,44 @@ def test_invalid_alignment_config_falls_back_instead_of_crashing(monkeypatch):
         video_title="India cricket discussion",
         approved_search_queries=queries,
     )
-    assert result["packaging_version"] == "promise_v3_english"
+    assert result["packaging_version"] == "promise_v4_longtail"
 
 
 def test_unknown_player_in_title_is_replaced_with_grounded_clip_topic(monkeypatch):
+    """v4 layering: the copy-audit flags the hallucinated person, the scrub
+    strips it, and one corrective LLM pass rebuilds a grounded title."""
     import automation.seo.seo as seo
 
     queries = [f"new zealand captaincy debate {index}" for index in range(8)]
     monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
-    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
-        "title": "Saud Shakeel Captaincy Shock",
-        "description": "New Zealand captaincy debate explained. " * 50,
+    monkeypatch.setattr(seo, "extract_grounded_entities_llm", lambda *a, **k: {
+        "players": [], "teams": ["New Zealand"], "topic_phrases": [],
+    })
+    monkeypatch.setattr(seo, "audit_written_copy_llm", lambda *a, **k: {
+        "unsupported_entities": ["Saud Shakeel"],
+        "supported_topics": ["captaincy debate"],
+    })
+    body = "Spin plans and field placements explained with grounded context. " * 55
+    bad = {
+        "title": "Saud Shakeel Masterclass",
+        "description": body,
         "hashtags": ["#Shorts", "#NewZealandCricket"],
         "search_terms": queries,
-        "primary_search_terms": queries[:2],
-    })
+        "primary_search_terms": queries[:4],
+    }
+    good = {
+        "title": "New Zealand Captaincy Big Call 🏏",
+        "description": bad["description"],
+        "hashtags": bad["hashtags"],
+        "search_terms": queries,
+        "primary_search_terms": queries[:4],
+    }
+    responses = [bad, good]
+
+    def writer(*a, **k):
+        return responses.pop(0) if responses else good
+
+    monkeypatch.setattr(seo, "_attempt_seo_generation", writer)
 
     result = seo.generate_clip_seo(
         "clip-grounded-title",
@@ -252,17 +276,37 @@ def test_unknown_player_in_title_is_replaced_with_grounded_clip_topic(monkeypatc
 
 
 def test_match_roster_player_cannot_be_attributed_when_clip_never_says_name(monkeypatch):
+    """Roster presence alone is not attribution: the repair must strip a
+    player the clip never names, else generation fails."""
     import automation.seo.seo as seo
 
     queries = [f"england pakistan test analysis {index}" for index in range(8)]
     monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
-    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
+    body = ("England batting aggressively against Pakistan with the run rate "
+            "climbing every over. " * 50)
+    bad = {
         "title": "Joe Root Run Rate Debate",
-        "description": "Joe Root is batting aggressively against Pakistan. " * 40,
+        "description": body,
         "hashtags": ["#Shorts", "#Cricket"],
         "search_terms": queries,
         "primary_search_terms": queries[:2],
-    })
+    }
+    good = {
+        "title": "England Run Rate 41 Pressure 🏏",
+        "description": body,
+        "hashtags": bad["hashtags"],
+        "search_terms": queries,
+        "primary_search_terms": queries[:2],
+    }
+    responses = [bad, good]
+
+    def writer(*a, **k):
+        if "CORRECTION REQUIRED" not in (a[1] if len(a) > 1 else k.get("user_prompt", "")):
+            # repair prompt arrives positionally as user_prompt (arg 2)
+            pass
+        return responses.pop(0) if responses else good
+
+    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: responses.pop(0) if responses else good)
 
     result = seo.generate_clip_seo(
         "clip-no-player",

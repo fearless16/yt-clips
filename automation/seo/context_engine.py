@@ -30,10 +30,41 @@ _QUERY_SUFFIXES = (
     "cricket discussion",
     "cricket analysis",
     "fan reaction",
-    "explained in hindi",
-    "hinglish cricket opinion",
+    "explained",
     "shorts discussion",
+    "highlights today",
+    "full highlights",
+    "match review",
+    "post match analysis",
+    "best moments",
+    "big update",
+    "turning point",
 )
+
+
+def _local_query_combos(subject: str, topic: str, team_context: str,
+                        secondary: List[str]) -> List[str]:
+    """Deterministic long-tail combos grounded in verified entities."""
+    combos = [
+        f"{subject} {topic}",
+        f"{subject} {topic} {team_context}".rstrip(),
+        f"{subject} {topic} debate",
+        f"{subject} {topic} analysis",
+        f"{subject} cricket opinion",
+        f"should {subject} {topic} {team_context}".rstrip(),
+        f"{subject} {team_context} discussion".replace("  ", " ").strip(),
+        f"{subject} {topic} explained",
+        f"{subject} {topic} highlights today",
+        f"{subject} full highlights",
+        f"{subject} match review",
+        f"{subject} key moments",
+        f"{subject} turning point today",
+    ]
+    for name in secondary:
+        combos.append(f"{name} {topic}")
+        combos.append(f"{name} highlights")
+        combos.append(f"{name} {topic} reaction")
+    return combos
 
 
 def _clean(
@@ -125,28 +156,17 @@ def build_grounded_search_queries(
         secondary = [
             name for name in subjects
             if name != subject and _is_canonical_subject(name, evidence)
-        ][:3]
+        ][:4]
     else:
         subject = subjects[0] if subjects else "cricket"
         secondary = []
     team_context = entities["teams"][1] if len(entities["teams"]) > 1 else ""
     topic = _topic_from_text(transcript) or _topic_from_text(evidence) or "cricket"
-    local = [
-        f"{subject} {topic}",
-        f"{subject} {topic} {team_context}".rstrip(),
-        f"{subject} {topic} debate",
-        f"{subject} {topic} analysis",
-        f"{subject} cricket opinion",
-        f"should {subject} {topic} {team_context}".rstrip(),
-        f"{subject} {team_context} discussion".replace("  ", " ").strip(),
-        f"{subject} {topic} explained",
-    ]
-    for name in secondary:
-        local.append(f"{name} {topic}")
+    local = _local_query_combos(subject, topic, team_context, secondary)
     local.extend(f"{subject} {suffix}" for suffix in _QUERY_SUFFIXES)
 
-    queries = _dedupe([*accepted, *local], limit=15)
-    return queries[:15]
+    queries = _dedupe([*accepted, *local], limit=30)
+    return queries[:30]
 
 
 def _is_canonical_subject(name: str, evidence: str) -> bool:

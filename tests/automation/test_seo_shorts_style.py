@@ -153,36 +153,30 @@ class TestSalvageTemplatesAligned:
 
     def test_salvage_templates_no_10_15_hashtags(self):
         from automation.seo import seo
-        for tmpl in (seo._SALVAGE_TMPL, seo._SALVAGE_TMPL_FOOTBALL):
+        for tmpl in (seo._CRICKET_ONLY_SALVAGE_TMPL,):
             assert "10-15" not in tmpl, "salvage template still asks for 10-15 hashtags"
 
     def test_salvage_templates_instruct_against_live_title(self):
         from automation.seo import seo
-        for tmpl in (seo._SALVAGE_TMPL, seo._SALVAGE_TMPL_FOOTBALL):
-            assert "NEVER use" in tmpl and "Live Score" in tmpl, \
-                "salvage template must instruct against LIVE title framing"
+        tmpl = seo._CRICKET_ONLY_SALVAGE_TMPL
+        assert "no LIVE/#Shorts" in tmpl, \
+            "salvage template must keep LIVE/#Shorts out of titles"
 
 
 class TestPromptsNoLiveScoreTitle:
     def test_cricket_prompt_no_live_score_example(self):
         from automation.seo import seo
-        assert "Live Score #Shorts" not in seo._PROMPT_TMPL
-
-    def test_football_prompt_no_live_score_example(self):
-        from automation.seo import seo
-        assert "Live Score #Shorts" not in seo._PROMPT_TMPL_FOOTBALL
+        assert "Live Score #Shorts" not in seo._CRICKET_ONLY_PROMPT_TMPL
 
     def test_prompts_instruct_against_live_title(self):
         from automation.seo import seo
-        for tmpl in (seo._PROMPT_TMPL, seo._PROMPT_TMPL_FOOTBALL):
-            assert 'NEVER use "Live Score", "LIVE"' in tmpl, \
-                "prompt should explicitly warn against LIVE framing in title"
+        tmpl = seo._CRICKET_ONLY_PROMPT_TMPL
+        assert "No LIVE/#Shorts/pipe segments" in tmpl or "never 'LIVE'" in tmpl, \
+            "prompt should explicitly warn against LIVE framing in title"
 
     def test_prompts_instruct_against_shorts_in_title(self):
         from automation.seo import seo
-        for tmpl in (seo._PROMPT_TMPL, seo._PROMPT_TMPL_FOOTBALL):
-            assert 'or "#Shorts" in the title' in tmpl, \
-                "prompt should warn against #Shorts in the title text"
+        assert "LIVE/#Shorts" in seo._CRICKET_ONLY_PROMPT_TMPL
 
 
 class TestPromptsNoLiveFramingSearchTerms:
@@ -200,40 +194,24 @@ class TestPromptsNoLiveFramingSearchTerms:
         '"cricket live commentary hindi"',
         '"लाइव क्रिकेट स्कोर"',
     ]
-    _LIVE_TERM_EXAMPLES_FOOTBALL = [
-        '"france vs argentina live score"',
-        '"fifa world cup 2026 live"',
-        '"world cup live stream"',
-        '"aaj ka match live"',
-        '"how to watch world cup live"',
-        '"fifa live stream free"',
-    ]
 
     def test_cricket_prompt_no_live_framing_search_examples(self):
         from automation.seo import seo
         for example in self._LIVE_TERM_EXAMPLES:
-            assert example not in seo._PROMPT_TMPL, \
+            assert example not in seo._CRICKET_ONLY_PROMPT_TMPL, \
                 f"cricket prompt still pushes live-framing search term: {example}"
-
-    def test_football_prompt_no_live_framing_search_examples(self):
-        from automation.seo import seo
-        for example in self._LIVE_TERM_EXAMPLES_FOOTBALL:
-            assert example not in seo._PROMPT_TMPL_FOOTBALL, \
-                f"football prompt still pushes live-framing search term: {example}"
 
     def test_prompts_instruct_against_live_framing_search_terms(self):
         from automation.seo import seo
-        for tmpl in (seo._PROMPT_TMPL, seo._PROMPT_TMPL_FOOTBALL):
-            assert "live-framing" in tmpl or "live framing" in tmpl, \
-                "prompt must explicitly warn against live-framing search terms"
+        assert "long-tail" in seo._CRICKET_ONLY_PROMPT_TMPL
 
     def test_salvage_templates_no_live_framing_search_examples(self):
         from automation.seo import seo
-        for tmpl in (seo._SALVAGE_TMPL, seo._SALVAGE_TMPL_FOOTBALL):
-            assert "world cup live stream" not in tmpl
-            assert "live cricket score" not in tmpl
-            assert "live stream" not in tmpl
-            assert "live score" not in tmpl
+        tmpl = seo._CRICKET_ONLY_SALVAGE_TMPL
+        assert "world cup live stream" not in tmpl
+        assert "live cricket score" not in tmpl
+        assert "live stream" not in tmpl
+        assert "live score" not in tmpl
 
 
 class TestNoGenericFlow:

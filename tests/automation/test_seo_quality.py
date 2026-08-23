@@ -295,7 +295,7 @@ class TestSEOQualityGate:
             "title": "Kohli ne maara CHHAKKA! 🔥",
             "description": (
                 "Virat Kohli batting analysis explains the complete Hinglish "
-                "cricket discussion without inventing an opponent or score. " * 20
+                "cricket discussion without inventing an opponent or score. " * 45
             ),
             "hashtags": ["#Shorts", "#Kohli", "#RCBvsCSK"],
             "search_terms": ["kohli six wankhede", "RCB vs CSK highlights"],

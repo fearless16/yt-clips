@@ -12,6 +12,16 @@ import yaml
 # ── A: Quality gate hardens ─────────────────────────────────────────────────
 
 
+def _long_body() -> str:
+    """v4 budget: algorithm-facing copy must clear 3000 chars naturally."""
+    sentence = (
+        "Jasprit Bumrah cleans up the tail with unplayable yorkers in the "
+        "final over of the session while India protect a slim lead and "
+        "England's lower order survives against reverse swing under lights. "
+    )
+    return sentence * 22  # ~3300 chars
+
+
 def _base_item(**overrides):
     item = {
         "title": "Bumrah destroys stumps with a searing yorker 🏏",
@@ -21,7 +31,8 @@ def _base_item(**overrides):
             "lead and those two wickets flipped the session completely. "
             "England now need their lower order to survive against a "
             "reverse-swinging ball under lights, and the new pair looked "
-            "uncomfortable from the very first delivery they faced."
+            "uncomfortable from the very first delivery they faced. "
+            + _long_body()
         ),
         "hashtags": ["#Shorts", "#Bumrah"],
     }
@@ -103,7 +114,7 @@ def test_enforce_limits_caps_title_at_configured_limit():
 
 
 def test_description_budget_is_right_sized_for_shorts():
-    """Descriptions are feed-invisible; budget must be small and enforced."""
+    """v4 long-tail policy: algorithm-facing copy, 3000-4500 chars enforced."""
     from utils.config import load_config
     from automation.seo.seo import (
         _description_min_chars,
@@ -111,14 +122,14 @@ def test_description_budget_is_right_sized_for_shorts():
     )
 
     seo_cfg = load_config().get("seo", {})
-    assert int(seo_cfg.get("description_target_chars")) <= 700
-    assert _description_min_chars() <= 400
-    assert _description_max_chars() <= 1000
-    long_desc = "word " * 400  # ~2000 chars
+    assert int(seo_cfg.get("description_target_chars")) >= 3000
+    assert _description_min_chars() >= 3000
+    assert _description_max_chars() <= 5000
+    long_desc = "word " * 1200  # ~6000 chars, must clamp to max budget
     from automation.seo.seo import _enforce_limits
 
     out = _enforce_limits({"title": "Fine title 🏏", "description": long_desc}, is_shorts=True)
-    assert len(out["description"]) <= 1000
+    assert len(out["description"]) <= _description_max_chars()
 
 
 # ── B: Trends → selection bridge ────────────────────────────────────────────

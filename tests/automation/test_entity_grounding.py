@@ -113,7 +113,7 @@ def test_generate_clip_seo_passes_with_llm_vouched_team(tmp_path, monkeypatch):
         video_title="IND vs SL Live match today Day 4",
         approved_search_queries=queries,
     )
-    assert result["packaging_version"] == "promise_v3_english"
+    assert result["packaging_version"] == "promise_v4_longtail"
     assert "India" in result["description"]
 
 
@@ -312,20 +312,98 @@ def test_scrub_gutted_title_falls_back_to_evidence_promise(monkeypatch):
     assert result["title"].strip()
 
 
-def test_grounded_fallback_copy_is_english_v3():
-    """Fallback builders write Full-English public copy, never Hinglish."""
+def test_ungrounded_title_triggers_llm_repair_not_template(monkeypatch):
+    """v4 policy: no deterministic template fallback. An ungrounded name in
+    the title triggers one corrective LLM pass; failure raises loudly."""
     import automation.seo.seo as seo
 
-    title = seo._grounded_fallback_title(
-        "team ka run rate gir gaya aur lead khatam", ["clean query one"])
-    assert "Hinglish" not in title
-    assert not re.search(r"\b[Kk]a\b|\b[Kk]i\b|\bNe\b", title)
+    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
+    monkeypatch.setattr(seo, "extract_grounded_entities_llm", lambda *a, **k: {
+        "players": [], "teams": ["India"], "topic_phrases": ["grip debate"],
+    })
+    monkeypatch.setattr(seo, "audit_written_copy_llm", lambda *a, **k: {
+        "unsupported_entities": [], "supported_topics": [],
+    })
+    queries = [f"india batting grip debate {i}" for i in range(8)]
 
-    description = seo._grounded_fallback_description(
-        title, "yaha run rate ki baat ho rahee hai",
-        "IND vs SL Live Day 4", ["clean query one", "clean query two"],
-        ["#Shorts", "#Cricket"],
+    def writer(clip_id, user_prompt, transcript, video_title, is_shorts,
+               provider_override=None, model_override=None,
+               sys_instruction=None, salvage_tmpl=None):
+        if "CORRECTION REQUIRED" in user_prompt:
+            # Repair pass: clean title, long keyword-rich body
+            return {
+                "title": "India Batting Grip Debate 🏏",
+                "description": (
+                    f"{queries[0]} aur {queries[1]}. "
+                    "India batting grip debate explained. " * 45
+                ),
+                "hashtags": ["#Shorts", "#Cricket"],
+                "search_terms": queries,
+                "primary_search_terms": queries[:4],
+            }
+        # First pass: hallucinated celebrity name in title
+        return {
+            "title": "Ravindra Jadeja Grip Verdict",
+            "description": (
+                f"{queries[0]} aur {queries[1]}. "
+                "India batting grip debate explained. " * 45
+            ),
+            "hashtags": ["#Shorts", "#Cricket"],
+            "search_terms": queries,
+            "primary_search_terms": queries[:4],
+        }
+
+    calls = {"n": 0}
+
+    def counting_writer(*a, **k):
+        calls["n"] += 1
+        return writer(*a, **k)
+
+    monkeypatch.setattr(seo, "_attempt_seo_generation", counting_writer)
+
+    result = seo.generate_clip_seo(
+        "clip-repair",
+        "batting grip ke baare mein baat",
+        video_title="India cricket discussion",
+        approved_search_queries=queries,
     )
-    low = description.casefold()
-    for marker in ("karne wale", "hai:", "li gayi", "nahi", "hinglish"):
-        assert marker not in low, marker
+    assert calls["n"] == 2, "repair must issue exactly one corrective LLM call"
+    assert "jadeja" not in json.dumps(result).casefold()
+    assert "promise_v4_longtail" == result["packaging_version"]
+
+
+def test_repair_failure_raises_instead_of_template_junk(monkeypatch):
+    """If the corrective LLM pass also violates policy, generation fails
+    loudly — no silent template fallback exists anymore."""
+    import automation.seo.seo as seo
+
+    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
+    monkeypatch.setattr(seo, "extract_grounded_entities_llm", lambda *a, **k: {
+        "players": [], "teams": ["India"], "topic_phrases": ["grip debate"],
+    })
+    monkeypatch.setattr(seo, "audit_written_copy_llm", lambda *a, **k: {
+        "unsupported_entities": [], "supported_topics": [],
+    })
+    queries = [f"india batting grip debate {i}" for i in range(8)]
+
+    def always_bad(*a, **k):
+        return {
+            "title": "Ravindra Jadeja Grip Verdict",
+            "description": (
+                f"{queries[0]} aur {queries[1]}. "
+                "Ravindra Jadeja verdict on the India batting grip. " * 40
+            ),
+            "hashtags": ["#Shorts", "#Cricket"],
+            "search_terms": queries,
+            "primary_search_terms": queries[:4],
+        }
+
+    monkeypatch.setattr(seo, "_attempt_seo_generation", always_bad)
+
+    with pytest.raises(seo.SEOGenerationError):
+        seo.generate_clip_seo(
+            "clip-repair-fail",
+            "batting grip ke baare mein baat",
+            video_title="India cricket discussion",
+            approved_search_queries=queries,
+        )

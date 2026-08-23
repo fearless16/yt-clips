@@ -249,14 +249,14 @@ testing:
 # descriptions (feed-invisible), grounded API-only search terms/tags.
 seo:
   title_max_chars: 60                   # one premise, mobile-first, 1-2 emojis
-  min_search_terms: 8                   # enough current intent coverage without generic filler
-  max_search_terms: 15                  # focused, grounded phrases only
-  min_primary_search_terms: 2           # phrases naturally used in public description copy
-  max_primary_search_terms: 4           # remaining research queries stay in API metadata
+  min_search_terms: 24                  # long-tail contract: real viewer searches
+  max_search_terms: 26                  # around 25 as channel policy
+  min_primary_search_terms: 4           # phrases naturally used in public description copy
+  max_primary_search_terms: 8           # keyword-rich prose needs more weaving
   min_promise_alignment_score: 0.50     # title must match clip speech + description opening
-  description_min_chars: 350            # enough for moment + context; no thin AI blurbs
-  description_target_chars: 550         # feed-invisible: right-sized beats bloated
-  description_max_chars: 900            # hard cap enforced at enforce-limits time
+  description_min_chars: 3000           # algorithm-facing copy: crawlable keyword surface
+  description_target_chars: 3500        # LLM writes toward this length
+  description_max_chars: 4500           # hard cap, safe margin below YouTube's 5000
   max_tag_chars: 450                    # safe margin below YouTube's 500-char tags limit
   # Inject random hardcoded viral hooks/CTAs into descriptions. OFF by default:
   # the product contract prefers per-clip LLM-generated hooks over generic copy.

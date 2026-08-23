@@ -195,7 +195,7 @@ def test_seo_prompt_uses_canonical_grounded_player(monkeypatch):
         ]
         description = ". ".join(queries) + ". " + (
             "This detailed grounded cricket discussion explains the complete "
-            "coaching opinion without inventing match facts. " * 20
+            "coaching opinion without inventing match facts. " * 80
         )
         return {"title": "Yuvraj Singh Coach Debate", "description": description,
                 "hashtags": ["#YuvrajSingh", "#Cricket", "#Shorts"],
@@ -226,13 +226,12 @@ def test_seo_prompt_uses_canonical_grounded_player(monkeypatch):
 
     assert captured["transcript"] == "Yuvraj Singh ko India ka coach bana do"
     assert "Grounded players: Yuvraj Singh" in captured["prompt"]
-    assert "TITLE: maximum 60 characters" in captured["prompt"]
-    assert "target 550 characters" in captured["prompt"]
-    assert "900 characters" in captured["prompt"]
+    assert "3500" in captured["prompt"]
+    assert "4500" in captured["prompt"]
     assert "Prajjwal explains why Yuvraj Singh has the temperament" in captured["prompt"]
     assert "Yuvraj Singh ko India ka coach bana do" in captured["prompt"]
-    assert "8-15" in captured["prompt"]
-    assert "maximum 60 characters" in captured["salvage"]
+    assert "exactly 25 long-tail" in captured["prompt"]
+    assert "max 60 characters" in captured["salvage"]
 
 
 def test_seo_rejects_hallucinated_player_from_ai(monkeypatch):
@@ -250,7 +249,7 @@ def test_seo_rejects_hallucinated_player_from_ai(monkeypatch):
         },
     )
 
-    with pytest.raises(seo.SEOGenerationError, match="ungrounded entities"):
+    with pytest.raises(seo.SEOGenerationError, match="ungrounded"):
         seo.generate_clip_seo(
             "clip1",
             "Yuvi ko India ka coach bana do",
@@ -273,11 +272,11 @@ def test_seo_enforces_mobile_title_and_focused_search_term_caps():
 
     result = _enforce_limits({
         "title": "Yuvraj Singh " + "coach debate " * 10,
-        "description": "Yuvraj Singh cricket coach debate. " * 10,
+        "description": "Yuvraj Singh cricket coach debate. " * 200,
         "hashtags": ["#Shorts", "#YuvrajSingh", "#Cricket"],
-        "search_terms": [f"yuvraj cricket phrase {index}" for index in range(25)],
+        "search_terms": [f"yuvraj cricket phrase {index}" for index in range(30)],
     })
 
     assert len(result["title"]) <= 70
-    assert len(result["description"]) <= 4000
-    assert len(result["search_terms"]) <= 15
+    assert len(result["description"]) <= 4500
+    assert len(result["search_terms"]) <= 26

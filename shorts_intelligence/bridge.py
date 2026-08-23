@@ -66,7 +66,7 @@ def record_exported(
                     features.update({
                         "seo_title_length_bucket": _length_bucket(len(title), (40, 50, 60)),
                         "seo_description_length_bucket": _length_bucket(
-                            len(description), (400, 700, 900)
+                            len(description), (2500, 3500, 4500)
                         ),
                         "seo_tag_count_bucket": _length_bucket(len(tags), (10, 20, 30)),
                         "seo_hashtag_count_bucket": _length_bucket(len(hashtags), (5, 10, 15)),

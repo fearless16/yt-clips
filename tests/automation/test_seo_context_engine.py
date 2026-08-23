@@ -26,7 +26,7 @@ def _long_description(queries=None):
         f"Fans searching for {query} will find the exact opinion explained here"
         for query in queries
     )
-    return (opening + embedded + ". " + opening * 20).strip()
+    return (opening + embedded + ". " + opening * 45).strip()
 
 
 def test_download_metadata_keeps_source_description_and_context():
@@ -72,7 +72,7 @@ def test_evidence_pack_fuses_all_sources_and_resolves_yuvi():
         "Shubman Gill captains India in the Sri Lanka Test series."
     ]
     assert "Shubman Gill" in pack["grounded_entities"]["players"]
-    assert 8 <= len(pack["approved_search_queries"]) <= 15
+    assert 8 <= len(pack["approved_search_queries"]) <= 30
 
 
 def test_research_uses_full_source_context_for_match_lookup(monkeypatch):
@@ -110,7 +110,7 @@ def test_research_uses_full_source_context_for_match_lookup(monkeypatch):
     assert "Test" in captured["query"]
     assert result["match_facts"] == ["India vs Sri Lanka, 1st Test, Galle"]
     assert result["sources"][0]["url"] == "https://example.test/match"
-    assert 8 <= len(result["search_queries"]) <= 15
+    assert 8 <= len(result["search_queries"]) <= 30
 
 
 def test_match_research_query_prioritizes_clip_entities_over_live_title():
@@ -156,7 +156,7 @@ def test_research_network_failure_returns_grounded_local_queries(monkeypatch):
 
     assert result["match_facts"] == []
     assert result["sources"] == []
-    assert 8 <= len(result["search_queries"]) <= 15
+    assert 8 <= len(result["search_queries"]) <= 30
     assert all("yuvraj" in query.lower() or "india" in query.lower() for query in result["search_queries"])
 
 
@@ -210,9 +210,9 @@ def test_generated_queries_are_replaced_by_approved_evidence(monkeypatch):
     )
 
     assert result["search_terms"][:len(_approved_queries())] == _approved_queries()
-    assert 8 <= len(result["search_terms"]) <= 15
+    assert 24 <= len(result["search_terms"]) <= 30
     assert result["primary_search_terms"][:2] == _approved_queries()[:2]
-    assert 2 <= len(result["primary_search_terms"]) <= 4
+    assert 4 <= len(result["primary_search_terms"]) <= 8
     assert "india cricket latest" not in result["description"].casefold()
 
 
@@ -240,8 +240,8 @@ def test_research_queries_can_stay_in_metadata_when_primary_queries_are_embedded
     )
 
     assert result["search_terms"][:len(_approved_queries())] == _approved_queries()
-    assert 8 <= len(result["search_terms"]) <= 15
-    assert result["primary_search_terms"] == _approved_queries()[:2]
+    assert 24 <= len(result["search_terms"]) <= 30
+    assert result["primary_search_terms"][:2] == _approved_queries()[:2]
 
 
 def test_hallucinated_player_in_api_tags_is_rejected(monkeypatch):

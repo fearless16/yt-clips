@@ -40,10 +40,10 @@ SEO_QUERIES = [
 def _grounded_long_seo_result():
     description = ". ".join(SEO_QUERIES) + ". " + (
         "This detailed Hinglish cricket discussion explains the complete Kohli "
-        "batting opinion without inventing a score, venue, or match event. " * 16
+        "batting opinion without inventing a score, venue, or match event. " * 38
     )
     return {
-        "title": "Kohli ke SIX par Seedhi Baat!",
+        "title": "Kohli Six Straight Talk 🏏",
         "description": description,
         "search_terms": SEO_QUERIES,
         "hashtags": ["#Shorts", "#ViratKohli", "#RCB"],
@@ -197,7 +197,7 @@ class TestSEOContract:
                                     approved_search_queries=SEO_QUERIES)
         assert "CHAPTERS" not in res["description"]
         assert "Kohli" in res["description"] or "kohli" in res["description"]
-        assert len(res["description"]) <= 1000
+        assert len(res["description"]) <= 4500
         assert res["is_shorts"] is True
 
     def test_total_failure_raises_seo_generation_error(self):

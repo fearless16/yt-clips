@@ -63,7 +63,7 @@ def test_bridge_records_only_exported_highlights_and_pending_upload(tmp_path):
         assert production["features"]["complete_thought"] == "true"
         assert production["features"]["hook_type"] == "instant_payoff"
         assert production["features"]["seo_title_length_bucket"] == "50_59"
-        assert production["features"]["seo_description_length_bucket"] == "900_plus"
+        assert production["features"]["seo_description_length_bucket"] == "2500_3499"
         assert production["features"]["seo_provider"] == "groq"
         assert production["features"]["seo_packaging_version"] == "promise_v2"
         assert production["features"]["seo_promise_alignment_bucket"] == "75_89"

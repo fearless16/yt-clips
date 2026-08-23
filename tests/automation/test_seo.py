@@ -131,7 +131,7 @@ class TestProcessAllSEOFailureMarker:
 
         mock_generate.return_value = {
             "title": "Kohli ne maara CHHAKKA! 🔥 #Shorts",
-            "description": "Virat Kohli grounded cricket analysis. " * 40,
+            "description": "Virat Kohli grounded cricket analysis explains every delivery of the match discussion. " * 45,
             "hashtags": ["#Shorts", "#IPL"],
             "search_terms": [f"virat kohli cricket analysis {i}" for i in range(8)],
         }
@@ -254,7 +254,7 @@ class TestRetryFailedSEO:
 
         mock_generate.return_value = {
             "title": "Kohli ne maara CHHAKKA! 🔥 Recovered",
-            "description": "Virat Kohli grounded cricket analysis. " * 40,
+            "description": "Virat Kohli grounded cricket analysis explains every delivery of the match discussion. " * 45,
             "hashtags": ["#Shorts"],
             "search_terms": [f"virat kohli analysis {i}" for i in range(8)],
         }
@@ -341,7 +341,7 @@ class TestSEOModelRestrictions:
             "title": "Kohli ne maara CHHAKKA! 🔥",
             "description": (
                 "Virat Kohli batting analysis explains this grounded cricket "
-                "moment without inventing a score or opponent. " * 20
+                "moment without inventing a score or opponent. " * 45
             ),
             "hashtags": ["#Shorts", "#IPL"],
             "search_terms": ["kohli six ipl"],
@@ -366,7 +366,7 @@ class TestSEOModelRestrictions:
             "title": "Override model SEO title! 🔥",
             "description": (
                 "Custom model generated a detailed grounded cricket discussion "
-                "without inventing a score, player, or opponent. " * 20
+                "without inventing a score, player, or opponent. " * 45
             ),
             "hashtags": ["#Shorts"],
             "search_terms": ["test term"],

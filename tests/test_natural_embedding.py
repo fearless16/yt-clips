@@ -23,7 +23,7 @@ class TestNaturalEmbedding:
     def test_natural_description_passes(self):
         body = (
             "Virat Kohli batting analysis explains the six over long-on and the "
-            "complete RCB match discussion without inventing another event. " * 16
+            "complete RCB match discussion without inventing another event. " * 26
         )
         item = make_item(
             "Kohli ka CHHAKKA! 🔥 | RCB vs MI IPL 2026",
@@ -65,7 +65,7 @@ class TestNaturalEmbedding:
         item = make_item(
             "Sky high! 🔥 | Suryakumar Yadav 360°",
             ("Suryakumar Yadav batting analysis explains the 360 degree shot, "
-             "innovation, timing, and complete cricket discussion naturally. " * 16)
+             "innovation, timing, and complete cricket discussion naturally. " * 26)
             + "\n\n"
             "#Shorts #SuryakumarYadav #MI #IPL2026 #Cricket #Six",
         )
