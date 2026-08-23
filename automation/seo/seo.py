@@ -28,7 +28,10 @@ from .cricket_context import (
     find_canonical_entities,
     is_cricket_content,
 )
-from .context_engine import build_cricket_evidence_pack
+from .context_engine import (
+    build_cricket_evidence_pack,
+    build_grounded_search_queries,
+)
 
 SUGGEST_CACHE = TTLCache(maxsize=16, ttl=600)
 TREND_CACHE = TTLCache(maxsize=4, ttl=300)
@@ -1257,6 +1260,32 @@ def generate_clip_seo(
             log.warning(
                 "[%s] Dropped %d contaminated search queries",
                 clip_id, before - len(approved_queries),
+            )
+        floor = _seo_config_int("min_search_terms", 8, 1, 15)
+        if len(approved_queries) < floor:
+            # The dedupe budget in the evidence pack was consumed by the
+            # dirty queries, so deterministic local combos never made it in.
+            # Rebuild them now from the same grounded evidence and top up.
+            rebuilt = build_grounded_search_queries(
+                video_title, video_description, transcript,
+                player_names=grounded_players,
+                player_aliases=grounded_aliases or {},
+            )
+            existing = {str(q).casefold() for q in approved_queries}
+            added = 0
+            for query in rebuilt:
+                if len(approved_queries) >= floor:
+                    break
+                if any(p.search(str(query)) for p in unsupported_patterns):
+                    continue
+                if str(query).casefold() in existing:
+                    continue
+                approved_queries.append(query)
+                existing.add(str(query).casefold())
+                added += 1
+            log.warning(
+                "[%s] Rebuilt %d grounded search queries after scrub",
+                clip_id, added,
             )
 
     def _title_vouched(name: str) -> bool:

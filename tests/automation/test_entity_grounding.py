@@ -219,6 +219,45 @@ def test_audit_scrubs_contaminated_approved_queries(monkeypatch):
     assert all("jadeja" not in term for term in result["search_terms"])
 
 
+def test_all_dirty_queries_rebuilt_from_evidence(monkeypatch):
+    """When every approved query carries the hallucinated name, rebuild a
+    minimum grounded set from the source title and vouched teams."""
+    import automation.seo.seo as seo
+
+    monkeypatch.setattr(seo, "extract_grounded_entities_llm", lambda *a, **k: {
+        "players": [], "teams": ["India", "Sri Lanka"],
+        "topic_phrases": ["grip debate"],
+    })
+    monkeypatch.setattr(seo, "audit_written_copy_llm", lambda *a, **k: {
+        "unsupported_entities": ["Ravindra Jadeja"],
+        "supported_topics": [],
+    })
+    dirty = [f"ravindra jadeja six {i}" for i in range(10)]
+    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
+    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
+        "title": "India Batting Grip Debate 🏏",
+        "description": (
+            f"{dirty[0]} aur {dirty[1]}. "
+            "Ravindra Jadeja opinion on the batting grip with context. " * 12
+        ),
+        "hashtags": ["#Shorts", "#Cricket"],
+        "search_terms": list(dirty),
+        "primary_search_terms": dirty[:2],
+    })
+
+    result = seo.generate_clip_seo(
+        "clip-audit-rebuild",
+        "batting grip ke baare mein baat",
+        video_title="IND vs SL Live Day 4 Sri Lanka 84/4 Target 372 India Innings",
+        approved_search_queries=list(dirty),
+    )
+    everything = json.dumps(result, ensure_ascii=False).casefold()
+    assert "jadeja" not in everything
+    assert len(result["search_terms"]) >= 8
+    joined = " ".join(result["search_terms"]).casefold()
+    assert "sri lanka" in joined or "india" in joined
+
+
 def test_grounded_fallback_copy_is_english_v3():
     """Fallback builders write Full-English public copy, never Hinglish."""
     import automation.seo.seo as seo
