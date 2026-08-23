@@ -648,7 +648,7 @@ def _promise_alignment_score(title: str, transcript: str, description: str) -> f
 
 
 def _grounded_fallback_title(transcript: str, approved_queries: List[str]) -> str:
-    """Build a short public promise from spoken evidence, never match-roster guesses."""
+    """Build a short English promise from spoken evidence, no roster guesses."""
     corrected = correct_cricket_spelling(transcript)
     entities = find_canonical_entities(corrected)
     team = entities["teams"][0] if entities["teams"] else "Cricket"
@@ -656,17 +656,17 @@ def _grounded_fallback_title(transcript: str, approved_queries: List[str]) -> st
     low = corrected.casefold()
     if "रन रेट" in corrected or "run rate" in low:
         value = f" {numbers[0]}" if numbers else ""
-        title = f"{team} Ka Run Rate{value}: Test Match Pressure"
+        title = f"{team} Run Rate{value}: Test Match Pressure Explained"
     elif "लीड" in corrected or " lead" in low:
         value = f" {numbers[-1]}" if numbers else ""
-        title = f"{team}{value} Ki Lead? Test Match Ka Bada Mod"
+        title = f"{team}{value} Lead: Test Match Turning Point"
     elif "चौका" in corrected or re.search(r"\bfour\b", low):
-        title = f"{team} Ne Sirf Ek Chaukka Mara? Test Match Reaction"
+        title = f"{team} Four Reactions: Test Match Pressure"
     elif "विकेट" in corrected or re.search(r"\bwicket\b", low):
-        title = f"{team} Wicket Pressure: Hinglish Cricket Take"
+        title = f"{team} Wicket Pressure: Test Match Take"
     else:
         query = approved_queries[0] if approved_queries else f"{team} cricket analysis"
-        title = f"{query}: Hinglish Cricket Take"
+        title = f"{str(query).title()}: Cricket Shorts Breakdown"
     return _clean_title(title, _seo_config_int("title_max_chars", 70, 20, 100))
 
 
@@ -677,21 +677,25 @@ def _grounded_fallback_description(
     approved_queries: List[str],
     hashtags: List[str],
 ) -> str:
-    """Create long, query-rich copy from local evidence when AI adds a player."""
-    transcript = re.sub(r"\s+", " ", transcript).strip()
+    """Create long, query-rich English copy from local evidence.
+
+    Quotes nothing verbatim (public copy is English-only) and never names a
+    player the clip does not discuss — queries are pre-scrubbed upstream.
+    """
     source = re.sub(r"\s+", " ", video_title).strip()
     queries = [str(query).strip() for query in approved_queries if str(query).strip()]
     opening = (
-        f"{title}. Is cricket Short ka exact spoken point hai: “{transcript}” "
-        f"Yeh clip source stream “{source}” se li gayi hai aur isi moment ki "
-        "Hinglish fan reaction, match pressure aur tactical context par focused hai."
+        f"{title}. This Short captures one exact moment from the live stream "
+        f"\"{source}\": raw fan reaction, match pressure and tactical context "
+        "around what was actually said on air."
     )
     paragraphs = [opening]
     for query in queries:
         paragraphs.append(
-            f"{query} search karne wale viewers ke liye yahan seedha clip-specific "
-            "context hai: koi invented player attribution nahi, koi unrelated match "
-            "claim nahi—sirf transcript mein boli gayi cricket baat aur source match context."
+            f"Viewers searching {query} get clip-specific context here: no "
+            "invented player attributions and no unrelated match claims - "
+            "only the cricket conversation recorded in this clip plus real "
+            "match context."
         )
     hashtag_line = " ".join(str(tag) for tag in hashtags if str(tag).strip())
     if hashtag_line:
@@ -1222,10 +1226,12 @@ def generate_clip_seo(
     supported_topics = vouched_topics + [
         t for t in copy_audit.get("supported_topics", []) if t not in vouched_topics
     ]
+    unsupported_patterns = []
     for name in copy_audit.get("unsupported_entities", []):
         pattern = re.compile(
             r"\b" + re.escape(str(name)) + r"\b", re.IGNORECASE
         )
+        unsupported_patterns.append(pattern)
         for key in ("title", "description"):
             if key in result and isinstance(result[key], str):
                 cleaned = pattern.sub("", result[key])
@@ -1238,6 +1244,20 @@ def generate_clip_seo(
             ]
         log.warning("[%s] Scrubbed unsupported entity from copy: %s",
                     clip_id, name)
+    if unsupported_patterns:
+        # Upstream research can bake a hallucinated name into the approved
+        # queries themselves; those must never reach search_terms or the
+        # rebuilt fallback copy.
+        before = len(approved_queries)
+        approved_queries = [
+            query for query in approved_queries
+            if not any(p.search(str(query)) for p in unsupported_patterns)
+        ]
+        if len(approved_queries) != before:
+            log.warning(
+                "[%s] Dropped %d contaminated search queries",
+                clip_id, before - len(approved_queries),
+            )
 
     def _title_vouched(name: str) -> bool:
         return name_vouched_by_topics(name, supported_topics)

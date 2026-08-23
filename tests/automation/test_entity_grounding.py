@@ -2,6 +2,8 @@
 """LLM-assisted entity grounding: contract tests."""
 
 import json
+import re
+
 from unittest.mock import patch
 
 import pytest
@@ -173,3 +175,64 @@ def test_copy_audit_scrubs_hallucinated_player(monkeypatch):
     )
     copy = (result["title"] + " " + result["description"]).casefold()
     assert "jadeja" not in copy
+
+
+def test_audit_scrubs_contaminated_approved_queries(monkeypatch):
+    """Upstream research can bake a hallucinated name into approved queries.
+
+    Scrubbed queries must never reach search_terms or the rebuilt fallback
+    copy; clean ones survive.
+    """
+    import automation.seo.seo as seo
+
+    monkeypatch.setattr(seo, "extract_grounded_entities_llm", lambda *a, **k: {
+        "players": [], "teams": ["India"], "topic_phrases": ["grip debate"],
+    })
+    monkeypatch.setattr(seo, "audit_written_copy_llm", lambda *a, **k: {
+        "unsupported_entities": ["Ravindra Jadeja"],
+        "supported_topics": [],
+    })
+    clean = [f"india batting grip debate {i}" for i in range(8)]
+    dirty = ["ravindra jadeja six reaction", "ravindra jadeja fielding"]
+    queries = dirty[:1] + clean[:4] + dirty[1:] + clean[4:]
+    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
+    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
+        "title": "India Batting Grip Debate 🏏",
+        "description": (
+            f"{queries[0]} aur {queries[1]}. "
+            "Ravindra Jadeja opinion on the batting grip with context. " * 12
+        ),
+        "hashtags": ["#Shorts", "#Cricket"],
+        "search_terms": queries,
+        "primary_search_terms": queries[:2],
+    })
+
+    result = seo.generate_clip_seo(
+        "clip-audit-queries",
+        "batting grip ke baare mein baat",
+        video_title="India cricket discussion",
+        approved_search_queries=queries,
+    )
+    everything = json.dumps(result, ensure_ascii=False).casefold()
+    assert "jadeja" not in everything
+    assert len(result["search_terms"]) >= 8
+    assert all("jadeja" not in term for term in result["search_terms"])
+
+
+def test_grounded_fallback_copy_is_english_v3():
+    """Fallback builders write Full-English public copy, never Hinglish."""
+    import automation.seo.seo as seo
+
+    title = seo._grounded_fallback_title(
+        "team ka run rate gir gaya aur lead khatam", ["clean query one"])
+    assert "Hinglish" not in title
+    assert not re.search(r"\b[Kk]a\b|\b[Kk]i\b|\bNe\b", title)
+
+    description = seo._grounded_fallback_description(
+        title, "yaha run rate ki baat ho rahee hai",
+        "IND vs SL Live Day 4", ["clean query one", "clean query two"],
+        ["#Shorts", "#Cricket"],
+    )
+    low = description.casefold()
+    for marker in ("karne wale", "hai:", "li gayi", "nahi", "hinglish"):
+        assert marker not in low, marker

@@ -274,4 +274,4 @@ def test_match_roster_player_cannot_be_attributed_when_clip_never_says_name(monk
 
     rendered = f"{result['title']} {result['description']}".casefold()
     assert "joe root" not in rendered
-    assert "england ka run rate 41" in result["title"].casefold()
+    assert "england run rate 41" in result["title"].casefold()
