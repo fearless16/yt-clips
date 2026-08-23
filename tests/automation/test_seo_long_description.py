@@ -1,18 +1,22 @@
-"""TDD contract for config-driven, long, grounded Shorts descriptions."""
+"""TDD contract for config-driven, right-sized, grounded Shorts descriptions.
+
+Feed-invisible metadata: descriptions are short and factual (350-900 chars),
+not 2015-style keyword real estate. Budgets live in config.yaml under seo.
+"""
 import pytest
 
 from automation.seo import seo
 from utils.config import load_config
 
 SEO_CFG = load_config().get("seo", {})
-MIN_CHARS = int(SEO_CFG.get("description_min_chars", 1200))
-TARGET_CHARS = int(SEO_CFG.get("description_target_chars", 3200))
-MAX_CHARS = int(SEO_CFG.get("description_max_chars", 4000))
+MIN_CHARS = int(SEO_CFG.get("description_min_chars", 350))
+TARGET_CHARS = int(SEO_CFG.get("description_target_chars", 550))
+MAX_CHARS = int(SEO_CFG.get("description_max_chars", 900))
 
 RICH_DESCRIPTION = (
     "Virat Kohli batting analysis explains the complete cricket discussion "
-    "without inventing a score or opponent. " * 30
-).strip()
+    "without inventing a score or opponent. "
+).strip() * 4
 
 
 def _make_item(description, title="Kohli ne maara CHHAKKA! 🔥"):
@@ -26,15 +30,16 @@ def _make_item(description, title="Kohli ne maara CHHAKKA! 🔥"):
 
 class TestDescriptionCharacterBudgetConfig:
 
-    def test_config_has_long_description_budgets(self):
-        assert 800 <= MIN_CHARS < TARGET_CHARS < MAX_CHARS
-        assert MAX_CHARS == 4000
+    def test_config_has_right_sized_description_budgets(self):
+        assert 250 <= MIN_CHARS < TARGET_CHARS < MAX_CHARS
+        assert TARGET_CHARS <= 700
+        assert MAX_CHARS <= 1000
 
 
 class TestDescriptionCharacterQualityGate:
 
     def test_quality_gate_rejects_below_min_chars(self):
-        below = "Kohli cricket discussion. " * 20
+        below = "Kohli cricket discussion. " * 10
         assert len(below) < MIN_CHARS
         assert not seo._validate_seo_quality(_make_item(below))
 

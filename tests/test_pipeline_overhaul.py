@@ -183,7 +183,9 @@ class TestSEOContract:
                    "t20 cricket live", "best cricket moments"}
         assert not (set(out["search_terms"]) & generic)
 
-    def test_shorts_preserves_llm_long_grounded_description(self):
+    def test_shorts_right_sizes_llm_description(self):
+        """v3 packaging: bloated LLM descriptions are capped to the
+        feed-invisible budget while grounded head content survives."""
         from automation.seo.seo import generate_clip_seo
         ai_json = json.dumps(_grounded_long_seo_result())
         with patch("utils.ai_client.AIClient.generate_fastest_first",
@@ -194,8 +196,8 @@ class TestSEOContract:
                                     is_shorts=True,
                                     approved_search_queries=SEO_QUERIES)
         assert "CHAPTERS" not in res["description"]
-        assert "Kohli" in res["description"]
-        assert len(res["description"]) >= 1200
+        assert "Kohli" in res["description"] or "kohli" in res["description"]
+        assert len(res["description"]) <= 1000
         assert res["is_shorts"] is True
 
     def test_total_failure_raises_seo_generation_error(self):

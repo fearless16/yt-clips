@@ -592,6 +592,12 @@ def detect_highlights(
     windows.sort(key=lambda w: w["start"])
     merged = _merge_windows(windows, h_cfg["merge_gap"])
 
+    # Stamp every candidate with its content angle so the LLM arbiter can
+    # weigh it and shorts_intelligence can learn which angles win.
+    from automation.clip_selection.content_type import classify_content_type
+    for w in merged:
+        w["content_type"] = classify_content_type(str(w.get("text", "")))
+
     merged.sort(key=lambda w: w["score"], reverse=True)
     selection_cfg = cfg.get("clip_selection", {})
     if selection_cfg.get("prefer_source_match", True):
@@ -721,6 +727,7 @@ def detect_highlights(
             "score": w.get("final_score", w.get("score", 0)),
             "speed_factor": yaml_data[key]["speed_factor"],
             "text": window_text,
+            "content_type": w.get("content_type"),
             "agent_scores": w.get("agent_scores", {}),
             "hook_score": w.get("hook_score"),
             "intelligence_adjustment": w.get("intelligence_adjustment", 0.0),

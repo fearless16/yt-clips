@@ -52,6 +52,9 @@ def record_exported(
                 features["intelligence_segment"] = str(segments[0])
             if hook:
                 features["hook_type"] = str(hook).casefold()
+            content_type = item.get("content_type")
+            if content_type:
+                features["content_type"] = str(content_type).casefold()
             metadata_path = path.with_name(f"{path.stem}_metadata.json")
             if metadata_path.exists():
                 try:
@@ -61,9 +64,9 @@ def record_exported(
                     tags = metadata.get("tags") or []
                     hashtags = metadata.get("hashtags") or []
                     features.update({
-                        "seo_title_length_bucket": _length_bucket(len(title), (40, 55, 70)),
+                        "seo_title_length_bucket": _length_bucket(len(title), (40, 50, 60)),
                         "seo_description_length_bucket": _length_bucket(
-                            len(description), (1000, 2500, 3800)
+                            len(description), (400, 700, 900)
                         ),
                         "seo_tag_count_bucket": _length_bucket(len(tags), (10, 20, 30)),
                         "seo_hashtag_count_bucket": _length_bucket(len(hashtags), (5, 10, 15)),

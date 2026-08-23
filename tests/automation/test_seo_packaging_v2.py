@@ -21,7 +21,8 @@ def test_title_cleanup_removes_shorts_fake_live_and_never_cuts_a_word(monkeypatc
     assert "live" not in result["title"].casefold()
     assert "#shorts" not in result["title"].casefold()
     assert not result["title"].startswith(("🔴", "|", "-", ":"))
-    assert result["title"] == "Yuvraj Singh Coach Debate"
+    # v3 packaging appends the channel-neutral emoji when the model omits one.
+    assert result["title"] == "Yuvraj Singh Coach Debate 🏏"
 
 
 def test_packaging_contract_uses_focused_queries_and_scores_promise_alignment(monkeypatch):
@@ -48,7 +49,7 @@ def test_packaging_contract_uses_focused_queries_and_scores_promise_alignment(mo
         approved_search_queries=queries,
     )
 
-    assert result["packaging_version"] == "promise_v2"
+    assert result["packaging_version"] == "promise_v3_english"
     assert result["primary_search_terms"] == queries[:2]
     assert result["promise_alignment_score"] >= 0.5
 
@@ -223,7 +224,7 @@ def test_invalid_alignment_config_falls_back_instead_of_crashing(monkeypatch):
         video_title="India cricket discussion",
         approved_search_queries=queries,
     )
-    assert result["packaging_version"] == "promise_v2"
+    assert result["packaging_version"] == "promise_v3_english"
 
 
 def test_unknown_player_in_title_is_replaced_with_grounded_clip_topic(monkeypatch):

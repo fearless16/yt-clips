@@ -62,15 +62,17 @@ def test_config_has_target_duration():
     from utils.config import load_config
     hl = load_config().get("highlight", {})
     assert "target_duration" in hl
-    assert 5 <= float(hl["target_duration"]) <= 15
+    assert 20 <= float(hl["target_duration"]) <= 30
 
 
-def test_config_duration_limits_stay_below_25_seconds():
+def test_config_duration_targets_natural_pace():
+    """Channel data: 25-40s natural-pace thoughts win; compression is a fallback."""
     from utils.config import load_config
     hl = load_config().get("highlight", {})
-    assert float(hl["max_duration"]) <= 24
-    assert float(hl["preferred_duration_max"]) <= 24
-    assert float(hl["target_duration"]) < 25
+    assert float(hl["max_duration"]) <= 45
+    assert float(hl["preferred_duration_min"]) >= 15
+    assert 25 <= float(hl["preferred_duration_max"]) <= 45
+    assert float(hl["target_duration"]) >= 20
 
 
 def test_config_has_max_speedup():
@@ -179,8 +181,9 @@ def test_detect_highlights_yaml_has_speed_factor(tmp_path, monkeypatch):
     assert out_yaml.exists()
     data = yaml.safe_load(out_yaml.read_text(encoding="utf-8"))
     assert "speed_factor" in data["clip1"]
-    assert data["clip1"]["speed_factor"] == pytest.approx(1.6, abs=0.01)
-    assert highlights[0]["speed_factor"] == pytest.approx(1.6, abs=0.01)
+    # 24s window vs 25s natural target — no speed-up needed anymore.
+    assert data["clip1"]["speed_factor"] == pytest.approx(1.0, abs=0.01)
+    assert highlights[0]["speed_factor"] == pytest.approx(1.0, abs=0.01)
 
 
 def test_sanitize_strategy_preserves_merged_speed():

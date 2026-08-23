@@ -103,6 +103,43 @@ def compute_weighted_score(
     }
 
 
+def _render_match_facts(match_context: Any) -> str:
+    """Render verified match context as a compact evidence line for the LLM."""
+    if not match_context:
+        return ""
+    try:
+        rendered = json.dumps(match_context, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return ""
+    rendered = re.sub(r"\s+", " ", rendered).strip()
+    return rendered[:600]
+
+
+# Safety valve: normal complete thoughts are <=20s of speech (~350 chars).
+# The cap only bites on pathological outliers so one runaway segment cannot
+# blow the prompt budget; the marker keeps the truncation honest to the LLM.
+MAX_SCRIPT_CHARS = 2000
+
+
+def _render_candidate_script(text: Any) -> str:
+    script = str(text or "").strip()
+    if len(script) > MAX_SCRIPT_CHARS:
+        log.warning("Candidate script capped at %d chars (was %d)",
+                    MAX_SCRIPT_CHARS, len(script))
+        return script[:MAX_SCRIPT_CHARS].rstrip() + " …[script truncated]"
+    return script
+
+
+def _coerce_candidate_index(candidate_id: Any, total: int) -> int:
+    """Map an LLM-provided candidate_id (int, float, numeric string) to a
+    valid list index. Returns -1 when unusable or out of range."""
+    try:
+        idx = int(candidate_id) - 1
+    except (TypeError, ValueError):
+        return -1
+    return idx if 0 <= idx < total else -1
+
+
 def llm_arbiter_refine(
     candidates_with_scores: list[dict],
     context: dict,
@@ -123,19 +160,22 @@ def llm_arbiter_refine(
 
     transcript_segments = context.get("transcript_segments", [])
 
-    # Build candidate detail for LLM
+    # Build candidate detail for LLM — full clip script, never silently
+    # truncated: the arbiter cannot judge self-containedness from a fragment.
     lines = []
     for i, c in enumerate(candidates, 1):
-        text = c.get("text", "")[:150]
+        text = _render_candidate_script(c.get("text"))
         agent_breakdown = c.get("agent_scores", {})
+        content_type = str(c.get("content_type") or "").strip()
+        type_tag = f" type={content_type}" if content_type else ""
         scores_str = " | ".join(
             f"{k}:{v.get('score', 0):.0f}" for k, v in sorted(agent_breakdown.items())
         )
         lines.append(
             f"{i}. [{c['start']:.1f}s-{c['end']:.1f}s] "
-            f"weighted={c.get('final_score', 0):.1f} "
+            f"weighted={c.get('final_score', 0):.1f}{type_tag} "
             f"agents=[{scores_str}] "
-            f"text={text}"
+            f"script={text}"
         )
 
     candidates_str = "\n".join(lines)
@@ -150,6 +190,21 @@ def llm_arbiter_refine(
     ][:30]
     transcript_text = "\n".join(transcript_snippets)
 
+    match_facts = _render_match_facts(context.get("match_context"))
+    match_line = f"\nVerified match facts (evidence boundary): {match_facts}\n" if match_facts else ""
+
+    trend_topics = [
+        str(t).strip() for t in (context.get("trend_topics") or [])
+        if str(t).strip()
+    ][:10]
+    trend_lines = ""
+    if trend_topics:
+        rendered = "\n".join(f"- {t}" for t in trend_topics)
+        trend_lines = (
+            "\nCurrent YouTube search demand (IN), newest signals:\n"
+            f"{rendered}\n"
+        )
+
     system_prompt = (
         "You are the Final Clip Selection Arbiter. "
         "Your job: select the best clips for YouTube Shorts from scored candidates.\n\n"
@@ -159,10 +214,22 @@ def llm_arbiter_refine(
         "3. Cricket relevance (key players, big moments)\n"
         "4. Self-contained (makes sense without context)\n"
         "5. Viral potential (rare/controversial/shocking)\n\n"
+        "Content angles:\n"
+        "- Each candidate line carries type=moment|comedy|debate|news.\n"
+        "- Moments with visible stakes outrank debate/chatter when scores tie.\n"
+        "- Comedy and news angles are valid when genuinely strong.\n\n"
         "Source-grounding:\n"
         "- Prefer clips that directly match the source event/title\n"
         "- Keep an off-topic tangent only when it is exceptionally strong, self-contained, and cricket-grounded\n"
         "- Never invent a player, match, or expansion of an ambiguous nickname\n\n"
+        "Search demand:\n"
+        "- Trend lines show what viewers search right now; prefer candidates "
+        "whose content matches that demand when quality is otherwise close\n"
+        "- Demand lines are context only: never mention them, and never add a "
+        "player or event to a clip just because demand lists it\n\n"
+        "ID contract:\n"
+        '- Every candidate line starts with its integer number. "candidate_id" '
+        "MUST be that integer (1-based), copied exactly. Never invent other id formats.\n\n"
         "Rules:\n"
         "- Reject clips that are boring, repetitive, or incomplete\n"
         "- Prefer shorter clips (15-30s) for Shorts retention\n"
@@ -172,10 +239,11 @@ def llm_arbiter_refine(
     )
 
     source_title = str(context.get("source_title", "") or "").strip()
-    source_line = f"Source video title: {source_title}\n\n" if source_title else ""
+    source_line = f"Source video title: {source_title}\n" if source_title else ""
 
     user_prompt = (
-        f"{source_line}Here are {len(candidates)} scored candidates:\n\n"
+        f"{source_line}{match_line}{trend_lines}\n"
+        f"Here are {len(candidates)} scored candidates:\n\n"
         f"{candidates_str}\n\n"
         f"Transcript context:\n{transcript_text}\n\n"
         "Return JSON:\n"
@@ -191,40 +259,64 @@ def llm_arbiter_refine(
         "}"
     )
 
-    try:
-        log.info("LLM arbiter: refining %d candidates...", len(candidates))
-        response = _get_ai().generate_text(user_prompt, system_instruction=system_prompt)
+    result: dict | None = None
+    last_error: str | None = None
+    for attempt in (1, 2):
+        try:
+            log.info("LLM arbiter: refining %d candidates (attempt %d)...",
+                     len(candidates), attempt)
+            response = _get_ai().generate_text(user_prompt, system_instruction=system_prompt)
 
-        match = re.search(r'\{.*\}', response, re.DOTALL)
-        if not match:
-            log.warning("LLM arbiter: no JSON found in response")
-            return candidates_with_scores[:max_selected]
-
-        result = json.loads(match.group(0))
-        selected = result.get("selected", [])
-        log.info("LLM arbiter: selected %d of %d candidates",
-                 len(selected), len(candidates))
-
-        # Apply LLM selection
-        refined = []
-        for sel in selected:
-            candidate_id = sel.get("candidate_id", 1)
-            idx = candidate_id - 1
-            if not (0 <= idx < len(candidates)):
-                log.warning("LLM arbiter: invalid candidate_id %d (expected 1-%d)",
-                            candidate_id, len(candidates))
+            match = re.search(r'\{.*\}', response, re.DOTALL)
+            if not match:
+                last_error = "no JSON found in response"
+                log.warning("LLM arbiter: %s (attempt %d)", last_error, attempt)
                 continue
-            c = dict(candidates[idx])
-            c["ai_score"] = sel.get("score", c.get("final_score", 0))
-            c["ai_reason"] = sel.get("reason", "")
-            refined.append(c)
 
-        refined.sort(key=lambda x: x.get("ai_score", x.get("final_score", 0)), reverse=True)
-        return refined[:max_selected]
+            try:
+                result = json.loads(match.group(0))
+                break
+            except json.JSONDecodeError as exc:
+                last_error = f"malformed JSON: {exc}"
+                log.warning("LLM arbiter: %s (attempt %d)", last_error, attempt)
 
-    except Exception as e:
-        log.warning("LLM arbiter failed: %s — using weighted scores", e)
+        except Exception as e:
+            last_error = str(e)
+            log.warning("LLM arbiter: generation failed (attempt %d): %s", attempt, e)
+
+    if result is None:
+        log.warning("LLM arbiter failed after retry (%s) — using weighted scores",
+                    last_error or "unknown")
         return candidates_with_scores[:max_selected]
+
+    selected = result.get("selected", [])
+    log.info("LLM arbiter: selected %d of %d candidates",
+             len(selected), len(candidates))
+
+    # Apply LLM selection. LLM output is adversarial input: ids may arrive as
+    # strings/floats/out of range, entries may not be objects, duplicates
+    # happen. Skip anything unusable instead of crashing the stage.
+    refined: list[dict] = []
+    seen_indices: set[int] = set()
+    for sel in selected:
+        if not isinstance(sel, dict):
+            log.warning("LLM arbiter: skipping non-object selection entry: %r", sel)
+            continue
+        idx = _coerce_candidate_index(sel.get("candidate_id"), len(candidates))
+        if idx < 0:
+            log.warning("LLM arbiter: invalid candidate_id %r (expected 1-%d)",
+                        sel.get("candidate_id"), len(candidates))
+            continue
+        if idx in seen_indices:
+            continue
+        seen_indices.add(idx)
+        c = dict(candidates[idx])
+        c["ai_score"] = sel.get("score", c.get("final_score", 0))
+        c["ai_reason"] = sel.get("reason", "")
+        refined.append(c)
+
+    refined.sort(key=lambda x: x.get("ai_score", x.get("final_score", 0)), reverse=True)
+    return refined[:max_selected]
 
 
 def fmt_ts(seconds: float) -> str:

@@ -92,7 +92,21 @@ GENERIC_TITLES = {
     "sports highlights", "match highlights",
 }
 
-PACKAGING_VERSION = "promise_v2"
+PACKAGING_VERSION = "promise_v3_english"
+
+# ── Anti-AI-generic gate ────────────────────────────────────────────────────
+# Narration slop that LLMs default to. Any hit in public copy fails the
+# quality gate; the prompt also bans them so the model self-corrects first.
+AI_SLOP_PHRASES = (
+    "stay tuned", "is video mein", "dekhte hain", "welcome back",
+    "cricket lovers", "dil jhoom", "dhamakedaar", "aapko pasand aayega",
+    "toh chaliye", "aaj ke match mein", "hello guys",
+    "in this video we will", "in this video, we", "video ko like karo",
+    "subscribe karna na bhoolein", "channel ko subscribe",
+)
+
+_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF\u2600-\u27BF]")
+_DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 
 _PROMISE_STOP_WORDS = STOP_WORDS | GENERIC_TAGS | {
     "ka", "ki", "ke", "ko", "ne", "hai", "hain", "tha", "thi", "aur",
@@ -120,15 +134,21 @@ SEO_BLOCKED_PROVIDERS = {"nvidia", "groq"}
 
 _SYSTEM = (
     "You generate metadata only for cricket Shorts on @cricketwithprajjwal2.0, "
-    "for an Indian Hindi-English audience. Treat the source video title, source "
-    "video description, complete clip transcript, OCR, approved search queries, "
-    "and explicitly verified match facts as the entire evidence boundary. Resolve "
-    "cricket aliases to canonical people and teams. Never invent a player, team, "
-    "score, venue, match event, date, record, injury, or trend. Write one specific "
-    "mobile-readable Hinglish title and a long, unique, natural description using "
-    "the configured character budget. Embed selected approved queries naturally; "
-    "never append a keyword or tag dump. These are on-demand Shorts, so never frame "
-    "them as live streams or live scores. Keep YouTube API tags separate from the "
+    "for an Indian audience that reads English. Treat the source video title, "
+    "source video description, complete clip transcript, OCR, approved search "
+    "queries, and explicitly verified match facts as the entire evidence "
+    "boundary. Resolve cricket aliases to canonical people and teams. Never "
+    "invent a player, team, score, venue, match event, date, record, injury, "
+    "or trend. All public copy — title, description, hashtags — is written in "
+    "clear simple ENGLISH only: no Hindi words in Roman script, no Devanagari, "
+    "no Hinglish. The title carries one specific premise plus exactly 1-2 "
+    "emojis; never use pipe-separated template segments. Descriptions are "
+    "short and factual: open with this clip's exact moment and its stakes, "
+    "add verified match context, stop talking. Never narrate ('in this "
+    "video', 'stay tuned', 'dekhte hain'), never greet, never promise. Embed "
+    "selected approved queries naturally where they fit; never append a "
+    "keyword or tag dump. These are on-demand Shorts, so never frame them as "
+    "live streams or live scores. Keep YouTube API tags separate from the "
     "description and use only grounded aliases, entities, and phrases. "
     "Return ONLY valid JSON — no markdown, no explanation, no extra text."
 )
@@ -163,8 +183,8 @@ APPROVED GROUNDED SEARCH QUERIES (select 8-15 exactly from this list):
 
 Return ONLY this valid JSON object:
 {{
-  "title": "<specific Hinglish title>",
-  "description": "<long, unique, natural, evidence-grounded description>",
+  "title": "<specific English title, max 60 chars>",
+  "description": "<short factual English description, target {description_target_chars} chars>",
   "hashtags": ["#Shorts", "<1-2 exact topic tags>"],
   "search_terms": ["<8-15 exact approved research queries>"],
   "primary_search_terms": ["<2-4 phrases used naturally in the description>"],
@@ -172,17 +192,21 @@ Return ONLY this valid JSON object:
 }}
 
 STRICT RULES:
-- TITLE: maximum 70 characters, one clear premise, mobile-readable. Lead with
-  the canonical player/team and the exact opinion or event from this clip.
-- Never write LIVE, Live Score, Live Stream, Highlights, or #Shorts in title.
-- DESCRIPTION: target {description_target_chars} characters; maximum {description_max_chars} characters.
-  Use the available budget for a detailed,
-  unique Hinglish/English explanation of the source video, this clip's complete
-  thought, and verified match context. Put the strongest 1-2 phrases in the
-  opening lines. Expand on the clip's one promise before broader verified
-  context; do not turn the description into a list of near-duplicate queries.
-  Never append a keyword dump or repeat sentences merely to reach the target.
-  If a match fact is absent, omit it instead of guessing.
+- LANGUAGE: title, description and hashtags are ENGLISH ONLY. No Hindi words
+  in Roman script, no Hinglish sentences, absolutely no Devanagari.
+- TITLE: maximum 60 characters. ONE clear premise — lead with the canonical
+  player/team and the exact event or moment from this clip. Exactly 1-2
+  emojis at natural reading points. Never pipe-separated segments, never a
+  template like "Hook | Context | Channel". Never write LIVE, Live Score,
+  Live Stream, Highlights, or #Shorts in the title.
+- BANNED NARRATION in any field: "in this video", "stay tuned",
+  "dekhte hain", "is video mein", "welcome back", "cricket lovers",
+  "hello guys", "dhamakedaar". State facts; never narrate or greet.
+- DESCRIPTION: target {description_target_chars} characters; hard maximum
+  {description_max_chars} characters; minimum 350. First sentence = this
+  clip's exact moment and why it matters (stakes, record, situation).
+  Second beat = verified match context from the facts above. One short CTA
+  line at most. If a match fact is absent, omit it instead of guessing.
 - HASHTAGS: exactly 2-3; #Shorts plus only grounded player/team/event tags.
 - SEARCH TERMS: 8-15 entries copied exactly from the approved list.
 - PRIMARY SEARCH TERMS: choose 2-4 of those entries and weave only these
@@ -198,10 +222,13 @@ Source title: {video_title}
 
 Return only JSON with title, description, hashtags, search_terms,
 primary_search_terms, and tags.
-- Title: maximum 70 characters; one specific Hinglish premise; no LIVE/#Shorts.
-- Description: long and evidence-grounded, target {description_target_chars}
-  characters and never exceed {description_max_chars} characters; no invented
-  match facts or keyword dump.
+- LANGUAGE: English only everywhere. No Hinglish, no Devanagari.
+- Title: maximum 60 characters; one specific premise plus 1-2 emojis;
+  no LIVE/#Shorts, no pipe-separated segments.
+- Description: short and factual, target {description_target_chars}
+  characters, never exceed {description_max_chars} characters; open with
+  this clip's exact moment; no invented match facts, no narration
+  ("in this video", "stay tuned"), no keyword dump.
 - Hashtags: exactly 2-3 including #Shorts.
 - Search terms: 8-15 specific grounded cricket phrases.
 - Primary search terms: 2-4 selected search terms written naturally in prose.
@@ -465,15 +492,15 @@ def _seo_config_float(key: str, default: float, low: float, high: float) -> floa
 
 
 def _description_min_chars() -> int:
-    return _seo_config_int("description_min_chars", 1200, 100, 3900)
+    return _seo_config_int("description_min_chars", 350, 150, 1500)
 
 
 def _description_target_chars() -> int:
-    return _seo_config_int("description_target_chars", 3200, 500, 4000)
+    return _seo_config_int("description_target_chars", 550, 300, 2000)
 
 
 def _description_max_chars() -> int:
-    return _seo_config_int("description_max_chars", 4000, 500, 4900)
+    return _seo_config_int("description_max_chars", 900, 500, 2500)
 
 
 def _shorts_hashtag_cap() -> int:
@@ -686,7 +713,9 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     except (TypeError, ValueError):
         title_cap = 70
     title_cap = max(30, min(100, title_cap))
-    out["title"] = _clean_title(out.get("title"), title_cap)
+    out["title"] = _ensure_title_emoji(
+        _clean_title(out.get("title"), title_cap), title_cap
+    )
     out["description"] = str(out.get("description") or "")[:_description_max_chars()]
 
     htags = out.get("hashtags") or []
@@ -806,6 +835,24 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     return out
 
 
+def _ensure_title_emoji(title: str, cap: int) -> str:
+    """Shorts feed titles carry at least one emoji (mobile-first packaging).
+
+    Appends the channel-neutral cricket ball when the model forgot one.
+    Deterministic — never invents content, only completes the format.
+    """
+    if not title or _EMOJI_RE.search(title):
+        return title
+    if len(title) + 2 <= cap:
+        return title.rstrip() + " 🏏"
+    return title
+
+
+def _has_ai_slop(text: str) -> bool:
+    lowered = re.sub(r"\s+", " ", str(text or "").lower())
+    return any(phrase in lowered for phrase in AI_SLOP_PHRASES)
+
+
 def _validate_seo_quality(item: Dict) -> bool:
 
     """Quality gate: reject SEO that would hurt channel performance.
@@ -824,16 +871,27 @@ def _validate_seo_quality(item: Dict) -> bool:
     if title.lower().rstrip("!.?") in GENERIC_TITLES:
         return False
 
-    # 3. Description must use the configured long-form evidence budget.
+    # 3. Description must use the configured short-form evidence budget.
     if len(description) < _description_min_chars():
         return False
 
-    # 4. Title must not contain Devanagari script (kills discoverability)
-    # Unicode range: \u0900-\u097F (Devanagari block)
-    if re.search(r'[\u0900-\u097F]', title):
+    # 4. No Devanagari script anywhere in public copy (kills discoverability)
+    if _DEVANAGARI_RE.search(title):
+        return False
+    if _DEVANAGARI_RE.search(description):
+        return False
+    hashtags_text = " ".join(
+        str(tag) for tag in (item.get("hashtags") or []) if isinstance(tag, str)
+    )
+    if _DEVANAGARI_RE.search(hashtags_text):
         return False
 
-    # 5. Natural embedding check — reject if keyword list/tag block is
+    # 5. AI narration slop is banned in public copy — it reads as template
+    #    output and erodes trust in a feed where every word earns swipes.
+    if _has_ai_slop(title) or _has_ai_slop(description):
+        return False
+
+    # 6. Natural embedding check — reject if keyword list/tag block is
     #    appended at the end of description (signals lazy SEO).
     #    Look for patterns like:
     #      - "Tags:", "Keywords:", "Search terms:" at end (label + colon)

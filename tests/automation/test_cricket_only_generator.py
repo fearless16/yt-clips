@@ -226,12 +226,13 @@ def test_seo_prompt_uses_canonical_grounded_player(monkeypatch):
 
     assert captured["transcript"] == "Yuvraj Singh ko India ka coach bana do"
     assert "Grounded players: Yuvraj Singh" in captured["prompt"]
-    assert "TITLE: maximum 70 characters" in captured["prompt"]
-    assert "DESCRIPTION: target 3200 characters; maximum 4000 characters" in captured["prompt"]
+    assert "TITLE: maximum 60 characters" in captured["prompt"]
+    assert "target 550 characters" in captured["prompt"]
+    assert "900 characters" in captured["prompt"]
     assert "Prajjwal explains why Yuvraj Singh has the temperament" in captured["prompt"]
     assert "Yuvraj Singh ko India ka coach bana do" in captured["prompt"]
     assert "8-15" in captured["prompt"]
-    assert "maximum 70 characters" in captured["salvage"]
+    assert "maximum 60 characters" in captured["salvage"]
 
 
 def test_seo_rejects_hallucinated_player_from_ai(monkeypatch):
@@ -257,13 +258,13 @@ def test_seo_rejects_hallucinated_player_from_ai(monkeypatch):
         )
 
 
-def test_short_duration_config_prioritizes_minimal_complete_thoughts():
+def test_short_duration_config_prioritizes_natural_pace_complete_thoughts():
     from utils.config import load_config
 
     highlight = load_config()["highlight"]
     assert highlight["min_duration"] <= 4
-    assert highlight["target_duration"] <= 15
-    assert highlight["max_duration"] <= 20
+    assert 20 <= highlight["target_duration"] <= 30
+    assert highlight["max_duration"] <= 45
     assert highlight["merge_gap"] == 0
 
 

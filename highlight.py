@@ -488,7 +488,6 @@ def _refine_highlights_with_ai(
             log.info("AI ranker: %d selected, %d rejected, quality=%s",
                      len(selected), len(rejected), notes.get("overall_quality", "unknown"))
 
-            selected_ids = {s.get("candidate_id") for s in selected}
             refined = []
             for sel in selected:
                 try:
@@ -506,11 +505,11 @@ def _refine_highlights_with_ai(
                         c["end"] = sel["best_end_sec"]
                     refined.append(c)
 
-            if len(refined) < max_clips:
-                for i, c in enumerate(capped_candidates):
-                    cid = f"candidate_{i+1}"
-                    if cid not in selected_ids and len(refined) < max_clips:
-                        refined.append(c)
+            # Strict selection: rejected candidates stay rejected. Never
+            # backfill up to max_clips with clips the ranker explicitly
+            # discarded — that is how mediocre shorts get uploaded.
+            log.info("AI ranker strict selection: %d clips kept, %d rejected stay rejected",
+                     len(refined), len(rejected))
 
             refined.sort(key=lambda x: x.get("ai_score", x.get("weighted_score", 0)), reverse=True)
             return refined[:max_clips]
