@@ -14,6 +14,13 @@ import pytest
 from utils.config import Config, _config_cache
 
 MEDIA_ID = "17900000000000001"
+
+
+@pytest.fixture(autouse=True)
+def _no_upload_post_creds(monkeypatch):
+    """ai_client's load_dotenv() leaks the real key into the session; tests
+    here stub the Graph flow and rely on the provider factory bailing out."""
+    monkeypatch.setenv("UPLOAD_POST_API_KEY", "")
 PERMALINK = "https://www.instagram.com/reel/fake123/"
 
 
@@ -657,3 +664,106 @@ class TestPublishHook:
                                          "profile": "chan"}})
         fn = seo.make_upload_post_publish()
         assert callable(fn)
+
+
+def test_provider_issue_names_missing_env_key(monkeypatch):
+    """provider=upload_post + absent key must say THAT, not blame graph."""
+    from automation.instagram import runner
+
+    monkeypatch.setenv("UPLOAD_POST_API_KEY", "")
+    issue = runner._provider_config_issue({
+        "provider": "upload_post",
+        "upload_post": {"api_key_env": "UPLOAD_POST_API_KEY",
+                        "profile": "prajjwall"},
+    })
+    assert issue is not None
+    assert "UPLOAD_POST_API_KEY" in issue
+    assert "upload_post" in issue
+
+
+def test_provider_issue_none_when_key_present(monkeypatch):
+    from automation.instagram import runner
+
+    monkeypatch.setenv("UPLOAD_POST_API_KEY", "k-test")
+    assert runner._provider_config_issue({
+        "provider": "upload_post",
+        "upload_post": {"api_key_env": "UPLOAD_POST_API_KEY",
+                        "profile": "prajjwall"},
+    }) is None
+
+
+def test_provider_issue_skips_graph_provider():
+    from automation.instagram import runner
+
+    assert runner._provider_config_issue({"provider": "graph"}) is None
+
+
+def test_upload_stage_error_reports_provider_issue(tmp_path, monkeypatch):
+    """End-to-end: UPLOAD stage with unconfigured provider surfaces the real
+    reason instead of the generic graph_client complaint."""
+    from automation.instagram import runner as rn
+
+    monkeypatch.setattr(rn, "_skip_requested", lambda: False)
+    for name in (rn.HOOK_RUN_EVIDENCE, rn.HOOK_RUN_CAPTION,
+                 rn.HOOK_MAKE_CLIENT, rn.HOOK_PUBLISH):
+        rn._HOOKS.pop(name, None)
+    monkeypatch.setattr(
+        rn, "_provider_config_issue",
+        lambda cfg=None: "instagram.provider=upload_post but "
+                         "UPLOAD_POST_API_KEY is not set")
+    state = tmp_path / rn.STATE_FILE
+    state.write_text(json.dumps({
+        "stage": "CAPTION", "attempts": 1,
+        "caption": "ready caption"}), encoding="utf-8")
+    (tmp_path / "clip.mp4").write_bytes(b"\x00")
+
+    result = rn.process_instagram_for_clip(
+        tmp_path, "tr", "T", "D", force=True)
+
+    assert result is None
+    marker = json.loads((tmp_path / rn.FAILED_MARKER).read_text())
+    assert "upload_post" in marker["error"]
+    rn._HOOKS.clear()
+
+
+def test_resolve_publish_hook_after_lazy_import(monkeypatch):
+    """Resume-at-UPLOAD resolves PUBLISH as the FIRST hook in a fresh
+    process: the lazy seo import registers defaults mid-call, and the
+    resolver must return the registered hook, not getattr('publish')."""
+    from automation.instagram import runner as rn
+
+    monkeypatch.setitem(rn.__dict__, "_HOOKS", {})
+    hook = rn.resolve_stage_hook(rn.HOOK_PUBLISH)
+    assert hook is not None, (
+        "PUBLISH hook unresolved on first call — upload_post resumes "
+        "at UPLOAD checkpoint can never publish"
+    )
+
+
+def test_resume_at_upload_reaches_publish(tmp_path, monkeypatch):
+    """Full resume path: UPLOAD checkpoint + ready caption must reach the
+    publish hook without falling into the graph-client branch."""
+    from automation.instagram import runner as rn
+    from automation.instagram import upload_post_client as upc
+
+    monkeypatch.setattr(rn, "_skip_requested", lambda: False)
+    monkeypatch.setenv("UPLOAD_POST_API_KEY", "k-test")
+    rn._HOOKS.clear()
+    (tmp_path / "clip.mp4").write_bytes(b"\x00")
+    (tmp_path / rn.STATE_FILE).write_text(json.dumps({
+        "stage": "UPLOAD", "attempts": 1,
+        "caption": "ready"}), encoding="utf-8")
+
+    seen = []
+
+    def fake_publish(self, video_path, caption, **kw):
+        seen.append(caption)
+        return {"media_id": "M1", "permalink": "u"}
+
+    monkeypatch.setattr(upc.UploadPostClient, "publish_reel", fake_publish)
+
+    result = rn.process_instagram_for_clip(
+        tmp_path, "tr", "T", "D", force=True)
+
+    assert result == "M1" and seen == ["ready"]
+    rn._HOOKS.clear()

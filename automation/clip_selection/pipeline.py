@@ -84,6 +84,82 @@ def _merge_caption_fragments(segments: list[dict]) -> list[dict]:
     return merged
 
 
+def _split_segments_on_pauses(
+    segments: list[dict],
+    pause_seconds: float = 0.55,
+    max_block_seconds: float = 20.0,
+    words_per_second: float = 2.5,
+) -> list[dict]:
+    """Split whisper's long punctuation-free blocks at speech pauses.
+
+    whisper.cpp emits ~30s blocks with no sentence punctuation, so the
+    complete-thought merger cannot find boundaries and glues whole minutes
+    into a single 'thought'. Word timestamps carry real silence gaps — cut
+    there; when timings are missing, hard-split oversized blocks
+    proportionally by word count. Boundaries stay inside the source segment;
+    no text is dropped or reordered.
+    """
+    out: list[dict] = []
+    max_words = max(4, int(max_block_seconds * words_per_second))
+    for segment in segments:
+        try:
+            seg_start = float(segment["start"])
+            seg_end = float(segment["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if seg_end <= seg_start or not str(segment.get("text", "")).strip():
+            continue
+        words = _valid_word_timings(segment)
+
+        # Boundary indices where the speaker paused.
+        bounds: list[int] = [0]
+        if len(words) >= 2:
+            for i in range(1, len(words)):
+                gap = float(words[i]["start"]) - float(words[i - 1]["end"])
+                if gap >= pause_seconds:
+                    bounds.append(i)
+        bounds.append(len(words))
+
+        pieces: list[tuple[float, float, list[str]]] = []
+        if len(words) >= 1 and len(bounds) > 2:
+            for a, b in zip(bounds, bounds[1:]):
+                if b <= a:
+                    continue
+                toks = [str(w.get("word", "")).strip() for w in words[a:b]]
+                pieces.append((
+                    float(words[a]["start"]), float(words[b - 1]["end"]), toks,
+                ))
+        else:
+            pieces.append((
+                seg_start, seg_end,
+                [t for t in str(segment.get("text", "")).split()],
+            ))
+
+        for p_start, p_end, toks in pieces:
+            toks = [t for t in toks if t]
+            span = max(p_end - p_start, 0.01)
+            n_chunks = max(
+                1,
+                int(-(-span // max_block_seconds)),
+                int(-(-len(toks) // max_words)),
+            )
+            per_chunk = -(-len(toks) // n_chunks)
+            for idx in range(n_chunks):
+                chunk = toks[idx * per_chunk:(idx + 1) * per_chunk]
+                if not chunk:
+                    continue
+                frac_a = (idx * per_chunk) / max(len(toks), 1)
+                frac_b = ((idx + 1) * per_chunk) / max(len(toks), 1)
+                c_start = p_start + (p_end - p_start) * min(frac_a, 1.0)
+                c_end = p_start + (p_end - p_start) * min(frac_b, 1.0)
+                out.append({
+                    "start": round(c_start, 3),
+                    "end": round(c_end, 3),
+                    "text": " ".join(chunk),
+                })
+    return out
+
+
 def _prepare_complete_thoughts(segments: list[dict]) -> list[dict]:
     """Canonicalize entities, split complete thoughts, and trim outer silence."""
     from automation.seo.cricket_context import correct_cricket_spelling
@@ -251,19 +327,47 @@ def _compute_speed_factor(
     window_duration: float,
     target_duration: float,
     max_speedup: float,
+    output_min: float = 0.0,
+    output_max: float | None = None,
 ) -> float:
-    """Return the speed multiplier needed to fit a window within the target.
+    """Return the speed multiplier for a window, normalizing EXPORT duration.
 
-    Mirrors ``highlight._compute_speed_factor`` — windows at or below target
-    run at 1.0x, longer windows are compressed to complete within the target
-    seconds, capped at ``max_speedup``.
+    Base behaviour: windows at or below ``target_duration`` run at 1.0x,
+    longer windows are compressed to complete within the target seconds,
+    capped at ``max_speedup``.
+
+    When ``output_min``/``output_max`` are set, the resulting exported
+    duration (``window / speed``) is normalized into that window by adjusting
+    the speed factor only. Clip boundaries are never altered here — a window
+    shorter than ``output_min`` stays at 1.0x (stretching audio is worse than
+    a short complete thought) and an over-cap window keeps the cap (the caller
+    logs when the ceiling cannot be met).
     """
     if window_duration <= 0 or target_duration <= 0:
         return 1.0
-    if window_duration <= target_duration:
-        return 1.0
     cap = max(1.0, max_speedup)
-    return round(min(cap, window_duration / target_duration), 2)
+    if window_duration <= target_duration:
+        speed = 1.0
+    else:
+        speed = min(cap, window_duration / target_duration)
+
+    def _clamp(value: float, lo: float, hi: float | None) -> float:
+        if value < lo:
+            return lo
+        if hi is not None and value > hi:
+            return hi
+        return value
+
+    out_floor = max(0.0, float(output_min or 0.0))
+    out_ceiling = float(output_max) if output_max else None
+    raw_output = window_duration / max(speed, 1e-9)
+    target_output = _clamp(raw_output, out_floor, out_ceiling)
+    if abs(target_output - raw_output) < 1e-6:
+        return round(speed, 2)
+    adjusted = window_duration / target_output
+    if adjusted < 1.0:
+        return round(speed, 2)
+    return round(min(cap, adjusted), 2)
 
 
 def _build_clip_yaml_entry(
@@ -273,6 +377,8 @@ def _build_clip_yaml_entry(
     text: str,
     target_duration: float,
     max_speedup: float,
+    output_min: float = 0.0,
+    output_max: float | None = None,
 ) -> dict:
     """Build a clip YAML entry, attaching the duration-compression speed_factor."""
     duration = max(0.0, end - start)
@@ -282,7 +388,10 @@ def _build_clip_yaml_entry(
         "start_sec": round(start, 2),
         "end_sec": round(end, 2),
         "score": round(score, 2),
-        "speed_factor": _compute_speed_factor(duration, target_duration, max_speedup),
+        "speed_factor": _compute_speed_factor(
+            duration, target_duration, max_speedup,
+            output_min=output_min, output_max=output_max,
+        ),
         "text": text,
     }
 
@@ -510,6 +619,7 @@ def detect_highlights(
     from utils.devanagari import to_roman
     for seg in segments:
         seg["text"] = to_roman(seg.get("text", ""))
+    segments = _split_segments_on_pauses(segments)
     segments = _prepare_complete_thoughts(segments)
     source_context = _load_source_context(paths["input"])
     source_title = _load_source_title(paths["input"])
@@ -691,6 +801,10 @@ def detect_highlights(
 
     target_duration = float(h_cfg.get("target_duration", 22.0))
     max_speedup = float(h_cfg.get("max_speedup", 1.6))
+    sel_cfg = cfg.get("clip_selection", {})
+    output_min = float(sel_cfg.get("output_min_duration", 0) or 0)
+    output_max_raw = float(sel_cfg.get("output_max_duration", 0) or 0)
+    output_max: float | None = output_max_raw if output_max_raw > 0 else None
 
     # ── Build YAML output ─────────────────────────────────────────────────
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -712,6 +826,8 @@ def detect_highlights(
             text=window_text,
             target_duration=target_duration,
             max_speedup=max_speedup,
+            output_min=output_min,
+            output_max=output_max,
         )
 
         if "agent_scores" in w:

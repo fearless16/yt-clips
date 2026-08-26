@@ -1202,6 +1202,10 @@ def generate_clip_seo(
     rendered_entities = find_canonical_entities(
         rendered_text, player_catalog
     )
+
+    def _title_vouched(name: str) -> bool:
+        return name_vouched_by_topics(name, supported_topics)
+
     extra_players = {
         player for player in set(rendered_entities["players"]) - clip_players
         if not _title_vouched(player)

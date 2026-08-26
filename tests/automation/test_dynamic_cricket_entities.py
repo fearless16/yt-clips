@@ -34,6 +34,68 @@ def test_archived_ipl_season_is_not_rewritten_to_current_year():
     assert correct_cricket_spelling("IPL 2025 final") == "IPL 2025 final"
 
 
+def test_surname_after_different_first_name_is_not_rewritten_to_catalog_player():
+    """A DPL squad list ('Pranav Pant') must not become 'Rishabh Pant'.
+
+    Regression: the live DPL 2026 stream description mentioned squad player
+    'Pranav Pant'; the surname alias rewrote it to 'Rishabh Pant', which then
+    poisoned trend research (query 'Rishabh Pant T20 cricket'), grounded every
+    clip SEO on the wrong player, and got all copy blocked by validators.
+    """
+    from automation.seo.cricket_context import correct_cricket_spelling
+
+    text = (
+        "The South Delhi Superstarz squad features Ayush Badoni, "
+        "Pranav Pant and Divansh Rawat."
+    )
+    corrected = correct_cricket_spelling(text)
+    assert "Rishabh Pant" not in corrected
+    assert "Pranav Pant" in corrected
+
+
+def test_bare_surname_still_resolves_when_not_part_of_another_full_name():
+    from automation.seo.cricket_context import correct_cricket_spelling
+
+    assert (
+        correct_cricket_spelling("pant ne chauka maara")
+        == "Rishabh Pant ne chauka maara"
+    )
+
+
+def test_canonical_full_name_passes_through_unchanged():
+    from automation.seo.cricket_context import correct_cricket_spelling
+
+    assert correct_cricket_spelling("Rishabh Pant ne six maara") == (
+        "Rishabh Pant ne six maara"
+    )
+
+
+def test_phonetic_hinglish_variants_map_to_canonical_terms():
+    """whisper language=hi emits pure phonetic Hinglish ('kriketa', 'viketa',
+    'maicha'); without these mappings the cricket gate rejects real cricket
+    commentary as non-cricket."""
+    from automation.seo.cricket_context import (
+        _cricket_relevance_score,
+        correct_cricket_spelling,
+        is_cricket_content,
+    )
+
+    assert correct_cricket_spelling("kriketa ke viketa") == "cricket ke wicket"
+    assert correct_cricket_spelling("aaj ka maicha") == "aaj ka match"
+
+    whisper_line = (
+        "bhaaee kaise usako viketa milate the maara bahuta khaataa hai vo "
+        "aura paakistaana vaale sabase buraa maarate the"
+    )
+    # Standalone fragment with multiple canonical terms clears the hard gate.
+    assert is_cricket_content(
+        "kriketa ka maicha hai aur usne do viketa liye"
+    ) is True
+    # Thin fragments pass via the same source-context path the selector uses.
+    assert is_cricket_content(whisper_line, "kriketa maicha commentary") is True
+    assert _cricket_relevance_score(whisper_line) >= 1
+
+
 def test_evidence_pack_uses_verified_runtime_player_catalog():
     from automation.seo.context_engine import build_cricket_evidence_pack
 
@@ -170,3 +232,59 @@ def test_match_team_extraction_supports_international_and_hindi_teams():
 
     assert set(teams) == {"England", "Pakistan", "Australia", "South Africa"}
     assert match_type == "test"
+
+
+def test_other_players_surname_never_canonicalizes_to_catalog_star():
+    """DPL squad list says 'Pranav Pant'; the unique-surname shortcut must not
+    claim that occurrence for Rishabh Pant."""
+    from automation.seo.cricket_context import find_canonical_entities
+
+    text = (
+        "New Delhi Tigers squad: Ayush Badoni, Sanat Sangwan, "
+        "Pranav Pant and Divansh Rawat."
+    )
+    assert "Rishabh Pant" not in find_canonical_entities(text)["players"]
+
+
+def test_bare_surname_still_resolves_to_unique_catalog_player():
+    from automation.seo.cricket_context import find_canonical_entities
+
+    assert find_canonical_entities("pant finishes it off in style")[
+        "players"
+    ] == ["Rishabh Pant"]
+
+
+def test_full_name_mention_still_resolves():
+    from automation.seo.cricket_context import find_canonical_entities
+
+    assert find_canonical_entities("Rishabh Pant keeps wicket")[
+        "players"
+    ] == ["Rishabh Pant"]
+
+
+def test_phonetic_country_names_ground_india():
+    """Hinglish 'indiyaa'/'bharat' must canonicalize to India so the copy
+    gate stops rejecting legitimate national-team mentions."""
+    from automation.seo.cricket_context import (
+        correct_cricket_spelling,
+        find_canonical_entities,
+    )
+
+    fixed = correct_cricket_spelling(
+        "cricket men kabhee indiyaa achchhaa karataa hai"
+    )
+    assert "India" in fixed
+    assert find_canonical_entities(fixed)["teams"] == ["India"]
+
+
+def test_bharat_and_hindustaan_map_to_india():
+    from automation.seo.cricket_context import correct_cricket_spelling
+
+    assert correct_cricket_spelling("bharat ne jeeta") == "India ne jeeta"
+    assert correct_cricket_spelling("hindustaan ka match") == "India ka match"
+
+
+def test_indiya_does_not_corrupt_inside_words():
+    from automation.seo.cricket_context import correct_cricket_spelling
+
+    assert correct_cricket_spelling("Indianapolis") == "Indianapolis"

@@ -24,6 +24,14 @@ MEDIA_ID = "17900000000000002"
 VIDEO_ID = "yt_vid_integration_1"
 
 
+@pytest.fixture(autouse=True)
+def _no_upload_post_creds(monkeypatch):
+    """The seo import chain pulls utils.ai_client which load_dotenv()s the
+    real key mid-session. Graph-flow tests stub only some hooks and rely on
+    the provider factory bailing out — force that bail-out per test."""
+    monkeypatch.setenv("UPLOAD_POST_API_KEY", "")
+
+
 def _merge_config(monkeypatch, enabled):
     try:
         from utils.config import load_config as _load
@@ -573,11 +581,41 @@ class TestRunnerAudioNameThreading:
 
 class TestSuiteGuards:
 
-    def test_config_yaml_ships_instagram_disabled_facebook_login(self):
+    def test_config_yaml_ships_instagram_live_upload_post(self):
         data = yaml.safe_load(
             Path("config.yaml").read_text(encoding="utf-8")) or {}
         insta = data.get("instagram") or {}
-        assert insta.get("enabled") is False
-        assert insta.get("api_flavor") == "facebook_login"
+        assert insta.get("enabled") is True
+        assert insta.get("provider") == "upload_post"
+        assert (insta.get("upload_post") or {}).get("profile") == "prajjwall"
         assert insta.get("hashtags_count") == 5
         assert insta.get("caption_target_chars") == 250
+
+
+def test_export_insta_worker_passes_only_runner_kwargs(tmp_path, monkeypatch):
+    """Regression: export's Instagram worker once called the runner with an
+    unsupported ``clip_id`` kwarg, killing every IG publish at runtime."""
+    from automation.instagram import runner
+    from export import _export_insta_worker
+
+    captured = {}
+
+    def fake_resolve(clip_dir, info):
+        return "tr"
+
+    def fake_process(clip_dir, transcript, video_title, video_description,
+                     *, force=False):
+        captured["args"] = (str(clip_dir), transcript, video_title,
+                            video_description)
+        return "179med"
+
+    monkeypatch.setattr(runner, "resolve_insta_transcript", fake_resolve)
+    monkeypatch.setattr(runner, "process_instagram_for_clip", fake_process)
+
+    media = _export_insta_worker(
+        "clip9", {}, tmp_path, tmp_path,
+        {"video_title": "T", "video_description": "D"},
+    )
+
+    assert media == "179med"
+    assert captured["args"] == (str(tmp_path), "tr", "T", "D")

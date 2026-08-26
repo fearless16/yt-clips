@@ -18,6 +18,7 @@ CAPTION_TARGET_MIN = 150
 CAPTION_TARGET_MAX = 250
 CAPTION_HARD_MAX = 2200
 HASHTAG_COUNT = 5
+MIN_HASHTAG_COUNT = 3
 BRAND_SUFFIX = " – CricketWithPrajjwal"
 
 _DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
@@ -57,7 +58,7 @@ HARD CONTRACT:
   first {hook_max} chars.
 - CAPTION BODY: total caption target {target_min}-{target_max} chars
   (hard API max {hard_max}, hashtags excluded).
-- EXACTLY {tag_count} hashtags, taken ONLY from validated_hashtags/seeds
+- 3–5 hashtags (aim {tag_count}), taken ONLY from validated_hashtags/seeds
 - VARY the tag selection across posts: start your tiered pick at index
   {rotation_start} (mod pool size) of the allowed list, keeping tiers intact
   above. Tier mix: 1 broad + 2 mid series/team + 1 long-tail moment +
@@ -293,7 +294,8 @@ def _validate_and_scrub(candidate, evidence_pack, transcript, video_title,
             seen_tags.add(norm)
             valid_tags.append(allowed[norm])
     topped_up = []
-    if len(valid_tags) < HASHTAG_COUNT:
+    target = min(HASHTAG_COUNT, len(allowed))
+    if len(valid_tags) < target:
         # Deterministic REAL-ONLY top-up: fill the shortfall from the
         # allowed pool (rotation order) instead of failing the whole
         # caption over one slipped tag. Invented tags are still dropped.
@@ -302,17 +304,17 @@ def _validate_and_scrub(candidate, evidence_pack, transcript, video_title,
         start = (int(rotation) % len(pool)) if pool else 0
         ordered = pool[start:] + pool[:start]
         for norm, display in ordered:
-            if len(valid_tags) >= HASHTAG_COUNT:
+            if len(valid_tags) >= target:
                 break
             if norm not in seen_tags:
                 seen_tags.add(norm)
                 valid_tags.append(display)
                 topped_up.append(display)
-    if len(valid_tags) != HASHTAG_COUNT:
+    if len(valid_tags) < MIN_HASHTAG_COUNT:
         violations.append(
-            f"exactly {HASHTAG_COUNT} hashtags from validated_hashtags/"
-            f"seeds required (got {len(valid_tags)}); invented tags are "
-            "rejected")
+            f"at least {MIN_HASHTAG_COUNT} real hashtags from "
+            f"validated_hashtags/seeds required (got {len(valid_tags)}); "
+            "invented tags are rejected")
 
     body_len = len(f"{hook}\n{body_text}".strip())
     if body_len < CAPTION_TARGET_MIN or body_len > CAPTION_TARGET_MAX:
@@ -361,8 +363,8 @@ def _repair_prompt(user_prompt, previous, violations):
         + json.dumps(previous, ensure_ascii=False)[:1200]
         + "\nRegenerate the COMPLETE corrected metadata now, following "
         "every original rule (hook <=55 chars with primary keyword inside, "
-        "150-250 chars total, exactly 5 hashtags only from the pack's "
-        "validated_hashtags/seeds, one reply-driving question, no "
+         "150-250 chars total, 3-5 hashtags only from the pack's "
+         "validated_hashtags/seeds, one reply-driving question, no "
         "Devanagari). Return ONLY the JSON object."
     )
 
@@ -391,10 +393,10 @@ def write_caption(evidence_pack, transcript, video_title) -> dict:
     """
     evidence_pack = dict(evidence_pack or {})
     allowed = _allowed_tag_set(evidence_pack)
-    if len(allowed) < HASHTAG_COUNT:
+    if len(allowed) < MIN_HASHTAG_COUNT:
         raise InsufficientEvidenceError(
             f"evidence pack yields only {len(allowed)} distinct hashtags "
-            f"but {HASHTAG_COUNT} are required; refusing to invent tags")
+            f"but {MIN_HASHTAG_COUNT} are required; refusing to invent tags")
     clip_id = re.sub(r"\W+", "-",
                      str(video_title or "insta-caption"))[:40] or "insta"
     rotation_offset = _rotation_offset(evidence_pack)

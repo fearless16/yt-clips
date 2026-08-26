@@ -264,3 +264,71 @@ class TestAsyncListShape:
             clip, "c", poll_interval_s=0)
         assert out["permalink"] == ""
         assert out["media_id"].startswith("up_")
+
+
+class TestNonTerminalIgEntry:
+    """The initial POST may embed a per-platform snapshot that is still
+    PROCESSING (idempotent_replay). A request_id exists — the client must
+    poll it to completion instead of treating the snapshot as a failure."""
+
+    def test_list_processing_entry_polls_to_finish(self, tmp_path, live,
+                                                   monkeypatch):
+        clip = tmp_path / "c.mp4"
+        clip.write_bytes(b"x")
+        session = MagicMock()
+        session.post.return_value = _resp({
+            "request_id": "rp1", "job_id": "j1", "status": "processing",
+            "completed": 0, "failed": 0, "total": 1,
+            "results": [{"platform": "instagram", "status": "processing",
+                         "attempts": 1, "success": False}],
+            "success": True, "idempotent_replay": True,
+        })
+        session.get.side_effect = [
+            _resp({"status": "processing"}),
+            _resp({"status": "finished", "completed": 1, "total": 1,
+                   "results": [{"platform": "instagram", "success": True,
+                                "post_url": "https://ig/reel/RX/",
+                                "post_id": "181rx"}]}),
+        ]
+        monkeypatch.setattr(
+            "automation.instagram.upload_post_client.time.sleep",
+            lambda s: None)
+        result = UploadPostClient("k", "p", session=session).publish_reel(
+            clip, "c", poll_interval_s=0)
+        assert result["media_id"] == "181rx"
+
+    def test_dict_processing_entry_polls_to_finish(self, tmp_path, live,
+                                                   monkeypatch):
+        clip = tmp_path / "c.mp4"
+        clip.write_bytes(b"x")
+        session = MagicMock()
+        session.post.return_value = _resp({
+            "success": True, "request_id": "rp2",
+            "results": {"instagram": {"success": False,
+                                      "status": "processing"}},
+        })
+        session.get.side_effect = [
+            _resp({"results": {"instagram": {
+                "success": True, "url": "https://ig/reel/Z2/",
+                "post_id": "181z2"}}}),
+        ]
+        monkeypatch.setattr(
+            "automation.instagram.upload_post_client.time.sleep",
+            lambda s: None)
+        result = UploadPostClient("k", "p", session=session).publish_reel(
+            clip, "c", poll_interval_s=0)
+        assert result["media_id"] == "181z2"
+
+    def test_failed_entry_without_request_id_still_raises(self, tmp_path,
+                                                          live):
+        clip = tmp_path / "c.mp4"
+        clip.write_bytes(b"x")
+        session = MagicMock()
+        session.post.return_value = _resp({
+            "success": True,
+            "results": {"instagram": {"success": False,
+                                      "error": None}},
+        })
+        with pytest.raises(UploadPostError, match="publish failed"):
+            UploadPostClient("k", "p", session=session).publish_reel(
+                clip, "c", poll_interval_s=0)

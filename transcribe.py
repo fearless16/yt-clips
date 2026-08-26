@@ -65,6 +65,26 @@ def _whisper_cli_version(cli: Path) -> str:
         return "unknown"
 
 
+def decode_whisper_output(raw: bytes) -> tuple[dict, list[str]]:
+    """Decode whisper-cli's JSON output without ever producing mojibake.
+
+    whisper.cpp's Windows builds can truncate a multibyte character mid-sequence
+    (token crossing an internal write boundary), so strict UTF-8 may fail on an
+    otherwise-valid document. Single-byte fallbacks (cp1252/latin-1) "succeed"
+    on any byte stream and silently destroy Devanagari — they are never used.
+    """
+    warnings: list[str] = []
+    try:
+        return json.loads(raw.decode("utf-8")), warnings
+    except UnicodeDecodeError as exc:
+        warnings.append(
+            "whisper JSON had invalid UTF-8 at byte %d (%s) — recovered with "
+            "errors='ignore'; a few truncated characters were dropped" % (exc.start, exc.reason)
+        )
+    text = raw.decode("utf-8", errors="ignore")
+    return json.loads(text), warnings
+
+
 def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
     """Transcribe using whisper.cpp GPU (ROCm or Vulkan). Returns True on success."""
     result = _find_whisper_cli()
@@ -140,6 +160,17 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
     out_dir = Path(__file__).parent / "temp"
     out_base = str(out_dir / f"whisper_{backend}_out")
 
+    # Drop any stale output from a previous (possibly failed) run: whisper.cpp
+    # only writes on success, so a leftover .json from another video would be
+    # parsed as this one's transcript and corrupt every downstream stage.
+    for _suffix in (".json", ".txt"):
+        _stale = Path(out_base + _suffix)
+        if _stale.exists():
+            try:
+                _stale.unlink()
+            except OSError:
+                pass
+
     cmd = [
         str(cli),
         "-m", str(model_path),
@@ -168,6 +199,12 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
         log.error("whisper-cli failed: %s", e)
         return False
 
+    if proc.returncode != 0:
+        log.error("whisper-cli exited %s", proc.returncode)
+        if proc.stderr:
+            log.error("whisper-cli stderr: %s", proc.stderr[-500:])
+        return False
+
     duration_s = time.monotonic() - t0
     log.info("whisper.cpp %s completed in %.1fs", backend.upper(), duration_s)
 
@@ -182,17 +219,9 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
     try:
         with open(json_path, "rb") as f:
             raw = f.read()
-        # Try multiple encodings (whisper-cli may produce non-UTF-8)
-        data = None
-        for enc in ["utf-8", "utf-8-sig", "cp1252", "latin-1"]:
-            try:
-                data = json.loads(raw.decode(enc))
-                break
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-        if data is None:
-            log.error("Failed to decode whisper JSON output")
-            return False
+        data, decode_warnings = decode_whisper_output(raw)
+        for warning in decode_warnings:
+            log.warning(warning)
     except Exception as e:
         log.error("Failed to parse whisper JSON: %s", e)
         return False

@@ -65,6 +65,19 @@ def _extract_instagram_result(payload: dict) -> dict | None:
     return None
 
 
+def _entry_is_terminal(entry: dict) -> bool:
+    """True when a per-platform entry has settled (done or failed).
+
+    An idempotent_replay / async snapshot can carry ``success: false`` with
+    ``status: "processing"`` — that is NOT a failure, the request_id must
+    be polled to completion instead.
+    """
+    status = str(entry.get("status") or "").casefold()
+    if status in _STATUS_TERMINAL_DONE or status in _STATUS_TERMINAL_FAILED:
+        return True
+    return entry.get("success") is True
+
+
 class UploadPostClient:
     def __init__(self, api_key: str, profile: str, *,
                  base_url: str = BASE_URL,
@@ -149,16 +162,19 @@ class UploadPostClient:
                 f"(used {usage.get('count')}/{usage.get('limit')})")
 
         ig = _extract_instagram_result(payload)
-        if ig is not None:
+        request_id = payload.get("request_id")
+        if ig is not None and _entry_is_terminal(ig):
             return self._result_from(ig)
 
-        request_id = payload.get("request_id")
         if resp.status_code == 200 and payload.get("success") \
                 and request_id:
             return self._poll_status(request_id,
                                      poll_interval_s=poll_interval_s,
                                      timeout_s=max(
                                          1.0, deadline - time.monotonic()))
+
+        if ig is not None:
+            return self._result_from(ig)
         raise UploadPostError(
             f"upload rejected ({resp.status_code}): "
             f"{payload.get('message') or payload.get('error') or resp.text[:200]}")
@@ -177,7 +193,7 @@ class UploadPostClient:
             except ValueError:
                 payload = {}
             ig = _extract_instagram_result(payload)
-            if ig is not None:
+            if ig is not None and _entry_is_terminal(ig):
                 return self._result_from(ig)
             status = str(payload.get("status") or "").casefold()
             if status in _STATUS_TERMINAL_FAILED:

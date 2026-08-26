@@ -1,7 +1,8 @@
 """kaggle.py — Kaggle environment setup.
 
-Minimal module: detects Kaggle, creates directories, installs deps,
-and starts the watcher (reused from watcher.py).
+Minimal module: detects Kaggle, creates directories, installs deps.
+(The remote worker watcher lifecycle was removed — the local pipeline does not
+need it.)
 """
 
 import sys
@@ -11,7 +12,6 @@ from pathlib import Path
 
 from utils.logger import get_logger
 from .env import is_kaggle  # noqa: F401
-from .watcher import start_watcher, kill_watcher  # noqa: F401
 
 log = get_logger("kaggle")
 
@@ -19,7 +19,7 @@ log = get_logger("kaggle")
 def setup() -> dict:
     """Create directories and install Python deps for Kaggle.
 
-    Also starts the watcher subprocess. Returns status dict.
+    Returns status dict.
     """
     status = {"status": "ok", "steps": []}
     log.info("Setting up Kaggle environment ...")
@@ -46,8 +46,5 @@ def setup() -> dict:
     except Exception as e:
         log.warning("pip install failed: %s", e)
         status["steps"].append("pip_deps_failed")
-    log.info("Starting watcher ...")
-    started = start_watcher()
-    status["watcher"] = started
-    log.info("Kaggle setup complete: watcher=%s steps=%s", started, status["steps"])
+    log.info("Kaggle setup complete: steps=%s", status["steps"])
     return status

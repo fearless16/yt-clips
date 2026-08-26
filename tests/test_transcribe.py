@@ -3,6 +3,47 @@ from unittest.mock import patch, MagicMock
 from pathlib import Path
 import json
 
+
+def test_decode_whisper_output_accepts_valid_utf8():
+    from transcribe import decode_whisper_output
+
+    payload = json.dumps(
+        {"transcription": [{"offsets": {"from": 0, "to": 500}, "text": "नमस्कार"}]},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    data, warnings = decode_whisper_output(payload)
+    assert warnings == []
+    assert data["transcription"][0]["text"] == "नमस्कार"
+
+
+def test_decode_whisper_output_survives_truncated_multibyte():
+    """whisper.cpp's JSON writer can cut a multibyte char mid-sequence when a
+    token crosses an internal boundary; strict decoding must not fall back to
+    cp1252/latin-1 (which silently destroys Devanagari into mojibake)."""
+    from transcribe import decode_whisper_output
+
+    # Truncate ONE trailing byte of the last multibyte char ("ो") while the
+    # surrounding JSON structure stays intact.
+    doc_prefix = (
+        '{"transcription": [{"offsets": {"from": 0, "to": 500}, "text": "'
+    ).encode("ascii")
+    broken = doc_prefix + "नमस्कार तो".encode("utf-8")[:-1] + b'"}]}'
+    data, warnings = decode_whisper_output(broken)
+    assert any("utf-8" in w.lower() for w in warnings)
+    assert data["transcription"][0]["text"].startswith("नमस्कार")
+
+
+def test_decode_whisper_output_never_falls_back_to_single_byte_codecs():
+    from transcribe import decode_whisper_output
+
+    raw = b'{"transcription": [{"text": "\xe0\xa4\x95\xe0\xa4"}]}'  # cut char
+    try:
+        data, warnings = decode_whisper_output(raw)
+    except ValueError:
+        return  # hard failure is acceptable; silent mojibake is not
+    assert "\xfffd" not in json.dumps(data, ensure_ascii=False)
+    assert any("utf-8" in w.lower() for w in warnings)
+
 from transcribe import correct_segments_with_llm, transcribe
 from automation.transcript import fetch
 

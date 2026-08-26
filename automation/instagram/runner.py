@@ -44,6 +44,14 @@ def resolve_stage_hook(name: str):
         mod = importlib.import_module("automation.instagram.seo")
     except ImportError:
         return None
+    # The import registers defaults once, but a cleared/empty registry
+    # (fresh subprocess, test isolation) must heal itself: re-run the
+    # idempotent registrar before falling back to module attributes.
+    registrar = getattr(mod, "_register_default_hooks", None)
+    if callable(registrar):
+        registrar()
+    if name in _HOOKS:
+        return _HOOKS[name]
     return getattr(mod, name, None)
 
 
@@ -201,9 +209,10 @@ def process_instagram_for_clip(clip_dir: Path, transcript: str,
         client = client_fn() if client_fn is not None else \
             _default_graph_client()
         if client is None:
+            issue = _provider_config_issue()
             raise RuntimeError(
-                "Instagram GraphClient unavailable (graph_client module "
-                "missing or misconfigured)")
+                "Instagram publish unavailable: %s" % (
+                    issue or "graph_client module missing or misconfigured"))
 
         poll_interval_s, upload_timeout_s = _upload_timing()
         resume_creation_id = str(state.get("creation_id") or "").strip() or None
@@ -237,6 +246,38 @@ def process_instagram_for_clip(clip_dir: Path, transcript: str,
                              video_description, stage=stage_label, error=error)
         _write_state(clip_dir, checkpoint, attempts, last_error=error)
         return None
+
+
+def _provider_config_issue(cfg: dict | None = None) -> str | None:
+    """Why the configured Instagram provider cannot publish right now.
+
+    The runner's Graph fallback can never work when config selects
+    ``upload_post`` (third-party key flow); diagnosing THAT — e.g. the API
+    key env var missing from this shell's environment — beats blaming the
+    graph_client module for a misconfiguration it has nothing to do with.
+    """
+    if cfg is None:
+        try:
+            from utils.config import load_config
+            cfg = (load_config() or {}).get("instagram") or {}
+        except Exception:
+            return None
+    provider = str(cfg.get("provider") or "graph").casefold()
+    if provider != "upload_post":
+        return None
+    up_cfg = cfg.get("upload_post") or {}
+    env_name = str(up_cfg.get("api_key_env") or "UPLOAD_POST_API_KEY")
+    if not os.environ.get(env_name, "").strip():
+        return (
+            "instagram.provider=upload_post but %s is not set in this "
+            "environment" % env_name
+        )
+    if not str(up_cfg.get("profile") or "").strip():
+        return (
+            "instagram.provider=upload_post but "
+            "instagram.upload_post.profile is missing"
+        )
+    return None
 
 
 def _default_graph_client():

@@ -136,10 +136,19 @@ class TestAnalyzeClipEmptyFacesRegression:
 def test_obstructive_source_lower_third_is_detected():
     import frame_analyzer as fa
 
-    frame = np.full((180, 320), 100, dtype=np.uint8)
-    region = frame[136:174, 96:166]
-    region[:] = 10
-    region.flat[: max(1, int(region.size * 0.04))] = 255
+    # Detector unit test: force the guard on regardless of runtime config
+    # (production config may intentionally disable it).
+    original_guard = fa.cfg.get("layout", {}).get("source_overlay_guard", {})
+    fa.cfg.setdefault("layout", {})["source_overlay_guard"] = {
+        **original_guard, "enabled": True,
+    }
+    try:
+        frame = np.full((180, 320), 100, dtype=np.uint8)
+        region = frame[136:174, 96:166]
+        region[:] = 10
+        region.flat[: max(1, int(region.size * 0.04))] = 255
 
-    assert fa._is_obstructive_lower_third(frame) is True
-    assert fa._is_obstructive_lower_third(np.full((180, 320), 100, dtype=np.uint8)) is False
+        assert fa._is_obstructive_lower_third(frame) is True
+        assert fa._is_obstructive_lower_third(np.full((180, 320), 100, dtype=np.uint8)) is False
+    finally:
+        fa.cfg["layout"]["source_overlay_guard"] = original_guard

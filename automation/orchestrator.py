@@ -191,30 +191,8 @@ def run(
     # still get isolated history instead of collapsing onto the constant stem.
     match_key = _url_match_key(url)
 
-    # Hoisted config flag — shared across stages 3-5, 6 (hook audit), 8b (update_performance)
-    use_new_selector = cfg.get("clip_selection", {}).get("enabled", True)
-
     # ── Stages 1-8 ──────────────────────────────────────────────────
     if not learn_only:
-
-        # ── Stage 1a: Transcript fetch ──────────────────────────
-        if not skip_transcribe:
-            try:
-                with run_phase(log, "stage 1a Transcript fetch", "transcript_fetch", run_id=rid) as ph:
-                    from automation.transcript import fetch as fetch_transcript
-                    transcript = fetch_transcript(url, output_path=transcript_path)
-                    if transcript.get("segments"):
-                        skip_transcribe = True
-                        result.transcript_source = transcript.get("source", "api")
-                        ph.set(source=result.transcript_source,
-                               segments=len(transcript["segments"]))
-                        _PROVIDER_HEALTH.record_success("transcript")
-                    else:
-                        _PROVIDER_HEALTH.record_failure("transcript")
-                        ph.set(source="none", segments=0)
-            except Exception as e:
-                _PROVIDER_HEALTH.record_failure("transcript")
-                result.failures.append(f"stage1a: {e}")
 
         # ── Stage 1b: Drive pull ────────────────────────────────
         if sync_from_drive:
@@ -262,10 +240,7 @@ def run(
             try:
                 with run_phase(log, "stage 3-5 Highlight + Score + Rank",
                                "highlight", run_id=rid) as ph:
-                    if use_new_selector:
-                        from automation.clip_selection.pipeline import detect_highlights
-                    else:
-                        from highlight import detect_highlights
+                    from automation.clip_selection.pipeline import detect_highlights
                     highlights = detect_highlights(transcript_path, video_path,
                                                    highlights_path,
                                                    match_key=match_key)
@@ -344,7 +319,7 @@ def run(
                                 e,
                             )
                     # Phase 3 — Hook audit: analyze first 3s of each exported clip
-                    if result.exported and use_new_selector:
+                    if result.exported:
                         try:
                             with run_phase(log, "stage 6a Hook audit",
                                            "hook_audit", run_id=rid) as ph:

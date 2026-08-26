@@ -58,7 +58,28 @@ CRICKET_SPELLING_CORRECTIONS = {
     "parag": "Riyan Parag",
     "boult": "Trent Boult",
     "chahal": "Yuzvendra Chahal",
-    
+
+    # Phonetic Hinglish variants — whisper language=hi emits pure phonetic
+    # spellings ('kriketa', 'viketa', 'maicha') that the cricket gate and
+    # keyword scorers would otherwise miss entirely.
+    "kriketa": "cricket",
+    "kriket": "cricket",
+    "viketa": "wicket",
+    "maicha": "match",
+    "maich": "match",
+    "seereeja": "series",
+    "kaptaana": "captain",
+    "pleyara": "player",
+
+    # Phonetic country names — Hinglish commentary says 'indiyaa', 'bharat',
+    # 'hindustaan'; without these the national-team context stays ungrounded
+    # and the copy gate rejects legitimate "India" mentions.
+    "indiyaa": "India",
+    "indiya": "India",
+    "bharat": "India",
+    "hindustaan": "India",
+    "hindustan": "India",
+
     # Teams
     "rcb": "Royal Challengers Bengaluru",
     "csk": "Chennai Super Kings",
@@ -208,14 +229,29 @@ def correct_cricket_spelling(
         + r")(?![A-Za-z0-9_\u0900-\u097f])",
         re.IGNORECASE,
     )
-    return pattern.sub(
-        lambda match: corrections[match.group(0).lower()],
-        text,
-    )
+
+    def _substitute(match: "re.Match") -> str:
+        alias = match.group(0)
+        if " " not in alias:
+            prefix = text[max(0, match.start() - 32):match.start()]
+            suffix = text[match.end():match.end() + 8]
+            preceded_by_titlecase = bool(
+                re.search(
+                    r"(?:^|[\s(\"'\u2018\u201c])[A-Z][a-z]{2,}\s$", prefix
+                )
+            )
+            followed_by_list_boundary = bool(
+                re.match(r"^\s*(?:[,.;)]|and\b|&|aur\b|or\b|ya\b|$)", suffix, re.I)
+            )
+            if preceded_by_titlecase and followed_by_list_boundary:
+                return alias
+        return corrections[alias.lower()]
+
+    return pattern.sub(_substitute, text)
 
 
 _STRONG_CRICKET_TERMS = {
-    "cricket", "ipl", "bbl", "psl", "t20", "odi", "test match",
+    "cricket", "ipl", "bbl", "psl", "t20", "odi", "test match", "match",
     "wicket", "bowled", "lbw", "stumped", "batsman", "batter", "bowler",
     "yorker", "googly", "doosra", "powerplay", "run rate", "super over",
     "century", "half-century", "hattrick", "innings", "crease", "over",
@@ -423,10 +459,29 @@ def find_canonical_entities(
         # "Singh", "Sharma" and "Yadav" must never fan out into fake entities.
         last = name.split()[-1].lower()
         unique_last_name = surname_counts.get(last) == 1
+
+        def _surname_mentioned(candidate: str = name, token: str = last) -> bool:
+            """A bare-surname hit counts only when no other person owns it.
+
+            ``Pranav Pant`` in a squad list must never canonicalize to Rishabh
+            Pant: an occurrence preceded by a different TitleCase word belongs
+            to that other person, so only standalone mentions (or mentions
+            preceded by this very player's first name) count.
+            """
+            first = candidate.split()[0].lower()
+            pattern = re.compile(
+                r"(?:(\w+)\s+)?\b" + re.escape(token) + r"\b", re.IGNORECASE
+            )
+            for m in pattern.finditer(text):
+                prev = m.group(1)
+                if prev is None or prev.lower() == first:
+                    return True
+                if not prev[:1].isupper():
+                    return True
+            return False
+
         if name.lower() in low or (
-            unique_last_name
-            and len(last) > 3
-            and re.search(r"\b" + re.escape(last) + r"\b", low)
+            unique_last_name and len(last) > 3 and _surname_mentioned()
         ):
             players.append(name)
     teams = []

@@ -265,15 +265,12 @@ class TestColab:
         from automation.colab import gpu_count
         assert isinstance(gpu_count(), int)
 
-    def test_tunnel_status_shape(self):
-        from automation.colab import tunnel_status
-        s = tunnel_status()
-        for k in ("url", "alive", "uptime", "fail_count", "port"):
-            assert k in s
+    def test_colab_namespace_no_remote_watch_exports(self):
+        import automation.colab as colab
 
-    def test_watcher_port_default(self):
-        from automation.colab import WATCHER_PORT
-        assert WATCHER_PORT == 5000
+        assert not hasattr(colab, "tunnel_status")
+        assert not hasattr(colab, "WATCHER_PORT")
+        assert not hasattr(colab, "start_watcher")
 
 
 # ─── kaggle.py ─────────────────────────────────────────────────────────────────
@@ -378,43 +375,29 @@ class TestResilience:
         assert cb.allow_request() is True
 
 
-# ─── watcher.py — Secret Extraction ─────────────────────────────────────────────
+# ─── remote watch stack removed (watcher / tunnel / cli --remote) ────────────
 
-class TestWatcherSecretExtraction:
-    def test_secrets_extracted_from_job(self):
-        import json, tempfile
-        from pathlib import Path
-        
-        with tempfile.TemporaryDirectory() as tmp:
-            job = {
-                "url": "https://youtu.be/test",
-                "flags": ["--upload"],
-                "client_secrets.json": '{"web":{"client_id":"test"}}',
-                "yt_channel_token.json": '{"token":"test","refresh_token":"rt"}',
-            }
-            job_path = Path(tmp) / "remote_job.json"
-            job_path.write_text(json.dumps(job))
-            
-            loaded = json.loads(job_path.read_text())
-            for secret_file in ["client_secrets.json", "yt_channel_token.json"]:
-                if secret_file in loaded and loaded[secret_file]:
-                    (Path(tmp) / secret_file).write_text(loaded[secret_file], encoding="utf-8")
-                    del loaded[secret_file]
-            
-            assert not (Path(tmp) / "yt_channel_token.json").exists() or (Path(tmp) / "yt_channel_token.json").read_text() == '{"token":"test","refresh_token":"rt"}'
-            assert "yt_channel_token.json" not in loaded
-            assert "client_secrets.json" not in loaded
+class TestNoRemoteWatchSurface:
+    """The removed Colab/Kaggle worker daemon exposed an unauthenticated RCE
+    and credential-read surface. Ensure no remnants are importable."""
 
-    def test_missing_url_skipped(self):
-        import json, tempfile
-        from pathlib import Path
-        
-        with tempfile.TemporaryDirectory() as tmp:
-            job = {"flags": ["--upload"]}
-            job_path = Path(tmp) / "bad_job.json"
-            job_path.write_text(json.dumps(job))
-            loaded = json.loads(job_path.read_text())
-            assert not loaded.get("url")
+    def test_cli_has_no_remote_flags(self):
+        from automation import cli
+        parser = cli.setup_argparse()
+        names = {a.dest for a in parser._actions}
+        assert "remote" not in names
+        assert "tunnel_url" not in names
+
+    def test_remote_submit_symbol_gone(self):
+        import automation.cli as cli
+        assert not hasattr(cli, "_submit_remote")
+
+    def test_kaggle_setup_does_not_start_watcher(self):
+        import inspect
+        from automation import kaggle
+        src = inspect.getsource(kaggle.setup)
+        assert "start_watcher" not in src
+        assert "watcher" not in src
 
 
 # ─── upload.py — Colab detection guard ──────────────────────────────────────────

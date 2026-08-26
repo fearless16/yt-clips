@@ -43,7 +43,7 @@ def _build_evidence(clip_dir, transcript, video_title, video_description):
 
     teams = []
     try:
-        from automation.seo.entity_grounding import find_canonical_entities
+        from automation.seo.cricket_context import find_canonical_entities
         merged = " ".join(filter(None, [video_title, video_description,
                                         transcript]))
         teams = find_canonical_entities(merged)["teams"][:2]

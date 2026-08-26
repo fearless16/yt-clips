@@ -15,6 +15,6 @@ The in-memory `DecisionStore` is runtime telemetry only. Do not add another
 persistent learner or analytics database.
 
 ```bash
-.venv/bin/python -m pytest tests/test_automation.py -v
-.venv/bin/python -m pytest tests/shorts_intelligence/ -v
+.venv\Scripts\python.exe -m pytest tests/test_automation.py -v
+.venv\Scripts\python.exe -m pytest tests/shorts_intelligence/ -v
 ```

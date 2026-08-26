@@ -39,7 +39,26 @@ VIDEO_TITLE = "Bumrah Death Over Magic | IND vs SL 2nd T20I"
 HOOK = "Bumrah ne liye 3 wickets! IND v SL"
 
 VALID_TAGS = ["#cricket", "#INDvSL", "#TeamIndia",
-              "#BumrahMagic", "#PallekeleT20"]
+               "#BumrahMagic", "#PallekeleT20"]
+
+# Real-world pack that yields only 3 distinct validated hashtags — previously
+# this hard-failed the entire SEO/IG stage (InsufficientEvidenceError).
+PACK_SMALL = {
+    "match_facts": ["India vs Sri Lanka, 2nd T20I, Pallekele"],
+    "roster": ["Gill", "Samson", "Bumrah"],
+    "learner_top_captions": ["Bumrah ne udaya!"],
+    "seed_phrases": ["ind vs sl highlights"],
+    "validated_hashtags": [
+        {"tag": "cricket", "recent_volume_24h": 50000,
+         "source": "ig-hashtag-api"},
+        {"tag": "INDvSL", "recent_volume_24h": 1200,
+         "source": "ig-hashtag-api"},
+        {"tag": "TeamIndia", "recent_volume_24h": 9000,
+         "source": "ig-hashtag-api"},
+    ],
+    "forbidden": ["invented player names",
+                  "generic tags without volume evidence"],
+}
 
 
 class FakeAI:
@@ -265,6 +284,24 @@ class TestCaptionPolicyEnforcement:
         with pytest.raises(ce.CaptionPolicyError):
             ce.write_caption(PACK, TRANSCRIPT, VIDEO_TITLE)
         assert len(ai.prompts) == 2
+
+    def test_small_pack_publishes_with_available_real_tags(self, monkeypatch):
+        """Data-driven regression: a pack with only 3 validated hashtags must
+        still publish (with 3 real tags), not raise InsufficientEvidenceError.
+        """
+        import automation.instagram.caption_engine as ce
+        ai = _stub_llm(monkeypatch, [_valid_candidate()])
+        monkeypatch.setattr(ce, "audit_written_copy_llm", _clean_audit)
+
+        out = ce.write_caption(PACK_SMALL, TRANSCRIPT, VIDEO_TITLE)
+
+        # 3 validated + 1 seed-phrase tag = 4 real tags; all must be grounded.
+        assert 3 <= len(out["hashtags"]) <= 5
+        allowed = {t.lstrip("#").lower()
+                   for t in ["#cricket", "#INDvSL", "#TeamIndia",
+                             "#IndVsSlHighlights"]}
+        for tag in out["hashtags"]:
+            assert tag[1:].lower() in allowed
 
 
 # ---------------------------------------------------------------------------

@@ -1307,6 +1307,28 @@ def _parse_time_to_seconds(time_val) -> float:
     return 0.0
 
 
+def _export_insta_worker(clip_id, info, clip_dir, out_dir, seo_context):
+    """Publish one exported clip to Instagram (module-level for testability)."""
+    try:
+        from automation.instagram.runner import (
+            process_instagram_for_clip,
+            resolve_insta_transcript,
+        )
+        transcript = resolve_insta_transcript(clip_dir, info)
+        media_id = process_instagram_for_clip(
+            clip_dir=clip_dir,
+            transcript=transcript,
+            video_title=(seo_context or {}).get("video_title", ""),
+            video_description=(seo_context or {}).get("video_description", ""),
+        )
+        if media_id:
+            log.info("📲 Instagram Reel live: %s (%s)", clip_id, media_id)
+        return media_id
+    except Exception as e:
+        log.error("📲 Instagram worker failed for %s: %s", clip_id, e)
+        return None
+
+
 def export_all(
     highlights,
     video_path: str,
@@ -1571,23 +1593,8 @@ def export_all(
         return ThreadPoolExecutor(max_workers=2, thread_name_prefix="insta")
 
     def _insta_worker(clip_id, info, clip_dir, out_dir, seo_context):
-        try:
-            from automation.instagram.runner import (
-                process_instagram_for_clip,
-                resolve_insta_transcript,
-            )
-            transcript = resolve_insta_transcript(clip_dir, info)
-            media_id = process_instagram_for_clip(
-                clip_dir=clip_dir,
-                transcript=transcript,
-                video_title=seo_context.get("video_title", ""),
-                video_description=seo_context.get("video_description", ""),
-                clip_id=clip_id,
-            )
-            if media_id:
-                log.info("📲 Instagram Reel live: %s (%s)", clip_id, media_id)
-        except Exception as e:
-            log.error("📲 Instagram worker failed for %s: %s", clip_id, e)
+        return _export_insta_worker(clip_id, info, clip_dir, out_dir,
+                                    seo_context)
 
     # ── Parallel Export + Immediate SEO ──────────────────────────────────────────
     # Export clips in parallel. As each clip finishes, its SEO is submitted

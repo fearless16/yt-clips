@@ -24,6 +24,9 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+import cv2
+import numpy as np
+
 from utils.config import load_config
 from utils.logger import get_logger
 

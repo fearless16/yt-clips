@@ -119,7 +119,7 @@ layout:
     # Minimum brightness threshold to detect chat area (chat is usually brighter/darker than gameplay)
     brightness_threshold: 30
   source_overlay_guard:
-    enabled: true
+    enabled: false                     # disabled 2026-08-25: own chat-callout is intermittent + part of channel look; guard hard-dropped 3/3 clips (0 exports)
     min_votes: 2                       # reject when opaque lower-third appears in >=2/12 samples
     dark_ratio: 0.58                   # dark callout body in lower-left/center source region
     bright_text_ratio: 0.0             # grayscale pipe crushes white text; dark body is the stable signal
@@ -317,6 +317,8 @@ thumbnail:
 # ── Clip Selection (7-Agent System) ─────────────────────────────────────────
 clip_selection:
   enabled: true                        # Use 7-agent clip selector (false = old heuristic)
+  output_min_duration: 10              # Exported clip floor in seconds (micro-clips below this are noise)
+  output_max_duration: 24              # Exported clip ceiling in seconds (user rule: <25s)
   use_llm_arbiter: true                # Run LLM Final Arbiter pass
   min_quality: 38.0                    # Absolute floor (channel sim: real moments land 39-52); weak batches still may yield ZERO
   max_selected: 3                      # Max clips per stream — fewer, better Shorts beat spam volume
@@ -333,11 +335,11 @@ logging:
 
 # ── Instagram Reels (SEO + upload, PLAN.md §config) ──────────────────────────
 instagram:
-  enabled: false              # flips true only after creds verified + live smoke
+  enabled: true               # LIVE — upload_post provider verified 2026-08-23
   provider: upload_post       # upload_post (3rd-party, no Meta app needed) | graph (self-hosted FB-Login rupload)
   upload_post:                # active when provider=upload_post
     api_key_env: UPLOAD_POST_API_KEY   # key from app.upload-post.com/api-keys, kept OUT of repo
-    profile: ""               # profile username configured in the Upload-Post dashboard
+    profile: "prajjwall"      # profile username configured in the Upload-Post dashboard
   api_flavor: facebook_login  # locked by research (rupload + hashtag signals) — graph path only
   ig_user_id: ""              # graph path only
   token_file: insta_token.json
