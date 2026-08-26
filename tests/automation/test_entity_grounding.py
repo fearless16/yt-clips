@@ -300,6 +300,21 @@ def test_scrub_gutted_title_falls_back_to_evidence_promise(monkeypatch):
         "search_terms": queries,
         "primary_search_terms": queries[:2],
     })
+    # The new search-first gate may issue one corrective repair pass to lead
+    # with a verified entity. Mock it deterministically (no network): the
+    # evidence fallback must now also name a verified team (India/Sri Lanka).
+    def _repair(*a, **k):
+        return {
+            "title": "Sri Lanka six reaction India \U0001F3CF",
+            "description": (
+                f"{queries[0]} aur {queries[1]}. "
+                "Sri Lanka stunner six and the crowd erupted. " * 10
+            ),
+            "hashtags": ["#Shorts", "#Cricket"],
+            "search_terms": queries,
+            "primary_search_terms": queries[:2],
+        }
+    monkeypatch.setattr(seo, "_llm_repair_seo", _repair)
 
     result = seo.generate_clip_seo(
         "clip-title-fix",

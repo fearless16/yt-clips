@@ -379,3 +379,4 @@ class TestSEOModelRestrictions:
         assert result is not None
         mock_ai.generate_text.assert_called_once()
         mock_ai.generate_seo_text.assert_not_called()
+

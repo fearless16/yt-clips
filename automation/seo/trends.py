@@ -32,6 +32,7 @@ from automation.seo.cricket_context import (
     is_cricket_content,
 )
 from automation.seo.context_engine import build_grounded_search_queries
+from automation._cache import TTLCache
 
 cfg = load_config()
 log = get_logger("trends", cfg["logging"]["log_file"], cfg["logging"]["level"])
@@ -39,6 +40,14 @@ log = get_logger("trends", cfg["logging"]["log_file"], cfg["logging"]["level"])
 # Circuit breakers for external APIs
 _cricbuzz_breaker = CircuitBreaker(failure_threshold=3, recovery_timeout=60.0)
 _http_local = threading.local()
+
+# External YouTube signals must refresh in long-running workers. functools
+# lru_cache made them effectively immortal for the process lifetime, defeating
+# the outer 5-minute trend cache after its first refresh.
+_YT_SUGGEST_CACHE = TTLCache(maxsize=128, ttl=600)
+_YT_SEARCH_CACHE = TTLCache(maxsize=128, ttl=300)
+# India-wide Google Trends also drift hourly; keep it bounded the same way.
+_GOOGLE_TRENDS_CACHE = TTLCache(maxsize=16, ttl=600)
 
 TEAM_MAPPINGS = {
     "csk": "CSK", "chennai": "CSK", "chennai super kings": "CSK",
@@ -254,21 +263,29 @@ def _extract_topics_from_rss(xml_text: str, max_topics: int = 12) -> List[str]:
 
 
 def fetch_google_trends_in() -> List[str]:
-    """Fetch Indian Google Trends RSS feed."""
+    """Fetch Indian Google Trends RSS feed with a bounded TTL cache."""
+    cached = _GOOGLE_TRENDS_CACHE.get("google_trends_in")
+    if cached is not None:
+        return list(cached)
     try:
         resp = _session().get(
             "https://trends.google.com/trending/rss?geo=IN", timeout=10
         )
         if resp.status_code == 200:
-            return _extract_topics_from_rss(resp.text)
+            topics = _extract_topics_from_rss(resp.text)
+            _GOOGLE_TRENDS_CACHE.set("google_trends_in", list(topics))
+            return topics
     except Exception as e:
         log.warning("Google Trends RSS error: %s", e)
     return []
 
 
-@lru_cache(maxsize=128)
 def fetch_youtube_suggestions(seed_query: str = "cricket live") -> List[str]:
-    """Fetch YouTube autocomplete suggestions for a seed query."""
+    """Fetch YouTube autocomplete suggestions with a bounded TTL cache."""
+    cache_key = str(seed_query or "cricket live").strip().casefold()
+    cached = _YT_SUGGEST_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
     results = []
     base_queries = [
         f"{seed_query}", f"{seed_query} ipl", f"{seed_query} cricket",
@@ -287,7 +304,9 @@ def fetch_youtube_suggestions(seed_query: str = "cricket live") -> List[str]:
                         results.append(term)
         except Exception:
             continue
-    return results[:30]
+    final = results[:30]
+    _YT_SUGGEST_CACHE.set(cache_key, list(final))
+    return final
 
 
 def parse_youtube_search_titles(html: str, limit: int = 10) -> List[str]:
@@ -313,9 +332,12 @@ def parse_youtube_search_titles(html: str, limit: int = 10) -> List[str]:
     return titles
 
 
-@lru_cache(maxsize=128)
 def fetch_youtube_search_signals(query: str, limit: int = 10) -> List[str]:
-    """Fetch current YouTube result titles for query-specific search intent."""
+    """Fetch current YouTube result titles with a short TTL cache."""
+    cache_key = f"{str(query or '').strip().casefold()}|limit={int(limit)}"
+    cached = _YT_SEARCH_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
     params = urllib.parse.urlencode({"search_query": query, "hl": "en", "gl": "IN"})
     response = _session().get(
         f"https://www.youtube.com/results?{params}",
@@ -323,7 +345,9 @@ def fetch_youtube_search_signals(query: str, limit: int = 10) -> List[str]:
     )
     if response.status_code != 200:
         return []
-    return parse_youtube_search_titles(response.text, limit=limit)
+    titles = parse_youtube_search_titles(response.text, limit=limit)
+    _YT_SEARCH_CACHE.set(cache_key, list(titles))
+    return titles
 
 
 def fetch_verified_match_context(query: str) -> Dict:
@@ -491,6 +515,10 @@ def get_trending_context(
                 "search_query": query_topic,
             }),
             "query": query_topic,
+            # Preserve the actual SERP evidence. Previously only `query` was
+            # propagated, so the SEO model never saw the titles we fetched.
+            "titles": recent_youtube_titles[:10],
+            "suggestions": suggestions[:15],
         })
 
     # Global trends are allowed only when they overlap the source evidence.
@@ -532,6 +560,8 @@ def get_trending_context(
         "player_aliases": player_aliases,
         "search_queries": search_queries,
         "sources": sources,
+        "youtube_search_titles": recent_youtube_titles[:10],
+        "youtube_suggestions": suggestions[:15],
         "research_query": query_topic,
         "live_stream_url": fetch_own_live_stream_url() if include_live_stream_url else "",
         "teams": teams,

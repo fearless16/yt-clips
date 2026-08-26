@@ -100,6 +100,18 @@ GENERIC_TITLES = {
     "sports highlights", "match highlights",
 }
 
+# Vague LLM adjectives that dilute SEO quality — fans never search these and
+# the algorithm buries them. Strip from titles so the named entity (what
+# people actually type) leads. Kept OUT of the word-count; we raise QUALITY,
+# not reduce volume.
+_VAGUE_FILLER_RE = re.compile(
+    r"\b(?:epic|thrilling|incredible|amazing|awesome|best|shocking|"
+    r"stunning|mind[-\s]?blowing|unbelievable|fantastic|sensational|"
+    r"breathtaking|jaw[-\s]?dropping|must[-\s]?watch|crazy|insane|"
+    r"phenomenal|spectacular|greatest|top|superb|brilliant|classic)\b",
+    re.IGNORECASE,
+)
+
 PACKAGING_VERSION = "promise_v4_longtail"
 
 # ── Anti-AI-generic gate ────────────────────────────────────────────────────
@@ -214,11 +226,16 @@ STRICT RULES:
       match situation from the scorecard facts, both teams' position,
       every named player's role in this clip, series/match context,
       what happens next in the match.
-    * Weave EVERY search term naturally into sentences across the body.
-      Repetition of key entities is good; robotic lists are not.
+    * Weave EVERY selected search term into sentences across the body,
+      preserving the exact query wording at least once when grammar allows.
+      Use the available character budget aggressively; do not stop early just
+      because the core event has already been explained. Repetition of key
+      entities is good; robotic lists are not.
     * End with the 3 hashtags on one line.
-- SEARCH TERMS: exactly 25 long-tail phrases real viewers type, built
-  ONLY from the seeds + roster + scorecard above. Mix patterns:
+- SEARCH TERMS: choose and RANK exactly 25 long-tail phrases from the
+  grounded SEARCH SEEDS above. Prefer phrases supported by live YouTube
+  autocomplete and by wording/themes visible in recent YouTube result titles.
+  Do not invent a new entity. Mix patterns:
     "{teams_lower} highlights", "<player> bowling today",
     "<player> wickets", "{series_guess} day 4", "cricket shorts",
     "<team> collapse", "<team> target chase". No invented players.
@@ -410,8 +427,11 @@ def _cap_description_hashtags(description: str, hashtags: List[str]) -> str:
 
 
 def _clean_title(title: object, cap: int) -> str:
-    """Remove misleading format labels and truncate at a word boundary."""
+    """Remove vague filler/format labels and truncate at a word boundary."""
     text = str(title or "")
+    # Search-first titles should spend their tiny character budget on the
+    # named entity + exact moment, not generic LLM adjectives.
+    text = _VAGUE_FILLER_RE.sub("", text)
     text = _LIVE_FRAMING_RE.sub("", text)
     text = _LIVE_COMPOUND_RE.sub("", text)
     text = re.sub(r"(?i)(?:^|\s)#shorts\b", " ", text)
@@ -884,6 +904,28 @@ def generate_clip_seo(
     grounded_aliases = grounded_aliases or {}
     research_sources = research_sources or []
 
+    # Magic anchor: if the caller supplied no real trend/query evidence, pull
+    # LIVE high-search-volume cricket entities (YouTube autocomplete, Google
+    # Trends IN, verified match facts) so the LLM seeds its keywords with
+    # QUALITY entities fans actually search (Vaibhav Sooryavanshi, RCB, "why
+    # Jadeja sad IPL") instead of inventing generic filler ("epic moment").
+    # Network misses never block SEO — we degrade to the empty anchors we had.
+    if not trend_topics and not approved_search_queries:
+        try:
+            _ctx = get_trending_context(
+                domain="cricket", region="IN",
+                video_title=video_title, video_description=video_description,
+                transcript=transcript,
+            )
+            if not trend_topics:
+                trend_topics = list(_ctx.get("topics") or [])[:12]
+            if not approved_search_queries:
+                approved_search_queries = list(_ctx.get("search_queries") or [])[:30]
+            if not research_sources:
+                research_sources = list(_ctx.get("sources") or [])
+        except Exception as _exc:  # pragma: no cover - defensive
+            log.warning("live trend context unavailable: %s", _exc)
+
     if not transcript:
         raise SEOGenerationError(f"SEO blocked for {clip_id}: empty/non-cricket transcript")
     transcript = correct_cricket_spelling(
@@ -913,7 +955,9 @@ def generate_clip_seo(
         raise SEOGenerationError(f"SEO blocked for {clip_id}: non-cricket content")
 
     teams_str = ", ".join(teams)
-    trend_str = ", ".join(trend_topics[:5]) if trend_topics else ""
+    # Keep substantially more live evidence in the model context.  The old
+    # [:5] cap silently threw away most autocomplete/SERP signals.
+    trend_str = "\n".join(f"- {topic}" for topic in trend_topics[:20]) if trend_topics else ""
 
     # This channel is cricket-only. Football/general prompt routes remain
     # unavailable even if a mixed-niche source reaches this function.
@@ -977,8 +1021,11 @@ def generate_clip_seo(
         match_facts="\n".join(evidence_pack["match_facts"]) or "N/A",
         trend_topics=trend_str or "N/A",
         research_sources="\n".join(
-            str(source.get("query", "")) for source in evidence_pack["sources"]
-            if isinstance(source, dict)
+            f"- {title}"
+            for source in evidence_pack["sources"]
+            if isinstance(source, dict) and source.get("kind") == "youtube_search"
+            for title in (source.get("titles") or [])
+            if str(title).strip()
         ) or "N/A",
         teams=teams_str or default_teams,
         roster=", ".join(dict.fromkeys([
@@ -1176,6 +1223,61 @@ def generate_clip_seo(
             clip_id, ", ".join(unknown_title_people),
         )
 
+    # Hard entity-presence gate for search-first packaging. The old checks only
+    # rejected WRONG named entities; a generic but transcript-aligned title like
+    # "Huge Six in Death Overs" could still ship. If verified player/team
+    # evidence exists, require at least one canonical entity in the title and
+    # give the writer exactly one repair pass before failing closed.
+    grounded_teams = set(grounded_entities["teams"]) | {
+        str(t) for t in llm_ground.get("teams", [])
+    }
+
+    def _title_has_grounded_entity(candidate: object) -> bool:
+        entities = find_canonical_entities(str(candidate or ""), player_catalog)
+        title_people = {str(p).casefold() for p in entities.get("players", [])}
+        title_teams = {str(t).casefold() for t in entities.get("teams", [])}
+        valid_people = set(allowed_people)
+        valid_teams = {str(t).casefold() for t in grounded_teams}
+        return bool((title_people & valid_people) or (title_teams & valid_teams))
+
+    # Only enforce a grounded entity when the title is otherwise promise-aligned
+    # (alignment OK). If alignment is off the hard promise gate (further down)
+    # rejects loudly, and an ungrounded player name is owned by its own repair
+    # pass — so this stays a single corrective pass that never masks a mismatch.
+    _entity_min_alignment = _seo_config_float(
+        "min_promise_alignment_score", 0.5, 0.0, 1.0
+    )
+    if (allowed_people or grounded_teams) and _promise_alignment_score(
+        str(result.get("title") or ""), transcript,
+        str(result.get("description") or ""),
+    ) >= _entity_min_alignment and not _title_has_grounded_entity(result.get("title")):
+        repaired = _llm_repair_seo(
+            clip_id, user_prompt, result,
+            [
+                "Title is generic/entity-less. Lead with at least one VERIFIED "
+                "canonical player or team name that is supported by the clip "
+                "evidence, then state the exact searchable moment. Do not use "
+                "vague filler adjectives."
+            ],
+            ", ".join(sorted(allowed_people)) or "none verified — use teams only",
+            transcript, video_title, is_shorts,
+        )
+        if not repaired:
+            raise SEOGenerationError(
+                f"SEO blocked for {clip_id}: title has no grounded entity and "
+                "LLM repair failed"
+            )
+        if not _title_has_grounded_entity(repaired.get("title")):
+            raise SEOGenerationError(
+                f"SEO blocked for {clip_id}: repaired title still has no "
+                "grounded player/team entity"
+            )
+        result = repaired
+        log.warning(
+            "[%s] Title rewritten via LLM repair to enforce grounded entity lead",
+            clip_id,
+        )
+
     public_copy_text = " ".join([
         str(result.get("title", "")),
         str(result.get("description", "")),
@@ -1210,9 +1312,7 @@ def generate_clip_seo(
         player for player in set(rendered_entities["players"]) - clip_players
         if not _title_vouched(player)
     }
-    grounded_teams = set(grounded_entities["teams"]) | {
-        str(t) for t in llm_ground.get("teams", [])
-    }
+    # grounded_teams was computed earlier for the title entity-presence gate.
     extra_teams = set(rendered_entities["teams"]) - grounded_teams
     if extra_players:
         repaired = _llm_repair_seo(
@@ -1256,9 +1356,24 @@ def generate_clip_seo(
 
     min_queries = _seo_config_int("min_search_terms", 8, 1, 15)
     max_queries = _seo_config_int("max_search_terms", 26, min_queries, 40)
-    output_queries = list(dict.fromkeys(
+    # Respect the model as a RANKER while keeping grounding deterministic.
+    # Previously we discarded every LLM-selected search term and replaced the
+    # list with approved_queries in fixed order, making the model's search-term
+    # reasoning pointless.
+    approved_clean = list(dict.fromkeys(
         str(query).strip() for query in approved_queries if str(query).strip()
-    ))[:max_queries]
+    ))
+    approved_by_key = {query.casefold(): query for query in approved_clean}
+    ranked = []
+    for query in result.get("search_terms") or []:
+        clean = str(query).strip()
+        canonical = approved_by_key.get(clean.casefold())
+        if canonical and canonical not in ranked:
+            ranked.append(canonical)
+    for query in approved_clean:
+        if query not in ranked:
+            ranked.append(query)
+    output_queries = ranked[:max_queries]
     result["search_terms"] = output_queries
     if not min_queries <= len(output_queries) <= max_queries:
         raise SEOGenerationError(
@@ -1287,7 +1402,9 @@ def generate_clip_seo(
         if re.sub(r"\s+", " ", str(query)).strip().casefold() not in description_key
     ]
     if missing_queries:
-        suffix = "\n\nSearch context: " + " | ".join(missing_queries) + "."
+        # Preserve exact primary-query coverage without wasting budget on an
+        # opaque pipe-delimited debug-looking block.
+        suffix = "\n\nAlso relevant to searches for " + "; ".join(missing_queries) + "."
         max_chars = _description_max_chars()
         base = str(result.get("description") or "").rstrip()
         result["description"] = (
