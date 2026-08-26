@@ -13,8 +13,6 @@ automation/
 ├── env.py           Colab/Kaggle detection, nvidia-smi GPU queries
 ├── memory.py        /proc/meminfo reader, ring buffer, sparkline, backpressure
 ├── transcript.py    YouTube transcript fetcher (API → yt-dlp, 1h cache)
-├── watcher.py       Watcher subprocess lifecycle, /health polling
-├── tunnel.py        TunnelKeeper daemon, auto-reconnect, 3 fallback methods
 ├── worker.py        ParallelPool (threading + Semaphore, batch backpressure)
 ├── orchestrator.py  8-phase pipeline runner
 ├── cli.py           CLI entry point with subcommands
@@ -35,13 +33,7 @@ automation/
 - `ensure_free()` — blocks until ≥N GB free, or timeout
 - `safe_batch_size()` / `safe_workers()` — halve on low memory
 
-### 3. Always-Up Tunnel
-- `TunnelKeeper` — background daemon thread, heartbeat every 10s
-- 3 consecutive health check failures → auto-reconnect
-- Fallback chain: serveo.net → localhost.run → localtunnel
-- Singleton helpers: `start_tunnel()`, `tunnel_status()`, `kill_tunnel()`
-
-### 4. Parallel Workers
+### 3. Parallel Workers
 - `ParallelPool` — threading + `Semaphore`, no process pool
 - `batch_run()` — calls `ensure_free()` between every batch
 - `_ControlledFuture` — thin wrapper over `concurrent.futures.Future`
@@ -66,16 +58,11 @@ python -m automation.cli https://youtu.be/dQw4w9WgXcQ --skip-download --skip-hig
 # Diagnostics
 python -m automation.cli --memory-report
 python -m automation.cli --gpu-info
-python -m automation.cli --tunnel-status
 python -m automation.cli --fetch-transcript https://youtu.be/dQw4w9WgXcQ
-
-# Colab setup
-python -m automation.cli --setup-colab
 
 # Advanced
 python -m automation.cli --sync-only
 python -m automation.cli --auto-pilot https://youtube.com/@channel
-python -m automation.cli --remote https://abc.lhr.life
 ```
 
 ## Programmatic API
@@ -90,11 +77,6 @@ print(data["source"], len(data["segments"]))
 from automation.memory import memory_report, emit_graph
 print(memory_report()["free_gb"], "GB free")
 print(emit_graph())
-
-# Tunnel
-from automation.tunnel import start_tunnel, tunnel_status
-start_tunnel()
-print(tunnel_status())
 
 # Workers
 from automation.worker import ParallelPool

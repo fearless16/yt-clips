@@ -245,17 +245,12 @@ def main():
         print(f"\n  {red('Pipeline aborted at expectation analysis')}")
         sys.exit(1)
 
-    # Step 2: Frame sampling
-    if not run_step("frame_sampler.py", "sampling", skip_flag=args.skip_sampling):
-        print(f"\n  {red('Pipeline aborted at frame sampling')}")
-        sys.exit(1)
-
-    # Step 3: Crop analysis
+    # Step 2: Crop analysis
     if not run_step("crop_analyzer.py", "crop"):
         print(f"\n  {red('Pipeline aborted at crop analysis')}")
         sys.exit(1)
 
-    # Step 4: Report generation
+    # Step 3: Report generation
     if not run_step("report_generator.py", "report"):
         print(f"\n  {red('Pipeline aborted at report generation')}")
         sys.exit(1)

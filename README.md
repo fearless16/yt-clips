@@ -142,14 +142,6 @@ Edit `config.yaml` for the cricket pipeline (`highlight`, `clip_selection`,
 `seo`, `upload_schedule`, `shorts_intelligence`).  
 Edit `face_os_config.yaml` for Face OS tuning.
 
-### Kaggle GPU Worker
-
-```bash
-# Submit job to the remote watcher (tunnel URL of the GPU box):
-.venv/Scripts/python.exe -m automation.cli "https://youtu.be/VIDEO_ID" --remote --tunnel-url https://xxx.loca.lt
-python kaggle_monitor.py --monitor            # watch progress
-```
-
 ---
 
 ## Reports & Analytics
