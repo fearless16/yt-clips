@@ -800,10 +800,18 @@ def _build_enhance_stack(
         # Solo with face-detected crop region
         log.debug("SOLO + face crop → precise 9:16 crop")
         try:
-            cx = max(0, int(active_crop["x"]))
-            cy = max(0, int(active_crop["y"]))
-            cw = max(2, int(active_crop["width"]))
-            ch = max(2, int(active_crop["height"]))
+            orig_cx = max(0, int(active_crop["x"]))
+            orig_cy = max(0, int(active_crop["y"]))
+            orig_cw = max(2, int(active_crop["width"]))
+            orig_ch = max(2, int(active_crop["height"]))
+
+            # Expand crop by 1.5x for a professional cut
+            cw = int(orig_cw * 1.5)
+            ch = int(orig_ch * 1.5)
+            center_x = orig_cx + orig_cw / 2.0
+            center_y = orig_cy + orig_ch / 2.0
+            cx = max(0, int(center_x - cw / 2.0))
+            cy = max(0, int(center_y - ch / 2.0))
             if native_res:
                 # Crop only — super-res handles upscaling
                 filter_base = (

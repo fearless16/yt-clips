@@ -214,15 +214,14 @@ Return ONLY this valid JSON object:
 }}
 
 STRICT RULES:
-- TITLE: max {title_max_chars} chars. Lead with the canonical name + the
-  exact moment ("Prasidh Krishna Strikes Twice: Sri Lanka Collapse"). One
-  clear premise, 1-2 emojis. No LIVE/#Shorts/pipe segments.
+- TITLE: max {title_max_chars} chars. proper simple titles with exactly 1-2 emojis. No LIVE/#Shorts/pipe segments.
 - DESCRIPTION ({description_target_chars} chars target, hard range
-  {description_min_chars}-{description_max_chars}): written for the
-  algorithm, not a human reader.
+  {description_min_chars}-{description_max_chars}): long telling description
+  that narrates the clip's events, context, and player roles in an engaging,
+  story-like format (3000-4500 characters of keyword-rich English prose).
     * First 125 characters: primary keyword + clip's exact moment.
     * Then flowing English sentences organized with emoji markers
-      (\U0001F3CF \u26A1 \U0001F525 \U0001F4CA) into sections: what happens in this clip, verified
+      (🏏 ⚡ 🔥 📊) into sections: what happens in this clip, verified
       match situation from the scorecard facts, both teams' position,
       every named player's role in this clip, series/match context,
       what happens next in the match.

@@ -60,8 +60,8 @@ def test_build_enhance_stack_solo_crop():
         }
     }
     filter_chain = _build_enhance_stack(analysis)
-    # Checks that active crop coordinates are injected
-    assert "crop=320:480:150:250" in filter_chain
+    # Checks that active crop coordinates are injected and expanded by 1.5x
+    assert "crop=480:720:70:130" in filter_chain
 
 def test_build_enhance_stack_guest_cam_off():
     analysis = {
