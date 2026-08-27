@@ -10,14 +10,14 @@ from automation.seo import seo
 from utils.config import load_config
 
 SEO_CFG = load_config().get("seo", {})
-MIN_CHARS = int(SEO_CFG.get("description_min_chars", 3000))
-TARGET_CHARS = int(SEO_CFG.get("description_target_chars", 3500))
-MAX_CHARS = int(SEO_CFG.get("description_max_chars", 4500))
+MIN_CHARS = seo._description_min_chars()
+TARGET_CHARS = seo._description_target_chars()
+MAX_CHARS = seo._description_max_chars()
 
 RICH_DESCRIPTION = (
     "Virat Kohli batting analysis explains the complete cricket discussion "
     "without inventing a score or opponent. "
-).strip() * 30
+).strip() * 2
 
 
 def _make_item(description, title="Kohli ne maara CHHAKKA! 🔥"):
@@ -32,13 +32,13 @@ def _make_item(description, title="Kohli ne maara CHHAKKA! 🔥"):
 class TestDescriptionCharacterBudgetConfig:
 
     def test_config_has_right_sized_description_budgets(self):
-        assert 2000 <= MIN_CHARS < TARGET_CHARS < MAX_CHARS <= 4950
+        assert 100 <= MIN_CHARS < TARGET_CHARS < MAX_CHARS <= 400
 
 
 class TestDescriptionCharacterQualityGate:
 
     def test_quality_gate_rejects_below_min_chars(self):
-        below = "Kohli cricket discussion. " * 100  # ~2600 chars < 3000
+        below = "Kohli cricket discussion. " * 3  # ~78 chars < 150
         assert len(below) < MIN_CHARS
         assert not seo._validate_seo_quality(_make_item(below))
 

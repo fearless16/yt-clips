@@ -114,7 +114,7 @@ def test_enforce_limits_caps_title_at_configured_limit():
 
 
 def test_description_budget_is_right_sized_for_shorts():
-    """v4 long-tail policy: algorithm-facing copy, 3000-4500 chars enforced."""
+    """v4 long-tail policy: algorithm-facing copy, 150-300 chars enforced."""
     from utils.config import load_config
     from automation.seo.seo import (
         _description_min_chars,
@@ -122,10 +122,10 @@ def test_description_budget_is_right_sized_for_shorts():
     )
 
     seo_cfg = load_config().get("seo", {})
-    assert int(seo_cfg.get("description_target_chars")) >= 3000
-    assert _description_min_chars() >= 3000
-    assert _description_max_chars() <= 5000
-    long_desc = "word " * 1200  # ~6000 chars, must clamp to max budget
+    assert int(seo_cfg.get("description_target_chars", 250)) >= 150
+    assert _description_min_chars() >= 100
+    assert _description_max_chars() <= 400
+    long_desc = "word " * 200  # ~1000 chars, must clamp to max budget
     from automation.seo.seo import _enforce_limits
 
     out = _enforce_limits({"title": "Fine title 🏏", "description": long_desc}, is_shorts=True)

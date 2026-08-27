@@ -174,8 +174,10 @@ _SYSTEM = (
     "The description is written for the YouTube ALGORITHM, not for humans \u2014 "
     "nobody reads it. Your job is maximum keyword surface area that still "
     "reads as natural sentences: pack every verified entity, player name, "
-    "team name, match detail, event, and search phrase into 3000-4500 "
-    "characters of flowing English prose with emoji section markers. "
+    "team name, match detail, event, and search phrase into a concise, purely "
+    "algorithmic description (150-300 characters, 2-3 sentences). Front-load "
+    "critical trending search queries, entities, and match context. Do not use "
+    "emoji section markers or sections. Write a tight, keyword-dense paragraph. "
     "Evidence boundary: source video title/description, clip transcript, "
     "OCR, live autocomplete suggestions, recent YouTube search titles, and "
     "explicitly verified scorecard facts. Never invent a player, team, "
@@ -206,7 +208,7 @@ TASK \u2014 build metadata that wins YouTube search for THIS exact clip.
 Return ONLY this valid JSON object:
 {{
   "title": "<specific English title, max 60 chars, player/team + event>",
-  "description": "<3000-4500 chars of keyword-rich English prose>",
+  "description": "<150-300 chars of tight keyword-dense algorithmic English>",
   "hashtags": ["#Shorts", "<#SeriesTag like #INDvSL>", "<1 topic tag>"],
   "search_terms": ["<exactly 25 long-tail viewer searches>"],
   "primary_search_terms": ["<4-8 of those terms>"],
@@ -216,19 +218,12 @@ Return ONLY this valid JSON object:
 STRICT RULES:
 - TITLE: max {title_max_chars} chars. proper simple titles with exactly 1-2 emojis. No LIVE/#Shorts/pipe segments.
 - DESCRIPTION ({description_target_chars} chars target, hard range
-  {description_min_chars}-{description_max_chars}): long telling description
-  that narrates the clip's events, context, and player roles in an engaging,
-  story-like format (3000-4500 characters of keyword-rich English prose).
-    * First 125 characters: primary keyword + clip's exact moment.
-    * Then flowing English sentences organized with emoji markers
-      (🏏 ⚡ 🔥 📊) into sections: what happens in this clip, verified
-      match situation from the scorecard facts, both teams' position,
-      every named player's role in this clip, series/match context,
-      what happens next in the match.
-    * Weave EVERY selected search term into sentences across the body,
-      preserving the exact query wording at least once when grammar allows.
-      Use the available character budget aggressively; do not stop early just
-      because the core event has already been explained. Repetition of key
+  {description_min_chars}-{description_max_chars}): concise, purely algorithmic
+  description that tells YouTube exactly who to send the video to.
+    * 2-3 sentences (150-300 characters) of tight, keyword-dense English prose.
+    * Front-load the most critical trending search queries, entities, and match context.
+    * Do not use emoji section markers like 🏏 ⚡ 🔥 📊 or sections.
+    * Weave selected search terms into sentences naturally. Repetition of key
       entities is good; robotic lists are not.
     * End with the 3 hashtags on one line.
 - SEARCH TERMS: choose and RANK exactly 25 long-tail phrases from the
@@ -257,9 +252,10 @@ primary_search_terms, and tags.
 - LANGUAGE: English only everywhere. No Hinglish, no Devanagari.
 - Title: max 60 characters; one specific premise plus 1-2 emojis;
   no LIVE/#Shorts.
-- Description: 3000-4500 characters of algorithm-facing keyword-rich
-  English prose; first 125 chars carry the primary keyword; emoji
-  section markers allowed; weave search phrases into sentences.
+- Description: concise, purely algorithmic description (150-300 characters,
+  2-3 sentences) of tight, keyword-dense English prose; front-load critical
+  trending search queries and match context; no emoji section markers;
+  weave search phrases into sentences.
 - Hashtags: exactly 3 including #Shorts.
 - Search terms: exactly 25 long-tail grounded cricket phrases.
 - Tags: the same phrases trimmed under 450 total characters.
@@ -313,15 +309,15 @@ def _seo_config_float(key: str, default: float, low: float, high: float) -> floa
 
 
 def _description_min_chars() -> int:
-    return _seo_config_int("description_min_chars", 3000, 2000, 4500)
+    return _seo_config_int("description_min_chars", 150, 100, 250)
 
 
 def _description_target_chars() -> int:
-    return _seo_config_int("description_target_chars", 3500, 2500, 4800)
+    return _seo_config_int("description_target_chars", 250, 150, 300)
 
 
 def _description_max_chars() -> int:
-    return _seo_config_int("description_max_chars", 4500, 3000, 4950)
+    return _seo_config_int("description_max_chars", 300, 200, 400)
 
 
 def _shorts_hashtag_cap() -> int:
