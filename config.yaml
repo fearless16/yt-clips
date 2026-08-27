@@ -254,9 +254,9 @@ seo:
   min_primary_search_terms: 4           # phrases naturally used in public description copy
   max_primary_search_terms: 8           # keyword-rich prose needs more weaving
   min_promise_alignment_score: 0.50     # title must match clip speech + description opening
-  description_min_chars: 150            # concise algorithmic targeting paragraph
-  description_target_chars: 300         # 2-3 keyword-rich sentences
-  description_max_chars: 500            # hard cap, well below YouTube's 5000
+  description_min_chars: 3000           # algorithm-facing copy: crawlable keyword surface
+  description_target_chars: 3500        # LLM writes toward this length
+  description_max_chars: 4500           # hard cap, safe margin below YouTube's 5000
   max_tag_chars: 450                    # safe margin below YouTube's 500-char tags limit
   # Inject random hardcoded viral hooks/CTAs into descriptions. OFF by default:
   # the product contract prefers per-clip LLM-generated hooks over generic copy.

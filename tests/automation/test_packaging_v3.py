@@ -124,7 +124,7 @@ def test_description_budget_is_right_sized_for_shorts():
     seo_cfg = load_config().get("seo", {})
     assert int(seo_cfg.get("description_target_chars", 250)) >= 150
     assert _description_min_chars() >= 100
-    assert _description_max_chars() <= 400
+    assert _description_max_chars() <= 4800
     long_desc = "word " * 200  # ~1000 chars, must clamp to max budget
     from automation.seo.seo import _enforce_limits
 

@@ -171,96 +171,90 @@ SEO_BLOCKED_PROVIDERS = {"nvidia", "groq"}
 
 _SYSTEM = (
     "You are an elite cricket Shorts SEO engine for @cricketwithprajjwal2.0. "
-    "The description is written for the YouTube ALGORITHM, not for humans \u2014 "
-    "nobody reads it. Your job is maximum keyword surface area that still "
-    "reads as natural sentences: pack every verified entity, player name, "
-    "team name, match detail, event, and search phrase into a concise, purely "
-    "algorithmic description (150-300 characters, 2-3 sentences). Front-load "
-    "critical trending search queries, entities, and match context. Do not use "
-    "emoji section markers or sections. Write a tight, keyword-dense paragraph. "
-    "Evidence boundary: source video title/description, clip transcript, "
-    "OCR, live autocomplete suggestions, recent YouTube search titles, and "
-    "explicitly verified scorecard facts. Never invent a player, team, "
-    "score, venue, event, date, or record. All public copy is simple "
-    "ENGLISH only: no Hindi in Roman script, no Devanagari, no Hinglish. "
-    "Title = one specific premise (canonical player/team + exact event), "
-    "max 60 chars, exactly 1-2 emojis, never 'LIVE' or '#Shorts'. Never "
-    "narrate ('in this video', 'stay tuned'), never greet. Return ONLY "
-    "valid JSON."
+    "The description is written for the YouTube ALGORITHM, not for humans — "
+    "nobody reads it. Your job is maximum keyword surface area and explicit structure. "
+    "You must generate a heavily structured description of up to 4000 characters using "
+    "the exact format prescribed: Title at the top, an introductory summary, '🏏 MATCH DETAILS', "
+    "'🔥 CLIP COVERAGE' (since it is a Short), '🔎 Popular Searches:', '⚠️ DISCLAIMER:', "
+    "and finally a call to action followed by exactly 8-12 relevant hashtags. "
+    "Evidence boundary: source video title/description, clip transcript, OCR, live autocomplete "
+    "suggestions, recent YouTube search titles, and scorecard facts. Never invent a player, team, "
+    "score, or event. All public copy is simple ENGLISH only: no Hinglish, no Devanagari. "
+    "Title = one specific premise, max 60 chars, exactly 1-2 emojis, never 'LIVE' or '#Shorts'. "
+    "Return ONLY valid JSON."
 )
 
-_CRICKET_ONLY_PROMPT_TMPL = """CRICKET SHORT \u2014 FULL MATCH CONTEXT:
+_CRICKET_ONLY_PROMPT_TMPL = """CRICKET SHORT — FULL MATCH CONTEXT:
   Source video title: {video_title}
   Source video description: {video_description}
-  Verified scorecard / match facts (live Cricbuzz data): {match_facts}
+  Verified scorecard / match facts: {match_facts}
   Teams in this match: {teams}
-  Player roster (verified names you may use): {roster}
-  Live YouTube autocomplete (real searches happening now): {trend_topics}
+  Player roster: {roster}
+  Live YouTube autocomplete: {trend_topics}
   Recent YouTube search result titles: {research_sources}
 
 COMPLETE CLIP TRANSCRIPT: {transcript}
 
-SEARCH SEEDS (grounded anchors from research \u2014 expand these into long-tail):
+SEARCH SEEDS (grounded anchors from research — expand these into long-tail):
 {approved_search_queries}
 
-TASK \u2014 build metadata that wins YouTube search for THIS exact clip.
+TASK — build metadata that wins YouTube search for THIS exact clip.
 
 Return ONLY this valid JSON object:
 {{
   "title": "<specific English title, max 60 chars, player/team + event>",
-  "description": "<150-300 chars of tight keyword-dense algorithmic English>",
+  "description": "<Structured algorithm-focused description up to 4000 chars - see format>",
   "hashtags": ["#Shorts", "<#SeriesTag like #INDvSL>", "<1 topic tag>"],
   "search_terms": ["<exactly 25 long-tail viewer searches>"],
   "primary_search_terms": ["<4-8 of those terms>"],
   "tags": ["<the same 25 phrases, trimmed to fit the 500-char API field>"]
 }}
 
-STRICT RULES:
-- TITLE: max {title_max_chars} chars. proper simple titles with exactly 1-2 emojis. No LIVE/#Shorts/pipe segments.
-- DESCRIPTION ({description_target_chars} chars target, hard range
-  {description_min_chars}-{description_max_chars}): concise, purely algorithmic
-  description that tells YouTube exactly who to send the video to.
-    * 2-3 sentences (150-300 characters) of tight, keyword-dense English prose.
-    * Front-load the most critical trending search queries, entities, and match context.
-    * Do not use emoji section markers like 🏏 ⚡ 🔥 📊 or sections.
-    * Weave selected search terms into sentences naturally. Repetition of key
-      entities is good; robotic lists are not.
-    * End with the 3 hashtags on one line.
-- SEARCH TERMS: choose and RANK exactly 25 long-tail phrases from the
-  grounded SEARCH SEEDS above. Prefer phrases supported by live YouTube
-  autocomplete and by wording/themes visible in recent YouTube result titles.
-  Do not invent a new entity. Mix patterns:
-    "{teams_lower} highlights", "<player> bowling today",
-    "<player> wickets", "{series_guess} day 4", "cricket shorts",
-    "<team> collapse", "<team> target chase". No invented players.
-- TAGS: same 25 phrases; drop/shorten as needed to stay under 450 total
-  characters (YouTube's API budget). Most specific first.
-- HASHTAGS: exactly 3. #Shorts + series tag (#INDvSL pattern) + topic.
-- LANGUAGE: English only everywhere. No Hinglish, no Devanagari.
-- BANNED anywhere: "in this video", "stay tuned", "welcome back",
-  "cricket lovers", "hello guys".
-- Never invent a player, team, score, venue, or event not supported by
-  the evidence blocks above.
+STRICT RULES FOR DESCRIPTION FORMAT:
+You MUST format the 'description' field EXACTLY like this (fill in the brackets with verified facts):
+🔴 [Team 1] vs [Team 2] | [Series] | [T1] vs [T2] Shorts Today
+
+Follow [Team 1] vs [Team 2] in this [Series] clip. Get [T1] vs [T2] cricket updates, boundaries, match analysis and all the important moments from [Venue or 'the match'].
+
+🏏 MATCH DETAILS
+Match: [Team 1] vs [Team 2]
+Short Name: [T1] vs [T2]
+Tournament: [Series]
+Date: [Date if available, else omit line]
+Venue: [Venue if available, else omit line]
+
+🔥 CLIP COVERAGE
+[Write 1-2 paragraphs detailing the exact action in this clip, the context of the match, and the players involved. Make it keyword-dense.]
+
+[Write 1 paragraph listing the squad players for both teams involved in this match from the roster.]
+
+🔎 Popular Searches:
+[Comma separated list of all 25 long-tail keywords and search terms from the search_terms field to maximize SEO]
+
+⚠️ DISCLAIMER:
+This stream/clip is intended for independent cricket commentary, updates, analysis and fan discussion. No official match broadcast footage or copyrighted television audio is being rebroadcast. Team names, player names, league names, logos and trademarks belong to their respective owners.
+
+👍 Like the video, subscribe to the channel and join the comments with your prediction for [T1] vs [T2].
+
+#️⃣ Best hashtags
+[Put exactly 8 to 12 hashtags here. Start with #Shorts, the series tag, and the team tags, then relevant topics like #CricketLive #LiveCricket #CricketCommentary. Do NOT exceed 12 hashtags.]
+
+OTHER STRICT RULES:
+- TITLE: max {title_max_chars} chars. proper simple titles with exactly 1-2 emojis. No LIVE/#Shorts.
+- SEARCH TERMS: choose and RANK exactly 25 long-tail phrases.
+- TAGS: same 25 phrases, trimmed under 450 total characters for the API limit.
+- HASHTAGS (for the JSON array): exactly 3. #Shorts + series tag + topic. (The description body will have 8-12).
 """
 
 _CRICKET_ONLY_SALVAGE_TMPL = """Generate grounded, keyword-rich metadata for this cricket Short.
 Clip transcript: {transcript}
 Source title: {video_title}
 
-Return only JSON with title, description, hashtags, search_terms,
-primary_search_terms, and tags.
-- LANGUAGE: English only everywhere. No Hinglish, no Devanagari.
-- Title: max 60 characters; one specific premise plus 1-2 emojis;
-  no LIVE/#Shorts.
-- Description: concise, purely algorithmic description (150-300 characters,
-  2-3 sentences) of tight, keyword-dense English prose; front-load critical
-  trending search queries and match context; no emoji section markers;
-  weave search phrases into sentences.
-- Hashtags: exactly 3 including #Shorts.
+Return only JSON with title, description, hashtags, search_terms, primary_search_terms, and tags.
+- Description MUST use the highly structured format with 🏏 MATCH DETAILS, 🔥 CLIP COVERAGE, 🔎 Popular Searches, ⚠️ DISCLAIMER, and 8-12 #️⃣ Best hashtags.
+- Title: max 60 characters; one specific premise plus 1-2 emojis. No LIVE/#Shorts.
 - Search terms: exactly 25 long-tail grounded cricket phrases.
 - Tags: the same phrases trimmed under 450 total characters.
-- Never invent a player, team, score, or event. No narration
-  ("in this video", "stay tuned").
 """
 
 
@@ -309,15 +303,15 @@ def _seo_config_float(key: str, default: float, low: float, high: float) -> floa
 
 
 def _description_min_chars() -> int:
-    return _seo_config_int("description_min_chars", 150, 100, 250)
+    return _seo_config_int("description_min_chars", 1500, 100, 4800)
 
 
 def _description_target_chars() -> int:
-    return _seo_config_int("description_target_chars", 250, 150, 300)
+    return _seo_config_int("description_target_chars", 3000, 150, 4800)
 
 
 def _description_max_chars() -> int:
-    return _seo_config_int("description_max_chars", 300, 200, 400)
+    return _seo_config_int("description_max_chars", 4500, 200, 4800)
 
 
 def _shorts_hashtag_cap() -> int:

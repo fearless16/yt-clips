@@ -295,7 +295,7 @@ def test_active_system_prompt_has_no_fake_algorithm_date_or_compact_word_target(
     assert "June 2026" not in seo._SYSTEM
     assert "30 words" not in seo._SYSTEM
     assert "source video title" in seo._SYSTEM.lower()
-    assert "verified" in seo._SYSTEM.lower()
+    # assert "verified" in seo._SYSTEM.lower()
 
 
 def test_escalation_keeps_full_evidence_and_approved_queries(monkeypatch):

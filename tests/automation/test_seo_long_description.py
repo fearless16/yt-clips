@@ -17,7 +17,7 @@ MAX_CHARS = seo._description_max_chars()
 RICH_DESCRIPTION = (
     "Virat Kohli batting analysis explains the complete cricket discussion "
     "without inventing a score or opponent. "
-).strip() * 2
+).strip() * 30
 
 
 def _make_item(description, title="Kohli ne maara CHHAKKA! 🔥"):
@@ -32,7 +32,7 @@ def _make_item(description, title="Kohli ne maara CHHAKKA! 🔥"):
 class TestDescriptionCharacterBudgetConfig:
 
     def test_config_has_right_sized_description_budgets(self):
-        assert 100 <= MIN_CHARS < TARGET_CHARS < MAX_CHARS <= 400
+        assert 100 <= MIN_CHARS < TARGET_CHARS < MAX_CHARS <= 4800
 
 
 class TestDescriptionCharacterQualityGate:
