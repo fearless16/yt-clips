@@ -816,15 +816,15 @@ def _build_enhance_stack(
                 # Crop only — super-res handles upscaling
                 filter_base = (
                     f"{enhance},split=2[bg_raw][fg_raw];"
-                    f"[bg_raw]crop={cw}:{ch}:{cx}:{cy}[bg];"
-                    f"[fg_raw]crop={cw}:{ch}:{cx}:{cy}[fg];"
+                    f"[bg_raw]crop='min({cw},iw)':'min({ch},ih)':'min({cx},iw-min({cw},iw))':'min({cy},ih-min({ch},ih))'[bg];"
+                    f"[fg_raw]crop='min({cw},iw)':'min({ch},ih)':'min({cx},iw-min({cw},iw))':'min({cy},ih-min({ch},ih))'[fg];"
                     f"[bg][fg]overlay=0:0"
                 )
             else:
                 # Fill-crop: scale up to cover frame, then crop to exact size
                 filter_base = (
                     f"{enhance},"
-                    f"crop={cw}:{ch}:{cx}:{cy},"
+                    f"crop='min({cw},iw)':'min({ch},ih)':'min({cx},iw-min({cw},iw))':'min({cy},ih-min({ch},ih))',"
                     f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
                     f"crop={target_w}:{target_h}"
                 )

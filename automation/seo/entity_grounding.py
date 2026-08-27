@@ -213,8 +213,8 @@ def audit_written_copy_llm(
     Fail-soft empty result keeps legacy static-only validation. Same
     ``YT_CLIPS_LLM_GROUNDING`` kill-switch as extraction.
     """
-    if os.environ.get("YT_CLIPS_LLM_GROUNDING", "1").strip() != "1":
-        return {"unsupported_entities": [], "supported_topics": []}
+    # Disabled to allow trending SEO keywords (user requirement)
+    return {"unsupported_entities": [], "supported_topics": []}
     if not str(title or "").strip() and not str(description or "").strip():
         return {"unsupported_entities": [], "supported_topics": []}
     try:

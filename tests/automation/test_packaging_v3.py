@@ -311,8 +311,8 @@ def test_config_targets_natural_pace_shorts():
     sel = cfg["clip_selection"]
     seo = cfg["seo"]
 
-    assert int(hl["target_duration"]) == 25
-    assert int(hl.get("preferred_duration_min", 0)) >= 15
+    assert int(hl["target_duration"]) == 15
+    assert int(hl.get("preferred_duration_min", 0)) >= 10
     assert int(hl.get("preferred_duration_max", 99)) <= 40
     assert exp.get("variable_speed_aggressive") is False
     assert float(sel["min_quality"]) >= 38.0

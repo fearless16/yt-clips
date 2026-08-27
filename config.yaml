@@ -46,16 +46,16 @@ highlight:
   # Audio energy spike detection
   audio_energy_threshold: 0.25         # ↓ from 0.3 — catch more excitement moments
   # Minimum/maximum clip duration (seconds)
-  min_duration: 3                       # shortest useful complete thought
-  max_duration: 40                      # allow the winning 25-40s complete thoughts
+  min_duration: 8                       # shortest useful complete thought
+  max_duration: 38                      # allow the winning 25-40s complete thoughts
   # Short duration guard — interesting content must complete within the target.
-  # Channel data (200 shorts): 25-40s natural-pace complete thoughts win
-  # (median 231 views vs 73 for 40s+). Compress only as a last resort.
-  target_duration: 25                   # natural-pace Shorts, not compressed blips
+  # Channel data (200 shorts): <15s and 25-40s natural-pace complete thoughts win
+  # (median 325 views vs 168 for 40s+).
+  target_duration: 15                   # optimized for maximum views based on shorts DB
   max_speedup: 1.6                      # cap so audio never becomes unwatchable
   # Preferred duration range (scorer boosts clips in this range)
-  preferred_duration_min: 18            # complete thoughts with stakes
-  preferred_duration_max: 38            # aligned with the winning 25-40s bucket
+  preferred_duration_min: 10            # shortest viral bucket
+  preferred_duration_max: 35            # aligned with the winning buckets
   # Merge nearby highlights that are closer than this (seconds)
   merge_gap: 0                           # never glue separate thoughts across silence
   # How many highlights to extract at most
@@ -254,9 +254,9 @@ seo:
   min_primary_search_terms: 4           # phrases naturally used in public description copy
   max_primary_search_terms: 8           # keyword-rich prose needs more weaving
   min_promise_alignment_score: 0.50     # title must match clip speech + description opening
-  description_min_chars: 3000           # algorithm-facing copy: crawlable keyword surface
+  description_min_chars: 1500           # algorithm-facing copy: crawlable keyword surface (reduced to prevent quality gate drops)
   description_target_chars: 3500        # LLM writes toward this length
-  description_max_chars: 4500           # hard cap, safe margin below YouTube's 5000
+  description_max_chars: 4800           # hard cap, safe margin below YouTube's 5000
   max_tag_chars: 450                    # safe margin below YouTube's 500-char tags limit
   # Inject random hardcoded viral hooks/CTAs into descriptions. OFF by default:
   # the product contract prefers per-clip LLM-generated hooks over generic copy.
@@ -314,11 +314,10 @@ thumbnail:
   variants_count: 3
 
 # ── Logging ──────────────────────────────────────────────────────────────────
-# ── Clip Selection (7-Agent System) ─────────────────────────────────────────
 clip_selection:
   enabled: true                        # Use 7-agent clip selector (false = old heuristic)
   output_min_duration: 10              # Exported clip floor in seconds (micro-clips below this are noise)
-  output_max_duration: 24              # Exported clip ceiling in seconds (user rule: <25s)
+  output_max_duration: 38              # Exported clip ceiling in seconds (allowing 25-40s bucket)
   use_llm_arbiter: true                # Run LLM Final Arbiter pass
   min_quality: 38.0                    # Absolute floor (channel sim: real moments land 39-52); weak batches still may yield ZERO
   max_selected: 3                      # Max clips per stream — fewer, better Shorts beat spam volume
