@@ -52,3 +52,13 @@ def pytest_collection_modifyitems(items):
 # Test suites must never fire live LLM grounding calls (cost + determinism).
 import os as _os
 _os.environ.setdefault("YT_CLIPS_LLM_GROUNDING", "0")
+
+
+@pytest.fixture(autouse=True)
+def _disable_live_vidiq(monkeypatch):
+    """Unit tests must not spend vidIQ credits or depend on its network."""
+    from utils.config import load_config
+
+    vidiq = load_config().setdefault("seo", {}).setdefault("vidiq", {})
+    monkeypatch.setitem(vidiq, "enabled", False)
+    monkeypatch.setitem(vidiq, "required", False)

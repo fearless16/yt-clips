@@ -251,12 +251,12 @@ def test_pipeline_attaches_content_type_to_highlights(tmp_path, monkeypatch):
         d.mkdir()
 
     segments = [
-        {"start": float(i * 10), "end": float(i * 10 + 8),
+        {"start": float(i * 10), "end": float(i * 10 + 10),
          "text": t}
         for i, t in enumerate([
-            "What a six that is, huge hit into the stands!",
+            "What a six and boundary that is, huge hit into the stands!",
             "I personally think the debate about the best format is boring",
-            "Bumrah takes the wicket, brilliant catch taken!",
+            "Bumrah takes the wicket after brilliant bowling and a catch!",
         ])
     ]
     (transcripts_dir / "video.json").write_text(json.dumps(segments), encoding="utf-8")
@@ -281,7 +281,7 @@ def test_pipeline_attaches_content_type_to_highlights(tmp_path, monkeypatch):
                 c.setdefault("complete_thought", True)
             return candidates
 
-        def select(self, scored, context, max_selected=3, min_quality=45.0):
+        def select(self, scored, context, max_selected=3, min_selected=0, min_quality=45.0):
             return [dict(c) for c in scored[:max_selected]]
 
     monkeypatch.setattr(cs_pipeline, "ClipSelector", FakeSelector)

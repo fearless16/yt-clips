@@ -37,11 +37,11 @@ def _log_vram(tag: str = ""):
 # ── whisper.cpp GPU path (ROCm > Vulkan > CPU) ─────────────────────────
 
 _WHISPER_CLI_CANDIDATES = [
-    # ROCm (HIP) — fastest for AMD GPUs, v1.8.4+ with gfx120X support
-    ("rocm", Path(__file__).parent / "whisper_rocm" / "whisper-cli.exe"),
     # Vulkan — cross-vendor fallback, older v1.0 build
     ("vulkan", Path(__file__).parent / "whisper_vulkan" / "whisper-cli.exe"),
     ("vulkan", Path(__file__).parent / "whisper_vulkan" / "whisper-cli"),
+    # ROCm (HIP) — fastest for AMD GPUs, v1.8.4+ with gfx120X support
+    ("rocm", Path(__file__).parent / "whisper_rocm" / "whisper-cli.exe"),
 ]
 
 # Model preferences: ROCm prefers large-v3-turbo, Vulkan uses small

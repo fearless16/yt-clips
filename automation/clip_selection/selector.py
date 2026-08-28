@@ -82,6 +82,7 @@ class ClipSelector:
         scored_candidates: list[dict],
         context: dict,
         max_selected: int = 10,
+        min_selected: int = 0,
         min_quality: float = 20.0,
     ) -> list[dict]:
         """Select top clips from scored candidates.
@@ -92,6 +93,7 @@ class ClipSelector:
             scored_candidates: Output of score_candidates()
             context: Full context dict (needed for LLM arbiter)
             max_selected: Max clips to select
+            min_selected: Best-effort minimum from non-hard-rejected candidates
             min_quality: Minimum weighted score to keep a clip (0-100)
 
         Returns:
@@ -106,7 +108,8 @@ class ClipSelector:
 
         # Quality threshold
         quality_pass = [c for c in keep if c.get("final_score", 0) >= min_quality]
-        if not quality_pass:
+        target_min = min(max(0, int(min_selected)), max_selected)
+        if not quality_pass and target_min == 0:
             log.warning(
                 "No non-rejected candidates passed quality threshold %.1f "
                 "— returning empty selection",
@@ -114,8 +117,15 @@ class ClipSelector:
             )
             return []
 
-        log.info("Quality pass: %d/%d candidates above %.1f",
-                 len(quality_pass), len(keep), min_quality)
+        if quality_pass:
+            log.info("Quality pass: %d/%d candidates above %.1f",
+                     len(quality_pass), len(keep), min_quality)
+        else:
+            log.warning(
+                "No candidates passed quality threshold %.1f — minimum-output "
+                "fallback may use non-hard-rejected candidates",
+                min_quality,
+            )
 
         # LLM arbiter refinement
         if self.use_llm_arbiter and len(quality_pass) >= 2:
@@ -136,7 +146,31 @@ class ClipSelector:
         else:
             final = quality_pass[:max_selected]
 
-        return final
+        if len(final) < target_min:
+            selected_windows = {
+                (c.get("start"), c.get("end"), c.get("text")) for c in final
+            }
+            # Floor-passing candidates stay ahead of below-floor fallbacks. The
+            # input is already sorted by the weighted score, which includes the
+            # hook and emotion agents' audio-energy signals.
+            backfill_pool = quality_pass
+            for candidate in backfill_pool:
+                identity = (
+                    candidate.get("start"), candidate.get("end"), candidate.get("text")
+                )
+                if identity in selected_windows:
+                    continue
+                final.append(candidate)
+                selected_windows.add(identity)
+                if len(final) >= target_min:
+                    break
+            log.warning(
+                "Minimum-output backfill selected %d/%d requested clips from "
+                "floor-passing, non-hard-rejected complete thoughts",
+                len(final), target_min,
+            )
+
+        return final[:max_selected]
 
     def _score_single(self, candidate: dict, context: dict) -> dict:
         """Run all 7 agents on one candidate."""
@@ -180,6 +214,7 @@ def select_best_clips(
     max_rms: float,
     match_context: dict | None = None,
     max_selected: int = 10,
+    min_selected: int = 0,
     use_llm_arbiter: bool = True,
     weights: dict[str, float] | None = None,
 ) -> list[dict]:
@@ -193,6 +228,7 @@ def select_best_clips(
         max_rms: Maximum RMS across full video
         match_context: Optional match info (players, teams, highlights)
         max_selected: Max clips to return
+        min_selected: Best-effort minimum from non-hard-rejected candidates
         use_llm_arbiter: Whether to run LLM refinement
         weights: Optional explicit agent weights supplied by the caller
 
@@ -212,6 +248,11 @@ def select_best_clips(
     }
 
     scored = selector.score_candidates(candidates, context)
-    final = selector.select(scored, context, max_selected=max_selected)
+    final = selector.select(
+        scored,
+        context,
+        max_selected=max_selected,
+        min_selected=min_selected,
+    )
 
     return final

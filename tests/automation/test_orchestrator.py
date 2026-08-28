@@ -291,6 +291,77 @@ def test_one_click_windows_script_uses_canonical_safe_cli():
     # Upload is opt-in: consent prompt must exist and gate the flag.
     assert 'set /p "UPLOAD=' in script
     assert '/i "%UPLOAD%"=="y"' in script
+    assert (
+        '"%PY%" -m automation.cli "%URL%" --sync --upload --schedule'
+        in script
+    )
+    assert (
+        '"%PY%" -m automation.cli "%URL%" --skip-instagram\n'
+        in script
+    )
+    assert (
+        '"%PY%" -m automation.cli "https://youtu.be/local" '
+        '--skip-download --skip-transcribe --skip-instagram'
+        in script
+    )
+
+
+def test_windows_launcher_collects_answers_before_work_starts():
+    script = (Path(__file__).parents[2] / "run_pipeline.bat").read_text(
+        encoding="utf-8"
+    )
+
+    last_question = max(script.index('set /p "MODE='), script.index('set /p "URL='),
+                        script.index('set /p "UPLOAD='))
+    first_work = min(script.index('"%PY%" -c '),
+                     script.index('"%PY%" -m automation.cli'))
+    assert last_question < first_work
+
+
+def test_windows_launcher_checks_oauth_only_for_explicit_upload():
+    script = (Path(__file__).parents[2] / "run_pipeline.bat").read_text(
+        encoding="utf-8"
+    )
+
+    assert script.count("ensure_fresh_tokens") == 1
+    assert "ensure_fresh_tokens(True)" in script
+    assert "setup_auth.py" not in script
+    assert script.index(":upload") < script.index("ensure_fresh_tokens(True)")
+    assert script.index("ensure_fresh_tokens(True)") < script.index(
+        '"%PY%" -m automation.cli "%URL%" --sync --upload --schedule'
+    )
+
+
+def test_windows_launcher_propagates_pipeline_failures():
+    script = (Path(__file__).parents[2] / "run_pipeline.bat").read_text(
+        encoding="utf-8"
+    )
+    commands = [
+        '"%PY%" -m automation.cli "%URL%" --sync --upload --schedule',
+        '"%PY%" -m automation.cli "%URL%" --skip-instagram',
+        ('"%PY%" -m automation.cli "https://youtu.be/local" '
+         '--skip-download --skip-transcribe --skip-instagram'),
+        ('"%PY%" dry_run.py "https://youtu.be/test" '
+         '--skip-download --skip-transcribe'),
+    ]
+
+    for command in commands:
+        assert f"{command}\nif errorlevel 1 goto failed" in script
+    assert ":failed" in script
+    assert "exit /b 1" in script[script.index(":failed"):]
+    assert "exit /b 0" in script[script.index(":done"):script.index(":failed")]
+
+
+def test_windows_launcher_has_no_mid_pipeline_questions():
+    script = (Path(__file__).parents[2] / "run_pipeline.bat").read_text(
+        encoding="utf-8"
+    )
+
+    first_pipeline_command = min(
+        script.index('"%PY%" -m automation.cli'),
+        script.index('"%PY%" dry_run.py'),
+    )
+    assert "set /p " not in script[first_pipeline_command:]
 
 
 def test_downloader_overwrites_previous_source_video():

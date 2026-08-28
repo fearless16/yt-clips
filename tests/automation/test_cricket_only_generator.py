@@ -1,5 +1,3 @@
-import pytest
-pytestmark = pytest.mark.skip()
 """Hard cricket-only and context-aware short generation contracts."""
 
 import pytest
@@ -16,6 +14,23 @@ def test_cricket_alias_resolves_yuvi_but_never_uv():
     )
     canonical = "Yuvraj Singh says Jasprit Bumrah is brilliant"
     assert correct_cricket_spelling(correct_cricket_spelling(canonical)) == canonical
+
+
+def test_transliterated_team_names_are_canonicalized_for_source_matching():
+    from automation.clip_selection.pipeline import _filter_source_match_candidates
+    from automation.seo.cricket_context import correct_cricket_spelling
+
+    assert correct_cricket_spelling("inglainda aur paakistaana") == (
+        "England aur Pakistan"
+    )
+    candidates = [
+        {"text": "inglainda ne paakistaana ke paancha wicket lie"},
+        {"text": "India kee bolinga kharaaba thee"},
+        {"text": "paakistaana ko eka wicket chaahie"},
+    ]
+    assert _filter_source_match_candidates(
+        candidates, "PAK vs ENG Test", minimum_matches=2
+    ) == [candidates[0], candidates[2]]
 
 
 def test_cricket_context_gate_understands_alias_and_rejects_tech_chatter():
@@ -150,6 +165,96 @@ def test_source_match_filter_falls_back_when_too_few_candidates_match():
     ) == candidates
 
 
+def test_livestream_windows_join_short_setup_and_payoff_without_filler():
+    from automation.clip_selection.pipeline import _build_livestream_windows
+
+    thoughts = [
+        {"start": 0.0, "end": 5.0, "text": "They were under huge pressure at that stage", "score": 4.0},
+        {"start": 5.0, "end": 12.0, "text": "but this fifty run partnership has changed the Test match", "score": 9.0},
+        {"start": 12.0, "end": 17.0, "text": "hello bro like the stream and subscribe", "score": 20.0},
+        {"start": 17.0, "end": 25.0, "text": "England need one wicket to break Pakistan again", "score": 8.0},
+    ]
+
+    windows = _build_livestream_windows(thoughts, min_duration=10, max_duration=20)
+
+    assert windows
+    assert all(10 <= window["end"] - window["start"] <= 20 for window in windows)
+    assert any(
+        window["start"] == 0.0
+        and window["end"] == 12.0
+        and "partnership" in window["text"]
+        for window in windows
+    )
+    assert all("subscribe" not in window["text"].lower() for window in windows)
+
+
+def test_livestream_windows_require_cricket_evidence_inside_the_cut():
+    from automation.clip_selection.pipeline import _build_livestream_windows
+
+    thoughts = [
+        {"start": 0.0, "end": 6.0, "text": "This captain is completely wrong", "score": 12.0},
+        {"start": 6.0, "end": 13.0, "text": "I cannot believe this decision at all", "score": 14.0},
+    ]
+
+    assert _build_livestream_windows(
+        thoughts, min_duration=10, max_duration=20
+    ) == []
+
+
+def test_livestream_windows_reject_live_views_strategy_chatter():
+    from automation.clip_selection.pipeline import _build_livestream_windows
+
+    thoughts = [{
+        "start": 0.0,
+        "end": 16.0,
+        "text": (
+            "India pe laaiva kara rahaa hoon, vyooja ke lie jo live match "
+            "hai usako lagaanaa padataa hai, this is strategy"
+        ),
+        "score": 20.0,
+    }]
+
+    assert _build_livestream_windows(
+        thoughts, min_duration=10, max_duration=20
+    ) == []
+
+
+def test_livestream_windows_reject_long_tangent_with_cricket_only_at_the_end():
+    from automation.clip_selection.pipeline import _build_livestream_windows
+
+    thoughts = [{
+        "start": 0.0,
+        "end": 30.0,
+        "text": (
+            "I had a girlfriend after we broke up now I will directly marry "
+            "and people say crush can happen later too anyway what is the "
+            "whole point of discussing relationships and old crushes because "
+            "none of this has anything to do with the event we are watching "
+            "and the conversation keeps wandering without making a useful point "
+            "England cricket score"
+        ),
+        "score": 20.0,
+    }]
+
+    assert _build_livestream_windows(
+        thoughts, min_duration=10, max_duration=38
+    ) == []
+
+
+def test_diverse_livestream_windows_do_not_return_same_moment_variants():
+    from automation.clip_selection.pipeline import _select_diverse_windows
+
+    windows = [
+        {"start": 0.0, "end": 20.0, "text": "a", "score": 10.0},
+        {"start": 2.0, "end": 21.0, "text": "b", "score": 9.0},
+        {"start": 40.0, "end": 55.0, "text": "c", "score": 8.0},
+    ]
+
+    selected = _select_diverse_windows(windows, max_candidates=3)
+
+    assert selected == [windows[0], windows[2]]
+
+
 def test_export_gate_blocks_stale_non_cricket_highlight():
     from export import _is_exportable_cricket_highlight
 
@@ -263,8 +368,8 @@ def test_short_duration_config_prioritizes_natural_pace_complete_thoughts():
     from utils.config import load_config
 
     highlight = load_config()["highlight"]
-    assert highlight["min_duration"] <= 4
-    assert 20 <= highlight["target_duration"] <= 30
+    assert highlight["min_duration"] >= 8
+    assert highlight["target_duration"] == 15
     assert highlight["max_duration"] <= 45
     assert highlight["merge_gap"] == 0
 
@@ -280,5 +385,5 @@ def test_seo_enforces_mobile_title_and_focused_search_term_caps():
     })
 
     assert len(result["title"]) <= 70
-    assert len(result["description"]) <= 4500
+    assert len(result["description"]) <= 4800
     assert len(result["search_terms"]) <= 26

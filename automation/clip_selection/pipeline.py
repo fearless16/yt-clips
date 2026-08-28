@@ -230,18 +230,37 @@ def _filter_source_match_candidates(
     minimum_matches: int = 3,
 ) -> list[dict]:
     """Prefer the advertised match without turning a generic stream into a hard gate."""
-    from automation.seo.cricket_context import find_canonical_entities
+    from automation.seo.cricket_context import (
+        correct_cricket_spelling,
+        find_canonical_entities,
+    )
 
-    source_teams = set(find_canonical_entities(source_title).get("teams", []))
+    source_teams = set(find_canonical_entities(
+        correct_cricket_spelling(source_title)
+    ).get("teams", []))
     if len(source_teams) < 2:
         return candidates
-    matched = [
-        candidate for candidate in candidates
-        if source_teams.intersection(
-            find_canonical_entities(str(candidate.get("text", ""))).get("teams", [])
+    candidates_with_teams = [
+        (
+            candidate,
+            set(find_canonical_entities(correct_cricket_spelling(
+                str(candidate.get("text", ""))
+            )).get("teams", [])),
         )
+        for candidate in candidates
     ]
-    return matched if len(matched) >= max(1, int(minimum_matches)) else candidates
+    required = max(1, int(minimum_matches))
+    source_only = [
+        candidate for candidate, teams in candidates_with_teams
+        if source_teams.intersection(teams) and not (teams - source_teams)
+    ]
+    if len(source_only) >= required:
+        return source_only
+    matched = [
+        candidate for candidate, teams in candidates_with_teams
+        if source_teams.intersection(teams)
+    ]
+    return matched if len(matched) >= required else candidates
 
 
 def _load_source_context(input_dir: str | Path) -> str:
@@ -486,6 +505,138 @@ def _merge_windows(windows: list[dict], gap: float) -> list[dict]:
     return merged
 
 
+_LIVESTREAM_FILLER_PATTERNS = (
+    "like the video", "like the stream", "like karate", "laaika karate",
+    "subscribe", "sabsakraaiba", "do subscribe", "channel ko",
+    "welcome to the stream", "welcome welcome", "velakama",
+    "hello bro", "hello hello", "helo bro", "helo helo",
+    "support banaye", "support bana", "saporta bana",
+    "views ke liye", "vyooja ke lie", "this is strategy", "disa ija a stretajee",
+    "live kar raha", "laaiva kara rahaa", "live match hota", "laaiva match hotaa",
+    "1080p", "maapha keejiegaa", "idhar-udhara", "idhara-udhara",
+)
+
+
+def _is_livestream_filler(text: str) -> bool:
+    """Identify greetings, chat replies, and channel CTA speech."""
+    normalized = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
+    return any(pattern in normalized for pattern in _LIVESTREAM_FILLER_PATTERNS)
+
+
+def _has_dense_cricket_evidence(text: str) -> bool:
+    """Reject long tangents that mention cricket only as an afterthought."""
+    from automation.seo.cricket_context import correct_cricket_spelling
+
+    canonical = correct_cricket_spelling(str(text or "")).casefold()
+    words = re.findall(r"\b\w+\b", canonical)
+    signals = re.findall(
+        r"\b(?:cricket|match|test|t20|odi|wicket|run|score|over|ball|"
+        r"batting|bowling|innings?|partnership|four|six|boundary|century|"
+        r"batsman|batter|bowler|pakistan|england|india|australia|"
+        r"sri\s+lanka|south\s+africa|new\s+zealand)\b",
+        canonical,
+    )
+    return len(signals) >= 2 and len(signals) / max(len(words), 1) >= 0.07
+
+
+def _build_livestream_windows(
+    thoughts: list[dict],
+    min_duration: float,
+    max_duration: float,
+    max_gap: float = 1.5,
+) -> list[dict]:
+    """Join adjacent transcript thoughts into complete Shorts-sized moments.
+
+    Livestream speech rarely puts setup and payoff in one caption sentence.
+    Generate bounded forward windows from every clean thought, stopping at
+    silence or stream-management filler. Cricket must be evidenced by the
+    resulting script itself; the source title cannot rescue generic chatter.
+    """
+    from automation.seo.cricket_context import is_cricket_content
+
+    minimum = max(0.0, float(min_duration))
+    maximum = max(minimum, float(max_duration))
+    ordered = sorted(thoughts, key=lambda item: float(item.get("start", 0)))
+    windows: list[dict] = []
+    seen: set[tuple[float, float]] = set()
+
+    for start_index, first in enumerate(ordered):
+        if _is_livestream_filler(first.get("text", "")):
+            continue
+        start = float(first.get("start", 0))
+        parts: list[str] = []
+        member_scores: list[float] = []
+        previous_end = start
+
+        for thought in ordered[start_index:]:
+            thought_start = float(thought.get("start", 0))
+            thought_end = float(thought.get("end", 0))
+            if thought_end <= thought_start:
+                continue
+            if parts and thought_start - previous_end > max_gap:
+                break
+            if _is_livestream_filler(thought.get("text", "")):
+                break
+            if thought_end - start > maximum:
+                break
+
+            parts.append(str(thought.get("text", "")).strip())
+            member_scores.append(float(thought.get("score", 0) or 0))
+            previous_end = thought_end
+            duration = thought_end - start
+            if duration < minimum:
+                continue
+
+            text = " ".join(part for part in parts if part).strip()
+            if not is_cricket_content(text) or not _has_dense_cricket_evidence(text):
+                continue
+            identity = (start, thought_end)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            windows.append({
+                "start": start,
+                "end": thought_end,
+                "text": text,
+                "score": round(max(member_scores, default=0.0), 4),
+            })
+
+    return windows
+
+
+def _select_diverse_windows(
+    windows: list[dict],
+    max_candidates: int,
+    overlap_threshold: float = 0.5,
+) -> list[dict]:
+    """Keep the strongest variant of a moment instead of near-duplicates."""
+    selected: list[dict] = []
+    ranked = sorted(windows, key=lambda item: item.get("score", 0), reverse=True)
+    for candidate in ranked:
+        start = float(candidate["start"])
+        end = float(candidate["end"])
+        duration = max(end - start, 0.0)
+        if duration <= 0:
+            continue
+        duplicate = False
+        for existing in selected:
+            overlap = max(
+                0.0,
+                min(end, float(existing["end"]))
+                - max(start, float(existing["start"])),
+            )
+            shorter = min(duration, float(existing["end"]) - float(existing["start"]))
+            if shorter > 0 and overlap / shorter >= overlap_threshold:
+                duplicate = True
+                break
+        if duplicate:
+            continue
+        selected.append(candidate)
+        if len(selected) >= max(0, int(max_candidates)):
+            break
+    return selected
+
+
 # ── Heuristic pre-filter (same as highlight.py) ─────────────────────────
 
 def _score_segment(
@@ -631,12 +782,11 @@ def detect_highlights(
         _write_empty_highlights(output_path)
         log.warning("Cricket-only gate rejected non-cricket source; wrote empty highlights")
         return []
-    segments = _filter_cricket_candidates(segments, source_context)
-    if not segments:
-        _write_empty_highlights(output_path)
-        log.warning("Cricket-only gate removed every non-cricket segment")
-        return []
-    log.info("Loaded %d complete cricket thoughts from %s", len(segments), t_path)
+    # Keep generic setup/payoff sentences until window construction. A phrase
+    # such as "this changes everything" is weak alone but essential beside a
+    # concrete wicket or scoreline. Each completed window must independently
+    # pass the cricket gate in _build_livestream_windows().
+    log.info("Loaded %d complete transcript thoughts from %s", len(segments), t_path)
 
     # ── Audio RMS extraction ───────────────────────────────────────────────
     rms_list = _extract_audio_rms(video_path)
@@ -686,27 +836,24 @@ def detect_highlights(
         })
 
     all_scores = [s["score"] for s in scored]
-    max_score = max(all_scores) if all_scores else 1.0
+    max_score = max(all_scores) if all_scores else 0.0
     min_score = min(all_scores) if all_scores else 0.0
-    threshold = min_score + (max_score - min_score) * h_cfg["audio_energy_threshold"]
-    candidates = [s for s in scored if s["score"] >= threshold]
-
-    log.info("Score range: %.2f -> %.2f | threshold: %.2f | candidates: %d/%d",
-             min_score, max_score, threshold, len(candidates), len(scored))
-
-    min_dur = h_cfg["min_duration"]
-
-    windows = []
-    for c in candidates:
-        seg_duration = c["end"] - c["start"]
-        if seg_duration < min_dur:
-            continue
-        win_start = c["start"]
-        win_end = c["end"]
-        windows.append({"start": win_start, "end": win_end, "score": c["score"], "text": c.get("text", "")})
-
-    windows.sort(key=lambda w: w["start"])
-    merged = _merge_windows(windows, h_cfg["merge_gap"])
+    windows = _build_livestream_windows(
+        scored,
+        min_duration=max(
+            float(h_cfg["min_duration"]),
+            float(cfg.get("clip_selection", {}).get("output_min_duration", 0) or 0),
+        ),
+        max_duration=float(h_cfg["max_duration"]),
+    )
+    selection_cfg = cfg.get("clip_selection", {})
+    discovery_limit = int(selection_cfg.get("discovery_candidates", 60))
+    merged = _select_diverse_windows(windows, discovery_limit)
+    log.info(
+        "Livestream discovery: score range %.2f -> %.2f | %d coherent windows | "
+        "%d diverse candidates",
+        min_score, max_score, len(windows), len(merged),
+    )
 
     # Stamp every candidate with its content angle so the LLM arbiter can
     # weigh it and shorts_intelligence can learn which angles win.
@@ -715,17 +862,25 @@ def detect_highlights(
         w["content_type"] = classify_content_type(str(w.get("text", "")))
 
     merged.sort(key=lambda w: w["score"], reverse=True)
-    selection_cfg = cfg.get("clip_selection", {})
     if selection_cfg.get("prefer_source_match", True):
-        before = len(merged)
-        merged = _filter_source_match_candidates(
+        source_matches = _filter_source_match_candidates(
             merged,
             source_title,
-            minimum_matches=int(selection_cfg.get("source_match_min_candidates", 3)),
+            minimum_matches=1,
         )
-        if len(merged) != before:
-            log.info("Source-match filter: %d/%d candidates match %s", len(merged), before, source_title)
-    merged = merged[:MAX_CANDIDATES]
+        source_windows = {
+            (candidate.get("start"), candidate.get("end"))
+            for candidate in source_matches
+        }
+        for candidate in merged:
+            candidate["source_match"] = (
+                candidate.get("start"), candidate.get("end")
+            ) in source_windows
+        log.info(
+            "Source-match preference: %d/%d candidates match %s",
+            sum(1 for candidate in merged if candidate.get("source_match")),
+            len(merged), source_title,
+        )
 
     # ── 7-Agent scoring ────────────────────────────────────────────────────
     log.info("Running 7-agent clip selection on %d candidates...", len(merged))
@@ -791,11 +946,23 @@ def detect_highlights(
     except Exception as exc:
         log.warning("Shorts Intelligence policy unavailable: %s", exc)
 
+    # Keep source-grounded moments visible to the arbiter without excluding
+    # stronger cricket discussion that genuinely occurred in the livestream.
+    scored_candidates.sort(
+        key=lambda candidate: (
+            candidate.get("final_score", 0)
+            + (4.0 if candidate.get("source_match") else 0.0)
+        ),
+        reverse=True,
+    )
+
     # Filter and select top clips
     min_quality = cfg.get("clip_selection", {}).get("min_quality", 20.0)
     max_selected = cfg.get("clip_selection", {}).get("max_selected", MAX_SELECTED_CLIPS)
+    min_selected = cfg.get("clip_selection", {}).get("min_selected", 0)
     top = selector.select(scored_candidates, context_for_agents,
-                          max_selected=max_selected, min_quality=min_quality)
+                          max_selected=max_selected, min_selected=min_selected,
+                          min_quality=min_quality)
 
     top.sort(key=lambda w: w["start"])
 

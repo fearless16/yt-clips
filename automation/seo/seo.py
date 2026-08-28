@@ -5,6 +5,7 @@ clip-specific and must promise the same thought that the clip actually opens
 with; failed attempts retain their complete research evidence for retry.
 """
 import json
+import math
 import os
 import re
 import time
@@ -32,6 +33,7 @@ from .context_engine import (
     build_cricket_evidence_pack,
     build_grounded_search_queries,
 )
+from .vidiq import VidiqClient
 
 SUGGEST_CACHE = TTLCache(maxsize=16, ttl=600)
 TREND_CACHE = TTLCache(maxsize=4, ttl=300)
@@ -872,6 +874,116 @@ def _repair_truncated_json(s: str) -> Optional[Dict]:
     return None
 
 
+def _get_vidiq_context(approved_queries: List[str], grounding_text: str):
+    """Return grounded vidIQ context and the accepted source recommendations."""
+    vidiq_cfg = cfg.get("seo", {}).get("vidiq", {})
+    client = VidiqClient(
+        enabled=vidiq_cfg.get("enabled", False),
+        timeout_seconds=vidiq_cfg.get("timeout_seconds", 8),
+        endpoint=vidiq_cfg.get("endpoint", "https://mcp.vidiq.com/mcp"),
+    )
+    seed = next((str(query).strip() for query in approved_queries if str(query).strip()), "")
+    if not seed:
+        return "", client.audit, {"keywords": [], "titles": []}
+
+    allowed = set(re.findall(r"[a-z0-9]+", grounding_text.casefold()))
+    allowed.update({"cricket", "shorts", "match", "video"})
+    grounded_source_entities = find_canonical_entities(grounding_text)
+    grounded_source_players = set(grounded_source_entities["players"])
+    grounded_source_teams = set(grounded_source_entities["teams"])
+
+    def clean_text(value: object) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()[:120]
+        return re.sub(r"[^A-Za-z0-9 #&'?!:,.-]", "", text).strip()
+
+    def clean_score(value: object) -> Optional[float]:
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return None
+        return score if math.isfinite(score) else None
+
+    def grounded(value: object) -> bool:
+        words = set(re.findall(r"[a-z0-9]+", clean_text(value).casefold())) - STOP_WORDS
+        return bool(words) and words <= allowed
+
+    def grounded_title(value: object) -> bool:
+        text = clean_text(value)
+        entities = find_canonical_entities(text)
+        players = set(entities["players"])
+        teams = set(entities["teams"])
+        return bool(players or teams) and (
+            players <= grounded_source_players and teams <= grounded_source_teams
+        )
+
+    keyword_data = client.call_tool(
+        vidiq_cfg.get("keyword_tool", "vidiq_keyword_research"),
+        {
+            "mode": "research",
+            "keyword": seed,
+            "country": "IN",
+            "includeRelated": True,
+        },
+    )
+    ranked_keywords = []
+    accepted_keywords = []
+    if isinstance(keyword_data, dict):
+        keyword_rows = []
+        if isinstance(keyword_data.get("seedKeyword"), dict):
+            keyword_rows.append(keyword_data["seedKeyword"])
+        related = keyword_data.get("relatedKeywords")
+        if isinstance(related, list):
+            keyword_rows.extend(related)
+        for item in keyword_rows:
+            if not isinstance(item, dict):
+                continue
+            text = clean_text(item.get("keyword"))
+            if text and grounded(text):
+                score = clean_score(item.get("volume"))
+                ranked_keywords.append(f"- {text}" + (f" (volume {score})" if score is not None else ""))
+                if text.casefold() not in {value.casefold() for value in accepted_keywords}:
+                    accepted_keywords.append(text)
+
+    title_data = client.call_tool(
+        vidiq_cfg.get("title_tool", "vidiq_generate_titles"),
+        {
+            "title": seed[:500],
+            "description": grounding_text[:5000],
+            "analysisSummary": grounding_text[:4000],
+            "numTitles": 5,
+            "type": "short",
+            "language": "en",
+            "regionCode": "IN",
+        },
+    )
+    ranked_titles = []
+    accepted_titles = []
+    if isinstance(title_data, dict):
+        title_rows = title_data.get("titles")
+        if not isinstance(title_rows, list):
+            title_rows = []
+        for item in title_rows:
+            if not isinstance(item, dict):
+                continue
+            text = clean_text(item.get("title"))
+            text = re.sub(r"(?:^|\s)#[A-Za-z0-9_]+", "", text).strip()
+            if text and grounded_title(text):
+                score = clean_score(item.get("score"))
+                ranked_titles.append(f"- {text}" + (f" (score {score})" if score is not None else ""))
+                if text.casefold() not in {value.casefold() for value in accepted_titles}:
+                    accepted_titles.append(text)
+
+    sections = []
+    if ranked_keywords:
+        sections.append("Grounded India keyword rankings:\n" + "\n".join(ranked_keywords[:8]))
+    if ranked_titles:
+        sections.append("Grounded title scoring references:\n" + "\n".join(ranked_titles[:5]))
+    return "\n".join(sections), client.audit, {
+        "keywords": accepted_keywords,
+        "titles": accepted_titles,
+    }
+
+
 # ── Main SEO generation ─────────────────────────────────────────────────────────
 
 def generate_clip_seo(
@@ -994,6 +1106,19 @@ def generate_clip_seo(
     )
     approved_queries = evidence_pack["approved_search_queries"]
     grounded_entities = evidence_pack["grounded_entities"]
+    vidiq_context, vidiq_audit, vidiq_recommendations = _get_vidiq_context(
+        approved_queries,
+        " ".join((video_title, video_description, transcript, scorecard, *match_facts)),
+    )
+    vidiq_required = bool(cfg.get("seo", {}).get("vidiq", {}).get("required", False))
+    if vidiq_required:
+        vidiq_titles = list(vidiq_recommendations.get("titles") or [])
+        vidiq_keywords = list(vidiq_recommendations.get("keywords") or [])
+        if not vidiq_audit.get("used") or not vidiq_titles or not vidiq_keywords:
+            raise SEOGenerationError(
+                f"SEO blocked for {clip_id}: vidIQ required but returned no grounded title/keywords"
+            )
+        approved_queries = vidiq_keywords
 
     # Entity allow-lists must exist BEFORE any repair path runs: the
     # corrective LLM prompt needs them, so compute them right after the
@@ -1042,6 +1167,21 @@ def generate_clip_seo(
     )
     if ocr_text:
         user_prompt += ocr_text
+    if vidiq_context:
+        user_prompt += (
+            "\n\nVIDIQ INDIA SEO CONTEXT (ranking guidance only):\n"
+            f"{vidiq_context}\nUse it to rank grounded wording. It is not factual "
+            "evidence and cannot introduce names, events, or promises."
+        )
+    if vidiq_required:
+        user_prompt += (
+            "\n\nEXCLUSIVE SEO SOURCE CONTRACT:\n"
+            f"Use this exact vidIQ title: {vidiq_titles[0]}\n"
+            "Use only these vidIQ search terms/tags:\n"
+            + "\n".join(f"- {term}" for term in vidiq_keywords)
+            + "\nYou are formatting the evidence-backed description only. Do not "
+            "invent or substitute any title, keyword, tag, or hashtag."
+        )
 
     user_prompt += (
         "\n\nENTITY GROUNDING (canonical cricket knowledge):\n"
@@ -1066,6 +1206,14 @@ def generate_clip_seo(
                                      model_override=model_override,
                                      sys_instruction=sys_instruction,
                                      salvage_tmpl=salvage_tmpl)
+    if vidiq_required:
+        result["title"] = vidiq_titles[0]
+        result["search_terms"] = vidiq_keywords
+        result["primary_search_terms"] = vidiq_keywords[:_seo_config_int(
+            "min_primary_search_terms", 4, 1, 10
+        )]
+        result["tags"] = vidiq_keywords
+        result["hashtags"] = ["#Shorts"]
     result = _enforce_limits(result, is_shorts=is_shorts)
 
     # Copy audit: the writer model can hallucinate celebrity names the clip
@@ -1115,6 +1263,10 @@ def generate_clip_seo(
                 clip_id, before - len(approved_queries),
             )
         floor = _seo_config_int("min_search_terms", 24, 1, 30)
+        if len(approved_queries) < floor and vidiq_required:
+            raise SEOGenerationError(
+                f"SEO blocked for {clip_id}: vidIQ terms fell below the grounded minimum after audit"
+            )
         if len(approved_queries) < floor:
             # The dedupe budget in the evidence pack was consumed by the
             # dirty queries, so deterministic local combos never made it in.
@@ -1152,6 +1304,10 @@ def generate_clip_seo(
             transcript,
             str(result.get("description") or ""),
         ) < min_alignment:
+            if vidiq_required:
+                raise SEOGenerationError(
+                    f"SEO blocked for {clip_id}: vidIQ title lost grounding during copy audit"
+                )
             repaired = _llm_repair_seo(
                 clip_id, user_prompt, result,
                 ["Scrubbing the ungrounded name gutted the title's core "
@@ -1184,9 +1340,19 @@ def generate_clip_seo(
     # 'Southee -> Saud Shakeel' hallucination class. Ordinary capitalized
     # phrases ('Straight Talk') are not names and must never trigger here;
     # creative hallucinations outside any catalog are the copy-audit's job.
-    # Title attribution check disabled to allow custom SEO trending formats
-    unknown_title_people = []
+    unknown_title_people = [
+        name for name in find_canonical_entities(
+            str(result.get("title") or ""), player_catalog
+        )["players"]
+        if name.casefold() not in allowed_people
+        and not name_vouched_by_topics(name, supported_topics)
+    ]
     if unknown_title_people:
+        if vidiq_required:
+            raise SEOGenerationError(
+                f"SEO blocked for {clip_id}: vidIQ title contains ungrounded player(s) "
+                f"{', '.join(unknown_title_people)}"
+            )
         repaired = _llm_repair_seo(
             clip_id, user_prompt, result,
             [f"Title names ungrounded player(s): "
@@ -1227,9 +1393,10 @@ def generate_clip_seo(
     }
 
     def _title_has_grounded_entity(candidate: object) -> bool:
-        # User requested custom SEO trending titles that do not match the static
-        # player catalog. We disable this strict check to allow custom titles.
-        return True
+        entities = find_canonical_entities(str(candidate or ""), player_catalog)
+        return any(name.casefold() in allowed_people for name in entities["players"]) or any(
+            name in grounded_teams for name in entities["teams"]
+        )
 
     # Only enforce a grounded entity when the title is otherwise promise-aligned
     # (alignment OK). If alignment is off the hard promise gate (further down)
@@ -1242,6 +1409,10 @@ def generate_clip_seo(
         str(result.get("title") or ""), transcript,
         str(result.get("description") or ""),
     ) >= _entity_min_alignment and not _title_has_grounded_entity(result.get("title")):
+        if vidiq_required:
+            raise SEOGenerationError(
+                f"SEO blocked for {clip_id}: vidIQ title has no grounded player/team entity"
+            )
         repaired = _llm_repair_seo(
             clip_id, user_prompt, result,
             [
@@ -1260,8 +1431,8 @@ def generate_clip_seo(
             )
         if not _title_has_grounded_entity(repaired.get("title")):
             raise SEOGenerationError(
-                f"SEO blocked for {clip_id}: repaired title still has no "
-                "grounded player/team entity"
+                f"SEO blocked for {clip_id}: repaired title remains ungrounded "
+                "and has no verified player/team entity"
             )
         result = repaired
         log.warning(
@@ -1279,8 +1450,12 @@ def generate_clip_seo(
     public_copy_players = set(
         find_canonical_entities(public_copy_text, player_catalog)["players"]
     ) - clip_players
-    api_tag_players = set()
-    if api_tag_players and not public_copy_players:
+    api_tag_players = {
+        name for name in find_canonical_entities(api_tag_text, player_catalog)["players"]
+        if name.casefold() not in allowed_people
+        and not name_vouched_by_topics(name, supported_topics)
+    }
+    if api_tag_players:
         raise SEOGenerationError(
             f"SEO blocked for {clip_id}: ungrounded entities "
             + ", ".join(sorted(api_tag_players))
@@ -1297,10 +1472,11 @@ def generate_clip_seo(
     def _title_vouched(name: str) -> bool:
         return name_vouched_by_topics(name, supported_topics)
 
-    extra_players = set()
-    extra_teams = set()
-    if extra_players:
-        pass
+    extra_players = {
+        name for name in rendered_entities["players"]
+        if name.casefold() not in allowed_people and not _title_vouched(name)
+    }
+    extra_teams = set(rendered_entities["teams"]) - grounded_teams
     if extra_players or extra_teams:
         extras = sorted(extra_players | extra_teams)
         raise SEOGenerationError(
@@ -1377,6 +1553,7 @@ def generate_clip_seo(
         )
     result["packaging_version"] = PACKAGING_VERSION
     result["promise_alignment_score"] = alignment
+    result["vidiq_audit"] = vidiq_audit
 
     return result
 

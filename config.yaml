@@ -52,7 +52,7 @@ highlight:
   # Channel data (200 shorts): <15s and 25-40s natural-pace complete thoughts win
   # (median 325 views vs 168 for 40s+).
   target_duration: 15                   # optimized for maximum views based on shorts DB
-  max_speedup: 1.6                      # cap so audio never becomes unwatchable
+  max_speedup: 1.25                     # cap so audio never becomes unwatchable
   # Preferred duration range (scorer boosts clips in this range)
   preferred_duration_min: 10            # shortest viral bucket
   preferred_duration_max: 35            # aligned with the winning buckets
@@ -134,7 +134,7 @@ export:
   fps: 30                               # Target FPS (motion interpolation fills gaps)
   video_bitrate: "15M"                  # ↓ from 25M — Shorts on phones, 15M is plenty
   audio_bitrate: "192k"                 # ↓ from 320k — mobile speakers, 192k indistinguishable
-  crf: 22                               # ↑ from 18 — saves 30-40% encode time, invisible on mobile
+  crf: 18                               # preserve detail across YouTube's second-generation encode
   super_resolution: false                 # AI 4x upscale via Real-ESRGAN (GPU only; auto-skips on CPU)
   super_res_device: "auto"               # "auto" | "cuda:0" | "cuda:1" ... (ignored on CPU)
   max_workers: 0                         # 0 = auto (1 per GPU for super-res, else 2-4 CPU); cap parallelism
@@ -143,6 +143,12 @@ export:
   # Hardware encoder — auto-detected in export.py; config is fallback
   encoder: "libx264"                      # h264_videotoolbox (Mac) | h264_nvenc (NVIDIA) | libx264 (CPU)
   encoder_preset: "medium"              # Only used by libx264; videotoolbox ignores this
+  face_target_width_ratio: 0.40          # medium close-up without the published extreme face zoom
+  denoise_luma_spatial: 0.8              # mild webcam cleanup; preserve skin texture
+  denoise_chroma_spatial: 0.6
+  denoise_luma_temporal: 1.2
+  denoise_chroma_temporal: 0.9
+  sharpen_amount: 0.25                   # one restrained 3x3 pass; no detail synthesis
   # Crop smoothing factor (0–1); lower = smoother but more lag
   crop_smooth_factor: 0.2
   # ─── Cinematic Transitions ─────────────────────────────────────────────────
@@ -249,7 +255,7 @@ testing:
 # descriptions (feed-invisible), grounded API-only search terms/tags.
 seo:
   title_max_chars: 60                   # one premise, mobile-first, 1-2 emojis
-  min_search_terms: 24                  # long-tail contract: real viewer searches
+  min_search_terms: 4                   # vidIQ-only: fail if it returns fewer grounded terms
   max_search_terms: 26                  # around 25 as channel policy
   min_primary_search_terms: 4           # phrases naturally used in public description copy
   max_primary_search_terms: 8           # keyword-rich prose needs more weaving
@@ -264,6 +270,13 @@ seo:
   inter_clip_sleep_s: 30
   # Max hashtags for Shorts uploads — champions use 2-3, not 15.
   max_hashtags: 3
+  vidiq:
+    enabled: true
+    required: true                       # fail closed; never ship generic/LLM SEO fallback
+    endpoint: "https://mcp.vidiq.com/mcp"
+    timeout_seconds: 8
+    keyword_tool: "vidiq_keyword_research"
+    title_tool: "vidiq_generate_titles"
 
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
@@ -319,8 +332,10 @@ clip_selection:
   output_min_duration: 10              # Exported clip floor in seconds (micro-clips below this are noise)
   output_max_duration: 38              # Exported clip ceiling in seconds (allowing 25-40s bucket)
   use_llm_arbiter: true                # Run LLM Final Arbiter pass
-  min_quality: 38.0                    # Absolute floor (channel sim: real moments land 39-52); weak batches still may yield ZERO
+  min_quality: 38.0                    # Hard publishability floor after transcript-aware discovery
+  min_selected: 3                      # Refill arbiter omissions only from clips that cleared the floor
   max_selected: 3                      # Max clips per stream — fewer, better Shorts beat spam volume
+  discovery_candidates: 60             # Deep scan across a long stream before final ranking
   prefer_source_match: true             # For match streams, prioritize clips naming either advertised team
   source_match_min_candidates: 3        # Fall back to all cricket clips if evidence is too sparse
   dedup_enabled: true                   # Reject windows already selected in prior runs

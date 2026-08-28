@@ -228,8 +228,14 @@ def run(
         if not skip_transcribe:
             try:
                 with run_phase(log, "stage 2 Transcribe", "transcribe", run_id=rid):
-                    from transcribe import transcribe
-                    transcribe(video_path, transcript_path)
+                    from automation.transcript import fetch
+                    import json
+                    t_data = fetch(url, output_path=transcript_path, video_path=video_path)
+                    if t_data and t_data.get("segments"):
+                        with open(transcript_path, "w", encoding="utf-8") as f:
+                            json.dump(t_data, f, indent=2, ensure_ascii=False)
+                    else:
+                        raise Exception("Failed to fetch or generate transcript")
                 _PROVIDER_HEALTH.record_success("transcriber")
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("transcriber")

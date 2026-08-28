@@ -231,6 +231,78 @@ def test_selector_select_returns_empty_when_nothing_passes_quality():
     assert selector.select(scored, {}, max_selected=3, min_quality=99.0) == []
 
 
+def test_selector_refills_partial_arbiter_selection_to_minimum(monkeypatch):
+    import automation.clip_selection.selector as selector_module
+
+    candidates = [
+        {
+            "start": 0.0,
+            "end": 15.0,
+            "text": "Pakistan rebuild the innings after losing five wickets",
+            "final_score": 52.0,
+            "should_reject": False,
+            "agent_scores": {"emotion_expert": {"score": 40}},
+        },
+        {
+            "start": 20.0,
+            "end": 35.0,
+            "text": "What a huge appeal as England attack again",
+            "final_score": 50.0,
+            "should_reject": False,
+            "agent_scores": {"emotion_expert": {"score": 88}},
+        },
+        {
+            "start": 40.0,
+            "end": 55.0,
+            "text": "The partnership has now crossed fifty runs",
+            "final_score": 48.0,
+            "should_reject": False,
+            "agent_scores": {"emotion_expert": {"score": 45}},
+        },
+    ]
+    monkeypatch.setattr(
+        selector_module,
+        "llm_arbiter_refine",
+        lambda items, context, max_selected: [items[0]],
+    )
+
+    selected = ClipSelector(use_llm_arbiter=True).select(
+        candidates,
+        {},
+        max_selected=3,
+        min_selected=3,
+        min_quality=38.0,
+    )
+
+    assert len(selected) == 3
+    assert candidates[1] in selected
+
+
+def test_selector_minimum_never_refills_hard_rejected_candidate(monkeypatch):
+    import automation.clip_selection.selector as selector_module
+
+    candidates = [
+        {"start": 0.0, "end": 12.0, "text": "one", "final_score": 50.0, "should_reject": False},
+        {"start": 20.0, "end": 32.0, "text": "two", "final_score": 37.0, "should_reject": False},
+        {"start": 40.0, "end": 52.0, "text": "three", "final_score": 60.0, "should_reject": True},
+    ]
+    monkeypatch.setattr(
+        selector_module,
+        "llm_arbiter_refine",
+        lambda items, context, max_selected: [items[0]],
+    )
+
+    selected = ClipSelector(use_llm_arbiter=True).select(
+        candidates,
+        {},
+        max_selected=3,
+        min_selected=3,
+        min_quality=38.0,
+    )
+
+    assert selected == candidates[:1]
+
+
 # ── Adversarial: LLM returns garbage shapes ─────────────────────────────────
 
 

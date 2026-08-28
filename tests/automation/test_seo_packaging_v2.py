@@ -1,5 +1,3 @@
-import pytest
-pytestmark = pytest.mark.skip()
 """Packaging-v2 contracts for cricket Shorts metadata."""
 
 import json

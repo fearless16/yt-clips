@@ -130,10 +130,10 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
 
         caption_id = None
         lang_code = None
-        for pref_lang in ["en", "en-US", "en-GB"]:
+        for pref_lang in ["en", "en-US", "en-GB", "hi"]:
             for item in items:
                 snippet = item["snippet"]
-                if snippet["language"] == pref_lang and snippet.get("trackKind") != "ASR":
+                if snippet["language"] == pref_lang and snippet.get("trackKind") != "ASR" and snippet.get("status") == "serving":
                     caption_id = item["id"]
                     lang_code = snippet["language"]
                     break
@@ -141,10 +141,10 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
                 break
 
         if not caption_id:
-            for pref_lang in ["en", "en-US", "en-GB"]:
+            for pref_lang in ["en", "en-US", "en-GB", "hi"]:
                 for item in items:
                     snippet = item["snippet"]
-                    if snippet["language"] == pref_lang:
+                    if snippet["language"] == pref_lang and snippet.get("status") == "serving":
                         caption_id = item["id"]
                         lang_code = snippet["language"]
                         break
@@ -152,9 +152,11 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
                     break
 
         if not caption_id:
-            item = items[0]
-            caption_id = item["id"]
-            lang_code = item["snippet"]["language"]
+            for item in items:
+                if item["snippet"].get("status") == "serving":
+                    caption_id = item["id"]
+                    lang_code = item["snippet"]["language"]
+                    break
 
         caption_response = youtube.captions().download(
             id=caption_id,

@@ -36,7 +36,7 @@ else:
 _BEST_ENCODER = None
 _BEST_ENCODER_LOCK = Lock()
 MIN_OUTPUT_BYTES = 5_000
-SAFE_LIGHTING_FILTERS = ("eq=", "curves=", "hue=", "unsharp=", "hqdn3d=")
+SAFE_LIGHTING_FILTERS = ("eq=", "curves=", "hue=")
 
 
 def _new_export_batch_id() -> str:
@@ -323,7 +323,18 @@ def _sanitize_strategy(raw_strategy) -> Dict:
                     "width": cw,
                     "height": ch,
                 }
-        except (TypeError, ValueError):
+                try:
+                    face = {
+                        "face_x": max(0, int(raw_strategy["active_crop"]["face_x"])),
+                        "face_y": max(0, int(raw_strategy["active_crop"]["face_y"])),
+                        "face_w": max(0, int(raw_strategy["active_crop"]["face_w"])),
+                        "face_h": max(0, int(raw_strategy["active_crop"]["face_h"])),
+                    }
+                    if face["face_w"] >= 24 and face["face_h"] >= 24:
+                        active_crop.update(face)
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    pass
+        except (TypeError, ValueError, OverflowError):
             active_crop = None
     else:
         active_crop = None
@@ -640,6 +651,12 @@ def _ffmpeg_timeout() -> int:
         return 900
 
 
+def _x264_preset() -> str:
+    value = str(cfg.get("export", {}).get("encoder_preset", "medium")).strip().lower()
+    allowed = {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"}
+    return value if value in allowed else "medium"
+
+
 def _libx264_fallback_cmd(cmd: List[str]) -> List[str]:
     fallback = list(cmd)
     if "-c:v" in fallback:
@@ -656,7 +673,7 @@ def _libx264_fallback_cmd(cmd: List[str]) -> List[str]:
             continue
         cleaned.append(item)
     insert_at = cleaned.index("-movflags") if "-movflags" in cleaned else max(0, len(cleaned) - 1)
-    cleaned[insert_at:insert_at] = ["-preset", "veryfast", "-crf", str(cfg["export"].get("crf", 23))]
+    cleaned[insert_at:insert_at] = ["-preset", _x264_preset(), "-crf", str(cfg["export"].get("crf", 23))]
     return cleaned
 
 
@@ -731,7 +748,26 @@ def _build_enhance_stack(
     # on the configured vertical canvas.
     target_w = int(cfg["export"]["width"])    # 1080
     target_h = int(cfg["export"]["height"])   # 1920
-    enhance = "hqdn3d=4:3:6:4.5,deband=1thr=0.02:2thr=0.02:range=16:blur=1,unsharp=5:5:1.0:5:5:0.0"
+    export_cfg = cfg.get("export", {})
+
+    def bounded_float(key, default, low, high):
+        try:
+            return max(low, min(high, float(export_cfg.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    denoise = [
+        bounded_float("denoise_luma_spatial", 0.8, 0.0, 2.0),
+        bounded_float("denoise_chroma_spatial", 0.6, 0.0, 2.0),
+        bounded_float("denoise_luma_temporal", 1.2, 0.0, 3.0),
+        bounded_float("denoise_chroma_temporal", 0.9, 0.0, 3.0),
+    ]
+    sharpen = bounded_float("sharpen_amount", 0.25, 0.0, 0.5)
+    fmt = lambda value: f"{value:g}"
+    enhance = (
+        "hqdn3d=" + ":".join(fmt(value) for value in denoise)
+        + f",unsharp=3:3:{fmt(sharpen)}:3:3:0.0"
+    )
 
     # ── Filter selection ──────────────────────────────────────────────────────
 
@@ -805,29 +841,40 @@ def _build_enhance_stack(
             orig_cw = max(2, int(active_crop["width"]))
             orig_ch = max(2, int(active_crop["height"]))
 
-            # Expand crop by 1.5x for a professional cut
-            cw = int(orig_cw * 1.5)
-            ch = int(orig_ch * 1.5)
-            center_x = orig_cx + orig_cw / 2.0
-            center_y = orig_cy + orig_ch / 2.0
-            cx = max(0, int(center_x - cw / 2.0))
-            cy = max(0, int(center_y - ch / 2.0))
-            if native_res:
-                # Crop only — super-res handles upscaling
+            face_w = int(active_crop.get("face_w", 0))
+            face_h = int(active_crop.get("face_h", 0))
+            if face_w >= 24 and face_h >= 24:
+                target_ratio = bounded_float("face_target_width_ratio", 0.44, 0.35, 0.55)
+                crop_w = max(2, int(face_w / target_ratio))
+                crop_h = max(2, int(crop_w * target_h / target_w))
+                center_x = int(active_crop.get("face_x", orig_cx)) + face_w / 2.0
+                center_y = int(active_crop.get("face_y", orig_cy)) + face_h / 2.0
+                crop_w_expr = f"min(iw,{crop_w})"
+                crop_h_expr = f"min(ih,{crop_h})"
+                cx_expr = (
+                    f"min(max(0,{center_x:g}-{crop_w_expr}/2),"
+                    f"max(0,iw-{crop_w_expr}))"
+                )
+                cy_expr = (
+                    f"min(max(0,{center_y:g}-{crop_h_expr}*0.4),"
+                    f"max(0,ih-{crop_h_expr}))"
+                )
+                canvas_w = "trunc(ih*9/16/2)*2" if native_res else str(target_w)
+                canvas_h = "ih" if native_res else str(target_h)
+                # The fit layer keeps full source height whenever possible. The
+                # dimmed cover layer supplies a clean 9:16 canvas without zooming
+                # or synthesizing face detail. Native mode retains source height
+                # and an even 9:16 width for the optional super-resolution stage.
                 filter_base = (
                     f"{enhance},split=2[bg_raw][fg_raw];"
-                    f"[bg_raw]crop='min({cw},iw)':'min({ch},ih)':'min({cx},iw-min({cw},iw))':'min({cy},ih-min({ch},ih))'[bg];"
-                    f"[fg_raw]crop='min({cw},iw)':'min({ch},ih)':'min({cx},iw-min({cw},iw))':'min({cy},ih-min({ch},ih))'[fg];"
-                    f"[bg][fg]overlay=0:0"
+                    f"[bg_raw]scale={canvas_w}:{canvas_h}:flags=lanczos:force_original_aspect_ratio=increase,"
+                    f"crop={canvas_w}:{canvas_h},gblur=sigma=28,colorchannelmixer=rr=0.55:gg=0.55:bb=0.55[bg];"
+                    f"[fg_raw]crop='{crop_w_expr}':'{crop_h_expr}':'{cx_expr}':'{cy_expr}',"
+                    f"scale={canvas_w}:{canvas_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
+                    f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
                 )
             else:
-                # Fill-crop: scale up to cover frame, then crop to exact size
-                filter_base = (
-                    f"{enhance},"
-                    f"crop='min({cw},iw)':'min({ch},ih)':'min({cx},iw-min({cw},iw))':'min({cy},ih-min({ch},ih))',"
-                    f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                    f"crop={target_w}:{target_h}"
-                )
+                raise ValueError("missing valid face metrics")
         except (TypeError, ValueError):
             if native_res:
                 filter_base = f"{enhance},crop='trunc(ih*9/16)':ih"
@@ -895,13 +942,6 @@ def _build_enhance_stack(
         if lf:
             filter_base += f",{lf}"
 
-    # ── Color boost + sharpening ─────────────────────────────────────────────
-    # Skip when any Phase 4.25 enhancement is enabled (handles this)
-    enh = cfg.get("enhancement", {})
-    phase_425_active = enh.get("selective", False) or enh.get("ref_grade", False)
-    if not phase_425_active:
-        filter_base += ",unsharp=5:5:1.0:5:5:0.0,eq=saturation=1.15:contrast=1.15:brightness=0.04"
-
     # ── Motion interpolation ──────────────────────────────────────────────────
     try:
         target_fps = float(cfg["export"].get("fps", 60))
@@ -926,7 +966,7 @@ def _build_enhance_stack(
     logo_path = cfg["thumbnail"].get("template_path", "channel_logo.png")
     logo_enabled = Path(logo_path).exists() if use_logo is None else use_logo
     is_graph = ";" in filter_base
-    scale_format = "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"
+    scale_format = "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,format=yuv420p"
 
     if logo_enabled:
         # Circular mask: scale to 200px, apply circular alpha, position bottom-LEFT
@@ -1214,7 +1254,7 @@ def export_clip(
         cmd.extend(["-preset", "p4", "-tune", "hq", "-rc", "vbr",
                     "-cq", "26", "-spatial-aq", "1", "-b_ref_mode", "middle"])
     elif encoder == "libx264":
-        cmd.extend(["-preset", "veryfast", "-crf", str(cfg["export"].get("crf", 23))])
+        cmd.extend(["-preset", _x264_preset(), "-crf", str(cfg["export"].get("crf", 23))])
 
     cmd.extend(["-movflags", "+faststart", output_path])
 

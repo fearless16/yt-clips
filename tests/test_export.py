@@ -1,6 +1,4 @@
 import pytest
-pytestmark = pytest.mark.skip()
-import pytest
 from unittest.mock import patch, MagicMock
 
 from export import _build_enhance_stack, _sanitize_strategy, _normalize_speed, _sanitize_lighting_filter
@@ -62,8 +60,9 @@ def test_build_enhance_stack_solo_crop():
         }
     }
     filter_chain = _build_enhance_stack(analysis)
-    # Checks that active crop coordinates are injected and expanded by 1.5x
-    assert "crop=480:720:70:130" in filter_chain
+    # Missing face metrics must degrade to a bounded vertical crop.
+    assert "crop='trunc(ih*9/16)':ih" in filter_chain
+    assert "crop=1080:1920" in filter_chain
 
 def test_build_enhance_stack_guest_cam_off():
     analysis = {
@@ -82,10 +81,11 @@ def test_validate_output_accepts_configured_minimum_short_duration(tmp_path, mon
 
     output = tmp_path / "short.mp4"
     output.write_bytes(b"x" * (int(export.cfg["export"].get("min_output_bytes", 1)) + 1))
+    duration = float(export.cfg["highlight"].get("min_duration", 8.0))
 
     class Probe:
-        stdout = json.dumps({"format": {"duration": "3.5"}})
+        stdout = json.dumps({"format": {"duration": str(duration)}})
 
     monkeypatch.setattr(export.subprocess, "run", lambda *args, **kwargs: Probe())
 
-    assert export._validate_output(str(output), expected_duration=3.5)
+    assert export._validate_output(str(output), expected_duration=duration)

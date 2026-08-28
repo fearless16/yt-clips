@@ -168,12 +168,13 @@ def llm_arbiter_refine(
         agent_breakdown = c.get("agent_scores", {})
         content_type = str(c.get("content_type") or "").strip()
         type_tag = f" type={content_type}" if content_type else ""
+        source_tag = " source_match=yes" if c.get("source_match") else ""
         scores_str = " | ".join(
             f"{k}:{v.get('score', 0):.0f}" for k, v in sorted(agent_breakdown.items())
         )
         lines.append(
             f"{i}. [{c['start']:.1f}s-{c['end']:.1f}s] "
-            f"weighted={c.get('final_score', 0):.1f}{type_tag} "
+            f"weighted={c.get('final_score', 0):.1f}{type_tag}{source_tag} "
             f"agents=[{scores_str}] "
             f"script={text}"
         )
