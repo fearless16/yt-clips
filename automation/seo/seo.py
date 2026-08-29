@@ -212,14 +212,11 @@ Return ONLY this valid JSON object:
 }}
 
 DESCRIPTION RULES:
-1. Aim for {description_target_chars} chars; never below {description_min_chars} when evidence is rich and never above {description_max_chars}.
-2. First 2-3 lines: explain the exact clip in natural English. Put the main player/team + topic phrase here.
-3. Add section: 🏏 MATCH DETAILS. Include ONLY verified fields available in match facts/source evidence: teams, series/tournament, format, result/status, venue, score/date if actually present. Omit unknown lines.
-4. Add section: 🔥 CLIP BREAKDOWN. Write 2 useful paragraphs about the spoken moment, why it matters in this match/discussion, and the verified players/teams involved.
-5. Add section: 🔎 SEARCH CONTEXT. Write 1 natural paragraph that incorporates 6-10 of the strongest approved/vidIQ phrases. Do NOT output a comma-separated keyword dump and do NOT repeat the same phrase mechanically.
-6. Add a short channel CTA and end with EXACTLY the same 3 hashtags from the JSON hashtags array. No extra hashtags anywhere else.
-7. No LIVE framing unless the clip itself is genuinely a live stream. For exported Shorts, avoid live/live score/live stream wording.
-8. Never paste the raw transcript or raw source description into public copy.
+1. Aim for {description_target_chars} chars; never below {description_min_chars} when evidence is rich and never above {description_max_chars}. Write extremely long and detailed text to maximize SEO surface area.
+2. Structure exactly like this:
+"Follow [Teams] in this [Match Type]. Get [Teams] cricket updates, boundaries, match analysis and all the important moments from [Venue].\\n\\n🏏 MATCH DETAILS\\nMatch: [Full match name]\\nShort Name: [Short teams]\\nTournament: [Tournament name]\\nVenue: [Venue]\\n\\n🔥 CLIP COVERAGE\\n[Write 2-3 long paragraphs detailing the exact action in the transcript, the players involved, the match situation, and the stakes. Be very wordy.]\\n\\nSquad players for both teams: [Team 1] ([Team 1 players]) and [Team 2] ([Team 2 players]).\\n\\n🔎 Popular Searches:\\n[Insert at least 25 comma-separated long-tail search terms here, including variations of live scores, commentary, player names, and team names]\\n\\n⚠️ DISCLAIMER:\\nThis stream/clip is intended for independent cricket commentary, updates, analysis and fan discussion. No official match broadcast footage or copyrighted television audio is being rebroadcast. Team names, player names, league names, logos and trademarks belong to their respective owners.\\n\\n👍 Like the video, subscribe to the channel and join the comments with your prediction for [Teams].\\n\\n#️⃣ Best hashtags\\n[Insert 10-15 hashtags]"
+3. Do NOT fabricate match facts; use ONLY the provided entities or omit the specific detail if entirely unknown.
+4. It is critical to include a comma-separated list of popular searches under "Popular Searches:". Include LIVE keywords if requested by the prompt style.
 
 TITLE RULES:
 - Max {title_max_chars} chars, 1-2 emojis, no LIVE/#Shorts.

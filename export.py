@@ -1682,14 +1682,21 @@ def export_all(
 
     # Wait for any remaining SEO tasks to finish
     if seo_futures:
+        seo_deadline_at = time.monotonic() + _seo_export_deadline_seconds()
         log.info("🏷  Waiting for %d remaining SEO tasks...", len(seo_futures))
         for fut in seo_futures:
+            remaining = max(0.0, seo_deadline_at - time.monotonic())
             try:
-                fut.result(timeout=120)
+                fut.result(timeout=remaining)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    "SEO generation exceeded the %.3fs export deadline"
+                    % _seo_export_deadline_seconds()
+                ) from exc
             except Exception as e:
                 log.error("SEO task error: %s", e)
     if seo_executor is not None:
-        seo_executor.shutdown(wait=False)
+        seo_executor.shutdown(wait=False, cancel_futures=True)
 
     if insta_futures:
         log.info("📲 Waiting for %d Instagram tasks...", len(insta_futures))
