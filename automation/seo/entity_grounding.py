@@ -225,7 +225,9 @@ def audit_written_copy_llm(
                 video_description=(video_description or "")[:500],
                 transcript=str(transcript or "")[:4000],
                 title=str(title or "")[:200],
-                description=str(description or "")[:1500],
+                # Public descriptions are intentionally long; audit the whole
+                # usable SEO body instead of leaving the back half unchecked.
+                description=str(description or "")[:4500],
             ),
             system_instruction=_AUDIT_SYSTEM,
             prefer_model="deepseek-v4-pro",

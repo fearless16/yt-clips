@@ -123,7 +123,7 @@ def _truncate_bytes(text: str, max_bytes: int = 5000) -> str:
     return encoded[:max_bytes].decode("utf-8", errors="ignore")
 
 
-def _limit_youtube_tags(tags: List[str], max_chars: int = 480) -> List[str]:
+def _limit_youtube_tags(tags: List[str], max_chars: int = 500) -> List[str]:
     """Limit tags to YouTube's ~500-char budget, accounting for quote overhead.
 
     YouTube counts multi-word (space-containing) tags as quoted, adding 2 chars

@@ -190,36 +190,81 @@ def parse_cricbuzz_search_results(html: str) -> str:
 
 
 def parse_cricbuzz_match_page(html: str) -> Dict[str, List[str]]:
-    """Parse current Next.js Cricbuzz pages into facts and player entities."""
+    """Parse a specific Cricbuzz scorecard into rich, source-safe match facts."""
     raw = html or ""
     normalized = raw.replace(r'\"', '"')
     soup = BeautifulSoup(raw, "html.parser")
     facts = []
+
+    def add_fact(label: str, value: str) -> None:
+        value = _clean(value)
+        if not value:
+            return
+        fact = f"{label}: {value}" if label else value
+        if fact not in facts:
+            facts.append(fact)
+
     title_tag = soup.find("h1")
     if title_tag:
         title = _clean(title_tag.get_text(" ", strip=True))
         title = re.sub(r"\s+-\s+Scorecard.*$", "", title, flags=re.I)
-        if title:
-            facts.append(title)
+        add_fact("Match", title)
 
-    status_match = re.search(r'"status"\s*:\s*"([^"\\]+)', normalized)
-    if status_match:
-        status = _clean(status_match.group(1))
-        if status and status not in facts:
-            facts.append(status)
+    # Cricbuzz embeds matchInfo-style JSON in the page. Pull only fields that are
+    # specific to this scorecard; no generic live-score page data is accepted.
+    field_map = (
+        ("seriesName", "Series"),
+        ("matchDesc", "Match description"),
+        ("matchDescription", "Match description"),
+        ("matchFormat", "Format"),
+        ("status", "Status"),
+    )
+    for key, label in field_map:
+        match = re.search(rf'"{key}"\s*:\s*"([^"\\]+)', normalized)
+        if match:
+            add_fact(label, match.group(1))
+
+    ground = re.search(r'"ground"\s*:\s*"([^"\\]+)', normalized)
+    city = re.search(r'"city"\s*:\s*"([^"\\]+)', normalized)
+    if ground or city:
+        venue_parts = []
+        if ground:
+            venue_parts.append(_clean(ground.group(1)))
+        if city:
+            city_text = _clean(city.group(1))
+            if city_text and city_text not in venue_parts:
+                venue_parts.append(city_text)
+        add_fact("Venue", ", ".join(venue_parts))
+
+    # Useful innings summaries where present in the embedded scorecard JSON.
+    # Keep the parser conservative: include only complete team/score/wicket/over rows.
+    innings_seen = set()
+    score_pattern = re.compile(
+        r'"batTeamName"\s*:\s*"([^"\\]+)".*?'
+        r'"score"\s*:\s*(\d+).*?'
+        r'"wickets"\s*:\s*(\d+).*?'
+        r'"overs"\s*:\s*([0-9.]+)',
+        re.DOTALL,
+    )
+    for team, score, wickets, overs in score_pattern.findall(normalized):
+        row = f"{_clean(team)} {score}/{wickets} ({overs} overs)"
+        marker = row.casefold()
+        if marker not in innings_seen:
+            innings_seen.add(marker)
+            add_fact("Score", row)
+        if len(innings_seen) >= 4:
+            break
 
     players = []
     seen = set()
     for key in ("batName", "bowlName"):
-        for name in re.findall(
-            rf'"{key}"\s*:\s*"([^"\\]+)', normalized
-        ):
+        for name in re.findall(rf'"{key}"\s*:\s*"([^"\\]+)', normalized):
             clean_name = _clean(name).removesuffix(" (c)").removesuffix(" (wk)")
             marker = clean_name.casefold()
             if clean_name and marker not in seen:
                 seen.add(marker)
                 players.append(clean_name)
-    return {"facts": facts, "player_names": players}
+    return {"facts": facts[:20], "player_names": players}
 
 
 @lru_cache(maxsize=128)
@@ -288,8 +333,9 @@ def fetch_youtube_suggestions(seed_query: str = "cricket live") -> List[str]:
         return list(cached)
     results = []
     base_queries = [
-        f"{seed_query}", f"{seed_query} ipl", f"{seed_query} cricket",
-        f"cricket {seed_query}", f"ipl {seed_query}",
+        f"{seed_query}",
+        f"{seed_query} cricket",
+        f"{seed_query} ipl",
     ]
     for query in base_queries:
         try:

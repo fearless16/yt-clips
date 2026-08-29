@@ -173,79 +173,58 @@ SEO_BLOCKED_PROVIDERS = {"nvidia", "groq"}
 
 _SYSTEM = (
     "You are an elite cricket Shorts SEO engine for @cricketwithprajjwal2.0. "
-    "The description is written for the YouTube ALGORITHM, not for humans — "
-    "nobody reads it. Your job is maximum keyword surface area and explicit structure. "
-    "You must generate a heavily structured description of up to 4000 characters using "
-    "the exact format prescribed: Title at the top, an introductory summary, '🏏 MATCH DETAILS', "
-    "'🔥 CLIP COVERAGE' (since it is a Short), '🔎 Popular Searches:', '⚠️ DISCLAIMER:', "
-    "and finally a call to action followed by exactly 8-12 relevant hashtags. "
-    "Evidence boundary: source video title/description, clip transcript, OCR, live autocomplete "
-    "suggestions, recent YouTube search titles, and scorecard facts. Never invent a player, team, "
-    "score, or event. All public copy is simple ENGLISH only: no Hinglish, no Devanagari. "
-    "Title = one specific premise, max 60 chars, exactly 1-2 emojis, never 'LIVE' or '#Shorts'. "
+    "Write metadata for BOTH viewers and YouTube Search. The first 2-3 description lines "
+    "must clearly explain the exact clip promise using the strongest grounded search phrase. "
+    "Then add verified match context and a concise clip breakdown. Use vidIQ/search phrases "
+    "naturally; never dump a wall of keywords or pretend tags alone create reach. "
+    "Evidence boundary: source title/description, clip transcript, OCR, live autocomplete, "
+    "recent YouTube search titles, verified scorecard facts, and explicitly supplied vidIQ "
+    "ranking guidance. Never invent a player, team, score, venue, date, series, or event. "
+    "All public copy is simple ENGLISH only: no Hinglish, no Devanagari. "
+    "Title = one specific premise, max 60 chars, 1-2 emojis, never LIVE or #Shorts. "
     "Return ONLY valid JSON."
 )
 
-_CRICKET_ONLY_PROMPT_TMPL = """CRICKET SHORT — FULL MATCH CONTEXT:
+_CRICKET_ONLY_PROMPT_TMPL = """CRICKET SHORT — VERIFIED CONTEXT:
   Source video title: {video_title}
   Source video description: {video_description}
   Verified scorecard / match facts: {match_facts}
   Teams in this match: {teams}
-  Player roster: {roster}
-  Live YouTube autocomplete: {trend_topics}
-  Recent YouTube search result titles: {research_sources}
+  Verified player roster/entities: {roster}
+  Current YouTube autocomplete/search signals: {trend_topics}
+  Recent YouTube result titles: {research_sources}
 
 COMPLETE CLIP TRANSCRIPT: {transcript}
 
-SEARCH SEEDS (grounded anchors from research — expand these into long-tail):
+APPROVED SEARCH SEEDS (grounded; rank and phrase naturally):
 {approved_search_queries}
 
-TASK — build metadata that wins YouTube search for THIS exact clip.
+TASK — create unique metadata for THIS exact Short.
 
 Return ONLY this valid JSON object:
 {{
-  "title": "<specific English title, max 60 chars, player/team + event>",
-  "description": "<Structured algorithm-focused description up to 4000 chars - see format>",
-  "hashtags": ["#Shorts", "<#SeriesTag like #INDvSL>", "<1 topic tag>"],
-  "search_terms": ["<exactly 25 long-tail viewer searches>"],
-  "primary_search_terms": ["<4-8 of those terms>"],
-  "tags": ["<the same 25 phrases, trimmed to fit the 500-char API field>"]
+  "title": "<specific English title, max 60 chars, grounded player/team + exact moment>",
+  "description": "<unique, human-readable, keyword-rich description>",
+  "hashtags": ["#Shorts", "<#specific team/series tag>", "<#specific topic/player tag>"],
+  "search_terms": ["<ranked long-tail viewer searches; prefer 12-25 strong phrases over filler>"],
+  "primary_search_terms": ["<4-8 strongest phrases>"],
+  "tags": ["<grounded phrases, packed under the API limit>" ]
 }}
 
-STRICT RULES FOR DESCRIPTION FORMAT:
-You MUST format the 'description' field EXACTLY like this (fill in the brackets with verified facts):
-🔴 [Team 1] vs [Team 2] | [Series] | [T1] vs [T2] Shorts Today
+DESCRIPTION RULES:
+1. Aim for {description_target_chars} chars; never below {description_min_chars} when evidence is rich and never above {description_max_chars}.
+2. First 2-3 lines: explain the exact clip in natural English. Put the main player/team + topic phrase here.
+3. Add section: 🏏 MATCH DETAILS. Include ONLY verified fields available in match facts/source evidence: teams, series/tournament, format, result/status, venue, score/date if actually present. Omit unknown lines.
+4. Add section: 🔥 CLIP BREAKDOWN. Write 2 useful paragraphs about the spoken moment, why it matters in this match/discussion, and the verified players/teams involved.
+5. Add section: 🔎 SEARCH CONTEXT. Write 1 natural paragraph that incorporates 6-10 of the strongest approved/vidIQ phrases. Do NOT output a comma-separated keyword dump and do NOT repeat the same phrase mechanically.
+6. Add a short channel CTA and end with EXACTLY the same 3 hashtags from the JSON hashtags array. No extra hashtags anywhere else.
+7. No LIVE framing unless the clip itself is genuinely a live stream. For exported Shorts, avoid live/live score/live stream wording.
+8. Never paste the raw transcript or raw source description into public copy.
 
-Follow [Team 1] vs [Team 2] in this [Series] clip. Get [T1] vs [T2] cricket updates, boundaries, match analysis and all the important moments from [Venue or 'the match'].
-
-🏏 MATCH DETAILS
-Match: [Team 1] vs [Team 2]
-Short Name: [T1] vs [T2]
-Tournament: [Series]
-Date: [Date if available, else omit line]
-Venue: [Venue if available, else omit line]
-
-🔥 CLIP COVERAGE
-[Write 1-2 paragraphs detailing the exact action in this clip, the context of the match, and the players involved. Make it keyword-dense.]
-
-[Write 1 paragraph listing the squad players for both teams involved in this match from the roster.]
-
-🔎 Popular Searches:
-[Comma separated list of all 25 long-tail keywords and search terms from the search_terms field to maximize SEO]
-
-⚠️ DISCLAIMER:
-This stream/clip is intended for independent cricket commentary, updates, analysis and fan discussion. No official match broadcast footage or copyrighted television audio is being rebroadcast. Team names, player names, league names, logos and trademarks belong to their respective owners.
-
-👍 Like the video, subscribe to the channel and join the comments with your prediction for [T1] vs [T2].
-
-#️⃣ Best hashtags
-[Put exactly 8 to 12 hashtags here. Start with #Shorts, the series tag, and the team tags, then relevant topics like #CricketLive #LiveCricket #CricketCommentary. Do NOT exceed 12 hashtags.]
-
-OTHER STRICT RULES:
-- TITLE: max {title_max_chars} chars. proper simple titles with exactly 1-2 emojis. No LIVE/#Shorts.
-- SEARCH TERMS: choose and RANK exactly 25 long-tail phrases.
-- TAGS: same 25 phrases, trimmed under 450 total characters for the API limit.
-- HASHTAGS (for the JSON array): exactly 3. #Shorts + series tag + topic. (The description body will have 8-12).
+TITLE RULES:
+- Max {title_max_chars} chars, 1-2 emojis, no LIVE/#Shorts.
+- Lead with the most searchable grounded entity when it fits naturally.
+- Promise the exact clip moment; avoid generic adjectives and fake urgency.
 """
 
 _CRICKET_ONLY_SALVAGE_TMPL = """Generate grounded, keyword-rich metadata for this cricket Short.
@@ -253,10 +232,10 @@ Clip transcript: {transcript}
 Source title: {video_title}
 
 Return only JSON with title, description, hashtags, search_terms, primary_search_terms, and tags.
-- Description MUST use the highly structured format with 🏏 MATCH DETAILS, 🔥 CLIP COVERAGE, 🔎 Popular Searches, ⚠️ DISCLAIMER, and 8-12 #️⃣ Best hashtags.
+- Description MUST be unique, natural, match-grounded, and end with exactly 3 relevant hashtags.
 - Title: max 60 characters; one specific premise plus 1-2 emojis. No LIVE/#Shorts.
-- Search terms: exactly 25 long-tail grounded cricket phrases.
-- Tags: the same phrases trimmed under 450 total characters.
+- Search terms: 12-25 ranked long-tail grounded cricket phrases; no filler.
+- Tags: only the strongest grounded phrases; do not try to fill the tag field.
 """
 
 
@@ -305,15 +284,112 @@ def _seo_config_float(key: str, default: float, low: float, high: float) -> floa
 
 
 def _description_min_chars() -> int:
-    return _seo_config_int("description_min_chars", 1500, 100, 4800)
+    return _seo_config_int("description_min_chars", 1800, 100, 4800)
 
 
 def _description_target_chars() -> int:
-    return _seo_config_int("description_target_chars", 3000, 150, 4800)
+    return _seo_config_int("description_target_chars", 3200, 150, 4800)
 
 
 def _description_max_chars() -> int:
     return _seo_config_int("description_max_chars", 4500, 200, 4800)
+
+
+def _vidiq_required_keyword_floor() -> int:
+    """Single source of truth for the grounded vidIQ keyword minimum."""
+    vidiq_cfg = cfg.get("seo", {}).get("vidiq", {})
+    try:
+        vidiq_min = int(vidiq_cfg.get("min_keywords", 12))
+    except (TypeError, ValueError):
+        vidiq_min = 12
+    vidiq_min = min(max(vidiq_min, 4), 25)
+    search_min = _seo_config_int("min_search_terms", 12, 1, 25)
+    return max(vidiq_min, search_min)
+
+
+def _youtube_tag_chars(tags: List[str]) -> int:
+    """Return YouTube's effective tag-field size, including separators/quotes."""
+    return sum(len(tag) + (2 if " " in tag else 0) for tag in tags) + max(0, len(tags) - 1)
+
+
+def _pack_youtube_tags(tags: List[str], max_chars: int) -> List[str]:
+    packed = []
+    for tag in tags:
+        candidate = [*packed, tag]
+        if _youtube_tag_chars(candidate) <= max_chars:
+            packed.append(tag)
+    return packed
+
+
+def _build_vidiq_description(
+    title: str,
+    transcript: str,
+    video_title: str,
+    video_description: str,
+    match_facts: List[str],
+    keywords: List[str],
+    teams: Optional[List[str]] = None,
+) -> str:
+    """Grounded fallback description used only when the writer model is unavailable.
+
+    Keep it readable. vidIQ phrases are ranking hints, not an excuse to repeat the
+    same sentence twenty times like a malfunctioning SEO fax machine.
+    """
+    target = min(_description_target_chars(), _description_max_chars())
+    teams = [str(t).strip() for t in (teams or []) if str(t).strip()]
+    facts = list(dict.fromkeys(
+        str(fact).strip() for fact in match_facts if str(fact).strip()
+    ))
+    ranked = list(dict.fromkeys(
+        str(keyword).strip() for keyword in keywords if str(keyword).strip()
+    ))[:10]
+
+    opening = (
+        f"{title}. This Short focuses on the exact cricket moment discussed in the clip, "
+        "with the title and search wording kept aligned to the verified source context."
+    )
+    sections = [opening]
+
+    if teams or facts:
+        details = ["🏏 MATCH DETAILS"]
+        if len(teams) >= 2:
+            details.append(f"Match: {teams[0]} vs {teams[1]}")
+        elif teams:
+            details.append(f"Team context: {teams[0]}")
+        details.extend(f"• {fact}" for fact in facts[:10])
+        sections.append("\n".join(details))
+
+    clip_subject = "the verified cricket discussion in this Short"
+    if ranked:
+        clip_subject = ranked[0]
+    sections.append(
+        "🔥 CLIP BREAKDOWN\n"
+        f"The clip is centered on {clip_subject}. The metadata stays tied to the spoken "
+        "segment and verified match evidence, without adding an unsupported player, score, "
+        "result, venue, or event."
+    )
+
+    if ranked:
+        natural = ranked[:8]
+        if len(natural) == 1:
+            search_text = natural[0]
+        else:
+            search_text = ", ".join(natural[:-1]) + f", and {natural[-1]}"
+        sections.append(
+            "🔎 SEARCH CONTEXT\n"
+            f"Relevant viewer searches around this exact topic include {search_text}. "
+            "These phrases are included as discovery context while keeping the description "
+            "specific to the clip instead of turning it into a tag dump."
+        )
+
+    if video_title.strip():
+        sections.append(f"Source program context: {video_title.strip()[:300]}")
+
+    sections.append(
+        "Watch the full Short for the complete spoken moment and cricket context."
+    )
+    description = "\n\n".join(sections)
+    return _truncate_at_word(description, target)
 
 
 def _shorts_hashtag_cap() -> int:
@@ -482,7 +558,7 @@ def _llm_repair_seo(
         + json.dumps(previous_result, ensure_ascii=False)[:1200]
         + f"\n\nAllowed people whitelist: {allowed_people_note}\n"
         + "Regenerate the COMPLETE corrected metadata now, following every "
-        "original rule (length budgets, 25 long-tail search terms, emoji "
+        "original rule (length budgets, 12-25 strong long-tail search terms, emoji "
         "title). Return ONLY the JSON object."
     )
     try:
@@ -630,16 +706,8 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
         if tg_clean.lower() not in seen_tags:
             seen_tags.add(tg_clean.lower())
             deduped_tags.append(tg_clean)
-    tag_budget = _seo_config_int("max_tag_chars", 450, 50, 500)
-    budgeted_tags = []
-    used_chars = 0
-    for tag in deduped_tags:
-        added = len(tag) + (1 if budgeted_tags else 0)
-        if used_chars + added > tag_budget:
-            continue
-        budgeted_tags.append(tag)
-        used_chars += added
-    out["tags"] = budgeted_tags
+    tag_budget = _seo_config_int("max_tag_chars", 500, 50, 500)
+    out["tags"] = _pack_youtube_tags(deduped_tags, tag_budget)
 
     return out
 
@@ -874,26 +942,107 @@ def _repair_truncated_json(s: str) -> Optional[Dict]:
     return None
 
 
-def _get_vidiq_context(approved_queries: List[str], grounding_text: str):
-    """Return grounded vidIQ context and the accepted source recommendations."""
+def _get_vidiq_context(approved_queries: List[str], grounding_text: str, player_names: Optional[List[str]] = None):
+    """Return grounded vidIQ intelligence with a strict per-request credit budget.
+
+    High-value order:
+      1) cached recent own-channel Shorts history (optional, for title novelty),
+      2) one deep keyword research call,
+      3) one India broad-search refinement only when needed,
+      4) one title-generation call.
+
+    This replaces the old "up to six near-duplicate keyword calls per clip" pattern.
+    """
     vidiq_cfg = cfg.get("seo", {}).get("vidiq", {})
+    try:
+        max_calls = int(vidiq_cfg.get("max_calls_per_clip", 4))
+    except (TypeError, ValueError):
+        max_calls = 4
     client = VidiqClient(
         enabled=vidiq_cfg.get("enabled", False),
         timeout_seconds=vidiq_cfg.get("timeout_seconds", 8),
         endpoint=vidiq_cfg.get("endpoint", "https://mcp.vidiq.com/mcp"),
+        max_calls=max_calls,
+        default_cache_ttl_seconds=vidiq_cfg.get("cache_ttl_seconds", 1800),
     )
     seed = next((str(query).strip() for query in approved_queries if str(query).strip()), "")
     if not seed:
-        return "", client.audit, {"keywords": [], "titles": []}
+        return "", client.audit, {"keywords": [], "titles": [], "previous_titles": []}
 
-    allowed = set(re.findall(r"[a-z0-9]+", grounding_text.casefold()))
-    allowed.update({"cricket", "shorts", "match", "video"})
-    grounded_source_entities = find_canonical_entities(grounding_text)
+    source_tokens = set(re.findall(r"[a-z0-9]+", grounding_text.casefold())) - STOP_WORDS
+    player_names = list(player_names or [])
+    grounded_source_entities = find_canonical_entities(grounding_text, player_names)
     grounded_source_players = set(grounded_source_entities["players"])
     grounded_source_teams = set(grounded_source_entities["teams"])
+    entity_tokens = set()
+    for name in [*grounded_source_players, *grounded_source_teams]:
+        entity_tokens.update(re.findall(r"[a-z0-9]+", name.casefold()))
+    seed_tokens = set(re.findall(r"[a-z0-9]+", seed.casefold())) - STOP_WORDS
+    anchors = entity_tokens or seed_tokens or source_tokens
+    safe_modifiers = {
+        "cricket", "shorts", "short", "match", "moment", "reaction", "analysis",
+        "explained", "debate", "discussion", "highlight", "highlights", "innings",
+        "batting", "bowling", "bowler", "batter", "wicket", "wickets", "six", "sixes",
+        "four", "fours", "yorker", "captain", "captaincy", "team", "series", "t20",
+        "odi", "test", "ipl", "world", "cup", "news", "update", "viral", "today",
+        "over", "overs", "spell", "pace", "fast", "death", "powerplay", "reaction",
+        "swing", "reverse", "seam", "spin", "ball", "delivery", "deliveries",
+    }
+
+    def topic_signals(words: set[str]) -> set[str]:
+        """Normalize factual cricket-event concepts so topic drift is rejected."""
+        signals = set()
+        for word in words:
+            if word.startswith("bowl") or word in {"pace", "pacer"}:
+                signals.add("bowling")
+            elif word.startswith("bat"):
+                signals.add("batting")
+            elif word.startswith("wicket") or word in {"bowled", "lbw", "stumped", "catch", "caught"}:
+                signals.add("wicket")
+            elif word.startswith("yorker"):
+                signals.add("yorker")
+            elif word in {"six", "sixes", "sixer", "chhakka", "chakka"}:
+                signals.add("six")
+            elif word in {"four", "fours", "boundary", "boundaries", "chauka"}:
+                signals.add("four")
+            elif word.startswith("captain"):
+                signals.add("captaincy")
+            elif word.startswith("coach"):
+                signals.add("coach")
+            elif word.startswith("retir"):
+                signals.add("retirement")
+            elif word.startswith("injur"):
+                signals.add("injury")
+            elif word.startswith("record"):
+                signals.add("record")
+            elif word.startswith("centur"):
+                signals.add("century")
+            elif word in {"run", "runs", "score", "scored"}:
+                signals.add("runs")
+            elif word in {"chase", "target"}:
+                signals.add("chase")
+            elif word in {"over", "overs", "powerplay", "spell", "death"}:
+                signals.add("phase")
+            elif word.startswith("select"):
+                signals.add("selection")
+            elif word.startswith("comeback") or word == "return":
+                signals.add("comeback")
+        return signals
+
+    source_topic_signals = topic_signals(source_tokens)
+    allowed_topic_signals = set(source_topic_signals)
+    bowling_family = {"bowling", "wicket", "yorker", "phase"}
+    batting_family = {"batting", "six", "four", "runs", "chase", "century", "phase"}
+    leadership_family = {"captaincy", "coach", "selection"}
+    if source_topic_signals & bowling_family:
+        allowed_topic_signals.update(bowling_family)
+    if source_topic_signals & batting_family:
+        allowed_topic_signals.update(batting_family)
+    if source_topic_signals & leadership_family:
+        allowed_topic_signals.update(leadership_family)
 
     def clean_text(value: object) -> str:
-        text = re.sub(r"\s+", " ", str(value or "")).strip()[:120]
+        text = re.sub(r"\s+", " ", str(value or "")).strip()[:160]
         return re.sub(r"[^A-Za-z0-9 #&'?!:,.-]", "", text).strip()
 
     def clean_score(value: object) -> Optional[float]:
@@ -904,83 +1053,247 @@ def _get_vidiq_context(approved_queries: List[str], grounding_text: str):
         return score if math.isfinite(score) else None
 
     def grounded(value: object) -> bool:
-        words = set(re.findall(r"[a-z0-9]+", clean_text(value).casefold())) - STOP_WORDS
-        return bool(words) and words <= allowed
+        text = clean_text(value)
+        if not text or _is_live_framed_search_term(text):
+            return False
+        words = set(re.findall(r"[a-z0-9]+", text.casefold())) - STOP_WORDS
+        if not words or not (words & anchors):
+            return False
+        entities = find_canonical_entities(text, player_names)
+        if set(entities["players"]) - grounded_source_players:
+            return False
+        if set(entities["teams"]) - grounded_source_teams:
+            return False
+        # A famous player's name alone is not topic grounding. vidIQ can return
+        # high-volume but wrong-intent phrases ("Bumrah retirement news" for a
+        # yorker clip). Reject any factual cricket-event signal not supported by
+        # the source, and require topic overlap whenever the source has one.
+        candidate_topic_signals = topic_signals(words)
+        if candidate_topic_signals - allowed_topic_signals:
+            return False
+        if source_topic_signals and not (candidate_topic_signals & allowed_topic_signals):
+            return False
+        # Catch out-of-catalog names such as "John Smith" even when the static
+        # cricket catalog cannot identify them as entities. Generic title-cased
+        # SEO words are exempt through safe_modifiers/source/entity tokens.
+        unknown_proper = [
+            token for token in re.findall(r"\b[A-Z][A-Za-z'-]{3,}\b", text)
+            if token.casefold() not in source_tokens
+            and token.casefold() not in safe_modifiers
+            and token.casefold() not in entity_tokens
+        ]
+        if unknown_proper:
+            return False
+        unexplained = words - source_tokens - safe_modifiers - entity_tokens
+        return len(unexplained) <= 1
 
     def grounded_title(value: object) -> bool:
-        text = clean_text(value)
-        entities = find_canonical_entities(text)
+        text = _clean_title(clean_text(value), _seo_config_int("title_max_chars", 60, 30, 100))
+        if not text:
+            return False
+        entities = find_canonical_entities(text, player_names)
         players = set(entities["players"])
         teams = set(entities["teams"])
-        return bool(players or teams) and (
-            players <= grounded_source_players and teams <= grounded_source_teams
+        if not (players or teams):
+            return False
+        if players - grounded_source_players or teams - grounded_source_teams:
+            return False
+        title_tokens = _promise_tokens(text)
+        evidence_tokens = _promise_tokens(grounding_text)
+        return bool(title_tokens & evidence_tokens)
+
+    keyword_candidates = {}
+    keyword_order = 0
+
+    def keyword_rank(value):
+        # India is the target market. Prefer in-country demand first, then vidIQ's
+        # overall opportunity score, global demand, and lower competition.
+        return (
+            value["country_volume"] if value["country_volume"] is not None else -1.0,
+            value["overall"] if value["overall"] is not None else -1.0,
+            value["volume"] if value["volume"] is not None else -1.0,
+            -(value["competition"] if value["competition"] is not None else 101.0),
+            -value["order"],
         )
 
-    keyword_data = client.call_tool(
-        vidiq_cfg.get("keyword_tool", "vidiq_keyword_research"),
-        {
-            "mode": "research",
-            "keyword": seed,
-            "country": "IN",
-            "includeRelated": True,
-        },
-    )
-    ranked_keywords = []
-    accepted_keywords = []
-    if isinstance(keyword_data, dict):
-        keyword_rows = []
+    def absorb_keyword_payload(keyword_data: object) -> None:
+        nonlocal keyword_order
+        if not isinstance(keyword_data, dict):
+            return
+        rows = []
         if isinstance(keyword_data.get("seedKeyword"), dict):
-            keyword_rows.append(keyword_data["seedKeyword"])
-        related = keyword_data.get("relatedKeywords")
-        if isinstance(related, list):
-            keyword_rows.extend(related)
-        for item in keyword_rows:
+            rows.append(keyword_data["seedKeyword"])
+        for key in ("relatedKeywords", "risingKeywords"):
+            if isinstance(keyword_data.get(key), list):
+                rows.extend(keyword_data[key])
+        for item in rows:
             if not isinstance(item, dict):
                 continue
             text = clean_text(item.get("keyword"))
-            if text and grounded(text):
-                score = clean_score(item.get("volume"))
-                ranked_keywords.append(f"- {text}" + (f" (volume {score})" if score is not None else ""))
-                if text.casefold() not in {value.casefold() for value in accepted_keywords}:
-                    accepted_keywords.append(text)
+            if not text or not grounded(text):
+                continue
+            candidate = {
+                "text": text,
+                "overall": clean_score(item.get("overall")),
+                "country_volume": clean_score(item.get("countryVolume")),
+                "volume": clean_score(item.get("volume")),
+                "competition": clean_score(item.get("competition")),
+                "order": keyword_order,
+            }
+            keyword_order += 1
+            key = text.casefold()
+            previous = keyword_candidates.get(key)
+            if previous is None or keyword_rank(candidate) > keyword_rank(previous):
+                keyword_candidates[key] = candidate
 
+    # Optional recent own-channel history. It is cached for six hours and filtered
+    # back to cricket. vidIQ previousTitles is a novelty/repetition signal, so use
+    # recent uploads here; winning-pattern learning belongs to channel analytics.
+    previous_titles = []
+    channel_ref = (
+        vidiq_cfg.get("channel_id")
+        or cfg.get("youtube", {}).get("channel_id")
+        or vidiq_cfg.get("channel_handle")
+    )
+    # With a smaller custom budget, preserve one slot for keyword research and
+    # one for title generation. History is optional; title generation is not.
+    if vidiq_cfg.get("use_channel_history", True) and channel_ref and max_calls >= 4:
+        history = client.call_tool(
+            vidiq_cfg.get("channel_videos_tool", "vidiq_channel_videos"),
+            {"channelId": channel_ref, "videoFormat": "short", "popular": False},
+            cache_ttl_seconds=21600,
+        )
+        if isinstance(history, dict) and isinstance(history.get("videos"), list):
+            for row in history["videos"]:
+                if not isinstance(row, dict):
+                    continue
+                title = clean_text(row.get("title"))
+                title_entities = find_canonical_entities(title, player_names)
+                cricket_specific = bool(re.search(
+                    r"\b(?:cricket|ipl|t20|odi|test|wicket|yorker|bowling|batting|"
+                    r"innings|powerplay|over|runs?|century|six|four)\b",
+                    title, re.IGNORECASE,
+                ))
+                # Mixed-niche channels can have football country-v-country titles
+                # that the generic cricket gate mistakes for cricket. Require an
+                # actual cricket signal or a canonical cricket player.
+                if title and (cricket_specific or title_entities["players"]):
+                    previous_titles.append(title)
+                if len(previous_titles) >= 20:
+                    break
+
+    primary = client.call_tool(
+        vidiq_cfg.get("keyword_tool", "vidiq_keyword_research"),
+        {"mode": "research", "keyword": seed, "country": "IN", "includeRelated": True},
+        cache_ttl_seconds=1800,
+    )
+    absorb_keyword_payload(primary)
+
+    min_keywords = _vidiq_required_keyword_floor()
+
+    # One broad India refinement is enough. Do it only when the deep call did not
+    # produce a healthy grounded set; this is the main credit-saving gate.
+    if len(keyword_candidates) < min_keywords and client.audit.get("calls", 0) < max_calls - 1:
+        broad = client.call_tool(
+            vidiq_cfg.get("keyword_tool", "vidiq_keyword_research"),
+            {
+                "mode": "country_search",
+                "keyword": seed[:120],
+                "country": "IN",
+                "limit": 30,
+                "broad": True,
+            },
+            cache_ttl_seconds=1800,
+        )
+        absorb_keyword_payload(broad)
+
+    ranked_keyword_rows = sorted(keyword_candidates.values(), key=keyword_rank, reverse=True)
+    accepted_keywords = [item["text"] for item in ranked_keyword_rows][:_seo_config_int(
+        "max_search_terms", 25, 8, 30
+    )]
+    ranked_keywords = []
+    for item in ranked_keyword_rows[:10]:
+        metrics = []
+        if item["overall"] is not None:
+            metrics.append(f"overall {item['overall']}")
+        if item["country_volume"] is not None:
+            metrics.append(f"India searches {item['country_volume']}")
+        if item["volume"] is not None:
+            metrics.append(f"volume {item['volume']}")
+        if item["competition"] is not None:
+            metrics.append(f"competition {item['competition']}")
+        ranked_keywords.append(
+            f"- {item['text']}" + (f" ({', '.join(metrics)})" if metrics else "")
+        )
+
+    title_args = {
+        "title": seed[:500],
+        "description": grounding_text[:5000],
+        "analysisSummary": grounding_text[:4000],
+        "numTitles": 5,
+        "type": "short",
+        "language": "en",
+        "regionCode": "IN",
+    }
+    if previous_titles:
+        title_args["previousTitles"] = previous_titles[:20]
     title_data = client.call_tool(
         vidiq_cfg.get("title_tool", "vidiq_generate_titles"),
-        {
-            "title": seed[:500],
-            "description": grounding_text[:5000],
-            "analysisSummary": grounding_text[:4000],
-            "numTitles": 5,
-            "type": "short",
-            "language": "en",
-            "regionCode": "IN",
-        },
+        title_args,
+        cache_ttl_seconds=3600,
     )
-    ranked_titles = []
-    accepted_titles = []
+
+    title_candidates = {}
+    title_order = 0
     if isinstance(title_data, dict):
         title_rows = title_data.get("titles")
-        if not isinstance(title_rows, list):
-            title_rows = []
-        for item in title_rows:
-            if not isinstance(item, dict):
-                continue
-            text = clean_text(item.get("title"))
-            text = re.sub(r"(?:^|\s)#[A-Za-z0-9_]+", "", text).strip()
-            if text and grounded_title(text):
-                score = clean_score(item.get("score"))
-                ranked_titles.append(f"- {text}" + (f" (score {score})" if score is not None else ""))
-                if text.casefold() not in {value.casefold() for value in accepted_titles}:
-                    accepted_titles.append(text)
+        if isinstance(title_rows, list):
+            for item in title_rows:
+                if not isinstance(item, dict):
+                    continue
+                text = clean_text(item.get("title"))
+                text = re.sub(r"(?:^|\s)#[A-Za-z0-9_]+", "", text).strip()
+                text = _clean_title(
+                    text, _seo_config_int("title_max_chars", 60, 30, 100)
+                )
+                if text and grounded_title(text):
+                    score = clean_score(item.get("score"))
+                    key = text.casefold()
+                    candidate = {"text": text, "score": score, "order": title_order}
+                    title_order += 1
+                    previous = title_candidates.get(key)
+                    if previous is None or (score if score is not None else -1.0) > (
+                        previous["score"] if previous["score"] is not None else -1.0
+                    ):
+                        title_candidates[key] = candidate
+
+    ranked_title_rows = sorted(
+        title_candidates.values(),
+        key=lambda item: (
+            item["score"] if item["score"] is not None else -1.0,
+            -item["order"],
+        ),
+        reverse=True,
+    )
+    accepted_titles = [item["text"] for item in ranked_title_rows]
+    ranked_titles = [
+        f"- {item['text']}" + (f" (score {item['score']})" if item["score"] is not None else "")
+        for item in ranked_title_rows[:5]
+    ]
 
     sections = []
     if ranked_keywords:
-        sections.append("Grounded India keyword rankings:\n" + "\n".join(ranked_keywords[:8]))
+        sections.append("Grounded India keyword opportunities:\n" + "\n".join(ranked_keywords))
     if ranked_titles:
-        sections.append("Grounded title scoring references:\n" + "\n".join(ranked_titles[:5]))
+        sections.append("Grounded title scoring references:\n" + "\n".join(ranked_titles))
+    if previous_titles:
+        sections.append("Avoid repeating these recent cricket title patterns:\n" + "\n".join(
+            f"- {title}" for title in previous_titles[:8]
+        ))
     return "\n".join(sections), client.audit, {
         "keywords": accepted_keywords,
         "titles": accepted_titles,
+        "previous_titles": previous_titles,
     }
 
 
@@ -1013,6 +1326,7 @@ def generate_clip_seo(
     grounded_players = grounded_players or []
     grounded_aliases = grounded_aliases or {}
     research_sources = research_sources or []
+    vidiq_required = bool(cfg.get("seo", {}).get("vidiq", {}).get("required", False))
 
     # Magic anchor: if the caller supplied no real trend/query evidence, pull
     # LIVE high-search-volume cricket entities (YouTube autocomplete, Google
@@ -1025,7 +1339,7 @@ def generate_clip_seo(
             _ctx = get_trending_context(
                 domain="cricket", region="IN",
                 video_title=video_title, video_description=video_description,
-                transcript=transcript,
+                transcript=transcript, include_live_stream_url=False,
             )
             if not trend_topics:
                 trend_topics = list(_ctx.get("topics") or [])[:12]
@@ -1058,6 +1372,23 @@ def generate_clip_seo(
         clip_id, transcript, video_title=video_title,
         video_description=video_description,
     )
+    # Reasoning grounding may normalize ugly transliteration, but it must not
+    # become a license to invent a player outside verified runtime evidence.
+    static_ground = find_canonical_entities(grounding_context, grounded_players)
+    if grounded_players:
+        verified_people = {str(name).casefold() for name in grounded_players}
+        verified_people.update(str(name).casefold() for name in static_ground["players"])
+        llm_ground["players"] = [
+            name for name in llm_ground.get("players", [])
+            if str(name).casefold() in verified_people
+        ]
+    if teams:
+        verified_teams = {str(name).casefold() for name in teams}
+        verified_teams.update(str(name).casefold() for name in static_ground["teams"])
+        llm_ground["teams"] = [
+            name for name in llm_ground.get("teams", [])
+            if str(name).casefold() in verified_teams
+        ]
     vouched_topics = list(llm_ground.get("topic_phrases", []))
     if not is_cricket_content(transcript, grounding_context) and not (
         llm_ground.get("players") or llm_ground.get("teams")
@@ -1109,8 +1440,8 @@ def generate_clip_seo(
     vidiq_context, vidiq_audit, vidiq_recommendations = _get_vidiq_context(
         approved_queries,
         " ".join((video_title, video_description, transcript, scorecard, *match_facts)),
+        player_names=list(dict.fromkeys([*grounded_players, *evidence_pack.get("player_names", [])])),
     )
-    vidiq_required = bool(cfg.get("seo", {}).get("vidiq", {}).get("required", False))
     if vidiq_required:
         vidiq_titles = list(vidiq_recommendations.get("titles") or [])
         vidiq_keywords = list(vidiq_recommendations.get("keywords") or [])
@@ -1177,10 +1508,11 @@ def generate_clip_seo(
         user_prompt += (
             "\n\nEXCLUSIVE SEO SOURCE CONTRACT:\n"
             f"Use this exact vidIQ title: {vidiq_titles[0]}\n"
-            "Use only these vidIQ search terms/tags:\n"
+            "Choose search terms/tags only from these vidIQ-ranked phrases:\n"
             + "\n".join(f"- {term}" for term in vidiq_keywords)
             + "\nYou are formatting the evidence-backed description only. Do not "
-            "invent or substitute any title, keyword, tag, or hashtag."
+            "invent or substitute any title, keyword, or tag. Hashtags may be derived only "
+            "from verified teams/players/topics already present in the evidence."
         )
 
     user_prompt += (
@@ -1199,22 +1531,59 @@ def generate_clip_seo(
             f"{learner_ctx}\nUse only supported priors; never override grounded facts."
         )
 
-    # Call AI with parallel fastest-first
-    result = _attempt_seo_generation(clip_id, user_prompt, transcript, video_title,
-                                     is_shorts,
-                                     provider_override=provider_override,
-                                     model_override=model_override,
-                                     sys_instruction=sys_instruction,
-                                     salvage_tmpl=salvage_tmpl)
     if vidiq_required:
+        try:
+            result = _attempt_seo_generation(
+                clip_id, user_prompt, transcript, video_title, is_shorts,
+                provider_override=provider_override,
+                model_override=model_override,
+                sys_instruction=sys_instruction,
+                salvage_tmpl=salvage_tmpl,
+            )
+            result["description_source"] = "grounded_writer"
+        except SEOGenerationError:
+            fallback_description = _build_vidiq_description(
+                vidiq_titles[0], transcript, video_title, video_description,
+                evidence_pack["match_facts"], vidiq_keywords, teams=teams,
+            )
+            if len(fallback_description) < _description_min_chars():
+                raise SEOGenerationError(
+                    f"SEO blocked for {clip_id}: writer unavailable and deterministic "
+                    f"description was too short ({len(fallback_description)} chars)"
+                )
+            result = {
+                "title": vidiq_titles[0],
+                "description": fallback_description,
+                "hashtags": ["#Shorts"],
+                "ai_generated": False,
+                "metadata_valid": True,
+                "description_source": "deterministic_grounded_fallback",
+            }
+        # vidIQ owns ranking choices; the writer owns readable evidence-backed prose.
         result["title"] = vidiq_titles[0]
         result["search_terms"] = vidiq_keywords
         result["primary_search_terms"] = vidiq_keywords[:_seo_config_int(
             "min_primary_search_terms", 4, 1, 10
         )]
-        result["tags"] = vidiq_keywords
-        result["hashtags"] = ["#Shorts"]
+        result["tags"] = vidiq_keywords[:_seo_config_int("max_tag_terms", 12, 3, 20)]
+        result["metadata_source"] = "vidiq_ranked_grounded_writer"
+    else:
+        result = _attempt_seo_generation(
+            clip_id, user_prompt, transcript, video_title, is_shorts,
+            provider_override=provider_override,
+            model_override=model_override,
+            sys_instruction=sys_instruction,
+            salvage_tmpl=salvage_tmpl,
+        )
     result = _enforce_limits(result, is_shorts=is_shorts)
+
+    if vidiq_required:
+        min_vidiq_keywords = _vidiq_required_keyword_floor()
+        if len(vidiq_keywords) < min_vidiq_keywords:
+            raise SEOGenerationError(
+                f"SEO blocked for {clip_id}: vidIQ returned only {len(vidiq_keywords)} "
+                f"grounded keywords; need {min_vidiq_keywords}"
+            )
 
     # Copy audit: the writer model can hallucinate celebrity names the clip
     # never discusses (e.g. Ravindra Jadeja in an IND-SL gloves debate) and
@@ -1262,7 +1631,7 @@ def generate_clip_seo(
                 "[%s] Dropped %d contaminated search queries",
                 clip_id, before - len(approved_queries),
             )
-        floor = _seo_config_int("min_search_terms", 24, 1, 30)
+        floor = _seo_config_int("min_search_terms", 12, 1, 25)
         if len(approved_queries) < floor and vidiq_required:
             raise SEOGenerationError(
                 f"SEO blocked for {clip_id}: vidIQ terms fell below the grounded minimum after audit"
@@ -1483,7 +1852,7 @@ def generate_clip_seo(
             f"SEO blocked for {clip_id}: ungrounded entities {', '.join(extras)}"
         )
 
-    min_queries = _seo_config_int("min_search_terms", 8, 1, 15)
+    min_queries = _seo_config_int("min_search_terms", 12, 1, 25)
     max_queries = _seo_config_int("max_search_terms", 26, min_queries, 40)
     # Respect the model as a RANKER while keeping grounding deterministic.
     # Previously we discarded every LLM-selected search term and replaced the
@@ -1531,13 +1900,17 @@ def generate_clip_seo(
         if re.sub(r"\s+", " ", str(query)).strip().casefold() not in description_key
     ]
     if missing_queries:
-        # Preserve exact primary-query coverage without wasting budget on an
-        # opaque pipe-delimited debug-looking block.
-        suffix = "\n\nAlso relevant to searches for " + "; ".join(missing_queries) + "."
+        # Preserve exact primary-query coverage in readable prose. Re-canonicalize
+        # the hashtag block afterwards so hashtags remain the final description line.
+        suffix = "\n\nViewer search context also includes " + "; ".join(missing_queries) + "."
         max_chars = _description_max_chars()
-        base = str(result.get("description") or "").rstrip()
+        base = _HASHTAG_TOKEN.sub("", str(result.get("description") or "")).rstrip()
         result["description"] = (
             _truncate_at_word(base, max(0, max_chars - len(suffix))) + suffix
+        )
+    if is_shorts:
+        result["description"] = _cap_description_hashtags(
+            str(result.get("description") or ""), result.get("hashtags") or []
         )
 
     alignment = _promise_alignment_score(
@@ -1551,9 +1924,14 @@ def generate_clip_seo(
             f"SEO blocked for {clip_id}: title promise does not match clip/opening "
             f"(alignment={alignment:.3f})"
         )
+    if not _validate_seo_quality(result):
+        raise SEOGenerationError(
+            f"SEO blocked for {clip_id}: final post-processed metadata failed quality gate"
+        )
     result["packaging_version"] = PACKAGING_VERSION
     result["promise_alignment_score"] = alignment
     result["vidiq_audit"] = vidiq_audit
+    result["metadata_valid"] = True
 
     return result
 
@@ -1802,21 +2180,14 @@ def generate_seo_for_exported_clip(
             grounded_aliases=grounded_aliases,
             research_sources=research_sources,
         )
-        if result.get("ai_generated") is False:
-            log.warning("[%s] AI SEO failed — writing failure marker", clip_id)
-            marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
-            with open(marker_path, "w", encoding="utf-8") as f:
-                json.dump(retry_payload, f, ensure_ascii=True)
-            if metadata_path.exists():
-                metadata_path.unlink()
-            result["_seo_failed"] = True
-        else:
-            tmp_path = metadata_path.with_suffix(".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(result, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, metadata_path)
-            marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
-            marker_path.unlink(missing_ok=True)
+        # Successful return from generate_clip_seo means metadata passed all
+        # gates, regardless of whether prose came from AI or deterministic fallback.
+        tmp_path = metadata_path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, metadata_path)
+        marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
+        marker_path.unlink(missing_ok=True)
         return result
     except Exception as e:
         log.error("[%s] SEO generation failed: %s", clip_id, e)
@@ -1881,6 +2252,7 @@ def process_all_seo(highlights_path: str, output_dir: str,
                     video_title=video_title,
                     video_description=video_description,
                     transcript=transcript,
+                    include_live_stream_url=False,
                 )
                 TREND_CACHE.set(trend_cache_key, trend)
             result = generate_clip_seo(
@@ -1908,33 +2280,41 @@ def process_all_seo(highlights_path: str, output_dir: str,
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, per_clip_path)
-        except SEOGenerationError as e:
-            log.warning("[%s] SEO failed — writing failure marker: %s", clip_id, e)
+        except Exception as e:  # one bad clip must never abort the whole batch
+            if isinstance(e, SEOGenerationError):
+                log.warning("[%s] SEO failed — writing failure marker: %s", clip_id, e)
+            else:
+                log.exception("[%s] Unexpected SEO failure — isolating clip", clip_id)
             failures.append(clip_id)
+            trend_data = trend if isinstance(locals().get("trend"), dict) else {}
             marker_data = {
                 "clip_id": clip_id,
                 "transcript": transcript,
                 "video_title": video_title,
                 "video_description": video_description,
-                "scorecard": trend.get("scorecard", ""),
-                "trend_topics": trend.get("topics", []),
-                "teams": trend.get("teams", []),
-                "approved_search_queries": trend.get("search_queries", []),
-                "match_facts": trend.get("match_facts", []),
-                "grounded_players": trend.get("player_names", []),
-                "grounded_aliases": trend.get("player_aliases", {}),
-                "research_sources": trend.get("sources", []),
+                "scorecard": trend_data.get("scorecard", ""),
+                "trend_topics": trend_data.get("topics", []),
+                "teams": trend_data.get("teams", []),
+                "approved_search_queries": trend_data.get("search_queries", []),
+                "match_facts": trend_data.get("match_facts", []),
+                "grounded_players": trend_data.get("player_names", []),
+                "grounded_aliases": trend_data.get("player_aliases", {}),
+                "research_sources": trend_data.get("sources", []),
                 "video_path": video_path,
                 "is_shorts": True,
             }
             marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
             with open(marker_path, "w", encoding="utf-8") as f:
                 json.dump(marker_data, f)
-            all_results.append({"_seo_failed": True, "clip_id": clip_id})
+            all_results.append({"_seo_failed": True, "clip_id": clip_id, "error": str(e)})
 
-        # Breathing room between clips — configurable, default 30s
+        # Breathing room between clips — misconfigured YAML must not crash the batch.
         if idx < len(clips):
-            sleep_s = cfg.get("seo", {}).get("inter_clip_sleep_s", 30)
+            try:
+                sleep_s = float(cfg.get("seo", {}).get("inter_clip_sleep_s", 30))
+            except (TypeError, ValueError):
+                sleep_s = 30.0
+            sleep_s = min(max(sleep_s, 0.0), 300.0)
             log.info("Sleeping %.1fs before next SEO call...", sleep_s)
             time.sleep(sleep_s)
 

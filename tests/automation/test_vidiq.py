@@ -108,6 +108,108 @@ def test_vidiq_context_uses_grounded_seed_and_only_grounded_keyword_suggestions(
     assert set(audit) == {"enabled", "used", "calls", "key_slot"}
 
 
+def test_vidiq_researches_multiple_grounded_seeds_for_a_full_tag_field(monkeypatch):
+    import automation.seo.seo as seo
+
+    keyword_calls = []
+
+    class Client:
+        audit = {"enabled": True, "used": True, "calls": 4, "key_slot": "primary"}
+
+        def call_tool(self, name, arguments):
+            if name == "vidiq_keyword_research":
+                keyword = arguments["keyword"]
+                keyword_calls.append(keyword)
+                return {"seedKeyword": {"keyword": keyword, "volume": 50}}
+            return {"titles": [{"title": "Pakistan England Test Cricket", "score": 80}]}
+
+    monkeypatch.setattr(seo, "VidiqClient", lambda **kwargs: Client())
+    _, _, recommendations = seo._get_vidiq_context(
+        [
+            "pakistan england test cricket",
+            "england pakistan wicket cricket",
+            "pakistan batting england bowling",
+        ],
+        "Pakistan England Test cricket wicket batting bowling",
+    )
+
+    assert keyword_calls == [
+        "pakistan england test cricket",
+        "england pakistan wicket cricket",
+        "pakistan batting england bowling",
+    ]
+    assert recommendations["keywords"] == keyword_calls
+
+
+def test_vidiq_ranks_keywords_and_titles_by_their_returned_scores(monkeypatch):
+    import automation.seo.seo as seo
+
+    class Client:
+        audit = {"enabled": True, "used": True, "calls": 2, "key_slot": "primary"}
+
+        def call_tool(self, name, arguments):
+            if name == "vidiq_keyword_research":
+                return {"relatedKeywords": [
+                    {
+                        "keyword": "india cricket coach debate",
+                        "volume": 90,
+                        "competition": 80,
+                        "overall": 42,
+                        "countryVolume": 12000,
+                    },
+                    {
+                        "keyword": "yuvraj singh india coach",
+                        "volume": 70,
+                        "competition": 20,
+                        "overall": 91,
+                        "countryVolume": 8000,
+                    },
+                    {
+                        "keyword": "yuvraj india cricket debate",
+                        "volume": 75,
+                        "competition": 30,
+                        "overall": 76,
+                        "countryVolume": 10000,
+                    },
+                ]}
+            return {"titles": [
+                {"title": "Yuvraj Singh India Coach Debate", "score": 71},
+                {"title": "Why Yuvraj Singh Should Coach India", "score": 94},
+            ]}
+
+    monkeypatch.setattr(seo, "VidiqClient", lambda **kwargs: Client())
+
+    context, _, recommendations = seo._get_vidiq_context(
+        ["yuvraj singh india cricket coach debate"],
+        "Yuvraj Singh should coach India in this cricket debate",
+    )
+
+    assert recommendations["keywords"] == [
+        "yuvraj singh india coach",
+        "yuvraj india cricket debate",
+        "india cricket coach debate",
+    ]
+    assert recommendations["titles"] == [
+        "Why Yuvraj Singh Should Coach India",
+        "Yuvraj Singh India Coach Debate",
+    ]
+    assert "overall 91.0" in context
+    assert "competition 20.0" in context
+    assert "India searches 8000.0" in context
+
+
+def test_seo_tag_packing_uses_near_full_500_character_api_budget(monkeypatch):
+    import automation.seo.seo as seo
+
+    monkeypatch.setitem(seo.cfg["seo"], "max_tag_chars", 500)
+    tags = [f"pakistan england test cricket moment {index:02d}" for index in range(30)]
+
+    packed = seo._enforce_limits({"tags": tags}, is_shorts=True)["tags"]
+    used = sum(len(tag) + (2 if " " in tag else 0) for tag in packed) + len(packed) - 1
+
+    assert 450 <= used <= 500
+
+
 def test_vidiq_prefers_structured_or_widget_data_over_prose(monkeypatch):
     from automation.seo.vidiq import VidiqClient
 
@@ -203,7 +305,7 @@ def test_seo_fails_closed_when_required_vidiq_has_no_output(monkeypatch):
 def test_vidiq_exclusively_controls_final_title_terms_and_tags(monkeypatch):
     import automation.seo.seo as seo
 
-    vidiq_terms = [f"yuvraj coach {index}" for index in range(24)]
+    vidiq_terms = [f"yuvraj singh india cricket coach debate {index}" for index in range(24)]
     monkeypatch.setitem(seo.cfg["seo"]["vidiq"], "enabled", True)
     monkeypatch.setitem(seo.cfg["seo"]["vidiq"], "required", True)
     monkeypatch.setattr(seo, "_get_vidiq_context", lambda *a, **k: (
@@ -212,22 +314,10 @@ def test_vidiq_exclusively_controls_final_title_terms_and_tags(monkeypatch):
         {"keywords": vidiq_terms, "titles": ["Yuvraj Singh India Coach Debate"]},
     ))
     monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
-    monkeypatch.setattr(seo, "extract_grounded_entities_llm", lambda *a, **k: {
-        "players": ["Yuvraj Singh"], "teams": ["India"], "topic_phrases": [],
-    })
-    monkeypatch.setattr(seo, "audit_written_copy_llm", lambda *a, **k: {
-        "unsupported_entities": [], "supported_topics": [],
-    })
-    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
-        "title": "Generic LLM Backup Title",
-        "description": (
-            "Yuvraj Singh India coach debate explained with cricket context. " * 70
-        ),
-        "hashtags": ["#Shorts", "#GenericBackup"],
-        "search_terms": ["generic llm fallback"],
-        "primary_search_terms": ["generic llm fallback"],
-        "tags": ["generic llm fallback"],
-    })
+    no_llm = lambda *a, **k: (_ for _ in ()).throw(AssertionError("LLM must not run"))
+    monkeypatch.setattr(seo, "extract_grounded_entities_llm", no_llm)
+    monkeypatch.setattr(seo, "audit_written_copy_llm", no_llm)
+    monkeypatch.setattr(seo, "_attempt_seo_generation", no_llm)
 
     result = seo.generate_clip_seo(
         "vidiq-exclusive",
@@ -239,8 +329,10 @@ def test_vidiq_exclusively_controls_final_title_terms_and_tags(monkeypatch):
     assert result["title"] == "Yuvraj Singh India Coach Debate 🏏"
     assert result["search_terms"] == vidiq_terms
     assert result["primary_search_terms"] == vidiq_terms[:4]
-    assert result["tags"] == vidiq_terms
-    assert "generic llm fallback" not in str(result)
+    assert result["tags"] == seo._pack_youtube_tags(vidiq_terms, 500)
+    assert 3500 <= len(result["description"]) <= 4000
+    assert result["metadata_source"] == "vidiq"
+    assert result["ai_generated"] is False
 
 
 def test_required_vidiq_title_is_never_replaced_by_llm_repair(monkeypatch):

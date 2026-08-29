@@ -27,43 +27,47 @@ _HINDI_TOPIC_TERMS = (
     ("सीरीज", "series"),
 )
 _QUERY_SUFFIXES = (
-    "cricket discussion",
     "cricket analysis",
     "fan reaction",
     "explained",
-    "shorts discussion",
-    "highlights today",
-    "full highlights",
     "match review",
-    "post match analysis",
-    "best moments",
-    "big update",
+    "key moment",
     "turning point",
+    "shorts",
 )
 
 
 def _local_query_combos(subject: str, topic: str, team_context: str,
-                        secondary: List[str]) -> List[str]:
-    """Deterministic long-tail combos grounded in verified entities."""
+                         secondary: List[str]) -> List[str]:
+    """Deterministic long-tail combos grounded in the exact clip premise.
+
+    Avoid phrases such as "full highlights" or "live" unless the source itself
+    supports them. Those queries can attract the wrong viewer and wreck retention.
+    """
+    subject = re.sub(r"\s+", " ", str(subject or "")).strip()
+    topic = re.sub(r"\s+", " ", str(topic or "cricket")).strip()
+    team_context = re.sub(r"\s+", " ", str(team_context or "")).strip()
     combos = [
         f"{subject} {topic}",
         f"{subject} {topic} {team_context}".rstrip(),
-        f"{subject} {topic} debate",
+        f"{subject} {topic} reaction",
         f"{subject} {topic} analysis",
-        f"{subject} cricket opinion",
-        f"should {subject} {topic} {team_context}".rstrip(),
-        f"{subject} {team_context} discussion".replace("  ", " ").strip(),
         f"{subject} {topic} explained",
-        f"{subject} {topic} highlights today",
-        f"{subject} full highlights",
-        f"{subject} match review",
-        f"{subject} key moments",
-        f"{subject} turning point today",
+        f"{subject} cricket discussion",
+        f"{subject} match moment",
+        f"{subject} shorts",
     ]
-    for name in secondary:
-        combos.append(f"{name} {topic}")
-        combos.append(f"{name} highlights")
-        combos.append(f"{name} {topic} reaction")
+    if team_context:
+        combos.extend([
+            f"{subject} vs {team_context} {topic}",
+            f"{subject} {team_context} cricket",
+        ])
+    for name in secondary[:4]:
+        combos.extend([
+            f"{name} {topic}",
+            f"{name} {topic} reaction",
+            f"{name} cricket analysis",
+        ])
     return combos
 
 
@@ -141,32 +145,52 @@ def build_grounded_search_queries(
     anchors = _query_anchors(evidence, entities)
 
     accepted = []
+    evidence_players = set(entities["players"])
+    evidence_teams = set(entities["teams"])
     for suggestion in suggestions or []:
         clean = _clean_query(suggestion)
         words = set(re.findall(r"[a-z0-9]+", clean.casefold()))
-        if words & anchors:
-            accepted.append(clean)
+        if not (words & anchors):
+            continue
+        # Autocomplete is discovery evidence, not factual evidence. A suggestion
+        # that introduces another canonical player/team can poison the vidIQ seed
+        # even though it shares a broad anchor such as "India". Reject it here.
+        suggested_entities = find_canonical_entities(clean, runtime_players)
+        if set(suggested_entities["players"]) - evidence_players:
+            continue
+        if set(suggested_entities["teams"]) - evidence_teams:
+            continue
+        accepted.append(clean)
 
-    subjects = entities["players"] + entities["teams"]
-    # Teams first: runtime rosters can carry capitalized phrase noise from
-    # upstream discovery ("Massive Target"); canonical team names are the
-    # only subjects guaranteed to be real cricket entities.
-    if entities["teams"]:
-        subject = entities["teams"][0]
-        secondary = [
-            name for name in subjects
-            if name != subject and _is_canonical_subject(name, evidence)
-        ][:4]
-    else:
-        subject = subjects[0] if subjects else "cricket"
-        secondary = []
-    team_context = entities["teams"][1] if len(entities["teams"]) > 1 else ""
+    clip_entities = find_canonical_entities(transcript, runtime_players)
+    # The exact spoken player is usually the best Shorts search anchor. Fall back
+    # to a clip team, then source-level entities. This keeps vidIQ research from
+    # starting with a broad team query when the clip is really about one player.
+    candidates = [
+        *clip_entities["players"],
+        *clip_entities["teams"],
+        *entities["players"],
+        *entities["teams"],
+    ]
+    candidates = list(dict.fromkeys(candidates))
+    subject = next(
+        (name for name in candidates if _is_canonical_subject(name, evidence)),
+        "cricket",
+    )
+    secondary = [
+        name for name in candidates
+        if name != subject and _is_canonical_subject(name, evidence)
+    ][:4]
+    team_pool = list(dict.fromkeys([*clip_entities["teams"], *entities["teams"]]))
+    team_context = next((team for team in team_pool if team != subject), "")
     topic = _topic_from_text(transcript) or _topic_from_text(evidence) or "cricket"
     local = _local_query_combos(subject, topic, team_context, secondary)
     local.extend(f"{subject} {suffix}" for suffix in _QUERY_SUFFIXES)
 
-    queries = _dedupe([*accepted, *local], limit=30)
-    return queries[:30]
+    # Clip-built queries lead so the first seed sent to vidIQ is about the exact
+    # spoken moment. Autocomplete remains useful enrichment, but never owns seed 1.
+    queries = _dedupe([*local, *accepted], limit=20)
+    return queries[:20]
 
 
 def _is_canonical_subject(name: str, evidence: str) -> bool:

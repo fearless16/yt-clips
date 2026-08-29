@@ -91,27 +91,22 @@ def _apply_top_padding(
     face_top_y: int, face_height: int, face_width: int,
     frame_height: int, frame_width: int,
 ) -> Tuple[int, int, int]:
-    """Return (crop_y, crop_h, crop_w) with face-centered positioning.
-    Target: face at ~30% of output height from top (matching expectation.png).
-    Guards against extreme zoom when face_width is anomalously small."""
-    # Target: face should be ~25% of output width (1080px) = 270px
+    """Return an even 9:16 crop with the face starting 30% from the top."""
     target_face_w = 270
+    target_aspect = 9 / 16
+    max_crop_w = min(frame_width, int(frame_height * target_aspect))
     if face_width > 0:
         face_w_clamped = max(face_width, 80)
         scale = target_face_w / face_w_clamped
         crop_w = int(1080 / scale)
-        crop_h = int(1920 / scale)
     else:
-        headroom = int(face_height * 0.80)
-        body_below = int(face_height * 1.20)
-        crop_h = face_height + headroom + body_below
-        crop_w = int(crop_h * 9 / 16)
+        crop_w = int(face_height * 3.0 * target_aspect)
 
-    crop_h = min(crop_h, frame_height)
-    crop_w = min(crop_w, frame_width)
-    crop_h = max(crop_h, 568)
-    crop_w = max(crop_w, 320)
-    crop_y = max(0, min(frame_height - crop_h, face_top_y - int(crop_h * 0.70)))
+    min_crop_w = min(320, max_crop_w)
+    crop_w = max(min_crop_w, min(crop_w, max_crop_w))
+    crop_w = max(2, crop_w // 2 * 2)
+    crop_h = min(frame_height, int(crop_w / target_aspect) // 2 * 2)
+    crop_y = max(0, min(frame_height - crop_h, face_top_y - int(crop_h * 0.30)))
 
     return crop_y, crop_h, crop_w
 

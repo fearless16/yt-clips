@@ -9,7 +9,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from frame_analyzer import select_face_crop, analyze_clip
+from frame_analyzer import _apply_top_padding, select_face_crop, analyze_clip
 
 
 def _face(x=10, y=20, w=80, h=90, conf=0.9, dynamic=False):
@@ -25,6 +25,20 @@ def _face(x=10, y=20, w=80, h=90, conf=0.9, dynamic=False):
         "confidence": conf,
         "is_dynamic_match": dynamic,
     }
+
+
+def test_face_crop_is_vertical_and_places_face_near_upper_third():
+    crop_y, crop_h, crop_w = _apply_top_padding(
+        face_top_y=400,
+        face_height=90,
+        face_width=80,
+        frame_height=1080,
+        frame_width=1920,
+    )
+
+    assert (crop_w, crop_h) == (320, 568)
+    assert crop_y == 230
+    assert crop_w / crop_h == pytest.approx(9 / 16, abs=0.002)
 
 
 class TestSelectFaceCropEmpty:

@@ -60,9 +60,9 @@ def test_build_enhance_stack_solo_crop():
         }
     }
     filter_chain = _build_enhance_stack(analysis)
-    # Missing face metrics must degrade to a bounded vertical crop.
-    assert "crop='trunc(ih*9/16)':ih" in filter_chain
-    assert "crop=1080:1920" in filter_chain
+    assert "crop=270:480:175:250" in filter_chain
+    assert "gblur=" not in filter_chain
+    assert "scale=1080:1920" in filter_chain
 
 def test_build_enhance_stack_guest_cam_off():
     analysis = {

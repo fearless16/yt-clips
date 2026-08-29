@@ -67,6 +67,9 @@ def test_upload_video_success_path(tmp_path):
         
         assert body["snippet"]["title"] == "Super Kohli Shot"
         assert "#Shorts" in body["snippet"]["description"]
+        assert body["snippet"]["tags"] == [
+            "shorts", "Kohli", "cricket", "Kohli highlights", "IPL highlights"
+        ]
         assert body["status"]["privacyStatus"] == "public"
         assert body["status"]["selfDeclaredMadeForKids"] is False
         assert body["status"]["containsSyntheticMedia"] is False
@@ -146,6 +149,15 @@ def test_limit_tags_accounts_for_quote_overhead():
     # Budget must include quote overhead — total stays within the real cap.
     total = sum(len(t) + (2 if " " in t else 0) for t in out) + (len(out) - 1)
     assert total <= 480
+
+
+def test_limit_tags_uses_full_youtube_500_character_budget():
+    tags = [f"tag{index:02d}value" for index in range(100)]
+
+    out = _limit_youtube_tags(tags)
+    total = sum(len(t) + (2 if " " in t else 0) for t in out) + (len(out) - 1)
+
+    assert 480 < total <= 500
 
 
 def test_assignable_category_id_valid_and_fallback():

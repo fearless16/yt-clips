@@ -143,7 +143,6 @@ export:
   # Hardware encoder — auto-detected in export.py; config is fallback
   encoder: "libx264"                      # h264_videotoolbox (Mac) | h264_nvenc (NVIDIA) | libx264 (CPU)
   encoder_preset: "medium"              # Only used by libx264; videotoolbox ignores this
-  face_target_width_ratio: 0.40          # medium close-up without the published extreme face zoom
   denoise_luma_spatial: 0.8              # mild webcam cleanup; preserve skin texture
   denoise_chroma_spatial: 0.6
   denoise_luma_temporal: 1.2
@@ -261,9 +260,10 @@ seo:
   max_primary_search_terms: 8           # keyword-rich prose needs more weaving
   min_promise_alignment_score: 0.50     # title must match clip speech + description opening
   description_min_chars: 1500           # algorithm-facing copy: crawlable keyword surface (reduced to prevent quality gate drops)
-  description_target_chars: 3500        # LLM writes toward this length
+  description_target_chars: 4000        # deterministic vidIQ path writes toward this length
   description_max_chars: 4800           # hard cap, safe margin below YouTube's 5000
-  max_tag_chars: 450                    # safe margin below YouTube's 500-char tags limit
+  min_tag_chars: 450                    # fail closed instead of shipping a thin vidIQ tag field
+  max_tag_chars: 500                    # YouTube API tag-field limit, including quote overhead
   # Inject random hardcoded viral hooks/CTAs into descriptions. OFF by default:
   # the product contract prefers per-clip LLM-generated hooks over generic copy.
   # Sleep between SEO calls for each clip (seconds). Longer = less rate limiting.
@@ -275,6 +275,7 @@ seo:
     required: true                       # fail closed; never ship generic/LLM SEO fallback
     endpoint: "https://mcp.vidiq.com/mcp"
     timeout_seconds: 8
+    max_keyword_queries: 6               # aggregate grounded results until tag budget is filled
     keyword_tool: "vidiq_keyword_research"
     title_tool: "vidiq_generate_titles"
 

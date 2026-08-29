@@ -19,19 +19,16 @@ def test_scrfd_metrics_survive_strategy_sanitization():
     assert export._sanitize_strategy(_solo_crop(**crop)["export_strategy"])["active_crop"] == crop
 
 
-def test_large_face_uses_adaptive_fit_composition_not_tight_full_height_crop(monkeypatch):
-    monkeypatch.setitem(export.cfg["export"], "face_target_width_ratio", 0.44)
+def test_solo_face_crop_fills_vertical_canvas_without_blurred_background():
     graph = export._build_enhance_stack(_solo_crop(
         x=640, y=0, width=607, height=1080,
         face_x=710, face_y=160, face_w=500, face_h=500,
     ), use_logo=False)
 
-    # 500 / .44 = 1136 source pixels: materially wider than the old 607px crop.
-    assert "min(iw,1136)" in graph
-    assert "crop='(ih*1080/1920)'" not in graph
-    assert "force_original_aspect_ratio=decrease" in graph
-    assert "gblur=" in graph
-    assert "colorchannelmixer=" in graph
+    assert "crop=606:1076:641:0" in graph
+    assert "force_original_aspect_ratio=increase" not in graph
+    assert "gblur=" not in graph
+    assert "colorchannelmixer=" not in graph
     assert "scale=1080:1920" in graph
 
 
@@ -46,19 +43,20 @@ def test_tiny_or_missing_face_metrics_degrade_to_safe_vertical_composition():
 
     for graph in (tiny, missing):
         assert "scale=1080:1920" in graph
-        assert "crop=1080:1920" in graph
+        assert "crop=600:1066:100:7" in graph
+        assert "force_original_aspect_ratio" not in graph
         assert "nan" not in graph.casefold()
         assert "inf" not in graph.casefold()
 
 
-def test_adaptive_face_native_mode_keeps_even_nine_sixteen_source_canvas():
+def test_solo_face_native_mode_uses_planned_source_crop_without_background():
     graph = export._build_enhance_stack(_solo_crop(
         x=640, y=0, width=607, height=1080,
         face_x=710, face_y=160, face_w=500, face_h=500,
     ), use_logo=False, native_res=True)
 
-    assert "scale=trunc(ih*9/16/2)*2:ih" in graph
-    assert "crop=trunc(ih*9/16/2)*2:ih" in graph
+    assert "crop=606:1076:641:0" in graph
+    assert "gblur=" not in graph
     assert "scale=1080:1920" not in graph
 
 
@@ -87,16 +85,14 @@ def test_delivery_quality_uses_square_pixels_and_generation_safe_x264_settings()
     assert export.cfg["export"]["encoder_preset"] == "medium"
 
 
-def test_small_bottom_face_gets_a_clamped_vertical_crop(monkeypatch):
-    monkeypatch.setitem(export.cfg["export"], "face_target_width_ratio", 0.40)
+def test_face_crop_centers_face_and_uses_upper_composition_line_when_possible():
     graph = export._build_enhance_stack(_solo_crop(
-        x=800, y=300, width=320, height=568,
-        face_x=900, face_y=850, face_w=100, face_h=120,
+        x=200, y=100, width=400, height=1000,
+        face_x=350, face_y=400, face_w=100, face_h=120,
     ), use_logo=False)
 
-    assert "min(ih,444)" in graph
-    assert "max(0,ih-min(ih,444))" in graph
-    assert "crop='min(iw,250)':'min(ih,444)'" in graph
+    assert "crop=400:710:200:187" in graph
+    assert "gblur=" not in graph
 
 
 def test_non_finite_face_metrics_are_rejected_without_crashing():

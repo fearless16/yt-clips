@@ -713,6 +713,34 @@ def _run_ffmpeg_with_retry(cmd: List[str], output_path: str, clip_id: str, attem
     return False, last_error
 
 
+def _plan_solo_crop(active_crop: Dict, target_w: int, target_h: int) -> Tuple[int, int, int, int]:
+    """Fit an even output-aspect crop inside the analyzed face region."""
+    region_x = int(active_crop["x"])
+    region_y = int(active_crop["y"])
+    region_w = int(active_crop["width"])
+    region_h = int(active_crop["height"])
+    target_aspect = target_w / target_h
+
+    crop_w = min(region_w, int(region_h * target_aspect))
+    crop_w = max(2, crop_w // 2 * 2)
+    crop_h = min(region_h, int(crop_w / target_aspect))
+    crop_h = max(2, crop_h // 2 * 2)
+
+    face_w = int(active_crop.get("face_w", 0))
+    face_h = int(active_crop.get("face_h", 0))
+    if face_w >= 24 and face_h >= 24:
+        face_center_x = int(active_crop["face_x"]) + face_w / 2.0
+        crop_x = int(face_center_x - crop_w / 2.0)
+        crop_y = int(active_crop["face_y"]) - int(crop_h * 0.30)
+    else:
+        crop_x = region_x + (region_w - crop_w) // 2
+        crop_y = region_y + (region_h - crop_h) // 2
+
+    crop_x = max(region_x, min(crop_x, region_x + region_w - crop_w))
+    crop_y = max(region_y, min(crop_y, region_y + region_h - crop_h))
+    return crop_x, crop_y, crop_w, crop_h
+
+
 def _build_enhance_stack(
     analysis: Dict,
     source_fps: float = 30.0,
@@ -836,45 +864,15 @@ def _build_enhance_stack(
         # Solo with face-detected crop region
         log.debug("SOLO + face crop → precise 9:16 crop")
         try:
-            orig_cx = max(0, int(active_crop["x"]))
-            orig_cy = max(0, int(active_crop["y"]))
-            orig_cw = max(2, int(active_crop["width"]))
-            orig_ch = max(2, int(active_crop["height"]))
-
-            face_w = int(active_crop.get("face_w", 0))
-            face_h = int(active_crop.get("face_h", 0))
-            if face_w >= 24 and face_h >= 24:
-                target_ratio = bounded_float("face_target_width_ratio", 0.44, 0.35, 0.55)
-                crop_w = max(2, int(face_w / target_ratio))
-                crop_h = max(2, int(crop_w * target_h / target_w))
-                center_x = int(active_crop.get("face_x", orig_cx)) + face_w / 2.0
-                center_y = int(active_crop.get("face_y", orig_cy)) + face_h / 2.0
-                crop_w_expr = f"min(iw,{crop_w})"
-                crop_h_expr = f"min(ih,{crop_h})"
-                cx_expr = (
-                    f"min(max(0,{center_x:g}-{crop_w_expr}/2),"
-                    f"max(0,iw-{crop_w_expr}))"
-                )
-                cy_expr = (
-                    f"min(max(0,{center_y:g}-{crop_h_expr}*0.4),"
-                    f"max(0,ih-{crop_h_expr}))"
-                )
-                canvas_w = "trunc(ih*9/16/2)*2" if native_res else str(target_w)
-                canvas_h = "ih" if native_res else str(target_h)
-                # The fit layer keeps full source height whenever possible. The
-                # dimmed cover layer supplies a clean 9:16 canvas without zooming
-                # or synthesizing face detail. Native mode retains source height
-                # and an even 9:16 width for the optional super-resolution stage.
-                filter_base = (
-                    f"{enhance},split=2[bg_raw][fg_raw];"
-                    f"[bg_raw]scale={canvas_w}:{canvas_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                    f"crop={canvas_w}:{canvas_h},gblur=sigma=28,colorchannelmixer=rr=0.55:gg=0.55:bb=0.55[bg];"
-                    f"[fg_raw]crop='{crop_w_expr}':'{crop_h_expr}':'{cx_expr}':'{cy_expr}',"
-                    f"scale={canvas_w}:{canvas_h}:flags=lanczos:force_original_aspect_ratio=decrease[fg];"
-                    f"[bg][fg]overlay=(W-w)/2:(H-h)/2"
-                )
+            cx, cy, cw, ch = _plan_solo_crop(active_crop, target_w, target_h)
+            if native_res:
+                filter_base = f"{enhance},crop={cw}:{ch}:{cx}:{cy}"
             else:
-                raise ValueError("missing valid face metrics")
+                filter_base = (
+                    f"{enhance},"
+                    f"crop={cw}:{ch}:{cx}:{cy},"
+                    f"scale={target_w}:{target_h}:flags=lanczos"
+                )
         except (TypeError, ValueError):
             if native_res:
                 filter_base = f"{enhance},crop='trunc(ih*9/16)':ih"
