@@ -133,6 +133,7 @@ class AIClient:
         self._model = ai_cfg.get("model", "mimo-v2.5-pro")
         self._last_provider = None
         self._last_model = None
+        self._reasoning_effort: Optional[str] = None  # "low" | "medium" | "high" | None
 
     @staticmethod
     def _bucket_key(provider: str, model: Optional[str] = None) -> str:
@@ -267,12 +268,15 @@ class AIClient:
         return _random.choice(models)
 
     def _call_provider(self, provider: str, prompt: str, system_instruction: Optional[str] = None,
-                       prefer_model: Optional[str] = None) -> str:
+                       prefer_model: Optional[str] = None, reasoning_effort: Optional[str] = None) -> str:
         old_provider = self._provider
         old_model = self._model
+        old_reasoning = self._reasoning_effort
         chosen_model = self._select_model_for_provider(provider, prefer_model=prefer_model)
         self._provider = provider
         self._model = chosen_model
+        if reasoning_effort:
+            self._reasoning_effort = reasoning_effort
         log.debug("Routing call to %s/%s", provider, chosen_model)
         try:
             if provider == "opencode":
@@ -290,6 +294,7 @@ class AIClient:
         finally:
             self._provider = old_provider
             self._model = old_model
+            self._reasoning_effort = old_reasoning
 
     def _log_cost(self, provider: str, model: str, input_chars: int, output_chars: int):
         in_tokens = input_chars // 4
@@ -498,9 +503,21 @@ class AIClient:
         self._last_provider = "opencode"
         self._last_model = self._model
         t0 = time.monotonic()
-        response = client.chat.completions.create(
-            model=self._model, messages=messages, temperature=0.7, max_tokens=8192,
-        )
+        
+        # O1/O3 models and deepseek reasoning models support reasoning_effort
+        kwargs = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 8192,
+        }
+        if self._reasoning_effort:
+            kwargs["reasoning_effort"] = self._reasoning_effort
+            # Reasoning models often require temperature=1 or do not support it
+            if "o1" in self._model or "o3" in self._model:
+                kwargs.pop("temperature", None)
+            
+        response = client.chat.completions.create(**kwargs)
         duration_ms = int((time.monotonic() - t0) * 1000)
         tokens = getattr(response.usage, "total_tokens", 0) if getattr(response, "usage", None) else 0
         log.info("LLM: opencode/%s (%dms, %d tokens)", self._model, duration_ms, tokens,
@@ -672,7 +689,7 @@ class AIClient:
         ("opencode", "qwen3.6-plus"),
     ]
 
-    def generate_seo_text(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+    def generate_seo_text(self, prompt: str, system_instruction: Optional[str] = None, reasoning_effort: Optional[str] = None) -> str:
         """Generate text for SEO using ONLY OpenCode Go models.
 
         Priority: qwen3.7-max → mimo-v2.5-pro → deepseek-v4-pro.
@@ -695,7 +712,7 @@ class AIClient:
                 continue
             try:
                 res = self._call_provider(provider, prompt, system_instruction,
-                                          prefer_model=model)
+                                          prefer_model=model, reasoning_effort=reasoning_effort)
                 if res and res.strip():
                     self._record_success(provider)
                     self._last_provider = provider
@@ -715,8 +732,9 @@ class AIClient:
             if self._in_cooldown(provider):
                 continue
             try:
+                log.info("SEO Retry: %s/%s", provider, model)
                 res = self._call_provider(provider, prompt, system_instruction,
-                                          prefer_model=model)
+                                          prefer_model=model, reasoning_effort=reasoning_effort)
                 if res and res.strip():
                     self._record_success(provider)
                     self._last_provider = provider

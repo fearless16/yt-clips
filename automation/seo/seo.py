@@ -175,8 +175,10 @@ _SYSTEM = (
     "You are an elite cricket Shorts SEO engine for @cricketwithprajjwal2.0. "
     "Write metadata for BOTH viewers and YouTube Search. The first 2-3 description lines "
     "must clearly explain the exact clip promise using the strongest grounded search phrase. "
-    "Then add verified match context and a concise clip breakdown. Use vidIQ/search phrases "
-    "naturally; never dump a wall of keywords or pretend tags alone create reach. "
+    "Then write a detailed, journalist-style article covering match context, player analysis, "
+    "pitch conditions, head-to-head stats, and predictions. Embed vidIQ keywords naturally "
+    "into flowing prose — NEVER dump a 'Popular Searches:' section or comma-separated keyword "
+    "list anywhere in the description. YouTube actively suppresses keyword-stuffed descriptions. "
     "Evidence boundary: source title/description, clip transcript, OCR, live autocomplete, "
     "recent YouTube search titles, verified scorecard facts, and explicitly supplied vidIQ "
     "ranking guidance. Never invent a player, team, score, venue, date, series, or event. "
@@ -204,7 +206,7 @@ TASK — create unique metadata for THIS exact Short.
 Return ONLY this valid JSON object:
 {{
   "title": "<specific English title, max 60 chars, grounded player/team + exact moment>",
-  "description": "<unique, human-readable, keyword-rich description>",
+  "description": "<unique, human-readable, keyword-rich description written as a natural article>",
   "hashtags": ["#Shorts", "<#specific team/series tag>", "<#specific topic/player tag>"],
   "search_terms": ["<ranked long-tail viewer searches; prefer 12-25 strong phrases over filler>"],
   "primary_search_terms": ["<4-8 strongest phrases>"],
@@ -212,11 +214,35 @@ Return ONLY this valid JSON object:
 }}
 
 DESCRIPTION RULES:
-1. Aim for {description_target_chars} chars; never below {description_min_chars} when evidence is rich and never above {description_max_chars}. Write extremely long and detailed text to maximize SEO surface area.
-2. Structure exactly like this:
-"Follow [Teams] in this [Match Type]. Get [Teams] cricket updates, boundaries, match analysis and all the important moments from [Venue].\\n\\n🏏 MATCH DETAILS\\nMatch: [Full match name]\\nShort Name: [Short teams]\\nTournament: [Tournament name]\\nVenue: [Venue]\\n\\n🔥 CLIP COVERAGE\\n[Write 2-3 long paragraphs detailing the exact action in the transcript, the players involved, the match situation, and the stakes. Be very wordy.]\\n\\nSquad players for both teams: [Team 1] ([Team 1 players]) and [Team 2] ([Team 2 players]).\\n\\n🔎 Popular Searches:\\n[Insert at least 25 comma-separated long-tail search terms here, including variations of live scores, commentary, player names, and team names]\\n\\n⚠️ DISCLAIMER:\\nThis stream/clip is intended for independent cricket commentary, updates, analysis and fan discussion. No official match broadcast footage or copyrighted television audio is being rebroadcast. Team names, player names, league names, logos and trademarks belong to their respective owners.\\n\\n👍 Like the video, subscribe to the channel and join the comments with your prediction for [Teams].\\n\\n#️⃣ Best hashtags\\n[Insert 10-15 hashtags]"
-3. Do NOT fabricate match facts; use ONLY the provided entities or omit the specific detail if entirely unknown.
-4. It is critical to include a comma-separated list of popular searches under "Popular Searches:". Include LIVE keywords if requested by the prompt style.
+1. Aim for {description_target_chars} chars; never below {description_min_chars} when evidence is rich and never above {description_max_chars}. Write an extremely long, detailed, natural-language article to maximize SEO surface area.
+2. NEVER include a "Popular Searches:" section or any comma-separated keyword list. YouTube flags this as keyword stuffing and suppresses reach. Instead, weave all keywords naturally into flowing prose paragraphs.
+3. Structure the description exactly like this:
+
+SECTION 1 — HOOK (first 150 chars, main keyword front-loaded):
+"[Match short name] — [exact clip moment in one punchy sentence]. Watch [specific player] [specific action] in this cricket Short."
+
+SECTION 2 — 🏏 MATCH DETAILS:
+"Match: [Full match name]
+Venue: [Venue]
+Tournament: [Tournament name]
+Date: [Date if known]
+Teams: [Team 1] vs [Team 2]"
+
+SECTION 3 — 🔥 DETAILED CLIP ANALYSIS (2-4 long paragraphs):
+Write like a cricket journalist. Detail the exact action in the transcript, the players involved, the match situation, the stakes, the strategy, head-to-head stats, pitch conditions, and why this moment matters. Naturally embed vidIQ keywords and search phrases into sentences — never as lists.
+
+SECTION 4 — 🏟️ SQUAD & PLAYING XI CONTEXT:
+"Squad players for [Team 1]: [names]. Squad players for [Team 2]: [names]."
+Include player analysis, form discussion, and predictions woven around the squad data.
+
+SECTION 5 — ⚠️ DISCLAIMER:
+"This clip is intended for independent cricket commentary, updates, analysis and fan discussion. No official match broadcast footage or copyrighted television audio is being rebroadcast. Team names, player names, league names, logos and trademarks belong to their respective owners."
+
+SECTION 6 — CALL TO ACTION:
+"Like the video, subscribe to Cricket With Prajjwal, and drop your prediction for [Teams] in the comments."
+
+4. Do NOT fabricate match facts; use ONLY the provided entities or omit the specific detail if entirely unknown.
+5. CRITICAL: Every keyword from the APPROVED SEARCH SEEDS must appear naturally inside prose sentences — never dumped as a comma-separated block.
 
 TITLE RULES:
 - Max {title_max_chars} chars, 1-2 emojis, no LIVE/#Shorts.
@@ -229,10 +255,12 @@ Clip transcript: {transcript}
 Source title: {video_title}
 
 Return only JSON with title, description, hashtags, search_terms, primary_search_terms, and tags.
-- Description MUST be unique, natural, match-grounded, and end with exactly 3 relevant hashtags.
+- Description MUST be a natural article-style essay (3000-4000 chars) with keywords woven into prose.
+- NEVER include a "Popular Searches:" section or any comma-separated keyword list — YouTube suppresses this as keyword stuffing.
+- Structure: Hook sentence → Match Details → 2-4 detailed analysis paragraphs → Squad context → Disclaimer → CTA.
 - Title: max 60 characters; one specific premise plus 1-2 emojis. No LIVE/#Shorts.
 - Search terms: 12-25 ranked long-tail grounded cricket phrases; no filler.
-- Tags: only the strongest grounded phrases; do not try to fill the tag field.
+- Tags: only the strongest 12-15 exact-match grounded phrases; pack within 480 chars.
 """
 
 
@@ -329,8 +357,8 @@ def _build_vidiq_description(
 ) -> str:
     """Grounded fallback description used only when the writer model is unavailable.
 
-    Keep it readable. vidIQ phrases are ranking hints, not an excuse to repeat the
-    same sentence twenty times like a malfunctioning SEO fax machine.
+    Builds a natural article-style description. vidIQ phrases are woven into
+    prose — never dumped as a comma-separated "Popular Searches" block.
     """
     target = min(_description_target_chars(), _description_max_chars())
     teams = [str(t).strip() for t in (teams or []) if str(t).strip()]
@@ -339,14 +367,22 @@ def _build_vidiq_description(
     ))
     ranked = list(dict.fromkeys(
         str(keyword).strip() for keyword in keywords if str(keyword).strip()
-    ))[:10]
+    ))[:15]
 
-    opening = (
-        f"{title}. This Short focuses on the exact cricket moment discussed in the clip, "
-        "with the title and search wording kept aligned to the verified source context."
-    )
+    # SECTION 1 — Hook
+    if len(teams) >= 2:
+        opening = (
+            f"{teams[0]} vs {teams[1]} — {title}. Watch the exact cricket moment "
+            "discussed in this Short, with analysis and commentary from Cricket With Prajjwal."
+        )
+    else:
+        opening = (
+            f"{title}. This Short covers a key cricket moment with detailed analysis "
+            "and commentary from Cricket With Prajjwal."
+        )
     sections = [opening]
 
+    # SECTION 2 — Match Details
     if teams or facts:
         details = ["🏏 MATCH DETAILS"]
         if len(teams) >= 2:
@@ -356,35 +392,63 @@ def _build_vidiq_description(
         details.extend(f"• {fact}" for fact in facts[:10])
         sections.append("\n".join(details))
 
+    # SECTION 3 — Detailed Analysis (natural prose with keywords embedded)
     clip_subject = "the verified cricket discussion in this Short"
     if ranked:
         clip_subject = ranked[0]
-    sections.append(
-        "🔥 CLIP BREAKDOWN\n"
-        f"The clip is centered on {clip_subject}. The metadata stays tied to the spoken "
+
+    analysis_lines = [
+        "🔥 CLIP ANALYSIS",
+        f"This clip centers on {clip_subject}. The metadata stays tied to the spoken "
         "segment and verified match evidence, without adding an unsupported player, score, "
-        "result, venue, or event."
-    )
-
+        "result, venue, or event.",
+    ]
+    # Weave keywords into natural sentences instead of dumping them
     if ranked:
-        natural = ranked[:8]
-        if len(natural) == 1:
-            search_text = natural[0]
-        else:
-            search_text = ", ".join(natural[:-1]) + f", and {natural[-1]}"
-        sections.append(
-            "🔎 SEARCH CONTEXT\n"
-            f"Relevant viewer searches around this exact topic include {search_text}. "
-            "These phrases are included as discovery context while keeping the description "
-            "specific to the clip instead of turning it into a tag dump."
-        )
+        keyword_chunks = [ranked[i:i+3] for i in range(0, len(ranked), 3)]
+        for chunk in keyword_chunks:
+            if len(chunk) == 3:
+                analysis_lines.append(
+                    f"Viewers searching for {chunk[0]} will find detailed coverage here. "
+                    f"This Short also covers aspects related to {chunk[1]} and {chunk[2]}, "
+                    "providing context from the actual match discussion."
+                )
+            elif len(chunk) == 2:
+                analysis_lines.append(
+                    f"Coverage in this clip extends to {chunk[0]} and {chunk[1]}, "
+                    "grounded in the actual transcript evidence."
+                )
+            else:
+                analysis_lines.append(
+                    f"This moment is particularly relevant for fans following {chunk[0]}."
+                )
+    sections.append("\n".join(analysis_lines))
 
+    # SECTION 4 — Source context
     if video_title.strip():
         sections.append(f"Source program context: {video_title.strip()[:300]}")
 
+    # SECTION 5 — Disclaimer
     sections.append(
-        "Watch the full Short for the complete spoken moment and cricket context."
+        "⚠️ DISCLAIMER\n"
+        "This clip is intended for independent cricket commentary, updates, analysis and "
+        "fan discussion. No official match broadcast footage or copyrighted television audio "
+        "is being rebroadcast. Team names, player names, league names, logos and trademarks "
+        "belong to their respective owners."
     )
+
+    # SECTION 6 — CTA
+    if len(teams) >= 2:
+        sections.append(
+            f"Like the video, subscribe to Cricket With Prajjwal, and drop your "
+            f"prediction for {teams[0]} vs {teams[1]} in the comments."
+        )
+    else:
+        sections.append(
+            "Like the video, subscribe to Cricket With Prajjwal, and share your "
+            "thoughts in the comments."
+        )
+
     description = "\n\n".join(sections)
     return _truncate_at_word(description, target)
 
@@ -556,7 +620,8 @@ def _llm_repair_seo(
         + f"\n\nAllowed people whitelist: {allowed_people_note}\n"
         + "Regenerate the COMPLETE corrected metadata now, following every "
         "original rule (length budgets, 12-25 strong long-tail search terms, emoji "
-        "title). Return ONLY the JSON object."
+        "title, natural article-style description with NO 'Popular Searches' keyword "
+        "lists). Return ONLY the JSON object."
     )
     try:
         repaired = _attempt_seo_generation(
@@ -703,8 +768,8 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
         if tg_clean.lower() not in seen_tags:
             seen_tags.add(tg_clean.lower())
             deduped_tags.append(tg_clean)
-    tag_budget = _seo_config_int("max_tag_chars", 500, 50, 500)
-    out["tags"] = _pack_youtube_tags(deduped_tags, tag_budget)
+    tag_budget = _seo_config_int("max_tag_chars", 480, 50, 500)
+    out["tags"] = _pack_youtube_tags(deduped_tags[:15], tag_budget)
 
     return out
 
@@ -796,8 +861,12 @@ def _validate_seo_quality(item: Dict) -> bool:
     #      - "Tags:", "Keywords:", "Search terms:" at end (label + colon)
     #      - Comma-separated single-word dump on last line
     last_200 = description[-200:].lower()
-    if re.search(r'\b(?:search[_ ]terms?|tags?|keywords?)\s*:', last_200):
+    if re.search(r'\b(?:search[_ ]terms?|tags?|keywords?|popular[_ ]searches?)\s*:', last_200):
         log.warning("Quality Gate Failed: Lazy SEO keyword dump at end")
+        return False
+    # Also reject "Popular Searches:" ANYWHERE in description (keyword stuffing)
+    if re.search(r'(?i)\bpopular\s+searches?\s*:', description):
+        log.warning("Quality Gate Failed: 'Popular Searches' keyword stuffing block detected")
         return False
     # Check last line for high comma density (keyword dump indicator)
     last_line = description.split('\n')[-1].strip().lower()
@@ -1996,6 +2065,7 @@ def _generate_ai_seo(clip_id: str, user_prompt: str,
             response = ai.generate_seo_text(
                 prompt=user_prompt,
                 system_instruction=sys_instruction,
+                reasoning_effort="high"
             )
         if not response or not response.strip():
             log.warning("[%s] AI returned empty response", clip_id)
@@ -2062,6 +2132,7 @@ def _escalation_seo(clip_id: str, user_prompt: str,
             response = ai.generate_seo_text(
                 prompt=salvage_prompt,
                 system_instruction=sys_instruction,
+                reasoning_effort="high"
             )
         if not response:
             return None

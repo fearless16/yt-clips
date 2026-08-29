@@ -171,7 +171,7 @@ class TestPromptsNoLiveScoreTitle:
     def test_prompts_instruct_against_live_title(self):
         from automation.seo import seo
         tmpl = seo._CRICKET_ONLY_PROMPT_TMPL
-        assert "No LIVE/#Shorts" in tmpl or "never 'LIVE'" in tmpl, \
+        assert "no live/#shorts" in tmpl.lower() or "never 'live'" in tmpl.lower(), \
             "prompt should explicitly warn against LIVE framing in title"
 
     def test_prompts_instruct_against_shorts_in_title(self):

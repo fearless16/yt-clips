@@ -504,8 +504,13 @@ def run(
                                run_id=rid) as ph:
                     from upload import upload_video
                     privacy = cfg.get("youtube", {}).get(
-                        "privacy_status", "public"
+                        "privacy_status", "scheduled"
                     )
+                    
+                    if privacy == "scheduled" and not auto_schedule:
+                        log.info("privacy_status is 'scheduled', auto-enabling scheduling")
+                        auto_schedule = True
+
                     interval = cfg.get("upload_schedule", {}).get(
                         "interval_hours",
                         cfg.get("youtube", {}).get("schedule_interval_hours", 1),

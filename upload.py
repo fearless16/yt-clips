@@ -268,7 +268,7 @@ def get_authenticated_service(token_index=0):
 def upload_video(
     video_path: str,
     metadata_path: str,
-    privacy: str = "public",
+    privacy: str = "scheduled",
     publish_at: Optional[str] = None,
 ) -> Optional[str]:
     """

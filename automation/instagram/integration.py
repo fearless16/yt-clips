@@ -72,7 +72,7 @@ def _run_instagram_worker(clip_dir, transcript, video_title,
 
 def publish_everywhere(clip_dir, transcript, video_title,
                        video_description, *, skip_youtube=False,
-                       skip_instagram=None, privacy="public") -> dict:
+                       skip_instagram=None, privacy="scheduled") -> dict:
     """Run YouTube SEO/upload and Instagram publish in parallel.
 
     Returns {"youtube": {...}|None, "instagram": media_id|None}; a

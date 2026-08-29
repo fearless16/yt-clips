@@ -244,7 +244,7 @@ def _api_intercept_context(video_path: str):
             })
         return "Kohli hit a six. Bumrah bowled a yorker. Amazing catch."
 
-    def _fake_generate_seo_text(self, prompt="", system_instruction=None):
+    def _fake_generate_seo_text(self, prompt="", system_instruction=None, reasoning_effort=None):
         log.info("  [FAKE AI] generate_seo_text (prompt=%.60s...)",
                  prompt.replace("\n", " ")[:60])
         return _FAKE_SEO_JSON

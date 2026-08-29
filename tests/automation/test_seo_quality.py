@@ -302,6 +302,27 @@ class TestSEOQualityGate:
         }
         assert _validate_seo_quality(item)
 
+    def test_quality_gate_rejects_lazy_keyword_dump(self):
+        """Quality gate rejects lazy 'Tags: ' or 'Popular Searches: ' blocks."""
+        from automation.seo.seo import _validate_seo_quality
+        metadata = {
+            "title": "Good Title",
+            "description": "A very long description that is at least 1500 chars... " + ("A" * 1500) + "\n\nPopular Searches:\nkeyword1, keyword2",
+            "search_terms": [],
+            "tags": ""
+        }
+        assert not _validate_seo_quality(metadata), "Must reject keyword-stuffed description"
+
+    def test_quality_gate_rejects_lazy_keyword_dump_at_end(self):
+        from automation.seo.seo import _validate_seo_quality
+        metadata = {
+            "title": "Good Title",
+            "description": "A very long description that is at least 1500 chars... " + ("A" * 1500) + "\n\nTags:\nkeyword1, keyword2",
+            "search_terms": [],
+            "tags": ""
+        }
+        assert not _validate_seo_quality(metadata), "Must reject keyword-stuffed description"
+
     def test_quality_gate_rejects_too_short_description(self):
         from automation.seo.seo import _validate_seo_quality
         item = {
