@@ -235,12 +235,20 @@ def apply_fades(
 
     # Apply fades
     tmp_out = output_path + ".tmp.mp4"
+    enc_args = ["-c:v", "libx264", "-crf", str(cfg.export.crf), "-preset", "fast"]
+    try:
+        import sys
+        _enc = sys.modules["export"]._get_best_encoder() if "export" in sys.modules else None
+        if _enc == "h264_nvenc": enc_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "26"]
+        elif _enc == "h264_amf": enc_args = ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr", "-qvbr", "26"]
+    except: pass
+
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
         "-vf", vf,
         "-af", f"afade=t=in:st=0:d={fade_in},afade=t=out:st={max(0, duration - fade_out):.3f}:d={fade_out}",
-        "-c:v", "libx264", "-crf", str(cfg.export.crf), "-preset", "fast",
+        *enc_args,
         "-c:a", "aac", "-b:a", cfg.export.audio_bitrate,
         "-movflags", "+faststart",
         tmp_out,

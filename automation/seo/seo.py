@@ -1625,8 +1625,8 @@ def generate_clip_seo(
                 "metadata_valid": True,
                 "description_source": "deterministic_grounded_fallback",
             }
-        # vidIQ owns ranking choices; the writer owns readable evidence-backed prose.
-        result["title"] = vidiq_titles[0]
+        # Let the LLM keep its desi-style title, but enforce VidIQ's search terms for semantic clustering.
+        # result["title"] = vidiq_titles[0] # REMOVED: Do not override the LLM's language/tone.
         result["search_terms"] = vidiq_keywords
         result["primary_search_terms"] = vidiq_keywords[:_seo_config_int(
             "min_primary_search_terms", 4, 1, 10

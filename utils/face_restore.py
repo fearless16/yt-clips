@@ -271,6 +271,17 @@ class FaceRestorer:
                      frame_idx, t_upscale, frame_idx / t_upscale if t_upscale > 0 else 0)
                      
             # Encode with ffmpeg
+            enc_args = ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
+            try:
+                import sys
+                _enc = sys.modules["export"]._get_best_encoder() if "export" in sys.modules else None
+                if _enc == "h264_nvenc":
+                    enc_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "26"]
+                elif _enc == "h264_amf":
+                    enc_args = ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr", "-qvbr", "26"]
+            except Exception:
+                pass
+                
             cmd_encode = [
                 "ffmpeg", "-y",
                 "-framerate", str(fps),
@@ -278,9 +289,7 @@ class FaceRestorer:
                 "-i", input_path,
                 "-map", "0:v",
                 "-map", "1:a?",
-                "-c:v", "libx264",
-                "-crf", "18",
-                "-preset", "fast",
+                *enc_args,
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac",
                 "-b:a", "192k",

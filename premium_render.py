@@ -179,6 +179,17 @@ class FrameInterpolator:
             remaining *= 2.0
         tempo_filters.append(f"atempo={remaining:.6f}")
         af = ",".join(tempo_filters)
+        enc_args = ["-c:v", "libx264", "-crf", "18", "-preset", "veryfast"]
+        try:
+            import sys
+            _enc = sys.modules["export"]._get_best_encoder() if "export" in sys.modules else None
+            if _enc == "h264_nvenc":
+                enc_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "26"]
+            elif _enc == "h264_amf":
+                enc_args = ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr", "-qvbr", "26"]
+        except Exception:
+            pass
+
         cmd = [
             "ffmpeg", "-y",
             "-ss", f"{start:.3f}",
@@ -186,7 +197,7 @@ class FrameInterpolator:
             "-i", video_path,
             "-vf", f"setpts={1/avg_speed:.3f}*PTS,framerate=fps={target_fps}:interp_start=0:interp_end=1:scene=0.3",
             "-af", af,
-            "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
+            *enc_args,
             "-c:a", "aac", "-b:a", "192k",
             "-shortest", output_path,
         ]
@@ -295,9 +306,17 @@ def encode_two_pass(input_path: str, output_path: str, bitrate: str = "15M") -> 
     maxrate = f"{float(bval) * 1.5:.0f}{bsuffix}"
     bufsize = f"{float(bval) * 2:.0f}{bsuffix}"
 
+    enc_args = ["-c:v", "libx264", "-preset", "veryfast"]
+    try:
+        import sys
+        _enc = sys.modules["export"]._get_best_encoder() if "export" in sys.modules else None
+        if _enc == "h264_nvenc": enc_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-multipass", "2"]
+        elif _enc == "h264_amf": enc_args = ["-c:v", "h264_amf", "-quality", "balanced"]
+    except Exception: pass
+
     pass1 = [
         "ffmpeg", "-y", "-i", input_path,
-        "-c:v", "libx264", "-preset", "veryfast",
+        *enc_args,
         "-b:v", bitrate, "-maxrate", maxrate,
         "-bufsize", bufsize,
         "-pass", "1", "-passlogfile", logbase,
@@ -312,13 +331,13 @@ def encode_two_pass(input_path: str, output_path: str, bitrate: str = "15M") -> 
 
     pass2 = [
         "ffmpeg", "-y", "-i", input_path,
-        "-c:v", "libx264", "-preset", "veryfast",
+        *enc_args,
         "-b:v", bitrate, "-maxrate", maxrate,
         "-bufsize", bufsize,
         "-pass", "2", "-passlogfile", logbase,
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
-        output_path,
+        output_path
     ]
     r2 = subprocess.run(pass2, capture_output=True, text=True)
     for f in gb.glob(f"{logbase}*"):

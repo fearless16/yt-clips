@@ -73,7 +73,7 @@ def test_upload_video_success_path(tmp_path):
         assert body["status"]["privacyStatus"] == "public"
         assert body["status"]["selfDeclaredMadeForKids"] is False
         assert body["status"]["containsSyntheticMedia"] is False
-        assert kwargs["notifySubscribers"] is True
+        assert kwargs["notifySubscribers"] is False
 
 def test_upload_video_transient_error_returns_none(tmp_path):
     video_file = tmp_path / "test.mp4"

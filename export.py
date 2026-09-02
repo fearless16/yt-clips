@@ -1004,6 +1004,13 @@ def _export_native_res(
         f"setpts=(PTS-STARTPTS)/{speed:.6f}[v_src];{v_filter}"
     )
 
+    enc_args = ["-c:v", "libx264", "-crf", "16", "-preset", "fast"]
+    encoder = _get_best_encoder()
+    if encoder == "h264_nvenc":
+        enc_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "26"]
+    elif encoder == "h264_amf":
+        enc_args = ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr", "-qvbr", "26"]
+
     cmd = [
         "ffmpeg", "-y",
         "-ss", f"{input_seek:.6f}",
@@ -1011,7 +1018,7 @@ def _export_native_res(
         "-i", video_path,
         "-filter_complex", video_complex,
         "-map", "[v_out]",
-        "-c:v", "libx264", "-crf", "16", "-preset", "fast",
+        *enc_args,
         "-pix_fmt", "yuv420p",
     ]
 
@@ -1593,6 +1600,69 @@ def export_all(
         path = export_clip(video_path, start, end, str(out_file),
                            clip_id, transcript_segments=transcript_segments, analysis=analysis,
                            device=device, sr_instance=sr_inst)
+
+        # Post-processing: Remove silence to ensure clips are engaging
+        if path and Path(path).exists():
+            clip_segs = [s for s in transcript_segments if s["end"] > start and s["start"] < end]
+            if clip_segs:
+                clip_dur = end - start
+                kept = []
+                curr_start = max(0.0, clip_segs[0]["start"] - start)
+                curr_end = min(clip_dur, clip_segs[0]["end"] - start)
+                for s in clip_segs[1:]:
+                    s_rel_start = max(0.0, s["start"] - start)
+                    s_rel_end = min(clip_dur, s["end"] - start)
+                    # Merge segments with less than 0.8s gap
+                    if s_rel_start - curr_end < 0.8:
+                        curr_end = max(curr_end, s_rel_end)
+                    else:
+                        kept.append((curr_start, curr_end))
+                        curr_start = s_rel_start
+                        curr_end = s_rel_end
+                kept.append((curr_start, curr_end))
+                
+                # Add slight padding (0.2s) to avoid abrupt cuts
+                padded = []
+                for st, en in kept:
+                    padded.append((max(0.0, st - 0.2), min(clip_dur, en + 0.2)))
+                
+                # Apply jumpcuts only if we save at least 0.5s of silence
+                total_kept = sum(en - st for st, en in padded)
+                if total_kept < clip_dur - 0.5 and len(padded) > 0:
+                    import subprocess
+                    import os
+                    tmp_out = str(Path(path).with_name(f"{clip_id}_jumpcut.mp4"))
+                    filter_complex = ""
+                    for i, (st, en) in enumerate(padded):
+                        filter_complex += f"[0:v]trim=start={st:.3f}:end={en:.3f},setpts=PTS-STARTPTS[v{i}];"
+                        filter_complex += f"[0:a]atrim=start={st:.3f}:end={en:.3f},asetpts=PTS-STARTPTS[a{i}];"
+                    concat_inputs = "".join([f"[v{i}][a{i}]" for i in range(len(padded))])
+                    filter_complex += f"{concat_inputs}concat=n={len(padded)}:v=1:a=1[vout][aout]"
+                    
+                    enc_args = []
+                    if encoder == "h264_nvenc":
+                        enc_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "26"]
+                    elif encoder == "h264_amf":
+                        enc_args = ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr", "-qvbr", "26"]
+                    else:
+                        enc_args = ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
+
+                    cmd = [
+                        "ffmpeg", "-y", "-i", path,
+                        "-filter_complex", filter_complex,
+                        "-map", "[vout]", "-map", "[aout]",
+                        *enc_args,
+                        "-c:a", "aac", "-b:a", "192k",
+                        tmp_out
+                    ]
+                    log.info("[%s] Removing silence (%d cuts, %.1fs -> %.1fs)", clip_id, len(padded)-1, clip_dur, total_kept)
+                    res = subprocess.run(cmd, capture_output=True)
+                    if res.returncode == 0 and os.path.exists(tmp_out):
+                        os.replace(tmp_out, path)
+                        log.info("[%s] Silence removed successfully.", clip_id)
+                    else:
+                        log.warning("[%s] Silence removal failed", clip_id)
+
         # Post-export A/V sync validation
         if path and Path(path).exists():
             _validate_av_sync(path, clip_id)
@@ -1682,7 +1752,7 @@ def export_all(
 
     # Wait for any remaining SEO tasks to finish
     if seo_futures:
-        seo_deadline_at = time.monotonic() + _seo_export_deadline_seconds()
+        seo_deadline_at = time.monotonic() + 300.0
         log.info("🏷  Waiting for %d remaining SEO tasks...", len(seo_futures))
         for fut in seo_futures:
             remaining = max(0.0, seo_deadline_at - time.monotonic())
@@ -1690,8 +1760,7 @@ def export_all(
                 fut.result(timeout=remaining)
             except TimeoutError as exc:
                 raise TimeoutError(
-                    "SEO generation exceeded the %.3fs export deadline"
-                    % _seo_export_deadline_seconds()
+                    "SEO generation exceeded the 300.0s export deadline"
                 ) from exc
             except Exception as e:
                 log.error("SEO task error: %s", e)
