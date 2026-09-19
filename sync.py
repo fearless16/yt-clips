@@ -55,8 +55,7 @@ def _upload_file(service, local_path: Path, parent_folder_id: str) -> str:
     media = MediaFileUpload(
         str(local_path),
         mimetype=mimetype,
-        resumable=True,
-        chunksize=10 * 1024 * 1024,  # 10MB chunks for large video files
+        resumable=False,
     )
 
     log.info("⬆️  Uploading: %s (%.1f MB) …", local_path.name, local_path.stat().st_size / 1_048_576)
@@ -65,19 +64,7 @@ def _upload_file(service, local_path: Path, parent_folder_id: str) -> str:
         body=file_metadata, media_body=media, fields="id,name,webViewLink"
     )
 
-    # Upload with progress tracking
-    response = None
-    last_progress = -10
-    last_progress_time = time.monotonic()
-    while response is None:
-        status, response = request.next_chunk()
-        if status:
-            progress = int(status.progress() * 100)
-            now = time.monotonic()
-            if progress >= last_progress + 10 or now - last_progress_time >= 15 or progress >= 100:
-                log.info("   Progress: %d%%", progress)
-                last_progress = progress
-                last_progress_time = now
+    response = request.execute()
 
     file_id = response.get("id")
     link = response.get("webViewLink", "")
