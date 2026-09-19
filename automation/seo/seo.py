@@ -769,7 +769,7 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
             seen_tags.add(tg_clean.lower())
             deduped_tags.append(tg_clean)
     tag_budget = _seo_config_int("max_tag_chars", 480, 50, 500)
-    out["tags"] = _pack_youtube_tags(deduped_tags[:15], tag_budget)
+    out["tags"] = _pack_youtube_tags(deduped_tags, tag_budget)
 
     return out
 
@@ -1641,6 +1641,11 @@ def generate_clip_seo(
             sys_instruction=sys_instruction,
             salvage_tmpl=salvage_tmpl,
         )
+
+    # Force metadata tags to be purely driven by vidIQ's ranked keywords, filling the API budget
+    if vidiq_keywords:
+        result["tags"] = vidiq_keywords
+
     result = _enforce_limits(result, is_shorts=is_shorts)
 
     if vidiq_required:
