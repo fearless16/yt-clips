@@ -30,6 +30,8 @@ def _no_upload_post_creds(monkeypatch):
     real key mid-session. Graph-flow tests stub only some hooks and rely on
     the provider factory bailing out — force that bail-out per test."""
     monkeypatch.setenv("UPLOAD_POST_API_KEY", "")
+    from utils.config import load_config
+    monkeypatch.setitem(load_config(), "release_review", {"required": False})
 
 
 def _merge_config(monkeypatch, enabled):
@@ -186,7 +188,7 @@ class TestParallelSuccess:
         ig_calls = _stub_instagram(monkeypatch)
 
         result = publish_everywhere(clip_dir, "tr text", "Title X",
-                                    "Desc Y")
+                                    "Desc Y", privacy="public")
 
         assert result["youtube"]["video_id"] == VIDEO_ID
         assert seen["seo"] == [{

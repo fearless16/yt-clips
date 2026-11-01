@@ -4,7 +4,7 @@ import pytest
 class _NoVidiq:
     audit = {"enabled": False, "used": False, "calls": 0, "key_slot": None}
 
-    def call_tool(self, name, arguments):
+    def call_tool(self, name, arguments, **kwargs):
         return None
 
 

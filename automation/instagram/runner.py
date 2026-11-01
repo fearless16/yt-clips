@@ -192,6 +192,10 @@ def process_instagram_for_clip(clip_dir: Path, transcript: str,
         _save("UPLOAD", caption=caption)
 
         video_path = _find_clip_video(clip_dir)
+        from utils.config import load_config
+        if load_config().get("release_review", {}).get("required", False):
+            from automation.release_review import require_ready
+            require_ready(Path(video_path))
         publish_fn = resolve_stage_hook(HOOK_PUBLISH)
         result = publish_fn(
             video_path=video_path, caption=caption,

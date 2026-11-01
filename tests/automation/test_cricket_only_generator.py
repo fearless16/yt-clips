@@ -333,11 +333,11 @@ def test_seo_prompt_uses_canonical_grounded_player(monkeypatch):
 
     assert captured["transcript"] == "Yuvraj Singh ko India ka coach bana do"
     assert "Grounded players: Yuvraj Singh" in captured["prompt"]
-    assert "4000" in captured["prompt"]
-    # assert str(seo._description_target_chars()) in captured["prompt"]
+    assert "1-3 useful sentences" in captured["prompt"]
+    assert "force every phrase" in captured["prompt"]
     assert "Prajjwal explains why Yuvraj Singh has the temperament" in captured["prompt"]
     assert "Yuvraj Singh ko India ka coach bana do" in captured["prompt"]
-    assert "12-25" in captured["prompt"] and "long-tail" in captured["prompt"]
+    assert "a few relevant grounded long-tail" in captured["prompt"]
     assert "max 60 characters" in captured["salvage"]
 
 

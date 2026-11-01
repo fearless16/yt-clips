@@ -292,6 +292,17 @@ def upload_video(
     if not m_path.exists():
         log.error(f"Metadata file not found: {metadata_path}")
         return None
+    if cfg.get("release_review", {}).get("required", False):
+        from automation.release_review import require_ready
+        # Approval binds the canonical metadata file, not an arbitrary override.
+        if m_path.resolve() != v_path.with_name(f"{v_path.stem}_metadata.json").resolve():
+            log.error("Release held: metadata path differs from reviewed package")
+            return None
+        try:
+            require_ready(v_path)
+        except ValueError as exc:
+            log.error("%s", exc)
+            return None
     if not _validate_shorts_video(v_path):
         return None
 
@@ -334,10 +345,18 @@ def upload_video(
                  cfg.get("youtube", {}).get("contains_synthetic_media", False))
     )
 
+    import re
+    # Strip markdown headers (##), Bold (** or __), and convert lists to clean bullets
+    safe_desc = description or ""
+    clean_desc = re.sub(r'(?m)^#+\s+', '', safe_desc)
+    clean_desc = re.sub(r'(\*\*|__)(.*?)\1', r'\2', clean_desc)
+    clean_desc = re.sub(r'(?m)^\s*[-*]\s+', '• ', clean_desc)
+    clean_desc = re.sub(r'\n{3,}', '\n\n', clean_desc).strip()
+
     body = {
         "snippet": {
-            "title": title[:100],
-            "description": _truncate_bytes(description, 5000),
+            "title": title[:100] if title else "Shorts",
+            "description": _truncate_bytes(clean_desc, 5000),
             "tags": all_tags,
             "categoryId": category_id,
         },

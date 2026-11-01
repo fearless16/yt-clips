@@ -629,8 +629,6 @@ class AIClient:
         self._last_provider = "deepseek"
         self._last_model = self._model
         api_model = self._model
-        if api_model == "deepseek-v4-pro":
-            api_model = "deepseek-chat"
         t0 = time.monotonic()
         response = client.chat.completions.create(
             model=api_model, messages=messages, temperature=0.7, max_tokens=8192,
@@ -671,22 +669,8 @@ class AIClient:
     # qwen3.7-max excluded: returns 401 "not supported for format oa-compat"
     SEO_PREFERRED_MODELS = [
         ("deepseek", "deepseek-v4-pro"),
-        ("deepseek", "deepseek-chat"),
-        ("deepseek", "deepseek-reasoner"),
         ("opencode", "mimo-v2.5-pro"),
-        ("opencode", "mimo-v2.5"),
         ("opencode", "deepseek-v4-pro"),
-        ("opencode", "deepseek-v4-flash"),
-        ("opencode", "kimi-k2.5"),
-        ("opencode", "kimi-k2.6"),
-        ("opencode", "glm-5"),
-        ("opencode", "glm-5.1"),
-        ("opencode", "minimax-m2.5"),
-        ("opencode", "minimax-m2.7"),
-        ("opencode", "minimax-m3"),
-        ("opencode", "qwen3.7-max"),
-        ("opencode", "qwen3.7-plus"),
-        ("opencode", "qwen3.6-plus"),
     ]
 
     def generate_seo_text(self, prompt: str, system_instruction: Optional[str] = None, reasoning_effort: Optional[str] = None) -> str:
@@ -699,11 +683,15 @@ class AIClient:
         Raises:
             RuntimeError: If all OpenCode Go models fail.
         """
-        if not self.opencode_api_key:
-            raise RuntimeError("OpenCode Go API key missing — cannot generate SEO")
+        available = [(provider, model) for provider, model in self.SEO_PREFERRED_MODELS
+                     if (provider == "deepseek" and getattr(self, "deepseek_api_key", None))
+                     or (provider == "opencode" and getattr(self, "opencode_api_key", None))]
+        if not available:
+            raise RuntimeError("DeepSeek or OpenCode API key required for SEO")
+        call_options = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
 
         errors = []
-        for provider, model in self.SEO_PREFERRED_MODELS:
+        for provider, model in available:
             if self._in_cooldown(provider):
                 log.info("SEO: skipping %s/%s (cooldown)", provider, model)
                 continue
@@ -712,7 +700,7 @@ class AIClient:
                 continue
             try:
                 res = self._call_provider(provider, prompt, system_instruction,
-                                          prefer_model=model, reasoning_effort=reasoning_effort)
+                                          prefer_model=model, **call_options)
                 if res and res.strip():
                     self._record_success(provider)
                     self._last_provider = provider
@@ -728,13 +716,13 @@ class AIClient:
                 errors.append(f"{provider}/{model}: {e}")
 
         # Retry round (ignore token bucket, respect cooldowns)
-        for provider, model in self.SEO_PREFERRED_MODELS:
+        for provider, model in available:
             if self._in_cooldown(provider):
                 continue
             try:
                 log.info("SEO Retry: %s/%s", provider, model)
                 res = self._call_provider(provider, prompt, system_instruction,
-                                          prefer_model=model, reasoning_effort=reasoning_effort)
+                                          prefer_model=model, **call_options)
                 if res and res.strip():
                     self._record_success(provider)
                     self._last_provider = provider
@@ -744,22 +732,6 @@ class AIClient:
             except Exception as e:
                 self._note_provider_error(provider, e)
                 errors.append(f"{provider}/{model} (retry): {e}")
-
-        # Last resort: OpenRouter free tier (nvidia/nemotron-3-super-120b-a12b:free) — better than failing
-        if not self._in_cooldown("openrouter"):
-            try:
-                res = self.generate_openrouter(prompt, system_instruction)
-                if res and res.strip():
-                    self._record_success("openrouter")
-                    self._last_provider = "openrouter"
-                    self._last_model = "nvidia/nemotron-3-super-120b-a12b:free"
-                    self._log_cost("openrouter", "nvidia/nemotron-3-super-120b-a12b:free",
-                                   len(prompt) + len(system_instruction or ""),
-                                   len(res))
-                    log.info("SEO LLM ok via openrouter/nvidia/nemotron-3-super-120b-a12b:free (fallback)")
-                    return res.strip()
-            except Exception as e:
-                errors.append(f"openrouter/nvidia/nemotron-3-super-120b-a12b:free: {e}")
 
         raise RuntimeError(
             f"SEO generation failed — all models exhausted. "

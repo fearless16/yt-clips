@@ -34,6 +34,7 @@ from .context_engine import (
     build_grounded_search_queries,
 )
 from .vidiq import VidiqClient
+from automation.artifacts import atomic_json, valid_metadata, validate_clip_id
 
 SUGGEST_CACHE = TTLCache(maxsize=16, ttl=600)
 TREND_CACHE = TTLCache(maxsize=4, ttl=300)
@@ -172,18 +173,15 @@ SEO_BLOCKED_PROVIDERS = {"nvidia", "groq"}
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
 _SYSTEM = (
-    "You are an elite cricket Shorts SEO engine for @cricketwithprajjwal2.0. "
-    "Write metadata for BOTH viewers and YouTube Search. The first 2-3 description lines "
-    "must clearly explain the exact clip promise using the strongest grounded search phrase. "
-    "Then write a detailed, journalist-style article covering match context, player analysis, "
-    "pitch conditions, head-to-head stats, and predictions. Embed vidIQ keywords naturally "
-    "into flowing prose — NEVER dump a 'Popular Searches:' section or comma-separated keyword "
-    "list anywhere in the description. YouTube actively suppresses keyword-stuffed descriptions. "
-    "Evidence boundary: source title/description, clip transcript, OCR, live autocomplete, "
-    "recent YouTube search titles, verified scorecard facts, and explicitly supplied vidIQ "
-    "ranking guidance. Never invent a player, team, score, venue, date, series, or event. "
-    "All public copy is simple ENGLISH only: no Hinglish, no Devanagari. "
-    "Title = one specific premise, max 60 chars, 1-2 emojis, never LIVE or #Shorts. "
+    "You write source-grounded cricket Shorts metadata for @cricketwithprajjwal2.0. "
+    "The retained clip transcript is the primary evidence. Source video title and "
+    "description are context, not verified match facts. Search suggestions are topic "
+    "hints, not proof of demand or facts. Never invent players, scores, venues or results. "
+    "Use natural Roman Hinglish or simple English matching the speech. Preserve names, "
+    "numbers, negation and opinion versus fact. One honest title promise, delivered "
+    "by the clip; no LIVE, fake urgency, mandatory emojis or generic source-title fallback. "
+    "Write a unique, concise description explaining THIS moment; add context only when "
+    "supported. No keyword stuffing, unrelated squad lists, forced CTA or length padding. "
     "Return ONLY valid JSON."
 )
 
@@ -205,47 +203,23 @@ TASK — create unique metadata for THIS exact Short.
 
 Return ONLY this valid JSON object:
 {{
-  "title": "<specific English title, max 60 chars, grounded player/team + exact moment>",
-  "description": "<unique, human-readable, keyword-rich description written as a natural article>",
+  "title": "<specific English or Roman Hinglish title, max 60 chars, exact moment>",
+  "cover_text": "<one idea, at most three words, supported by retained speech>",
+  "description": "<unique concise explanation of this retained clip>",
   "hashtags": ["#Shorts", "<#specific team/series tag>", "<#specific topic/player tag>"],
-  "search_terms": ["<ranked long-tail viewer searches; prefer 12-25 strong phrases over filler>"],
-  "primary_search_terms": ["<4-8 strongest phrases>"],
-  "tags": ["<grounded phrases, packed under the API limit>" ]
+  "search_terms": ["<a few relevant grounded long-tail research phrases; never live-framing filler>"],
+  "primary_search_terms": ["<one or two strongest phrases>"],
+  "tags": ["<a few relevant names/aliases; no budget-filling requirement>" ]
 }}
 
 DESCRIPTION RULES:
-1. Aim for {description_target_chars} chars; never below {description_min_chars} when evidence is rich and never above {description_max_chars}. Write an extremely long, detailed, natural-language article to maximize SEO surface area.
-2. NEVER include a "Popular Searches:" section or any comma-separated keyword list. YouTube flags this as keyword stuffing and suppresses reach. Instead, weave all keywords naturally into flowing prose paragraphs.
-3. Structure the description exactly like this:
-
-SECTION 1 — HOOK (first 150 chars, main keyword front-loaded):
-"[Match short name] — [exact clip moment in one punchy sentence]. Watch [specific player] [specific action] in this cricket Short."
-
-SECTION 2 — 🏏 MATCH DETAILS:
-"Match: [Full match name]
-Venue: [Venue]
-Tournament: [Tournament name]
-Date: [Date if known]
-Teams: [Team 1] vs [Team 2]"
-
-SECTION 3 — 🔥 DETAILED CLIP ANALYSIS (2-4 long paragraphs):
-Write like a cricket journalist. Detail the exact action in the transcript, the players involved, the match situation, the stakes, the strategy, head-to-head stats, pitch conditions, and why this moment matters. Naturally embed vidIQ keywords and search phrases into sentences — never as lists.
-
-SECTION 4 — 🏟️ SQUAD & PLAYING XI CONTEXT:
-"Squad players for [Team 1]: [names]. Squad players for [Team 2]: [names]."
-Include player analysis, form discussion, and predictions woven around the squad data.
-
-SECTION 5 — ⚠️ DISCLAIMER:
-"This clip is intended for independent cricket commentary, updates, analysis and fan discussion. No official match broadcast footage or copyrighted television audio is being rebroadcast. Team names, player names, league names, logos and trademarks belong to their respective owners."
-
-SECTION 6 — CALL TO ACTION:
-"Like the video, subscribe to Cricket With Prajjwal, and drop your prediction for [Teams] in the comments."
-
-4. Do NOT fabricate match facts; use ONLY the provided entities or omit the specific detail if entirely unknown.
-5. CRITICAL: Every keyword from the APPROVED SEARCH SEEDS must appear naturally inside prose sentences — never dumped as a comma-separated block.
+1. Begin with 1-3 useful sentences about the actual clip. Max {description_max_chars} chars.
+2. No search-term lists, padding, unverified match details or unrelated player names.
+3. Search seeds are internal evidence: do not force every phrase into public prose.
+4. Use a short commentary disclaimer if appropriate; never claim broadcast footage is present.
 
 TITLE RULES:
-- Max {title_max_chars} chars, 1-2 emojis, no LIVE/#Shorts.
+- Max {title_max_chars} chars, optional emoji, no LIVE/#Shorts.
 - Lead with the most searchable grounded entity when it fits naturally.
 - Promise the exact clip moment; avoid generic adjectives and fake urgency.
 """
@@ -255,12 +229,9 @@ Clip transcript: {transcript}
 Source title: {video_title}
 
 Return only JSON with title, description, hashtags, search_terms, primary_search_terms, and tags.
-- Description MUST be a natural article-style essay (3000-4000 chars) with keywords woven into prose.
-- NEVER include a "Popular Searches:" section or any comma-separated keyword list — YouTube suppresses this as keyword stuffing.
-- Structure: Hook sentence → Match Details → 2-4 detailed analysis paragraphs → Squad context → Disclaimer → CTA.
-- Title: max 60 characters; one specific premise plus 1-2 emojis. No LIVE/#Shorts.
-- Search terms: 12-25 ranked long-tail grounded cricket phrases; no filler.
-- Tags: only the strongest 12-15 exact-match grounded phrases; pack within 480 chars.
+- Description: concise, clip-specific explanation; no keyword lists, invented facts or padding.
+- Title: max 60 characters; one supported premise. No LIVE/#Shorts or mandatory emoji.
+- Use only relevant grounded search phrases and a few tags; no quantity quota.
 """
 
 
@@ -309,7 +280,7 @@ def _seo_config_float(key: str, default: float, low: float, high: float) -> floa
 
 
 def _description_min_chars() -> int:
-    return _seo_config_int("description_min_chars", 1800, 100, 4800)
+    return _seo_config_int("description_min_chars", 100, 1, 4800)
 
 
 def _description_target_chars() -> int:
@@ -1020,6 +991,8 @@ def _get_vidiq_context(approved_queries: List[str], grounding_text: str, player_
     This replaces the old "up to six near-duplicate keyword calls per clip" pattern.
     """
     vidiq_cfg = cfg.get("seo", {}).get("vidiq", {})
+    if not vidiq_cfg.get("enabled", False):
+        return "", {"used": False, "status": "disabled"}, {"titles": [], "keywords": []}
     try:
         max_calls = int(vidiq_cfg.get("max_calls_per_clip", 4))
     except (TypeError, ValueError):
@@ -1502,19 +1475,24 @@ def generate_clip_seo(
         research_context=research_context,
     )
     approved_queries = evidence_pack["approved_search_queries"]
+    # Preserve supplied evidence spelling/order where it survived grounding;
+    # model-generated queries cannot replace caller-approved evidence.
+    supplied = {str(q).strip().casefold(): str(q).strip() for q in (approved_search_queries or [])}
+    approved_queries = [supplied.get(str(q).casefold(), q) for q in approved_queries]
     grounded_entities = evidence_pack["grounded_entities"]
     vidiq_context, vidiq_audit, vidiq_recommendations = _get_vidiq_context(
         approved_queries,
         " ".join((video_title, video_description, transcript, scorecard, *match_facts)),
         player_names=list(dict.fromkeys([*grounded_players, *evidence_pack.get("player_names", [])])),
     )
+    vidiq_titles = []
+    vidiq_keywords = []
     if vidiq_required:
         vidiq_titles = list(vidiq_recommendations.get("titles") or [])
         vidiq_keywords = list(vidiq_recommendations.get("keywords") or [])
-        if not vidiq_audit.get("used") or not vidiq_titles or not vidiq_keywords:
-            raise SEOGenerationError(
-                f"SEO blocked for {clip_id}: vidIQ required but returned no grounded title/keywords"
-            )
+        min_vidiq_keywords = _vidiq_required_keyword_floor()
+        if not vidiq_audit.get("used") or not vidiq_titles or len(vidiq_keywords) < min_vidiq_keywords:
+            raise SEOGenerationError(f"SEO blocked for {clip_id}: required legacy VidIQ evidence unavailable")
         approved_queries = vidiq_keywords
 
     # Entity allow-lists must exist BEFORE any repair path runs: the
@@ -1934,7 +1912,7 @@ def generate_clip_seo(
     ))
     approved_by_key = {query.casefold(): query for query in approved_clean}
     ranked = []
-    for query in result.get("search_terms") or []:
+    for query in approved_clean:
         clean = str(query).strip()
         canonical = approved_by_key.get(clean.casefold())
         if canonical and canonical not in ranked:
@@ -1970,15 +1948,7 @@ def generate_clip_seo(
         str(query) for query in primary_queries
         if re.sub(r"\s+", " ", str(query)).strip().casefold() not in description_key
     ]
-    if missing_queries:
-        # Preserve exact primary-query coverage in readable prose. Re-canonicalize
-        # the hashtag block afterwards so hashtags remain the final description line.
-        suffix = "\n\nViewer search context also includes " + "; ".join(missing_queries) + "."
-        max_chars = _description_max_chars()
-        base = _HASHTAG_TOKEN.sub("", str(result.get("description") or "")).rstrip()
-        result["description"] = (
-            _truncate_at_word(base, max(0, max_chars - len(suffix))) + suffix
-        )
+    # Internal research phrases need not be pasted into public descriptions.
     if is_shorts:
         result["description"] = _cap_description_hashtags(
             str(result.get("description") or ""), result.get("hashtags") or []
@@ -2189,6 +2159,7 @@ def generate_seo_for_exported_clip(
     If AI generation fails after escalation, writes a ``*_seo_failed.json``
     marker so the retry queue can pick it up later. Never emits generic SEO.
     """
+    validate_clip_id(clip_id)
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     metadata_path = Path(output_dir) / f"{clip_id}_metadata.json"
 
@@ -2253,21 +2224,24 @@ def generate_seo_for_exported_clip(
             grounded_aliases=grounded_aliases,
             research_sources=research_sources,
         )
-        # Successful return from generate_clip_seo means metadata passed all
-        # gates, regardless of whether prose came from AI or deterministic fallback.
-        tmp_path = metadata_path.with_suffix(".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, metadata_path)
-        marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
-        marker_path.unlink(missing_ok=True)
-        return result
+        if not valid_metadata(result):
+            raise SEOGenerationError("Generated metadata is incomplete or failed")
     except Exception as e:
         log.error("[%s] SEO generation failed: %s", clip_id, e)
+        metadata_path.unlink(missing_ok=True)
         marker_path = Path(output_dir) / f"{clip_id}_seo_failed.json"
-        with open(marker_path, "w", encoding="utf-8") as f:
-            json.dump(retry_payload, f, ensure_ascii=True)
+        atomic_json(marker_path, {**retry_payload, "error": str(e)})
         return {"_seo_failed": True, "error": str(e)}
+
+    # A disk failure is not a provider rejection: surface it to the caller.
+    try:
+        atomic_json(metadata_path, result)
+    except OSError as exc:
+        metadata_path.unlink(missing_ok=True)
+        atomic_json(Path(output_dir) / f"{clip_id}_seo_failed.json", {**retry_payload, "error": str(exc)})
+        raise
+    (Path(output_dir) / f"{clip_id}_seo_failed.json").unlink(missing_ok=True)
+    return result
 
 
 def process_all_seo(highlights_path: str, output_dir: str,
@@ -2427,7 +2401,7 @@ def retry_failed_seo(output_dir: str) -> dict:
     for m in markers:
         try:
             data = json.loads(m.read_text(encoding="utf-8"))
-            clip_id = data.get("clip_id", m.stem.replace("_seo_failed", ""))
+            clip_id = validate_clip_id(m.name.removesuffix("_seo_failed.json"))
             retry_keys = (
                 "transcript", "video_title", "video_description", "scorecard",
                 "trend_topics", "teams", "is_shorts", "video_path",
@@ -2436,7 +2410,7 @@ def retry_failed_seo(output_dir: str) -> dict:
             )
             kwargs = {key: data[key] for key in retry_keys if key in data}
             result = generate_clip_seo(clip_id=clip_id, **kwargs)
-            if result and not result.get("_seo_failed"):
+            if valid_metadata(result):
                 meta_path = out / f"{clip_id}_metadata.json"
                 tmp_path = meta_path.with_suffix(".tmp")
                 tmp_path.write_text(
@@ -2448,9 +2422,15 @@ def retry_failed_seo(output_dir: str) -> dict:
                 recovered += 1
                 log.info("[retry] %s recovered", clip_id)
             else:
-                log.warning("[retry] %s still failing", clip_id)
+                raise SEOGenerationError(str((result or {}).get("error") or "Incomplete retry metadata"))
         except Exception as e:
             log.error("[retry] %s error: %s", m.name, e)
+            try:
+                existing = json.loads(m.read_text(encoding="utf-8"))
+                if isinstance(existing, dict):
+                    atomic_json(m, {**existing, "error": str(e)})
+            except (OSError, ValueError, TypeError) as persist_error:
+                log.error("[retry] Could not persist error for %s: %s", m.name, persist_error)
     return {"recovered": recovered, "total": total}
 
 

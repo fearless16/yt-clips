@@ -764,6 +764,7 @@ def detect_highlights(
     with open(t_path, encoding="utf-8") as f:
         data = json.load(f)
     segments = data if isinstance(data, list) else data.get("segments", [])
+    raw_segments = [dict(segment) for segment in segments]
     # Whisper emits Devanagari for language=hi, but every downstream signal
     # (keyword lists, classifiers, SEO grounding) operates on Roman-Hinglish.
     # Transliterate once here so selection sees what the audience speaks.
@@ -932,10 +933,11 @@ def detect_highlights(
     # Score all candidates through 7 agents
     scored_candidates = selector.score_candidates(merged, context_for_agents)
 
-    # Canonical learner is a bounded tie-breaker only. Every candidate here was
-    # already built by _prepare_complete_thoughts(), so it cannot shorten or cut.
+    # Sentence grouping is not semantic proof. Do not grant the learner's
+    # complete-thought gate just because a heuristic constructed a window.
     for candidate in scored_candidates:
-        candidate["complete_thought"] = True
+        candidate["complete_thought"] = False
+        candidate["boundary_method"] = "heuristic_sentence_grouping"
     try:
         from shorts_intelligence.bridge import apply_selection_policy
 
@@ -963,6 +965,12 @@ def detect_highlights(
     top = selector.select(scored_candidates, context_for_agents,
                           max_selected=max_selected, min_selected=min_selected,
                           min_quality=min_quality)
+
+    if cfg.get("release_review", {}).get("required", False):
+        from automation.editorial_evidence import source_identity, write_discovery_evidence
+        write_discovery_evidence(output_path, source_identity(video_path), transcript_path,
+                                 raw_segments, scored_candidates, top,
+                                 context_for_agents.get("editorial_decision"))
 
     top.sort(key=lambda w: w["start"])
 
@@ -996,6 +1004,8 @@ def detect_highlights(
             output_min=output_min,
             output_max=output_max,
         )
+        yaml_data[key]["selection_reason"] = w.get("ai_reason", "")
+        yaml_data[key]["semantic_review"] = w.get("semantic_review", "NOT CHECKED")
 
         if "agent_scores" in w:
             yaml_data[key]["agent_scores"] = {

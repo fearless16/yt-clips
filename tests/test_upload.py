@@ -9,6 +9,12 @@ from upload import (
     upload_video,
 )
 
+
+@pytest.fixture(autouse=True)
+def _transport_tests_are_separate_from_release_review(monkeypatch):
+    import upload
+    monkeypatch.setitem(upload.cfg, "release_review", {"required": False})
+
 def test_validate_shorts_video():
     with patch("upload._probe_video", return_value={"width": 1080, "height": 1920, "duration": 30.0}):
         assert _validate_shorts_video(Path("dummy.mp4")) is True

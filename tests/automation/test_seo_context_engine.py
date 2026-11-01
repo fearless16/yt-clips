@@ -210,9 +210,9 @@ def test_generated_queries_are_replaced_by_approved_evidence(monkeypatch):
     )
 
     assert result["search_terms"][:len(_approved_queries())] == _approved_queries()
-    assert 24 <= len(result["search_terms"]) <= 30
+    assert len(_approved_queries()) <= len(result["search_terms"]) <= 12
     assert result["primary_search_terms"][:2] == _approved_queries()[:2]
-    assert 4 <= len(result["primary_search_terms"]) <= 8
+    assert 1 <= len(result["primary_search_terms"]) <= 2
     assert "india cricket latest" not in result["description"].casefold()
 
 
@@ -240,7 +240,7 @@ def test_research_queries_can_stay_in_metadata_when_primary_queries_are_embedded
     )
 
     assert result["search_terms"][:len(_approved_queries())] == _approved_queries()
-    assert 24 <= len(result["search_terms"]) <= 30
+    assert len(_approved_queries()) <= len(result["search_terms"]) <= 12
     assert result["primary_search_terms"][:2] == _approved_queries()[:2]
 
 

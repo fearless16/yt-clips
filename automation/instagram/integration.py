@@ -67,7 +67,7 @@ def _run_instagram_worker(clip_dir, transcript, video_title,
     from automation.instagram import runner
 
     return runner.process_instagram_for_clip(
-        clip_dir, transcript, video_title, video_description)
+        str(clip_dir), transcript, video_title, video_description)
 
 
 def publish_everywhere(clip_dir, transcript, video_title,

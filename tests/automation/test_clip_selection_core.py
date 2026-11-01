@@ -231,7 +231,7 @@ def test_selector_select_returns_empty_when_nothing_passes_quality():
     assert selector.select(scored, {}, max_selected=3, min_quality=99.0) == []
 
 
-def test_selector_refills_partial_arbiter_selection_to_minimum(monkeypatch):
+def test_selector_preserves_partial_arbiter_selection_despite_minimum(monkeypatch):
     import automation.clip_selection.selector as selector_module
 
     candidates = [
@@ -274,8 +274,9 @@ def test_selector_refills_partial_arbiter_selection_to_minimum(monkeypatch):
         min_quality=38.0,
     )
 
-    assert len(selected) == 3
-    assert candidates[1] in selected
+    assert selected == [candidates[0]]
+    assert candidates[1] not in selected
+    assert candidates[2] not in selected
 
 
 def test_selector_minimum_never_refills_hard_rejected_candidate(monkeypatch):
@@ -367,7 +368,7 @@ def test_llm_arbiter_dedupes_duplicate_candidate_ids(monkeypatch):
     assert [item["text"] for item in result] == ["Siraj cleans up the tail"]
 
 
-def test_llm_arbiter_falls_back_when_both_attempts_malformed(monkeypatch):
+def test_llm_arbiter_holds_when_both_attempts_malformed(monkeypatch):
     import automation.clip_selection.arbiter as arbiter
 
     class BadJSONAI:
@@ -385,11 +386,7 @@ def test_llm_arbiter_falls_back_when_both_attempts_malformed(monkeypatch):
     result = arbiter.llm_arbiter_refine(candidates, {"transcript_segments": []}, max_selected=2)
 
     assert ai.calls == 2
-    assert [item["text"] for item in result] == [
-        "Siraj cleans up the tail",
-        "Kohli reviews the LBW",
-    ]
-    assert "ai_score" not in result[0] or result[0]["ai_score"] == candidates[0]["final_score"]
+    assert result == []
 
 
 def test_llm_arbiter_survives_exception_then_succeeds(monkeypatch):
@@ -458,9 +455,8 @@ def test_llm_arbiter_caps_pathological_script_with_marker(monkeypatch):
     assert "[script truncated]" in captured["prompt"]
 
 
-def test_selector_falls_back_to_weighted_when_arbiter_abstains(monkeypatch):
-    """Channel needs daily output: arbiter empty selection on a floor-passing
-    batch must fall back to top weighted, never go dark."""
+def test_selector_respects_arbiter_abstention(monkeypatch):
+    """A heuristic floor is not editorial approval; no output quota."""
     import automation.clip_selection.arbiter as arbiter
     from automation.clip_selection.selector import ClipSelector
 
@@ -482,8 +478,7 @@ def test_selector_falls_back_to_weighted_when_arbiter_abstains(monkeypatch):
         scored, {"transcript_segments": []}, max_selected=3, min_quality=38.0,
     )
 
-    assert len(result) == 3
-    assert result[0]["final_score"] == 50.0
+    assert result == []
 
 
 def test_selector_respects_empty_batch_without_fallback():

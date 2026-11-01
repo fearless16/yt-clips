@@ -21,6 +21,8 @@ def _no_upload_post_creds(monkeypatch):
     """ai_client's load_dotenv() leaks the real key into the session; tests
     here stub the Graph flow and rely on the provider factory bailing out."""
     monkeypatch.setenv("UPLOAD_POST_API_KEY", "")
+    from utils.config import load_config
+    monkeypatch.setitem(load_config(), "release_review", {"required": False})
 PERMALINK = "https://www.instagram.com/reel/fake123/"
 
 

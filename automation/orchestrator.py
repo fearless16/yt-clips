@@ -34,6 +34,7 @@ from automation.memory.decision_store import DecisionStore
 from automation.providers.provider_health import ProviderHealth
 
 from utils.logger import get_logger, run_phase, new_run_id
+from automation.artifacts import read_metadata
 
 log = get_logger("orchestrator")
 
@@ -90,6 +91,8 @@ class PipelineResult:
     selected_clips: int = 0
     rejected_clips: int = 0
     seo_generated: int = 0
+    release_ready: int = 0
+    release_held: int = 0
 
 
 # ── Short-hands to keep stage code readable ─────────────────────────────
@@ -229,7 +232,6 @@ def run(
             try:
                 with run_phase(log, "stage 2 Transcribe", "transcribe", run_id=rid):
                     from automation.transcript import fetch
-                    import json
                     t_data = fetch(url, output_path=transcript_path, video_path=video_path)
                     if t_data and t_data.get("segments"):
                         with open(transcript_path, "w", encoding="utf-8") as f:
@@ -391,7 +393,7 @@ def run(
                             log.warning("[hook_audit] failed: %s", e)
                     # SEO is now handled per-clip inside export_all()
                     if not skip_seo and result.exported:
-                        result.seo_generated = len(result.exported)
+                        result.seo_generated = sum(read_metadata(p) is not None for p in result.exported)
                     _PROVIDER_HEALTH.record_success("export")
                     ph.set(exported=len(result.exported),
                            seo_generated=result.seo_generated)
@@ -470,6 +472,32 @@ def run(
                 _PROVIDER_HEALTH.record_failure("enhancement")
                 result.failures.append(f"stage6b: {e}")
 
+        if cfg.get("delivery_qc", {}).get("enabled", False):
+            from automation.delivery_qc import check_delivery
+            for clip in result.exported:
+                expected_duration = None
+                try:
+                    edit = json.loads(clip.with_name(f"{clip.stem}_edit.json").read_text(encoding="utf-8"))
+                    expected_duration = sum(part["output_end"] - part["output_start"] for part in edit["timeline"])
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+                qc = check_delivery(clip, expected_duration)
+                if qc["status"] != "PASS":
+                    result.failures.append(f"delivery_qc {clip.name}: {'; '.join(qc['errors'])}")
+
+        # Recover once before covers, sync, scheduling or publication. A marker
+        # invalidates stale metadata even when --skip-seo prevents regeneration.
+        if result.exported:
+            if not skip_seo:
+                from automation.seo.seo import retry_failed_seo
+                for directory in sorted({p.parent for p in result.exported}):
+                    if any(directory.glob("*_seo_failed.json")):
+                        try:
+                            retry_failed_seo(str(directory))
+                        except Exception as exc:
+                            result.failures.append(f"seo_retry: {exc}")
+            result.seo_generated = sum(read_metadata(p) is not None for p in result.exported)
+
         # ── Stage 7b: Thumbnails ────────────────────────────────
         if result.exported:
             try:
@@ -479,6 +507,16 @@ def run(
                     process_all_thumbnails(export_dir)
             except Exception as e:
                 result.failures.append(f"stage7b: {e}")
+
+        # Prepare an honest review draft; never turn sampled checks into PASS.
+        if cfg.get("release_review", {}).get("required", False):
+            from automation.release_review import create_review, review_path
+            for clip in result.exported:
+                if not review_path(clip).exists() and read_metadata(clip) is not None:
+                    try:
+                        create_review(clip, Path(video_path))
+                    except (OSError, ValueError) as exc:
+                        log.warning("Review draft unavailable for %s: %s", clip.name, exc)
 
         # ── Stage 8a: Sync ──────────────────────────────────────
         do_sync = auto_sync and not skip_sync
@@ -503,6 +541,27 @@ def run(
                 with run_phase(log, "stage 8b Upload", "upload",
                                run_id=rid) as ph:
                     from upload import upload_video
+                    eligible = []
+                    for clip in result.exported:
+                        if read_metadata(clip) is not None:
+                            if cfg.get("release_review", {}).get("required", False):
+                                from automation.release_review import release_status
+                                status, reasons = release_status(clip)
+                                if status != "READY":
+                                    result.release_held += 1
+                                    result.failures.append(f"stage8b {clip.name}: {status}: {'; '.join(reasons)}")
+                                    continue
+                            result.release_ready += 1
+                            eligible.append(clip)
+                        else:
+                            error = "missing, invalid or failed SEO metadata"
+                            marker = clip.with_name(f"{clip.stem}_seo_failed.json")
+                            try:
+                                if marker.exists():
+                                    error = json.loads(marker.read_text(encoding="utf-8")).get("error") or error
+                            except (OSError, ValueError, AttributeError):
+                                pass
+                            result.failures.append(f"stage8b {clip.name}: {error}")
                     privacy = cfg.get("youtube", {}).get(
                         "privacy_status", "scheduled"
                     )
@@ -519,7 +578,7 @@ def run(
                     if auto_schedule:
                         from scheduler import assign_clips_to_slots, format_for_youtube
                         clip_scores: dict[str, float] = {}
-                        for clip_path in result.exported:
+                        for clip_path in eligible:
                             meta_path = clip_path.with_name(
                                 f"{clip_path.stem}_metadata.json"
                             )
@@ -536,7 +595,7 @@ def run(
                                 except (ValueError, OSError):
                                     pass
                         assignments = assign_clips_to_slots(
-                            clips=[p.stem for p in result.exported],
+                            clips=[p.stem for p in eligible],
                             interval_hours=interval,
                             clip_scores=clip_scores or None,
                             schedule_config=cfg.get("upload_schedule", {}),
@@ -566,7 +625,7 @@ def run(
                                  len(assignments))
 
                     skipped_no_meta = 0
-                    for clip_path in result.exported:
+                    for clip_path in eligible:
                         meta_path = clip_path.with_name(
                             f"{clip_path.stem}_metadata.json"
                         )
@@ -587,12 +646,14 @@ def run(
                                 str(clip_path), str(meta_path),
                                 privacy=privacy, publish_at=publish_at,
                             )
+                            if not isinstance(video_id, str) or not video_id.strip():
+                                raise RuntimeError("upload returned no video ID")
                             result.uploaded_count += 1
                             _emit_event(
                                 f"{stem}/{clip_path.stem}",
                                 EventType.published,
                                 {"privacy": privacy, "publish_at": publish_at,
-                                 "youtube_video_id": video_id},
+                                 "youtube_video_id": str(video_id) if video_id else None},
                             )
                             if video_id:
                                 try:

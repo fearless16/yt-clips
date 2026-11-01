@@ -219,9 +219,44 @@ class TestHookOverlayFilter:
         assert "C\\:/Windows/Fonts/arial.ttf" in filter_chain, \
             "Windows path must be normalized (forward slashes) with escaped drive colon"
 
+    def test_per_clip_caption_overlay_uses_hinglish_position_font_and_fade(self):
+        from export import _build_caption_overlay_filter
+
+        filter_chain = _build_caption_overlay_filter({
+            "enabled": True,
+            "text": "Kya kar rha he bhai",
+            "from_bottom": 0.4,
+            "fade_out": 0.5,
+            "font_file": r"C:\Windows\Fonts\Bahnschrift.ttf",
+        }, output_duration=8.0)
+
+        assert "Kya kar rha he bhai" in filter_chain
+        assert "y=h-text_h-h*0.400000" in filter_chain
+        assert "fontfile='C\\:/Windows/Fonts/Bahnschrift.ttf'" in filter_chain
+        assert "if(lt(t,7.500000),1,if(lt(t,8.000000),(8.000000-t)/0.500000,0))" in filter_chain
+
+    def test_per_clip_caption_overlay_is_opt_in_and_capped_to_clip_duration(self):
+        from export import _build_caption_overlay_filter
+
+        assert _build_caption_overlay_filter({"text": "Kya kar rha he bhai"}, 8.0) == ""
+        filter_chain = _build_caption_overlay_filter({
+            "enabled": True,
+            "text": "Kya kar rha he bhai",
+            "duration": 12.0,
+            "fade_out": 0.5,
+        }, output_duration=4.0)
+        assert "enable='between(t,0,4.000000)'" in filter_chain
+        assert "if(lt(t,3.500000),1,if(lt(t,4.000000),(4.000000-t)/0.500000,0))" in filter_chain
+
 
 class TestHookOverlayIntegration:
     """Integration tests: hook overlay in full export filter chain."""
+
+    @pytest.fixture(autouse=True)
+    def _explicitly_enable_optional_hook(self, monkeypatch):
+        import export
+        monkeypatch.setitem(export.cfg["export"]["hook_overlay"], "enabled", True)
+        monkeypatch.setitem(export.cfg["export"], "captions", {"enabled": False})
 
     def test_enhance_stack_includes_hook_overlay(self):
         from export import _build_enhance_stack
@@ -322,6 +357,12 @@ class TestHookOverlayIntegration:
 
 class TestHookOverlayExportIntegration:
     """End-to-end export tests with hook overlay."""
+
+    @pytest.fixture(autouse=True)
+    def _explicitly_enable_optional_hook(self, monkeypatch):
+        import export
+        monkeypatch.setitem(export.cfg["export"]["hook_overlay"], "enabled", True)
+        monkeypatch.setitem(export.cfg["export"], "captions", {"enabled": False})
 
     @pytest.fixture
     def mock_video_info(self):
@@ -465,12 +506,12 @@ class TestHookOverlayConfig:
             "hook_overlay must be nested under export: (code reads export.hook_overlay)"
         assert isinstance(hook_cfg, dict)
 
-    def test_config_hook_overlay_enabled_by_default(self):
+    def test_config_hook_overlay_disabled_for_natural_speech_pilot(self):
         from utils.config import load_config
         cfg = load_config()
         hook_cfg = cfg["export"]["hook_overlay"]
         enabled = hook_cfg.get("enabled", True)
-        assert enabled is True
+        assert enabled is False
 
     def test_config_hook_overlay_duration(self):
         from utils.config import load_config

@@ -1,4 +1,11 @@
 import export
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def legacy_composition_mode(monkeypatch):
+    # Retain regression coverage for the explicitly supported legacy layout.
+    monkeypatch.setitem(export.cfg["export"], "reserve_caption_band", False)
 
 
 def _solo_crop(**crop):

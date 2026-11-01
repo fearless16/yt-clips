@@ -208,7 +208,7 @@ def parse_cricbuzz_match_page(html: str) -> Dict[str, List[str]]:
     if title_tag:
         title = _clean(title_tag.get_text(" ", strip=True))
         title = re.sub(r"\s+-\s+Scorecard.*$", "", title, flags=re.I)
-        add_fact("Match", title)
+        add_fact("", title)
 
     # Cricbuzz embeds matchInfo-style JSON in the page. Pull only fields that are
     # specific to this scorecard; no generic live-score page data is accepted.
@@ -217,7 +217,7 @@ def parse_cricbuzz_match_page(html: str) -> Dict[str, List[str]]:
         ("matchDesc", "Match description"),
         ("matchDescription", "Match description"),
         ("matchFormat", "Format"),
-        ("status", "Status"),
+        ("status", ""),
     )
     for key, label in field_map:
         match = re.search(rf'"{key}"\s*:\s*"([^"\\]+)', normalized)

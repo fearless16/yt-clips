@@ -93,7 +93,7 @@ class ClipSelector:
             scored_candidates: Output of score_candidates()
             context: Full context dict (needed for LLM arbiter)
             max_selected: Max clips to select
-            min_selected: Best-effort minimum from non-hard-rejected candidates
+            min_selected: Deprecated compatibility argument; never forces output
             min_quality: Minimum weighted score to keep a clip (0-100)
 
         Returns:
@@ -108,8 +108,9 @@ class ClipSelector:
 
         # Quality threshold
         quality_pass = [c for c in keep if c.get("final_score", 0) >= min_quality]
-        target_min = min(max(0, int(min_selected)), max_selected)
-        if not quality_pass and target_min == 0:
+        if min_selected:
+            log.info("Ignoring min_selected=%s: editorial rejection cannot be backfilled", min_selected)
+        if not quality_pass:
             log.warning(
                 "No non-rejected candidates passed quality threshold %.1f "
                 "— returning empty selection",
@@ -117,58 +118,14 @@ class ClipSelector:
             )
             return []
 
-        if quality_pass:
-            log.info("Quality pass: %d/%d candidates above %.1f",
-                     len(quality_pass), len(keep), min_quality)
-        else:
-            log.warning(
-                "No candidates passed quality threshold %.1f — minimum-output "
-                "fallback may use non-hard-rejected candidates",
-                min_quality,
-            )
+        log.info("Quality pass: %d/%d candidates above %.1f",
+                 len(quality_pass), len(keep), min_quality)
 
         # LLM arbiter refinement
-        if self.use_llm_arbiter and len(quality_pass) >= 2:
+        if self.use_llm_arbiter:
             final = llm_arbiter_refine(quality_pass, context, max_selected)
-            if not final:
-                # Channel needs daily output. When the arbiter abstains on a
-                # batch that already cleared the absolute floor, publish the
-                # best-available by weighted score instead of going dark.
-                log.warning(
-                    "LLM arbiter selected none of %d floor-passing candidates "
-                    "— falling back to top weighted", len(quality_pass),
-                )
-                final = sorted(
-                    quality_pass,
-                    key=lambda c: c.get("final_score", 0),
-                    reverse=True,
-                )[:max_selected]
         else:
-            final = quality_pass[:max_selected]
-
-        if len(final) < target_min:
-            selected_windows = {
-                (c.get("start"), c.get("end"), c.get("text")) for c in final
-            }
-            # Floor-passing candidates stay ahead of below-floor fallbacks. The
-            # input is already sorted by the weighted score, which includes the
-            # hook and emotion agents' audio-energy signals.
-            backfill_pool = quality_pass
-            for candidate in backfill_pool:
-                identity = (
-                    candidate.get("start"), candidate.get("end"), candidate.get("text")
-                )
-                if identity in selected_windows:
-                    continue
-                final.append(candidate)
-                selected_windows.add(identity)
-                if len(final) >= target_min:
-                    break
-            log.warning(
-                "Minimum-output backfill selected %d/%d requested clips from "
-                "floor-passing, non-hard-rejected complete thoughts",
-                len(final), target_min,
-            )
+            final = sorted(quality_pass, key=lambda c: c.get("final_score", 0), reverse=True)[:max_selected]
 
         return final[:max_selected]
 

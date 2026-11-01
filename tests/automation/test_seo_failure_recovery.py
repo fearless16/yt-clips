@@ -396,6 +396,7 @@ def _stub_export_all(tmp_path, monkeypatch, export):
         **export.cfg.get("export", {}),
         "max_workers": 1,
         "super_resolution": False,
+        "captions": {"enabled": False, "require_word_timing": False},
     })
     monkeypatch.setattr(export, "_new_export_batch_id", lambda: "batch")
     monkeypatch.setattr(export, "_load_transcript_segments", lambda *_: [])

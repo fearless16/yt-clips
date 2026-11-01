@@ -4,6 +4,13 @@ from unittest.mock import patch, MagicMock
 from utils.ai_client import AIClient, classify_error, ErrorCategory
 
 
+@pytest.fixture(autouse=True)
+def _never_use_live_native_provider_credentials(monkeypatch):
+    # Racer tests mock other providers; local .env keys must not add real paid
+    # competitors to those races. Dedicated routing tests supply mocked keys.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+
+
 def reset_shared_state():
     with AIClient._shared_lock:
         AIClient._provider_failures.clear()
@@ -416,11 +423,12 @@ class TestGenerateSeoText:
             mock_ol.assert_not_called()
             mock_or.assert_not_called()
 
-    def test_seo_text_raises_without_opencode_key(self):
-        """generate_seo_text must raise if OpenCode key is missing."""
+    def test_seo_text_raises_without_any_supported_key(self):
+        """No supported credentials means no inference, even with a local .env."""
         ai = AIClient()
         ai.opencode_api_key = None
-        with pytest.raises(RuntimeError, match="OpenCode Go API key missing"):
+        ai.deepseek_api_key = None
+        with pytest.raises(RuntimeError, match="API key required"):
             ai.generate_seo_text("test")
 
     def test_seo_text_tries_all_models_on_failure(self):

@@ -52,7 +52,9 @@ def test_build_enhance_stack_screen_share():
     assert "scale=" in filter_chain
     assert "force_original_aspect_ratio=increase" in filter_chain
 
-def test_build_enhance_stack_solo_crop():
+def test_build_enhance_stack_solo_crop(monkeypatch):
+    import export
+    monkeypatch.setitem(export.cfg["export"], "reserve_caption_band", False)
     analysis = {
         "export_strategy": {
             "use_solo_frame": True,

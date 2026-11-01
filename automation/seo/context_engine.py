@@ -187,9 +187,9 @@ def build_grounded_search_queries(
     local = _local_query_combos(subject, topic, team_context, secondary)
     local.extend(f"{subject} {suffix}" for suffix in _QUERY_SUFFIXES)
 
-    # Clip-built queries lead so the first seed sent to vidIQ is about the exact
-    # spoken moment. Autocomplete remains useful enrichment, but never owns seed 1.
-    queries = _dedupe([*local, *accepted], limit=20)
+    # Keep grounded supplied research ahead of synthetic combinations; otherwise
+    # the local list can fill the cap and silently discard every actual signal.
+    queries = _dedupe([*accepted, *local], limit=20)
     return queries[:20]
 
 

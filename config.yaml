@@ -12,6 +12,10 @@ paths:
 channel:
   id: "UCQtCMKPc41MHd7hujVuGm5g"        # your YouTube channel ID
   live_stream_url: "https://www.youtube.com/watch?v=qAA6KKwHLU8"              # static fallback (optional)
+release_review:
+  required: true                      # pilot: exact media/metadata/cover/source + owner review before publication
+delivery_qc:
+  enabled: true                       # decode entire encoded file and measure actual audio
 # ─── Download ─────────────────────────────────────────────────────────────────
 download:
   # Best available quality (no cap — downloads highest resolution available)
@@ -32,6 +36,7 @@ download:
   proxy: ""
 # ─── Transcription ────────────────────────────────────────────────────────────
 transcription:
+  alignment_model: "medium"             # shortlisted ranges only; benchmark Hindi names/numbers before release
   model: "small"                        # tiny | base | small | medium | large-v3
   language: "hi"                        # Hindi commentary — use hi for better accuracy
   device: "auto"             # auto-detects CUDA/ROCm/CPU; falls back gracefully
@@ -52,7 +57,7 @@ highlight:
   # Channel data (200 shorts): <15s and 25-40s natural-pace complete thoughts win
   # (median 325 views vs 168 for 40s+).
   target_duration: 15                   # optimized for maximum views based on shorts DB
-  max_speedup: 1.25                     # cap so audio never becomes unwatchable
+  max_speedup: 1.0                      # corrected pilot preserves natural speech
   # Preferred duration range (scorer boosts clips in this range)
   preferred_duration_min: 10            # shortest viral bucket
   preferred_duration_max: 35            # aligned with the winning buckets
@@ -126,10 +131,11 @@ layout:
 
 # ─── Export ───────────────────────────────────────────────────────────────────
 export:
+  reserve_caption_band: true           # fit picture above captions, not over a mouth
   width: 1080
   height: 1920
   global_speed_factor: 1.0              # Set to 1.0 to use variable speed only (frame_analyzer.py calculates dynamic speed)
-  enable_variable_speed: true            # Enable smart speed adjustment based on silence/tempo
+  enable_variable_speed: false           # pilot: no unreviewed retiming
   variable_speed_aggressive: false       # Natural pace wins on watch-along streams (channel data)
   fps: 30                               # Target FPS (motion interpolation fills gaps)
   video_bitrate: "15M"                  # ↓ from 25M — Shorts on phones, 15M is plenty
@@ -159,7 +165,7 @@ export:
   # ─── Hook Overlay (First 2s Retention) ─────────────────────────────────────
   # MUST be nested under export: — code reads cfg["export"]["hook_overlay"].
   hook_overlay:
-    enabled: true
+    enabled: false                    # pilot: actual speech opens the clip
     duration: 2.0               # seconds — overlay visible for first N seconds
     position: "bottom"          # top | bottom | center
     font_size: 80               # px — large enough for mobile
@@ -167,6 +173,15 @@ export:
     stroke_color: "black"
     stroke_width: 3
     font_file: ""               # optional .ttf path; use forward slashes e.g. C:/Windows/Fonts/arial.ttf
+
+  # ─── Hinglish Captions (Quantum Holo-Glass) ──────────────────────────────
+  captions:
+    require_word_timing: true          # local word-timed ASR for shortlisted ranges
+    enabled: true
+    style: "holo_glass"          # Locked Design 2: Quantum Holo-Glass
+    from_bottom: 0.20            # Fixed 20% height from bottom (384px)
+    max_words_per_cue: 4         # Micro-chunking (2-4 words per card, no walls of text)
+    model: "qwen3.8-27b"         # Local LLM for natural conversational Hinglish
 
 # ─── YouTube Upload ──────────────────────────────────────────────────────────
 youtube:
@@ -250,19 +265,18 @@ testing:
   fail_fast: true                   # Stop on first failure (-x mode)
 
 # ── SEO ────────────────────────────────────────────────────────────────────────
-# Packaging v3: Full-English public copy, emoji-mandatory titles, right-sized
-# descriptions (feed-invisible), grounded API-only search terms/tags.
+# Clip-specific, source-grounded packaging; no paid keyword dependency.
 seo:
-  title_max_chars: 60                   # one premise, mobile-first, 1-2 emojis
-  min_search_terms: 4                   # vidIQ-only: fail if it returns fewer grounded terms
-  max_search_terms: 26                  # around 25 as channel policy
-  min_primary_search_terms: 4           # phrases naturally used in public description copy
-  max_primary_search_terms: 8           # keyword-rich prose needs more weaving
+  title_max_chars: 60                   # one honest premise, mobile-first
+  min_search_terms: 1                   # internal grounded research, not public keyword stuffing
+  max_search_terms: 12
+  min_primary_search_terms: 1
+  max_primary_search_terms: 2
   min_promise_alignment_score: 0.50     # title must match clip speech + description opening
-  description_min_chars: 1500           # algorithm-facing copy: crawlable keyword surface (reduced to prevent quality gate drops)
-  description_target_chars: 4000        # deterministic vidIQ path writes toward this length
+  description_min_chars: 100            # short, useful explanation; no essay padding
+  description_target_chars: 350         # editorial guideline, not a ranking claim
   description_max_chars: 4800           # hard cap, safe margin below YouTube's 5000
-  min_tag_chars: 450                    # fail closed instead of shipping a thin vidIQ tag field
+  min_tag_chars: 0                      # relevant tags only; never fill a quota
   max_tag_chars: 500                    # YouTube API tag-field limit, including quote overhead
   # Inject random hardcoded viral hooks/CTAs into descriptions. OFF by default:
   # the product contract prefers per-clip LLM-generated hooks over generic copy.
@@ -271,8 +285,8 @@ seo:
   # Max hashtags for Shorts uploads — champions use 2-3, not 15.
   max_hashtags: 3
   vidiq:
-    enabled: true
-    required: true                       # fail closed; never ship generic/LLM SEO fallback
+    enabled: false
+    required: false                      # no subscription; not part of active generation
     endpoint: "https://mcp.vidiq.com/mcp"
     timeout_seconds: 8
     max_keyword_queries: 6               # aggregate grounded results until tag budget is filled
@@ -282,7 +296,7 @@ seo:
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
   provider: "deepseek"          # deepseek | opencode (Go) | nvidia
-  model: "deepseek-v4-pro"      # deepseek-v4-pro maps to deepseek-chat on DeepSeek API
+  model: "deepseek-v4-pro"      # exact API model ID; no silent alias
   # Provider chain priority:
   # 1. OpenCode Go: mimo-v2.5-pro
   # 2. OpenCode Go: deepseek-v4-pro
@@ -316,6 +330,8 @@ ai:
 
 # ── Thumbnail Automation ──────────────────────────────────────────────────────
 thumbnail:
+  require_source_frame: true           # never use an already-captioned export frame
+  add_logo: false                      # source branding may already be present
   enabled: true
   use_ai: false                     # Set to true for AI image generation (Nano Banana 2)
   template_path: "channel_logo.png"  # Use logo as a watermark/element
@@ -334,7 +350,7 @@ clip_selection:
   output_max_duration: 38              # Exported clip ceiling in seconds (allowing 25-40s bucket)
   use_llm_arbiter: true                # Run LLM Final Arbiter pass
   min_quality: 38.0                    # Hard publishability floor after transcript-aware discovery
-  min_selected: 3                      # Refill arbiter omissions only from clips that cleared the floor
+  min_selected: 0                      # zero READY clips is valid; never backfill rejection
   max_selected: 3                      # Max clips per stream — fewer, better Shorts beat spam volume
   discovery_candidates: 60             # Deep scan across a long stream before final ranking
   prefer_source_match: true             # For match streams, prioritize clips naming either advertised team

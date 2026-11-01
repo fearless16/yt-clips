@@ -1,6 +1,7 @@
 import os
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -51,6 +52,11 @@ class ThumbnailGenerator:
             meta = json.load(f)
         
         title = meta.get("title", "Cricket Highlights")
+        edit_path = Path(video_path).with_name(f"{Path(video_path).stem}_edit.json")
+        if edit_path.exists():
+            return self._generate_source_cover(Path(video_path), meta, edit_path, Path(output_path))
+        if self.config.get("require_source_frame", False):
+            raise ValueError("Source-bound edit manifest missing; refusing a captioned export-frame cover")
         
         # ─── Option 1: AI Generation (Nano Banana Pro) ─────────────────────────
         from utils.ai_client import AIClient
@@ -108,6 +114,62 @@ class ThumbnailGenerator:
             
         return True
 
+    def _generate_source_cover(self, clip: Path, metadata: dict, edit_path: Path, output: Path):
+        """Shortlist real retained frames; technical ranking is NOT emotion review."""
+        from PIL import ImageStat
+        from automation.artifacts import atomic_json
+
+        edit = json.loads(edit_path.read_text(encoding="utf-8"))
+        source = Path(edit["source_path"])
+        start, end = float(edit["source_start"]), float(edit["source_end"])
+        if not source.is_file() or start < 0 or end <= start:
+            raise ValueError("Invalid source/range for cover")
+        cover_text = str(metadata.get("cover_text") or "").strip()
+        if len(cover_text.split()) > 3:
+            raise ValueError("Cover text exceeds three words; review instead of truncating")
+        candidates = []
+        crop = edit.get("active_crop")
+        prefilter = ""
+        if isinstance(crop, dict):
+            x, y, w, h = (int(crop[key]) for key in ("x", "y", "width", "height"))
+            if min(x, y) < 0 or min(w, h) <= 0:
+                raise ValueError("Invalid source cover crop")
+            prefilter = f"crop={w}:{h}:{x}:{y},"
+        fit = prefilter + "scale=1080:1480:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=0x101624"
+        # Keep the shortlist as review evidence; never overwrite source-side JPGs.
+        directory = Path(tempfile.mkdtemp(prefix=f"{clip.stem}-cover-", dir=clip.parent))
+        for index in range(12):
+            timestamp = start + (end - start) * (index + 0.5) / 12
+            frame = directory / f"candidate-{index:02d}.jpg"
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{timestamp:.6f}",
+                            "-i", str(source), "-frames:v", "1", "-vf", fit, str(frame)],
+                           check=True, capture_output=True, timeout=45)
+            with Image.open(frame) as image:
+                grayscale = image.convert("L")
+                luma = ImageStat.Stat(grayscale).mean[0]
+                detail = ImageStat.Stat(grayscale.filter(ImageFilter.FIND_EDGES)).var[0]
+            candidates.append({"path": str(frame.resolve()), "source_time": timestamp,
+                               "luma": luma, "edge_variance": detail,
+                               "technical_score": detail if 25 <= luma <= 235 else -1})
+        winner = max(candidates, key=lambda item: item["technical_score"])
+        if winner["technical_score"] < 0:
+            raise ValueError("All cover frames failed exposure screening")
+        with Image.open(winner["path"]) as image:
+            cover = image.convert("RGB")
+        if cover_text:
+            cover = self._add_text(cover, cover_text.upper())
+        if self.config.get("add_logo", False):
+            logo = self.config.get("template_path")
+            if logo and Path(logo).is_file():
+                cover = self._add_logo(cover, logo)
+        cover.save(output, quality=95)
+        atomic_json(clip.with_name(f"{clip.stem}_cover.json"), {
+            "source_path": str(source.resolve()), "selected": winner, "candidates": candidates,
+            "text": cover_text, "review_status": "NOT CHECKED",
+            "selection_method": "technical sharpness/exposure ranking only; expression/context require owner review",
+        })
+        return True
+
     def _apply_enhancements(self, img: Image.Image) -> Image.Image:
         """Apply subtle blur to edges or contrast boost."""
         # Optional: Add a slight vignette or contrast boost here
@@ -127,6 +189,14 @@ class ThumbnailGenerator:
         w, h = img.size
         bbox = draw.textbbox((0, 0), text, font=font)
         tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        size = self.font_size
+        while tw > int(w * 0.82) and size > 32:
+            size -= 4
+            font = ImageFont.truetype(self.font_path, size)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        if tw > int(w * 0.82):
+            raise ValueError("Cover text cannot fit safely")
         
         x = (w - tw) // 2
         y = h - th - 150  # 150px from bottom

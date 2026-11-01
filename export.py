@@ -2,6 +2,7 @@ import _fix_encoding  # noqa: F401 — force UTF-8 on Windows cp1252
 
 import subprocess
 import json
+import math
 import os
 import shlex
 import shutil
@@ -186,6 +187,55 @@ def _build_hook_overlay_filter(
         f":y={y_expr}"
         f"{fontfile_opt}"
         f":{enable_expr}"
+    )
+
+
+def _build_caption_overlay_filter(
+    caption: Dict,
+    output_duration: Optional[float],
+) -> str:
+    """Build an optional per-clip caption overlay with a smooth end fade."""
+    if not isinstance(caption, dict) or not caption.get("enabled", False):
+        return ""
+    text = str(caption.get("text", "")).strip()
+    if not text or not output_duration or output_duration <= 0:
+        return ""
+
+    safe_text = text.replace("\\", r"\\").replace("'", r"\'").replace(":", r"\:")
+    duration = max(0.0, min(float(caption.get("duration", output_duration)), output_duration))
+    fade_out = max(0.0, min(float(caption.get("fade_out", 0.5)), duration))
+    fade_start = max(0.0, duration - fade_out)
+    alpha_expr = "1"
+    if fade_out > 0:
+        alpha_expr = (
+            f"if(lt(t,{fade_start:.6f}),1,"
+            f"if(lt(t,{duration:.6f}),"
+            f"({duration:.6f}-t)/{fade_out:.6f},0))"
+        )
+
+    try:
+        from_bottom = min(0.9, max(0.0, float(caption.get("from_bottom", 0.4))))
+    except (TypeError, ValueError):
+        from_bottom = 0.4
+    y_expr = f"h-text_h-h*{from_bottom:.6f}"
+    font_size = max(1, int(caption.get("font_size", 80)))
+    stroke_width = max(0, int(caption.get("stroke_width", 3)))
+    font_file = str(caption.get("font_file", "") or "")
+    fontfile_opt = ""
+    if font_file:
+        safe_font = font_file.replace("\\", "/").replace(":", r"\:")
+        fontfile_opt = f":fontfile='{safe_font}'"
+
+    return (
+        f"drawtext=text='{safe_text}'"
+        f":fontsize={font_size}"
+        f":fontcolor={caption.get('font_color', 'white')}"
+        f":borderw={stroke_width}"
+        f":bordercolor={caption.get('stroke_color', 'black')}"
+        f":x=(w-text_w)/2:y={y_expr}"
+        f"{fontfile_opt}"
+        f":alpha='{alpha_expr}'"
+        f":enable='between(t,0,{duration:.6f})'"
     )
 
 
@@ -815,8 +865,10 @@ def _build_enhance_stack(
             half_h = target_h // 2  # 960px each
             filter_base = (
                 f"{enhance},split=2[left_raw][right_raw];"
-                f"[left_raw]crop=iw/2:ih:0:0,scale={target_w}:{half_h}:flags=lanczos[top];"
-                f"[right_raw]crop=iw/2:ih:iw/2:0,scale={target_w}:{half_h}:flags=lanczos[bot];"
+                f"[left_raw]crop=iw/2:ih:0:0,scale={target_w}:{half_h}:flags=lanczos:force_original_aspect_ratio=decrease,"
+                f"pad={target_w}:{half_h}:(ow-iw)/2:(oh-ih)/2[top];"
+                f"[right_raw]crop=iw/2:ih:iw/2:0,scale={target_w}:{half_h}:flags=lanczos:force_original_aspect_ratio=decrease,"
+                f"pad={target_w}:{half_h}:(ow-iw)/2:(oh-ih)/2[bot];"
                 f"[top][bot]vstack=inputs=2"
             )
 
@@ -830,9 +882,11 @@ def _build_enhance_stack(
             filter_base = f"{enhance}"
         else:
             filter_base = (
-                f"{enhance},"
-                f"scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=increase,"
-                f"crop={target_w}:{target_h}"
+                f"{enhance},split=2[screen_bg][screen_fg];"
+                f"[screen_bg]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+                f"crop={target_w}:{target_h},gblur=sigma=25[screen_blur];"
+                f"[screen_fg]scale={target_w}:{target_h}:flags=lanczos:force_original_aspect_ratio=decrease[screen_fit];"
+                f"[screen_blur][screen_fit]overlay=(W-w)/2:(H-h)/2"
             )
 
     elif guest_cam_off:
@@ -864,8 +918,12 @@ def _build_enhance_stack(
         # Solo with face-detected crop region
         log.debug("SOLO + face crop → precise 9:16 crop")
         try:
-            cx, cy, cw, ch = _plan_solo_crop(active_crop, target_w, target_h)
-            if native_res:
+            if export_cfg.get("reserve_caption_band", False) and not native_res:
+                cx, cy = int(active_crop["x"]), int(active_crop["y"])
+                cw, ch = int(active_crop["width"]), int(active_crop["height"])
+            else:
+                cx, cy, cw, ch = _plan_solo_crop(active_crop, target_w, target_h)
+            if native_res or export_cfg.get("reserve_caption_band", False):
                 filter_base = f"{enhance},crop={cw}:{ch}:{cx}:{cy}"
             else:
                 filter_base = (
@@ -884,8 +942,12 @@ def _build_enhance_stack(
                     f"crop={target_w}:{target_h}"
                 )
 
+    elif export_cfg.get("reserve_caption_band", False) and not native_res:
+        # Unknown speaker geometry is not permission to crop away the subject.
+        # Fit the available source; owner review can request a better region.
+        filter_base = enhance
     else:
-        # Default solo: center 9:16 crop (you only in frame)
+        # Legacy solo: center 9:16 crop
         log.debug("SOLO center crop → 9:16")
         # ── Chat exclusion: shift crop to exclude chat overlay ─────────────────
         chat_exclusion = strategy.get("chat_exclusion")
@@ -948,6 +1010,15 @@ def _build_enhance_stack(
     if target_fps > source_fps + 5:
         filter_base += f",framerate=fps={target_fps:.6f}"
 
+    if export_cfg.get("reserve_caption_band", False) and not native_res:
+        caption_y = _caption_card_y()
+        top = int(target_h * 0.04) // 2 * 2
+        picture_h = (caption_y - top - 24) // 2 * 2
+        filter_base += (
+            f",scale={target_w}:{picture_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:{top}:color=0x101624"
+        )
+
     # ── Fades ─────────────────────────────────────────────────────────────────
     if output_duration:
         fade_in, fade_out = _get_fade_durations(output_duration)
@@ -959,6 +1030,12 @@ def _build_enhance_stack(
     # ── Hook overlay (first 2s retention) ──────────────────────────────────────
     hook_analysis = analysis.get("hook_analysis", {}) if isinstance(analysis, dict) else {}
     filter_base = _merge_hook_overlay_filter(filter_base, hook_analysis, output_duration, native_res)
+    caption_filter = _build_caption_overlay_filter(
+        analysis.get("caption_overlay", {}) if isinstance(analysis, dict) else {},
+        output_duration,
+    )
+    if caption_filter and not native_res:
+        filter_base = f"{filter_base},{caption_filter}"
 
     # ── Logo overlay ──────────────────────────────────────────────────────────
     logo_path = cfg["thumbnail"].get("template_path", "channel_logo.png")
@@ -1045,6 +1122,14 @@ def _export_native_res(
              time.perf_counter() - t0, Path(temp_path).name)
 
     return temp_path
+
+
+def _caption_card_y() -> int:
+    height = int(cfg["export"]["height"])
+    from_bottom = float(cfg["export"].get("captions", {}).get("from_bottom", 0.20))
+    if not math.isfinite(from_bottom) or not 0.18 <= from_bottom <= 0.4:
+        raise ValueError("Caption bottom exclusion must be between 18% and 40%")
+    return int(height * (1 - from_bottom) - 320)
 
 
 def export_clip(
@@ -1146,6 +1231,8 @@ def export_clip(
     input_seek = max(0.0, start - pre_seek)
     trim_start = start - input_seek
     clip_duration = max(0.0, end - start)
+    from automation.edit_timeline import RetainedPart
+    analysis["edit_timeline"] = [RetainedPart(start, end, speed).to_dict()]
     output_duration = clip_duration / speed
     input_duration = trim_start + clip_duration
 
@@ -1179,6 +1266,12 @@ def export_clip(
                     # (baking it into native frames would scale it 4x).
                     hook_overlay = _build_hook_overlay_from_analysis(
                         analysis.get("hook_analysis"), output_duration)
+                    caption_overlay = _build_caption_overlay_filter(
+                        analysis.get("caption_overlay", {}), output_duration)
+                    if caption_overlay:
+                        hook_overlay = ",".join(
+                            part for part in (hook_overlay, caption_overlay) if part
+                        )
                     success = sr.upscale_video(
                         native_path, output_path,
                         target_w=target_w, target_h=target_h,
@@ -1217,6 +1310,37 @@ def export_clip(
         f"setpts=(PTS-STARTPTS)/{speed:.6f}[v_src];{v_filter}"
     )
 
+    # ── Captions (Quantum Holo-Glass) ────────────────────────────────────────
+    caption_cfg = cfg.get("export", {}).get("captions", {})
+    captions_enabled = caption_cfg.get("enabled", False)
+    if isinstance(analysis, dict) and "caption_overlay" in analysis:
+        captions_enabled = analysis["caption_overlay"].get("enabled", captions_enabled)
+
+    temp_cards_dir = None
+    caption_cards = []
+    if captions_enabled and caption_cfg.get("require_word_timing", False) and not transcript_segments:
+        raise ValueError("Required captions have no word-timed speech evidence")
+    if captions_enabled and transcript_segments:
+        try:
+            import tempfile as _tf
+            from automation.caption_engine import prepare_clip_captions
+            temp_cards_dir = Path(_tf.mkdtemp(prefix="holo_captions_"))
+            caption_cards = prepare_clip_captions(
+                transcript_segments,
+                clip_start=start,
+                clip_end=end,
+                output_dir=temp_cards_dir,
+                max_words_per_cue=caption_cfg.get("max_words_per_cue", 4),
+                require_word_timing=caption_cfg.get("require_word_timing", False),
+            )
+            if caption_cards:
+                log.info("[%s] Generated %d Quantum Holo-Glass caption cards", clip_id, len(caption_cards))
+        except Exception as e:
+            if caption_cfg.get("require_word_timing", False):
+                raise RuntimeError(f"Required captions failed for {clip_id}: {e}") from e
+            log.warning("[%s] Quantum Holo-Glass caption generation skipped: %s", clip_id, e)
+            caption_cards = []
+
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = ["ffmpeg", "-y",
@@ -1227,7 +1351,27 @@ def export_clip(
 
     if use_logo:
         cmd.extend(["-i", str(logo_file)])
-        
+
+    # Chain caption cards into filter complex if present
+    out_v_map = "[v_out]"
+    if caption_cards:
+        card_base_idx = 2 if use_logo else 1
+        card_filter_parts = []
+        last_v = "[v_out]"
+        for i, card in enumerate(caption_cards):
+            card_idx = card_base_idx + i
+            cmd.extend(["-i", card.path])
+            next_v = f"[v_cap_{i}]" if i < len(caption_cards) - 1 else "[v_cap_final]"
+            st = card.start / speed if speed > 0 else card.start
+            et = card.end / speed if speed > 0 else card.end
+            # 20% height from bottom: Y = 1920 - 384 - 320 = 1216
+            card_filter_parts.append(
+                f"{last_v}[{card_idx}:v]overlay=0:{_caption_card_y()}:enable='gte(t,{st:.6f})*lt(t,{et:.6f})'{next_v}"
+            )
+            last_v = next_v
+        video_filter_complex = f"{video_filter_complex};" + ";".join(card_filter_parts)
+        out_v_map = "[v_cap_final]"
+
     # CTA audio disabled — no intro voice
     cta_idx = 2 if use_logo else 1
 
@@ -1238,7 +1382,7 @@ def export_clip(
 
     cmd.extend([
         "-filter_complex", video_filter_complex,
-        "-map", "[v_out]",
+        "-map", out_v_map,
         "-c:v", encoder,
         "-b:v", str(cfg["export"].get("video_bitrate", "8M")),
         "-maxrate", "15M",
@@ -1279,6 +1423,19 @@ def export_clip(
                     f"[0:v]trim=start={trim_start:.6f}:duration={clip_duration:.6f},"
                     f"setpts=(PTS-STARTPTS)/{speed:.6f}[v_src];{no_logo_filter}"
                 )
+                if caption_cards:
+                    card_filter_parts = []
+                    last_v = "[v_out]"
+                    for i, card in enumerate(caption_cards):
+                        card_idx = 1 + i
+                        next_v = f"[v_cap_{i}]" if i < len(caption_cards) - 1 else "[v_cap_final]"
+                        st = card.start / speed if speed > 0 else card.start
+                        et = card.end / speed if speed > 0 else card.end
+                        card_filter_parts.append(
+                            f"{last_v}[{card_idx}:v]overlay=0:{_caption_card_y()}:enable='gte(t,{st:.6f})*lt(t,{et:.6f})'{next_v}"
+                        )
+                        last_v = next_v
+                    no_logo_complex = f"{no_logo_complex};" + ";".join(card_filter_parts)
                 fallback_source_cmd = _without_logo_cmd(cmd, logo_file, no_logo_complex)
                 success, error = _run_ffmpeg_with_retry(
                     fallback_source_cmd, output_path, clip_id, attempts=1, expected_duration=output_duration)
@@ -1307,6 +1464,10 @@ def export_clip(
     except Exception as e:
         log.error("[%s] Export crash: %s", clip_id, e)
         return None
+    finally:
+        if temp_cards_dir and temp_cards_dir.exists():
+            import shutil as _sh
+            _sh.rmtree(temp_cards_dir, ignore_errors=True)
 
 
 def _validate_av_sync(video_path: str, clip_id: str, tolerance: float = 0.5) -> bool:
@@ -1382,6 +1543,21 @@ def _export_insta_worker(clip_id, info, clip_dir, out_dir, seo_context):
         return None
 
 
+def _seo_worker(clip_id: str, info: dict, output_dir: Path, ctx: dict):
+    """Generate metadata; a failed return is not a completed SEO artifact."""
+    from automation.seo.seo import generate_seo_for_exported_clip
+    result = generate_seo_for_exported_clip(
+        clip_id=clip_id, transcript=info.get("text", ""), output_dir=str(output_dir),
+        video_title=ctx.get("video_title", ""), video_description=ctx.get("video_description", ""),
+        scorecard=ctx.get("scorecard", ""), live_stream_url=ctx.get("live_stream_url", ""),
+    )
+    if not result or result.get("_seo_failed"):
+        log.error("SEO failed for %s: %s", clip_id, (result or {}).get("error", "empty result"))
+        return result
+    log.info("SEO done: %s", clip_id)
+    return result
+
+
 def export_all(
     highlights,
     video_path: str,
@@ -1393,6 +1569,7 @@ def export_all(
     After each successful export, immediately generates SEO for that clip
     (one AI call per clip, with breathing room between calls).
     """
+    selection_file = Path(highlights) if isinstance(highlights, (str, Path)) else None
     if isinstance(highlights, (str, Path)):
         import yaml
         with open(highlights, "r", encoding="utf-8") as f:
@@ -1404,6 +1581,8 @@ def export_all(
 
     if transcript_path is None:
         candidate = Path(cfg["paths"]["transcripts"]) / f"{Path(video_path).stem}.json"
+        if not candidate.exists():
+            candidate = Path(cfg["paths"]["transcripts"]) / "video.json"
         transcript_path = str(candidate) if candidate.exists() else None
     transcript_segments = _load_transcript_segments(transcript_path)
     source_cricket_context = _load_export_cricket_context()
@@ -1411,6 +1590,10 @@ def export_all(
     log.info("🚀 Export phase starting...")
     out_dir = Path(cfg["paths"]["shorts"]) / _new_export_batch_id()
     out_dir.mkdir(parents=True, exist_ok=True)
+    if selection_file is not None:
+        evidence = selection_file.with_suffix(".editorial.json")
+        if evidence.exists():
+            shutil.copyfile(evidence, out_dir / "editorial.json")
 
     # Prepare immutable source context once. Current search/match research is
     # intentionally performed per clip using that clip's transcript.
@@ -1464,8 +1647,8 @@ def export_all(
     for clip_id, info in highlights.items():
         if not isinstance(info, dict):
             continue
-        start = _parse_time_to_seconds(info.get("start", info.get("start_sec", 0.0)))
-        end = _parse_time_to_seconds(info.get("end", info.get("end_sec", 0.0)))
+        start = _parse_time_to_seconds(info.get("start_sec", info.get("start", 0.0)))
+        end = _parse_time_to_seconds(info.get("end_sec", info.get("end", 0.0)))
         if end <= start:
             log.warning("Skipping invalid highlight %s: start=%.3f end=%.3f", clip_id, start, end)
             continue
@@ -1525,6 +1708,10 @@ def export_all(
         except Exception as e:
             log.debug("[%s] Hook analysis skipped: %s", clip_id, e)
             analysis["hook_analysis"] = {}
+        # Per-highlight opt-in; absent configuration leaves all existing exports unchanged.
+        caption_overlay = info.get("caption_overlay", {})
+        if isinstance(caption_overlay, dict) and caption_overlay.get("enabled"):
+            analysis["caption_overlay"] = caption_overlay
 
         filtered_items.append((clip_id, start, end, info, analysis))
 
@@ -1584,10 +1771,33 @@ def export_all(
                     log.debug("Warm-up skip for %s: %s", dev, e)
 
     exported_clips = []
+    export_errors = []
 
     def _export_one(args):
         """Worker function for parallel export."""
         idx, total, clip_id, start, end, info, analysis = args
+        clip_transcript = transcript_segments
+        if cfg.get("export", {}).get("captions", {}).get("require_word_timing", False):
+            relevant = [s for s in transcript_segments if s["end"] > start and s["start"] < end]
+            if not relevant or not all(s.get("words") and all("probability" in word for word in s["words"]) for s in relevant):
+                from automation.speech_alignment import transcribe_range
+                clip_transcript = transcribe_range(
+                    video_path, start, end,
+                    model_name=cfg.get("transcription", {}).get("alignment_model", "medium"),
+                    language=cfg.get("transcription", {}).get("language", "hi"),
+                    temp_dir=cfg.get("paths", {}).get("temp", "temp"),
+                )
+            from automation.artifacts import atomic_json
+            atomic_json(out_dir / f"{clip_id}_speech.json", {
+                "source_range": [start, end], "segments": clip_transcript,
+                "verification": "ASR estimates; listening review required",
+            })
+            from automation.speech_alignment import alignment_issues
+            issues = alignment_issues(clip_transcript, start, end)
+            if issues:
+                raise ValueError("Speech alignment held: " + "; ".join(issues))
+            info = dict(info)
+            info["text"] = " ".join(s.get("text", "") for s in clip_transcript if s["end"] > start and s["start"] < end)
         out_file = out_dir / f"{clip_id}.mp4"
         # Assign GPU round-robin for super-res workers
         device = None
@@ -1598,96 +1808,31 @@ def export_all(
             device = f"cuda:{(idx - 1) % gpu_count}" if gpu_count > 1 else "cuda:0"
             sr_inst = _sr_instances.get(device)
         path = export_clip(video_path, start, end, str(out_file),
-                           clip_id, transcript_segments=transcript_segments, analysis=analysis,
+                           clip_id, transcript_segments=clip_transcript, analysis=analysis,
                            device=device, sr_instance=sr_inst)
 
-        # Post-processing: Remove silence to ensure clips are engaging
-        if path and Path(path).exists():
-            clip_segs = [s for s in transcript_segments if s["end"] > start and s["start"] < end]
-            if clip_segs:
-                clip_dur = end - start
-                kept = []
-                curr_start = max(0.0, clip_segs[0]["start"] - start)
-                curr_end = min(clip_dur, clip_segs[0]["end"] - start)
-                for s in clip_segs[1:]:
-                    s_rel_start = max(0.0, s["start"] - start)
-                    s_rel_end = min(clip_dur, s["end"] - start)
-                    # Merge segments with less than 0.8s gap
-                    if s_rel_start - curr_end < 0.8:
-                        curr_end = max(curr_end, s_rel_end)
-                    else:
-                        kept.append((curr_start, curr_end))
-                        curr_start = s_rel_start
-                        curr_end = s_rel_end
-                kept.append((curr_start, curr_end))
-                
-                # Add slight padding (0.2s) to avoid abrupt cuts
-                padded = []
-                for st, en in kept:
-                    padded.append((max(0.0, st - 0.2), min(clip_dur, en + 0.2)))
-                
-                # Apply jumpcuts only if we save at least 0.5s of silence
-                total_kept = sum(en - st for st, en in padded)
-                if total_kept < clip_dur - 0.5 and len(padded) > 0:
-                    import subprocess
-                    import os
-                    tmp_out = str(Path(path).with_name(f"{clip_id}_jumpcut.mp4"))
-                    filter_complex = ""
-                    for i, (st, en) in enumerate(padded):
-                        filter_complex += f"[0:v]trim=start={st:.3f}:end={en:.3f},setpts=PTS-STARTPTS[v{i}];"
-                        filter_complex += f"[0:a]atrim=start={st:.3f}:end={en:.3f},asetpts=PTS-STARTPTS[a{i}];"
-                    concat_inputs = "".join([f"[v{i}][a{i}]" for i in range(len(padded))])
-                    filter_complex += f"{concat_inputs}concat=n={len(padded)}:v=1:a=1[vout][aout]"
-                    
-                    enc_args = []
-                    if encoder == "h264_nvenc":
-                        enc_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "vbr", "-cq", "26"]
-                    elif encoder == "h264_amf":
-                        enc_args = ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "vbr", "-qvbr", "26"]
-                    else:
-                        enc_args = ["-c:v", "libx264", "-crf", "18", "-preset", "fast"]
+        # Keep the rendered timeline intact. Transcript display gaps are not
+        # verified silence and source times cannot trim a speed-adjusted output.
+        # Future pause removal must be planned before rendering and shared by
+        # audio, picture and captions through one source-to-output edit map.
 
-                    cmd = [
-                        "ffmpeg", "-y", "-i", path,
-                        "-filter_complex", filter_complex,
-                        "-map", "[vout]", "-map", "[aout]",
-                        *enc_args,
-                        "-c:a", "aac", "-b:a", "192k",
-                        tmp_out
-                    ]
-                    log.info("[%s] Removing silence (%d cuts, %.1fs -> %.1fs)", clip_id, len(padded)-1, clip_dur, total_kept)
-                    res = subprocess.run(cmd, capture_output=True)
-                    if res.returncode == 0 and os.path.exists(tmp_out):
-                        os.replace(tmp_out, path)
-                        log.info("[%s] Silence removed successfully.", clip_id)
-                    else:
-                        log.warning("[%s] Silence removal failed", clip_id)
+        if path and Path(path).exists():
+            from automation.artifacts import atomic_json
+            atomic_json(out_dir / f"{clip_id}_edit.json", {
+                "schema_version": 1, "source_path": str(Path(video_path).resolve()),
+                "source_start": start, "source_end": end,
+                "timeline": analysis.get("edit_timeline", []),
+                "text": info.get("text", ""),
+                "active_crop": analysis.get("export_strategy", {}).get("active_crop"),
+                "layout_type": analysis.get("layout", {}).get("layout_type"),
+                "export_config": cfg.get("export", {}),
+                "qc_status": "NOT CHECKED",
+            })
 
         # Post-export A/V sync validation
         if path and Path(path).exists():
             _validate_av_sync(path, clip_id)
         return (idx, total, clip_id, path, info)
-
-    def _seo_worker(clip_id: str, info: dict, output_dir: Path, ctx: dict):
-        """Generate SEO for a single clip immediately after export.
-
-        Runs in a separate thread pool so it never blocks ongoing exports.
-        Uses OpenCode Go models only (qwen3.7-max, mimo-v2.5-pro, deepseek-v4-pro).
-        """
-        try:
-            from automation.seo.seo import generate_seo_for_exported_clip
-            generate_seo_for_exported_clip(
-                clip_id=clip_id,
-                transcript=info.get("text", ""),
-                output_dir=str(output_dir),
-                video_title=ctx.get("video_title", ""),
-                video_description=ctx.get("video_description", ""),
-                scorecard=ctx.get("scorecard", ""),
-                live_stream_url=ctx.get("live_stream_url", ""),
-            )
-            log.info("🏷  SEO done: %s", clip_id)
-        except Exception as e:
-            log.error("🏷  SEO failed for %s: %s", clip_id, e)
 
     def _make_insta_executor():
         """IG fan-out pool: None unless config enables it and env allows.
@@ -1695,14 +1840,17 @@ def export_all(
         YT_CLIPS_INSTA_DRYRUN=1 forces enablement (dry_run gate).
         """
         import os
+        if cfg.get("release_review", {}).get("required", False):
+            log.info("Instagram fan-out held: pilot packages require completed owner review")
+            return None
         if os.environ.get("YT_CLIPS_SKIP_INSTAGRAM") == "1":
             return None
         if os.environ.get("YT_CLIPS_INSTA_DRYRUN") == "1":
             return ThreadPoolExecutor(max_workers=2, thread_name_prefix="insta")
         try:
             from utils.config import load_config
-            cfg = load_config() or {}
-            if not (cfg.get("instagram") or {}).get("enabled", False):
+            insta_config = load_config() or {}
+            if not (insta_config.get("instagram") or {}).get("enabled", False):
                 return None
         except Exception:
             return None
@@ -1747,25 +1895,30 @@ def export_all(
                         ))
                 else:
                     log.warning("[%d/%d] Export failed or dropped: %s", idx, total, clip_id)
+                    export_errors.append(f"{clip_id}: render failed or held by quality checks")
             except Exception as e:
                 log.error(f"Parallel export error: {e}")
+                export_errors.append(str(e))
 
     # Wait for any remaining SEO tasks to finish
-    if seo_futures:
-        seo_deadline_at = time.monotonic() + 300.0
-        log.info("🏷  Waiting for %d remaining SEO tasks...", len(seo_futures))
+    try:
+        if seo_futures:
+            deadline = float(cfg.get("seo", {}).get("export_deadline_seconds", 300.0))
+            if not math.isfinite(deadline) or deadline <= 0:
+                raise ValueError("SEO export deadline must be finite and positive")
+            seo_deadline_at = time.monotonic() + deadline
+            log.info("Waiting for %d remaining SEO tasks...", len(seo_futures))
+            for fut in seo_futures:
+                remaining = max(0.0, seo_deadline_at - time.monotonic())
+                try:
+                    fut.result(timeout=remaining)
+                except TimeoutError as exc:
+                    raise TimeoutError(f"SEO generation exceeded the {deadline}s export deadline") from exc
+    finally:
         for fut in seo_futures:
-            remaining = max(0.0, seo_deadline_at - time.monotonic())
-            try:
-                fut.result(timeout=remaining)
-            except TimeoutError as exc:
-                raise TimeoutError(
-                    "SEO generation exceeded the 300.0s export deadline"
-                ) from exc
-            except Exception as e:
-                log.error("SEO task error: %s", e)
-    if seo_executor is not None:
-        seo_executor.shutdown(wait=False, cancel_futures=True)
+            fut.cancel()
+        if seo_executor is not None:
+            seo_executor.shutdown(wait=False, cancel_futures=True)
 
     if insta_futures:
         log.info("📲 Waiting for %d Instagram tasks...", len(insta_futures))
@@ -1776,6 +1929,12 @@ def export_all(
                 log.error("Instagram task error: %s", e)
     if insta_executor is not None:
         insta_executor.shutdown(wait=False)
+
+    if export_errors:
+        from automation.artifacts import atomic_json
+        atomic_json(out_dir / "batch_failures.json", {"status": "PARTIAL", "errors": export_errors,
+                                                     "exported": [str(path) for path in exported_clips]})
+        raise RuntimeError("Export batch incomplete: " + "; ".join(export_errors))
 
     log.info("✨ Export complete: %d clips in %s", len(exported_clips), out_dir)
     return exported_clips

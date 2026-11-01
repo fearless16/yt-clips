@@ -133,8 +133,12 @@ def _render_candidate_script(text: Any) -> str:
 def _coerce_candidate_index(candidate_id: Any, total: int) -> int:
     """Map an LLM-provided candidate_id (int, float, numeric string) to a
     valid list index. Returns -1 when unusable or out of range."""
+    if isinstance(candidate_id, bool) or not re.fullmatch(r"[0-9]+(?:\.0+)?", str(candidate_id)):
+        return -1
     try:
-        idx = int(candidate_id) - 1
+        if not float(candidate_id).is_integer():
+            return -1
+        idx = int(float(candidate_id)) - 1
     except (TypeError, ValueError):
         return -1
     return idx if 0 <= idx < total else -1
@@ -152,11 +156,16 @@ def llm_arbiter_refine(
 
     Returns re-ranked candidates list.
     """
-    if len(candidates_with_scores) <= 1:
-        return candidates_with_scores
+    if not candidates_with_scores:
+        return []
 
     top_n = min(len(candidates_with_scores), max_selected + 5)
     candidates = candidates_with_scores[:top_n]
+    context["editorial_decision"] = {
+        "status": "REVIEW", "considered_windows": [[c["start"], c["end"]] for c in candidates],
+        "not_considered_count": len(candidates_with_scores) - len(candidates),
+        "method": "text-only LLM comparison; not audio/visual verification",
+    }
 
     transcript_segments = context.get("transcript_segments", [])
 
@@ -210,11 +219,11 @@ def llm_arbiter_refine(
         "You are the Final Clip Selection Arbiter. "
         "Your job: select the best clips for YouTube Shorts from scored candidates.\n\n"
         "Ranking priorities:\n"
-        "1. Hook strength (first 3 seconds must grab)\n"
-        "2. Emotional peak (crowd/commentator excitement)\n"
-        "3. Cricket relevance (key players, big moments)\n"
-        "4. Self-contained (makes sense without context)\n"
-        "5. Viral potential (rare/controversial/shocking)\n\n"
+        "1. Complete, self-contained meaning: necessary setup and actual payoff\n"
+        "2. Specific insight, genuine humor, stakes or emotional payoff\n"
+        "3. An immediately understandable opening without invented context\n"
+        "4. Cricket relevance and faithful preservation of the speaker's claim\n"
+        "5. Distinct events: reject repetitive versions of the same point\n\n"
         "Content angles:\n"
         "- Each candidate line carries type=moment|comedy|debate|news.\n"
         "- Moments with visible stakes outrank debate/chatter when scores tie.\n"
@@ -233,12 +242,11 @@ def llm_arbiter_refine(
         "MUST be that integer (1-based), copied exactly. Never invent other id formats.\n\n"
         "Rules:\n"
         "- Reject clips that are boring, repetitive, or incomplete\n"
-        "- Prefer shorter clips (15-30s) for Shorts retention\n"
-        "- Prefer clips with audio peaks (crowd eruption, commentator scream)\n"
-        "- Publishable bar: these candidates already cleared a hard quality\n"
-        "  floor — pick the strongest available rather than returning empty.\n"
-        "  Go empty ONLY when EVERY candidate is unusable chatter (no cricket\n"
-        "  content, broken sentences, pure filler)\n"
+        "- Duration is secondary to a complete thought; never cut off the payoff\n"
+        "- Audio peaks are hints, not proof of quality; quiet insight can win\n"
+        "- Heuristic scores do not prove publishability. Return empty when none\n"
+        "  meets the editorial standard; there is no minimum output quota\n"
+        "- Compare strongest alternatives and explain each selected/rejected decision\n"
         "- Return valid JSON only\n"
         "- Max 10 clips"
     )
@@ -280,6 +288,10 @@ def llm_arbiter_refine(
 
             try:
                 result = json.loads(match.group(0))
+                if not isinstance(result, dict) or not isinstance(result.get("selected"), list):
+                    result = None
+                    last_error = "response must contain a selected list"
+                    continue
                 break
             except json.JSONDecodeError as exc:
                 last_error = f"malformed JSON: {exc}"
@@ -290,11 +302,13 @@ def llm_arbiter_refine(
             log.warning("LLM arbiter: generation failed (attempt %d): %s", attempt, e)
 
     if result is None:
-        log.warning("LLM arbiter failed after retry (%s) — using weighted scores",
+        context["editorial_decision"]["error"] = last_error
+        log.warning("LLM arbiter failed after retry (%s) — holding selection for review",
                     last_error or "unknown")
-        return candidates_with_scores[:max_selected]
+        return []
 
     selected = result.get("selected", [])
+    context["editorial_decision"].update({"status": "TEXT_REVIEWED", "response": result})
     log.info("LLM arbiter: selected %d of %d candidates",
              len(selected), len(candidates))
 
@@ -316,8 +330,15 @@ def llm_arbiter_refine(
             continue
         seen_indices.add(idx)
         c = dict(candidates[idx])
-        c["ai_score"] = sel.get("score", c.get("final_score", 0))
+        try:
+            score = float(sel.get("score", c.get("final_score", 0)))
+            if not math.isfinite(score) or not 0 <= score <= 100:
+                continue
+        except (ValueError, TypeError):
+            continue
+        c["ai_score"] = score
         c["ai_reason"] = sel.get("reason", "")
+        c["semantic_review"] = "text_only"
         refined.append(c)
 
     refined.sort(key=lambda x: x.get("ai_score", x.get("final_score", 0)), reverse=True)

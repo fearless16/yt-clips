@@ -4,6 +4,7 @@ import upload
 import json
 
 def test_upload_respects_notify_subscribers_config(monkeypatch, tmp_path):
+    monkeypatch.setitem(upload.cfg, "release_review", {"required": False})
     monkeypatch.setattr("time.sleep", lambda x: None)
     
     original_cfg_get = upload.cfg.get
@@ -50,4 +51,3 @@ def test_upload_respects_notify_subscribers_config(monkeypatch, tmp_path):
     kwargs = mock_youtube.videos.return_value.insert.call_args[1]
     assert "notifySubscribers" in kwargs
     assert kwargs["notifySubscribers"] is False
-

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from shorts_intelligence.learner import BayesianSegmentLearner
@@ -34,7 +35,12 @@ class ShortsIntelligence:
         batch = self.source.fetch(captured_at=captured_at)
         ingested = self.store.ingest_batch(batch.records, batch.snapshots)
         summary = self.store.summary()
-        model = self.learner.fit(self.store.training_rows())
+        now = (
+            datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+            if captured_at
+            else None
+        )
+        model = self.learner.fit(self.store.training_rows(), now=now)
         self.store.save_model(model, self.learner.config)
         recommendations = [
             {

@@ -30,6 +30,9 @@ import os
 import subprocess
 import sys
 import time
+import tempfile
+import copy
+from functools import wraps
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -90,12 +93,12 @@ class PipelineResult:
 
 
 _FAKE_SEGMENTS = [
-    {"start": 0.0, "end": 5.0, "text": "Hello and welcome to the live stream"},
-    {"start": 5.0, "end": 10.0, "text": "Today coaly is batting brilliantly"},
-    {"start": 30.0, "end": 35.0, "text": "coaly hits a massive six"},
-    {"start": 60.0, "end": 65.0, "text": "bumra bowls a perfect yorker"},
-    {"start": 120.0, "end": 125.0, "text": "What a catch in the deep"},
-    {"start": 300.0, "end": 305.0, "text": "And that's the end of the over"},
+    {"start": 0.0, "end": 5.0, "text": "Kohli waits for the slower ball."},
+    {"start": 5.0, "end": 25.0, "text": "Today coaly is batting brilliantly. Kohli waits for the slower ball and hits a six over the boundary. That batting patience wins the over."},
+    {"start": 30.0, "end": 55.0, "text": "Kohli hits a massive six. The bowler misses the yorker and Kohli clears the boundary to finish the cricket match with that six."},
+    {"start": 60.0, "end": 85.0, "text": "bumra bowls a perfect yorker. Bumrah changes the bowling angle and takes the wicket because the batter cannot reach the ball."},
+    {"start": 120.0, "end": 145.0, "text": "India take a catch in the deep. That wicket ends the batting partnership and India can defend the target with accurate bowling."},
+    {"start": 175.0, "end": 180.0, "text": "And that's the end of the over."},
 ]
 
 _FAKE_TRANSCRIPT = {
@@ -183,6 +186,118 @@ def _create_fake_video(path: str, size_mb: int = 10):
         log.info("  [FAKE] Created %s (%d MB)", path, size_mb)
 
 
+def _fake_ffmpeg_output(cmd, root: Path) -> Path | None:
+    """Accept only an explicit final output, never a searched-for input file."""
+    if not isinstance(cmd, (list, tuple)) or len(cmd) < 2:
+        raise ValueError("Dry-run FFmpeg requires an argument list")
+    final = str(cmd[-1])
+    if final in ("-", "NUL", "/dev/null") or final.startswith("pipe:"):
+        return None
+    output = Path(final).resolve()
+    inputs = {
+        Path(str(cmd[i + 1])).resolve()
+        for i, value in enumerate(cmd[:-1]) if value == "-i"
+    }
+    if output in inputs:
+        raise ValueError("Dry-run refuses to overwrite an FFmpeg input")
+    if output.suffix.lower() not in {".mp4", ".wav", ".nut", ".jpg", ".png", ".pcm"}:
+        return None
+    if not output.is_relative_to(root.resolve()):
+        raise ValueError("Dry-run FFmpeg output escaped its sandbox")
+    return output
+
+
+def _project_module(module) -> bool:
+    """Exclude installed dependencies and Face OS from process-global patches."""
+    filename = getattr(module, "__file__", None)
+    if not filename:
+        return False
+    try:
+        relative = Path(filename).resolve().relative_to(Path(__file__).resolve().parent)
+    except ValueError:
+        return False
+    return not any(part.startswith(".") or part in {"face_os", "site-packages"} for part in relative.parts)
+
+
+def _isolated_run(function):
+    """Keep relative files, cached configuration and generated evidence off live paths.
+
+    Like the existing API patches this harness is process-global, not thread-safe.
+    Preserve artifacts for debugging, but restore cwd/config/environment on exit.
+    """
+    @wraps(function)
+    def isolated(*args, **kwargs):
+        import yaml
+        import automation.config as config_module
+        import utils.config as utils_config
+
+        original_cwd = Path.cwd()
+        original = config_module.load()
+        config = copy.deepcopy(original)
+        temp_base = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "Temp" / "opencode"
+        temp_base.mkdir(parents=True, exist_ok=True)
+        sandbox = Path(tempfile.mkdtemp(prefix="yt-clips-dry-run-", dir=temp_base))
+        config["paths"] = {name: str(sandbox / name) for name in
+                           ("input", "temp", "transcripts", "highlights", "shorts", "logs")}
+        config.setdefault("shorts_intelligence", {})["enabled"] = False
+        config["shorts_intelligence"]["db_path"] = str(sandbox / "shorts_intelligence.db")
+        # Stubbed media cannot receive a real owner approval. Release gating is
+        # tested separately; this run exercises only the fake API happy path.
+        config["release_review"] = {"required": False}
+        config["delivery_qc"] = {"enabled": False}
+        config.setdefault("export", {}).setdefault("captions", {})["require_word_timing"] = False
+        (sandbox / "config.yaml").write_text(yaml.safe_dump(config, allow_unicode=False), encoding="utf-8")
+        # Fake credentials only: never copy production tokens/cookies into a test.
+        (sandbox / "yt_channel_token.json").write_text('{"token": "fake"}', encoding="utf-8")
+        saved = []
+        for name, module in list(sys.modules.items()):
+            if module is None or name.startswith("face_os"):
+                continue
+            if not _project_module(module):
+                continue
+            for attr in ("cfg", "_CONFIG"):
+                if hasattr(module, attr):
+                    saved.append((module, attr, getattr(module, attr)))
+                    setattr(module, attr, config)
+            for attr in ("_ai_instance", "_ai"):
+                if hasattr(module, attr):
+                    saved.append((module, attr, getattr(module, attr)))
+                    setattr(module, attr, None)
+            if name == "automation.orchestrator":
+                from automation.memory.decision_store import DecisionStore
+                from automation.providers.provider_health import ProviderHealth
+                for attr, replacement in (("_DECISION_STORE", DecisionStore()),
+                                          ("_PROVIDER_HEALTH", ProviderHealth())):
+                    saved.append((module, attr, getattr(module, attr)))
+                    setattr(module, attr, replacement)
+        previous_modules = set(sys.modules)
+        cache = dict(utils_config._config_cache)
+        utils_config._config_cache.clear()
+        try:
+            os.chdir(sandbox)
+            result = function(*args, **kwargs)
+            result["sandbox"] = str(sandbox)
+            return result
+        finally:
+            os.chdir(original_cwd)
+            for module, attr, value in saved:
+                setattr(module, attr, value)
+            for name in set(sys.modules) - previous_modules:
+                module = sys.modules[name]
+                if module is None or not _project_module(module):
+                    continue
+                for attr in ("cfg", "_CONFIG"):
+                    value = getattr(module, attr, None)
+                    if isinstance(value, dict) and value.get("paths", {}).get("input") == config["paths"]["input"]:
+                        setattr(module, attr, utils_config.Config(original))
+                for attr in ("_ai_instance", "_ai"):
+                    if hasattr(module, attr):
+                        setattr(module, attr, None)
+            utils_config._config_cache.clear()
+            utils_config._config_cache.update(cache)
+    return isolated
+
+
 def _create_fake_clip(export_dir: str, stem: str):
     d = Path(export_dir)
     d.mkdir(parents=True, exist_ok=True)
@@ -247,17 +362,34 @@ def _api_intercept_context(video_path: str):
     def _fake_generate_seo_text(self, prompt="", system_instruction=None, reasoning_effort=None):
         log.info("  [FAKE AI] generate_seo_text (prompt=%.60s...)",
                  prompt.replace("\n", " ")[:60])
-        return _FAKE_SEO_JSON
+        import re
+        match = re.search(r"COMPLETE CLIP TRANSCRIPT:\s*(.*?)\n\nAPPROVED", prompt, re.DOTALL)
+        script = match.group(1).strip() if match else "Kohli hits a six over the boundary."
+        title = "Kohli hits a massive six" if "kohli" in script.lower() or "coaly" in script.lower() else script.split(".")[0][:60]
+        return json.dumps({"title": title, "description": script + "\n\nIndependent cricket commentary and analysis, not official match footage.",
+                           "hashtags": ["#Shorts", "#Cricket"], "tags": ["cricket commentary"],
+                           "search_terms": [], "primary_search_terms": []})
 
     def _fake_generate_image(self, prompt="", **kwargs):
         log.info("  [FAKE AI] generate_image (prompt=%.60s...)", prompt[:60])
         return b"JPEG" * 1024
+
+    def _fake_caption_cards(cues, output_dir):
+        from automation.caption_engine import CaptionCard
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        cards = []
+        for index, cue in enumerate(cues):
+            path = Path(output_dir) / f"card-{index}.png"
+            path.write_bytes(b"fake-caption-image")
+            cards.append(CaptionCard(str(path), cue.start, cue.end, cue.text))
+        return cards
 
         # ── 2. subprocess — intercept ffmpeg/ffprobe/yt-dlp/aria2c/nvidia-smi ──
 
     _original_subprocess_run = subprocess.run
     _original_subprocess_popen = subprocess.Popen
     _last_ffmpeg_t = [10.0]  # list to allow mutation in nested function
+    _output_durations = {}
 
     def _fake_subprocess_run(cmd, *args, **kwargs):
         cmd_str = " ".join(str(c) for c in cmd) if isinstance(cmd, list) else str(cmd)
@@ -274,10 +406,8 @@ def _api_intercept_context(video_path: str):
             if "format=duration" in text and "show_entries" in text:
                 # If this looks like a clip validation file, use a small duration.
                 # Otherwise fall back to the full video duration.
-                if any(p in cmd_str for p in ("shorts/", "temp/")):
-                    dur = _last_ffmpeg_t[0]
-                else:
-                    dur = 180.0
+                target = str(Path(str(cmd[-1])).resolve()) if isinstance(cmd, (list, tuple)) else ""
+                dur = _output_durations.get(target, 180.0)
                 fake = json.dumps({"format": {"duration": str(dur)}})
             elif "r_frame_rate" in text:
                 fake = json.dumps({"streams": [{"width": 1080, "height": 1920, "r_frame_rate": "30/1"}]})
@@ -303,17 +433,20 @@ def _api_intercept_context(video_path: str):
                         _last_ffmpeg_t[0] = float(cmd[i + 1])
                     except (ValueError, IndexError):
                         pass
-            out_path = None
-            for c in reversed(cmd):
-                if isinstance(c, str) and (c.endswith(".mp4") or c.endswith(".wav") or c.endswith(".nut") or c.endswith(".jpg")):
-                    out_path = c
-                    break
+            out_path = _fake_ffmpeg_output(cmd, Path.cwd())
             if out_path:
-                Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-                if out_path.endswith(".wav"):
-                    Path(out_path).write_bytes(_make_valid_wav_bytes(16000))
+                import re
+                duration_match = re.search(r"(?<!a)trim=start=[0-9.]+:duration=([0-9.]+)", cmd_str)
+                speed_match = re.search(r"setpts=\(PTS-STARTPTS\)/([0-9.]+)", cmd_str)
+                duration = float(duration_match.group(1)) if duration_match else _last_ffmpeg_t[0]
+                if speed_match:
+                    duration /= float(speed_match.group(1))
+                _output_durations[str(out_path)] = duration
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                if out_path.suffix == ".wav":
+                    out_path.write_bytes(_make_valid_wav_bytes(16000))
                 else:
-                    Path(out_path).write_bytes(b"F" * 1024 * 500)  # 500KB to pass size validation
+                    out_path.write_bytes(b"F" * 1024 * 500)
             return subprocess.CompletedProcess(cmd, 0, _empty(), _empty())
         # yt-dlp call: create fake video file
         if "yt-dlp" in low or ("yt" in low and "dlp" in low):
@@ -337,8 +470,8 @@ def _api_intercept_context(video_path: str):
         # apt-get: skip
         if "apt-get" in low or "apt " in low:
             return subprocess.CompletedProcess(cmd, 0, _empty(), _empty())
-        # Everything else (mkdir, pip, cp, ls, etc.) pass through
-        return _original_subprocess_run(cmd, *args, **kwargs)
+        # A missing boundary stub must fail, not run pip/scripts/network for real.
+        raise RuntimeError(f"Dry-run has no safe subprocess stub for: {cmd_str[:120]}")
 
     class _FakePopen:
         def __init__(self, cmd, *args, **kwargs):
@@ -456,6 +589,14 @@ def _api_intercept_context(video_path: str):
         img.convert.return_value = img
         img.resize.return_value = img
         img.crop.return_value = img
+        img.__enter__.return_value = img
+        def save(path, **options):
+            target = Path(path).resolve()
+            if not target.is_relative_to(Path.cwd()):
+                raise ValueError("Fake image output escaped sandbox")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"fake-image")
+        img.save.side_effect = save
         return img
 
     # ── 7. Pillow ImageEnhance ─────────────────────────────────────────────
@@ -597,6 +738,8 @@ def _api_intercept_context(video_path: str):
         patch("utils.ai_client.AIClient.generate_text", _fake_generate_text),
         patch("utils.ai_client.AIClient.generate_seo_text", _fake_generate_seo_text),
         patch("utils.ai_client.AIClient.generate_image", _fake_generate_image),
+        patch("automation.caption_engine.convert_hindi_to_hinglish_llm", lambda texts, **_: texts),
+        patch("automation.caption_engine.render_transparent_cards_batch", _fake_caption_cards),
         # subprocess intercept
         patch("subprocess.run", _fake_subprocess_run),
         patch("subprocess.check_output", _fake_subprocess_run),
@@ -617,6 +760,7 @@ def _api_intercept_context(video_path: str):
         patch("PIL.ImageDraw.Draw", _FakeDraw),
         patch("PIL.ImageFont.truetype", _FakeFont.truetype),
         patch("PIL.ImageFilter.GaussianBlur", _FakeFilter),
+        patch("PIL.ImageStat.Stat", lambda *_: type("Stats", (), {"mean": [128.0], "var": [50.0]})()),
         # requests
         patch("requests.Session", _FakeSession),
         # OpenAI SDK (covered by AIClient patches above — the `chat` attribute
@@ -662,6 +806,7 @@ def validate_config(cfg: dict) -> list[tuple]:
 
 # ── Dry-run pipeline ─────────────────────────────────────────────────────────
 
+@_isolated_run
 def dry_run(url: str,
             skip_download=False, skip_transcribe=False,
             skip_highlight=False, skip_export=False,
@@ -714,6 +859,7 @@ def dry_run(url: str,
 
     # ── Ensure input directory exists for fake video ──────────────────────
     Path(input_dir).mkdir(parents=True, exist_ok=True)
+    _create_fake_video(video_path)
     temporary_transcript = _ensure_skipped_transcript_fixture(
         paths, video_path, skip_transcribe
     )
@@ -729,36 +875,28 @@ def dry_run(url: str,
         _ig = dict(_real_cfg.get("instagram") or {})
         _ig["enabled"] = True
         _real_cfg["instagram"] = _ig
-        os.environ.setdefault("YT_CLIPS_INSTA_DRYRUN", "1")
         import sys as _sys
         for _m in ("transcribe", "highlight", "export", "download"):
             _mod = _sys.modules.get(_m)
             if _mod is not None and hasattr(_mod, "cfg"):
                 _mod.cfg = _real_cfg
         with _api_intercept_context(video_path):
-            from automation.orchestrator import run as orchestrator_run
-            pipeline_result = orchestrator_run(
-                url=url,
-                skip_download=skip_download,
-                skip_transcribe=skip_transcribe,
-                skip_highlight=skip_highlight,
-                skip_export=skip_export,
-                skip_sync=skip_sync,
-                skip_seo=skip_seo,
-                skip_enhancement=skip_enhancement,
-                auto_sync=auto_sync,
-                auto_upload=auto_upload,
-                auto_schedule=auto_schedule,
-                sample_minutes=sample_minutes,
-                sync_from_drive=sync_from_drive,
-                mode=mode,
-            )
+            import automation.orchestrator as orchestrator
+            decision_store = orchestrator._DECISION_STORE
+            event_count_before = decision_store.count()
+            handler = JsonStreamHandler(cap_buf)
+            orchestrator.log.addHandler(handler)
             try:
-                from automation.instagram.runner import (
-                    process_instagram_for_clip as _ig_probe)
-                _ig_probe(Path("shorts") / "_dryrun_probe", "", "", "")
-            except Exception:
-                pass
+                pipeline_result = orchestrator.run(
+                    url=url, skip_download=skip_download, skip_transcribe=skip_transcribe,
+                    skip_highlight=skip_highlight, skip_export=skip_export,
+                    skip_sync=skip_sync, skip_seo=skip_seo, skip_enhancement=skip_enhancement,
+                    auto_sync=auto_sync, auto_upload=auto_upload, auto_schedule=auto_schedule,
+                    sample_minutes=sample_minutes, sync_from_drive=sync_from_drive, mode=mode,
+                )
+                rid = pipeline_result.run_id
+            finally:
+                orchestrator.log.removeHandler(handler)
     except Exception as e:
         log.error("Pipeline crashed: %s", e, exc_info=True)
         result.failures.append(f"pipeline_crash: {e}")
@@ -777,7 +915,13 @@ def dry_run(url: str,
     result.seo_generated = getattr(pipeline_result, 'seo_generated', 0)
     result.transcript_source = getattr(pipeline_result, 'transcript_source', 'none')
     pipe_failures = getattr(pipeline_result, 'failures', [])
-    result.failures = list(pipe_failures)
+    result.failures.extend(f for f in pipe_failures if f not in result.failures)
+    if not skip_export and not result.exported:
+        result.failures.append("acceptance: expected fixture exports, produced zero")
+    if not skip_export and len(result.exported) != result.selected_clips:
+        result.failures.append("acceptance: selected/exported count mismatch")
+    if not skip_export and not skip_seo and result.seo_generated != len(result.exported):
+        result.failures.append("acceptance: exported/valid metadata count mismatch")
 
     # ── Post-pipeline transcript correction validation ─────────────────────
     try:
@@ -829,7 +973,9 @@ def dry_run(url: str,
         except Exception:
             pass
     logged_stages = sorted({r.get("stage") for r in struct_records
-                            if r.get("run_id") == rid and r.get("stage")})
+                             if r.get("run_id") == rid and r.get("stage")})
+    if not struct_records:
+        result.failures.append("acceptance: no structured pipeline records captured")
 
     prompts_ok = True
     try:
@@ -859,6 +1005,9 @@ def dry_run(url: str,
         "validation": validation,
         "prompts_ok": prompts_ok,
         "event_count": event_count_new,
+        "event_types": sorted({event.event_type.value for event in decision_store.get_all_events()}),
+        "export_expected": not skip_export,
+        "instagram_expected": not skip_export and not skip_seo and os.environ.get("YT_CLIPS_SKIP_INSTAGRAM") != "1",
     }
 
 
@@ -945,11 +1094,9 @@ def _print_validation_report(result: dict):
     event_count = result.get("event_count", 0)
     print(f"        events emitted:             {event_count}")
     if event_count:
-        from automation import decision_store as _ds
-        event_types = sorted({e.event_type.value for e in _ds.get_all_events()})
-        print(f"        event types:               {event_types}")
+        print(f"        event types:               {result.get('event_types', [])}")
     print()
-    insta_gate_ok = _insta_stub_calls["count"] > 0
+    insta_gate_ok = not result.get("instagram_expected", False) or _insta_stub_calls["count"] > 0
     print("  [8] Instagram (stubbed, zero network):")
     print(f"        INSTA(STUB): "
           f"{'PASS' if insta_gate_ok else 'FAIL — stub never invoked'} "
@@ -959,7 +1106,8 @@ def _print_validation_report(result: dict):
         print("  Failures detail:")
         for f in result["failures"]:
             print(f"    - {f}")
-    ok = (cfg_ok == len(cfg_checks) and result["run_id"] and
+    export_ok = not result.get("export_expected", True) or bool(result["exported"])
+    ok = (cfg_ok == len(cfg_checks) and result["run_id"] and export_ok and
           transcript_ok and prompts_ok and insta_gate_ok and
           not result["failures"])
     print("=" * 70)
