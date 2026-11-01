@@ -641,8 +641,10 @@ def _load_transcript_segments(transcript_path: Optional[str]) -> Optional[List[D
             end = float(seg["end"])
         except (KeyError, TypeError, ValueError):
             continue
-        if end > start:
-            segments.append({"start": start, "end": end, "text": str(seg.get("text", ""))})
+        if math.isfinite(start) and math.isfinite(end) and start >= 0 and end > start:
+            # Do not discard reviewed word text, alignment or provenance. Invalid
+            # word evidence is held by range validation, not silently replaced.
+            segments.append({**seg, "start": start, "end": end, "text": str(seg.get("text", ""))})
     return segments or None
 
 
@@ -1124,6 +1126,16 @@ def _export_native_res(
     return temp_path
 
 
+def _caption_options(analysis: dict) -> tuple[dict, bool, bool]:
+    """Use the same per-highlight caption contract in preparation and rendering."""
+    options = cfg.get("export", {}).get("captions", {})
+    enabled = options.get("enabled", False)
+    overlay = analysis.get("caption_overlay")
+    if isinstance(overlay, dict):
+        enabled = overlay.get("enabled", enabled)
+    return options, bool(enabled), bool(enabled and options.get("require_word_timing", False))
+
+
 def _caption_card_y() -> int:
     height = int(cfg["export"]["height"])
     from_bottom = float(cfg["export"].get("captions", {}).get("from_bottom", 0.20))
@@ -1186,8 +1198,14 @@ def export_clip(
     if not has_audio:
         log.warning("[%s] No audio stream; exporting silent video.", clip_id)
 
+    caption_cfg, captions_enabled, required_captions = _caption_options(analysis)
+    if required_captions and not transcript_segments:
+        raise ValueError("Required captions have no word-timed speech evidence")
+    if required_captions and (premium_enabled or super_res_enabled):
+        log.warning("[%s] Required word captions use standard renderer; alternate renderers do not support this contract", clip_id)
+
     # ── Premium Render Path ──────────────────────────────────────────────────
-    if premium_enabled:
+    if premium_enabled and not required_captions:
         if strategy.get("speed_factor", 1.0) > 1.0:
             log.warning("[%s] Premium render ignores speed_factor %.2fx — clip may exceed target duration",
                         clip_id, strategy.get("speed_factor", 1.0))
@@ -1240,7 +1258,7 @@ def export_clip(
         return None
 
     # ── Super-Resolution Path ───────────────────────────────────────────────
-    if super_res_enabled and not premium_enabled:
+    if super_res_enabled and not premium_enabled and not required_captions:
         try:
             sr = sr_instance
             if sr is None:
@@ -1311,11 +1329,6 @@ def export_clip(
     )
 
     # ── Captions (Quantum Holo-Glass) ────────────────────────────────────────
-    caption_cfg = cfg.get("export", {}).get("captions", {})
-    captions_enabled = caption_cfg.get("enabled", False)
-    if isinstance(analysis, dict) and "caption_overlay" in analysis:
-        captions_enabled = analysis["caption_overlay"].get("enabled", captions_enabled)
-
     temp_cards_dir = None
     caption_cards = []
     if captions_enabled and caption_cfg.get("require_word_timing", False) and not transcript_segments:
@@ -1336,6 +1349,9 @@ def export_clip(
             if caption_cards:
                 log.info("[%s] Generated %d Quantum Holo-Glass caption cards", clip_id, len(caption_cards))
         except Exception as e:
+            if temp_cards_dir is not None:
+                shutil.rmtree(temp_cards_dir, ignore_errors=True)
+                temp_cards_dir = None
             if caption_cfg.get("require_word_timing", False):
                 raise RuntimeError(f"Required captions failed for {clip_id}: {e}") from e
             log.warning("[%s] Quantum Holo-Glass caption generation skipped: %s", clip_id, e)
@@ -1470,40 +1486,20 @@ def export_clip(
             _sh.rmtree(temp_cards_dir, ignore_errors=True)
 
 
-def _validate_av_sync(video_path: str, clip_id: str, tolerance: float = 0.5) -> bool:
-    """Validate audio-video duration sync. Returns True if OK."""
+def _validate_av_sync(video_path: str, clip_id: str, tolerance: float = 0.1) -> bool:
+    """Check encoded stream timing; this cannot certify content/lip synchronization."""
+    from automation.delivery_qc import av_timing_issues
     try:
-        cmd = [
-            "ffprobe", "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            video_path,
-        ]
-        v_result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        v_dur = float(v_result.stdout.strip()) if v_result.stdout.strip() else 0.0
-
-        cmd = [
-            "ffprobe", "-v", "error",
-            "-select_streams", "a:0",
-            "-show_entries", "stream=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            video_path,
-        ]
-        a_result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-        a_dur = float(a_result.stdout.strip()) if a_result.stdout.strip() else 0.0
-
-        if v_dur > 0 and a_dur > 0:
-            diff = abs(v_dur - a_dur)
-            if diff > tolerance:
-                log.warning("[%s] A/V sync issue: video=%.2fs audio=%.2fs (diff=%.2fs > %.2fs tolerance)",
-                           clip_id, v_dur, a_dur, diff, tolerance)
-                return False
-            log.debug("[%s] A/V sync OK: diff=%.3fs", clip_id, diff)
-        return True
+        cmd = ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,start_time,duration",
+               "-of", "json", video_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=True)
+        issues = av_timing_issues(json.loads(result.stdout)["streams"], start_tolerance=tolerance)
+        if issues:
+            log.warning("[%s] Encoded A/V timing held: %s", clip_id, "; ".join(issues))
+        return not issues
     except Exception as e:
-        log.debug("[%s] A/V validation failed: %s", clip_id, e)
-        return True  # Don't block on validation failure
+        log.warning("[%s] Encoded A/V timing unavailable; holding export: %s", clip_id, e)
+        return False
 
 
 def _parse_time_to_seconds(time_val) -> float:
@@ -1726,6 +1722,9 @@ def export_all(
     encoder = _get_best_encoder()
     export_cfg = cfg.get("export", {})
     super_res = export_cfg.get("super_resolution", False)
+    if super_res and all(_caption_options(item[-1])[2] for item in filtered_items):
+        log.info("Required word captions use standard rendering; skipping super-res initialization")
+        super_res = False
     # Super-res needs CUDA; auto-disable + warn rather than crash on CPU/Windows.
     if super_res:
         try:
@@ -1776,16 +1775,20 @@ def export_all(
     def _export_one(args):
         """Worker function for parallel export."""
         idx, total, clip_id, start, end, info, analysis = args
-        clip_transcript = transcript_segments
-        if cfg.get("export", {}).get("captions", {}).get("require_word_timing", False):
-            relevant = [s for s in transcript_segments if s["end"] > start and s["start"] < end]
-            if not relevant or not all(s.get("words") and all("probability" in word for word in s["words"]) for s in relevant):
+        clip_transcript = transcript_segments or []
+        _, _, required_captions = _caption_options(analysis)
+        if required_captions:
+            relevant = [s for s in clip_transcript if s["end"] > start and s["start"] < end]
+            # Cue-only input needs ASR. Mixed/invalid word evidence instead
+            # goes to validation so reviewed corrections cannot be overwritten.
+            if not relevant or not any(s.get("words") for s in relevant):
                 from automation.speech_alignment import transcribe_range
                 clip_transcript = transcribe_range(
                     video_path, start, end,
                     model_name=cfg.get("transcription", {}).get("alignment_model", "medium"),
                     language=cfg.get("transcription", {}).get("language", "hi"),
                     temp_dir=cfg.get("paths", {}).get("temp", "temp"),
+                    context_seconds=cfg.get("transcription", {}).get("alignment_context_seconds", 2.0),
                 )
             from automation.artifacts import atomic_json
             atomic_json(out_dir / f"{clip_id}_speech.json", {
@@ -1797,7 +1800,11 @@ def export_all(
             if issues:
                 raise ValueError("Speech alignment held: " + "; ".join(issues))
             info = dict(info)
-            info["text"] = " ".join(s.get("text", "") for s in clip_transcript if s["end"] > start and s["start"] < end)
+            from automation.speech_alignment import words_in_range
+            # Contextual ASR segments can contain speech outside the cut. SEO
+            # must describe retained words, not the surrounding argument.
+            info["text"] = " ".join(str(w.get("word", w.get("text", ""))).strip()
+                                    for w in words_in_range(clip_transcript, start, end))
         out_file = out_dir / f"{clip_id}.mp4"
         # Assign GPU round-robin for super-res workers
         device = None
@@ -1831,7 +1838,8 @@ def export_all(
 
         # Post-export A/V sync validation
         if path and Path(path).exists():
-            _validate_av_sync(path, clip_id)
+            if not _validate_av_sync(path, clip_id):
+                raise ValueError(f"{clip_id}: encoded A/V timing failed or unavailable")
         return (idx, total, clip_id, path, info)
 
     def _make_insta_executor():

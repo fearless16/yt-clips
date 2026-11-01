@@ -413,6 +413,12 @@ def _api_intercept_context(video_path: str):
                 fake = json.dumps({"streams": [{"width": 1080, "height": 1920, "r_frame_rate": "30/1"}]})
             elif "stream=width,height" in text and "codec_type" not in text:
                 fake = json.dumps({"streams": [{"width": 1080, "height": 1920}]})
+            elif "stream=codec_type,start_time,duration" in text:
+                target = str(Path(str(cmd[-1])).resolve())
+                dur = _output_durations.get(target, 180.0)
+                fake = json.dumps({"streams": [
+                    {"codec_type": kind, "start_time": "0.0", "duration": str(dur)}
+                    for kind in ("video", "audio")]})
             elif "codec_type" in text:
                 fake = json.dumps({"streams": [{"codec_type": "audio"}]})
             else:

@@ -11,6 +11,31 @@ from automation.artifacts import atomic_json
 from automation.release_review import sha256
 
 
+def av_timing_issues(streams: list[dict], *, start_tolerance=0.1, end_tolerance=0.15) -> list[str]:
+    """Compare encoded start/end timestamps; unknown timing is a hold, not PASS.
+
+    Container timing alone cannot prove transcript alignment or lip sync.
+    """
+    if not all(math.isfinite(t) and t >= 0 for t in (start_tolerance, end_tolerance)):
+        return ["Invalid A/V timing tolerance"]
+    timing = {}
+    for kind in ("video", "audio"):
+        try:
+            stream = next(s for s in streams if s.get("codec_type") == kind)
+            start, duration = float(stream["start_time"]), float(stream["duration"])
+            if not all(math.isfinite(t) for t in (start, duration, start + duration)) or duration <= 0:
+                raise ValueError("Invalid stream timing")
+            timing[kind] = (start, start + duration)
+        except (StopIteration, KeyError, ValueError, TypeError, AttributeError):
+            return [f"Missing or invalid {kind} stream timing"]
+    issues = []
+    if abs(timing["video"][0] - timing["audio"][0]) > start_tolerance:
+        issues.append("Encoded A/V start offset exceeds tolerance")
+    if abs(timing["video"][1] - timing["audio"][1]) > end_tolerance:
+        issues.append("Encoded A/V end offset exceeds tolerance")
+    return issues
+
+
 def check_delivery(clip: Path, expected_duration: float | None = None) -> dict:
     clip = Path(clip).resolve()
     result = {"schema_version": 1, "media_sha256": sha256(clip), "status": "FAIL", "errors": [],
@@ -19,6 +44,10 @@ def check_delivery(clip: Path, expected_duration: float | None = None) -> dict:
         probe = subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(clip)],
                                capture_output=True, text=True, check=True, timeout=30)
         info = json.loads(probe.stdout)
+        timing_errors = av_timing_issues(info["streams"])
+        result["av_timing"] = {"status": "FAIL" if timing_errors else "PASS", "errors": timing_errors,
+                               "method": "encoded stream start/end timestamps; not content alignment"}
+        result["errors"].extend(timing_errors)
         video = next(s for s in info["streams"] if s.get("codec_type") == "video")
         duration = float(info["format"]["duration"])
         if not math.isfinite(duration) or not 0 < duration <= 180:

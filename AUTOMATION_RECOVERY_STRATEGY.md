@@ -32,6 +32,34 @@
   source overlays remain review issues. No owner approval or metadata package
   was manufactured to make this sample eligible for publication.
 
+## Transcript synchronization hardening (2026-11-01)
+
+- Preserve source word intervals, corrected word text, confidence and provenance
+  when loading transcripts. Missing/empty/corrupt files can reach local ASR.
+  Partial or invalid existing word evidence is held, not silently retranscribed.
+- Shortlist ASR now reads two seconds of surrounding audio on each side (clamped
+  at source start), offsets estimates from that context origin, and retains its
+  requested context range. The final cut is unchanged. Boundary-crossing words,
+  overlaps, invalid timestamps and unknown confidence require review.
+- Gap/confidence checks operate on retained words only; contextual speech cannot
+  mask edge gaps or leak into clip metadata. Required empty captions fail closed.
+- Required word-caption exports use the standard renderer and its edit map;
+  premium/super-resolution cannot return before captions. Super-res model setup
+  is skipped in this mode rather than loading an unused GPU model.
+- Export and encoded-file QC share stream start/end checks (100 ms start and
+  150 ms end tolerances). Missing streams, unknown timing or probe errors hold
+  delivery. Matching container timestamps still do not certify lip sync or ASR
+  fidelity; source listening, full playback and named owner approval remain gates.
+- Added `tests/automation/test_transcript_sync.py`, including real 34-second
+  encoded timing regressions at 1.0x and 1.25x, with early/late audio pulses and
+  word-derived caption markers. These isolate timing, not Hindi recognition or
+  visual composition. No engineering pilot was approved or uploaded.
+- Final validation after hardening: **935 passed, 47 skipped, 18 xfailed** in
+  the broad non-Face-OS suite. The separate sync/automation/Shorts Intelligence
+  run passed **125 tests**. The required sandbox dry run passed with **2 selected,
+  2 exports, 2 valid metadata packages, 10 events and 0 failures**. Its disabled
+  word-ASR/review gates are covered by focused tests, not claimed as dry-run QC.
+
 The original audit below records historical findings, not current implementation
 status. Its baseline failures and original unsafe dry-run result are retained as evidence.
 

@@ -37,6 +37,7 @@ download:
 # ─── Transcription ────────────────────────────────────────────────────────────
 transcription:
   alignment_model: "medium"             # shortlisted ranges only; benchmark Hindi names/numbers before release
+  alignment_context_seconds: 2.0        # preserve neighboring speech when checking cut boundaries
   model: "small"                        # tiny | base | small | medium | large-v3
   language: "hi"                        # Hindi commentary — use hi for better accuracy
   device: "auto"             # auto-detects CUDA/ROCm/CPU; falls back gracefully

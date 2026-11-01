@@ -1,11 +1,8 @@
-"""caption_engine.py — High-fidelity Hinglish subtitle engine with Quantum Holo-Glass styling.
+"""Word-timed Hinglish caption cards with conservative source-boundary checks.
 
-Features:
-1. Natural, conversational Hinglish transliteration (via local LLM with rule fallback + in-memory cache).
-2. Micro-chunking: Breaks long lines into 2-4 word punchy bursts (0.8s - 2.0s duration) with strict proportional timing.
-3. Keyword highlighting: Emphasizes names, cricket terms, and punch words in radiant gold/cyan.
-4. Quantum Holo-Glass layout locked strictly at 20% height from bottom.
-5. Thread-safe Playwright card generation with domcontentloaded fast-render and offline font fallback.
+Required captions use source word intervals, not proportional sentence timing.
+ASR timestamps and transliteration still require listening/fidelity review.
+The optional legacy cue-only route is an approximation, not verified alignment.
 """
 
 from __future__ import annotations
@@ -236,11 +233,11 @@ def convert_hindi_to_hinglish_llm(
 
 
 def normalize_rolling_transcript_segments(segments: List[Dict]) -> List[Dict]:
-    """Normalize YouTube rolling ASR subtitle timestamps to true spoken audio boundaries.
+    """Approximate display-overlap removal for the legacy cue-only route.
 
     YouTube ASR subtitles use 2-line rolling display windows where end times reflect
     on-screen persistence (extending into subsequent utterances). This clamps each
-    segment's true speech end to the beginning of the next segment.
+    segment's display end near the next segment. This is not speech alignment.
     """
     if not segments:
         return []
@@ -412,6 +409,8 @@ def prepare_clip_captions(
 ) -> List[CaptionCard]:
     """Prepare and render synchronized transparent Holo-Glass caption cards for a specific clip."""
     if not transcript_segments:
+        if require_word_timing:
+            raise ValueError("Word-timed captions required; no speech evidence supplied")
         return []
 
     if require_word_timing:
@@ -482,30 +481,16 @@ def word_timed_cues(segments: List[Dict], clip_start: float, clip_end: float,
     words are rejected rather than dropping half a syllable into the delivery.
     """
     from automation.hinglish_converter import rule_based_transliterate
+    from automation.speech_alignment import words_in_range
 
-    if not 1 <= max_words <= 8 or clip_end <= clip_start:
+    if not isinstance(max_words, int) or not 1 <= max_words <= 8:
         raise ValueError("Invalid caption bounds/chunk size")
     words = []
-    for segment in segments:
-        if float(segment.get("end", 0)) <= clip_start or float(segment.get("start", 0)) >= clip_end:
-            continue
-        if not segment.get("words"):
-            raise ValueError("Missing word timestamps inside selected range")
-        for word in segment["words"]:
-            start, end = float(word["start"]), float(word["end"])
-            if not math.isfinite(start) or not math.isfinite(end) or end <= start:
-                raise ValueError("Invalid word timestamp")
-            if end <= clip_start or start >= clip_end:
-                continue
-            if start < clip_start - 0.02 or end > clip_end + 0.02:
-                raise ValueError("Cut straddles a spoken word; adjust source boundary")
-            text = str(word.get("word", word.get("text", ""))).strip()
-            if text:
-                words.append((max(start, clip_start), min(end, clip_end), rule_based_transliterate(text)))
-    words.sort(key=lambda word: (word[0], word[1]))
-    for previous, current in zip(words, words[1:]):
-        if current[0] < previous[1] - 0.02:
-            raise ValueError("Overlapping word timestamps require alignment review")
+    for word in words_in_range(segments, clip_start, clip_end):
+        text = str(word.get("word", word.get("text", ""))).strip()
+        if not text:
+            raise ValueError("Missing word text inside selected range")
+        words.append((word["start"], word["end"], rule_based_transliterate(text)))
     cues = []
     group = []
     for word in words:

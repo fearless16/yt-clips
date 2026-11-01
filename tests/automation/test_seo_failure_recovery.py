@@ -403,7 +403,7 @@ def _stub_export_all(tmp_path, monkeypatch, export):
     monkeypatch.setattr(export, "_load_export_cricket_context", lambda: "cricket")
     monkeypatch.setattr(export, "_is_exportable_cricket_highlight", lambda *_: True)
     monkeypatch.setattr(export, "_get_best_encoder", lambda: "libx264")
-    monkeypatch.setattr(export, "_validate_av_sync", lambda *_: None)
+    monkeypatch.setattr(export, "_validate_av_sync", lambda *_: True)
     monkeypatch.setattr(
         export,
         "analyze_clip",
