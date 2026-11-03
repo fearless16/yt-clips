@@ -59,10 +59,9 @@ class ThumbnailGenerator:
             raise ValueError("Source-bound edit manifest missing; refusing a captioned export-frame cover")
         
         # ─── Option 1: AI Generation (Nano Banana Pro) ─────────────────────────
-        from utils.ai_client import AIClient
-        ai = AIClient()
-        
         if self.config.get("use_ai", False):
+            from utils.ai_client import AIClient
+            ai = AIClient()
             prompt = f"Cricket action shot: {title}. High contrast, 4K, professional YouTube Short style."
             success = ai.generate_image(prompt, output_path)
             if success:
@@ -72,22 +71,20 @@ class ThumbnailGenerator:
 
         # ─── Option 2: Frame Extraction + Pillow (Fallback) ────────────────────
         # 1. Extract a frame (using ffmpeg)
-        frame_path = Path(video_path).with_suffix(".jpg")
         try:
-            subprocess.run([
-                "ffmpeg", "-y", "-ss", "00:00:01", "-i", video_path,
-                "-vframes", "1", str(frame_path), "-loglevel", "error"
-            ], check=True)
-        except subprocess.CalledProcessError as e:
+            scratch = Path(cfg.get("paths", {}).get("temp", "temp"))
+            scratch.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="thumbnail-", dir=scratch) as directory:
+                frame_path = Path(directory) / "frame.jpg"
+                subprocess.run([
+                    "ffmpeg", "-nostdin", "-ss", "00:00:01", "-i", video_path,
+                    "-vframes", "1", str(frame_path), "-loglevel", "error"
+                ], check=True, timeout=45)
+                with Image.open(frame_path) as frame:
+                    img = frame.convert("RGB")
+        except (OSError, subprocess.SubprocessError) as e:
             log.error(f"FFmpeg frame extraction failed: {e}")
             return False
-        
-        if not frame_path.exists():
-            log.error(f"Failed to extract frame from {video_path}")
-            return False
-
-        # 2. Open frame and apply effects
-        img = Image.open(frame_path).convert("RGB")
         
         # Split title into 2-3 words for the thumbnail text
         words = title.split()
@@ -108,10 +105,6 @@ class ThumbnailGenerator:
         img.save(output_path, quality=95)
         log.info("Thumbnail saved to %s", output_path)
         
-        # Cleanup temp frame
-        if frame_path.exists():
-            os.remove(frame_path)
-            
         return True
 
     def _generate_source_cover(self, clip: Path, metadata: dict, edit_path: Path, output: Path):
@@ -125,8 +118,8 @@ class ThumbnailGenerator:
         if not source.is_file() or start < 0 or end <= start:
             raise ValueError("Invalid source/range for cover")
         cover_text = str(metadata.get("cover_text") or "").strip()
-        if len(cover_text.split()) > 3:
-            raise ValueError("Cover text exceeds three words; review instead of truncating")
+        if not 1 <= len(cover_text.split()) <= 3:
+            raise ValueError("Cover text needs one to three deliberate words; review instead of guessing/truncating")
         candidates = []
         crop = edit.get("active_crop")
         prefilter = ""
@@ -135,7 +128,8 @@ class ThumbnailGenerator:
             if min(x, y) < 0 or min(w, h) <= 0:
                 raise ValueError("Invalid source cover crop")
             prefilter = f"crop={w}:{h}:{x}:{y},"
-        fit = prefilter + "scale=1080:1480:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=0x101624"
+        # Keep clean source camera frames, not padded portrait screenshots.
+        fit = prefilter.rstrip(",") or "null"
         # Keep the shortlist as review evidence; never overwrite source-side JPGs.
         directory = Path(tempfile.mkdtemp(prefix=f"{clip.stem}-cover-", dir=clip.parent))
         for index in range(12):
@@ -154,10 +148,9 @@ class ThumbnailGenerator:
         winner = max(candidates, key=lambda item: item["technical_score"])
         if winner["technical_score"] < 0:
             raise ValueError("All cover frames failed exposure screening")
+        from automation.cover_design import compose_cover
         with Image.open(winner["path"]) as image:
-            cover = image.convert("RGB")
-        if cover_text:
-            cover = self._add_text(cover, cover_text.upper())
+            cover, design = compose_cover(image, None, cover_text)
         if self.config.get("add_logo", False):
             logo = self.config.get("template_path")
             if logo and Path(logo).is_file():
@@ -167,6 +160,7 @@ class ThumbnailGenerator:
             "source_path": str(source.resolve()), "selected": winner, "candidates": candidates,
             "text": cover_text, "review_status": "NOT CHECKED",
             "selection_method": "technical sharpness/exposure ranking only; expression/context require owner review",
+            "design": design,
         })
         return True
 
@@ -237,14 +231,21 @@ class ThumbnailGenerator:
         return img
 
 def process_all_thumbnails(shorts_dir: str):
+    from automation.artifacts import read_metadata
+
+    if not cfg.get("thumbnail", {}).get("enabled", True):
+        return
     generator = ThumbnailGenerator()
     shorts_path = Path(shorts_dir)
     
     videos = list(shorts_path.glob("*.mp4"))
     for video in videos:
         meta_path = video.with_name(f"{video.stem}_metadata.json")
-        if meta_path.exists():
+        if read_metadata(video) is not None:
             thumb_path = video.with_name(f"{video.stem}_thumb.jpg")
+            if thumb_path.exists():
+                log.info("Preserving existing cover for %s; explicit rebuild required", video.name)
+                continue
             try:
                 generator.generate_for_clip(str(video), str(meta_path), str(thumb_path))
             except Exception as e:

@@ -389,6 +389,26 @@ def _sanitize_strategy(raw_strategy) -> Dict:
     else:
         active_crop = None
 
+    overlay_blurs = raw_strategy.get("source_overlay_blurs", [])
+    if not isinstance(overlay_blurs, list) or len(overlay_blurs) > 4:
+        raise ValueError("Invalid source overlay blur list")
+    clean_blurs = []
+    for region in overlay_blurs:
+        try:
+            if not active_crop:
+                raise ValueError()
+            values = [region[k] for k in ("x", "y", "width", "height")]
+            if any(type(v) is not int for v in values):
+                raise ValueError()
+            x, y, w, h = values
+            if (min(x, y) < 0 or min(w, h) < 2 or x + w > active_crop["width"]
+                    or y + h > active_crop["height"]
+                    or w * h > .1 * active_crop["width"] * active_crop["height"]):
+                raise ValueError()
+            clean_blurs.append(dict(zip(("x", "y", "width", "height"), values)))
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("Invalid source overlay blur bounds; explicit small camera-local regions required") from None
+
     return {
         "use_solo_frame": bool(raw_strategy.get("use_solo_frame", False)),
         "use_vertical_stack": bool(raw_strategy.get("use_vertical_stack", False)),
@@ -398,6 +418,7 @@ def _sanitize_strategy(raw_strategy) -> Dict:
         "guest_cam_off": bool(raw_strategy.get("guest_cam_off", False)),
         "is_screen_share": bool(raw_strategy.get("is_screen_share", False)),
         "active_crop": active_crop,
+        "source_overlay_blurs": clean_blurs,
         "speed_factor": _normalize_speed(raw_strategy.get("speed_factor", 1.0)),
         "apply_lighting_fix": bool(raw_strategy.get("apply_lighting_fix", False)),
         "lighting_filter": _sanitize_lighting_filter(raw_strategy.get("lighting_filter", "")),
@@ -1012,13 +1033,34 @@ def _build_enhance_stack(
     if target_fps > source_fps + 5:
         filter_base += f",framerate=fps={target_fps:.6f}"
 
-    if export_cfg.get("reserve_caption_band", False) and not native_res:
-        caption_y = _caption_card_y()
-        top = int(target_h * 0.04) // 2 * 2
-        picture_h = (caption_y - top - 24) // 2 * 2
+    if (export_cfg.get("reserve_caption_band", False) and not native_res
+            and not is_screen_share and not guest_cam_on):
+        # Explicit camera-local blur of a small baked source badge. This is not
+        # face synthesis/removal, and is never inferred or applied to other clips.
+        for index, region in enumerate(strategy.get("source_overlay_blurs", [])):
+            x, y, w, h = (region[k] for k in ("x", "y", "width", "height"))
+            filter_base += (
+                f",split=2[badge_base{index}][badge_src{index}];"
+                f"[badge_src{index}]crop={w}:{h}:{x}:{y},gblur=sigma=20[badge_blur{index}];"
+                f"[badge_base{index}][badge_blur{index}]overlay={x}:{y}"
+            )
+        # Split the SAME trimmed source after camera-region cropping. Both layers
+        # therefore have identical timestamps; never pad a blurred canvas later.
+        # Make the subject genuinely smaller, not just a narrower source crop
+        # enlarged back to the old face scale. Anchor the panel bottom 40px
+        # above the visible capsule (32px inside its transparent transport PNG).
+        picture_bottom = _caption_card_y() + 32 - 40
+        picture_h = min(int(target_h * 0.52), picture_bottom - int(target_h * 0.04)) // 2 * 2
+        top = (picture_bottom - picture_h) // 2 * 2
+        picture_w = int(target_w * 0.90) // 2 * 2
         filter_base += (
-            f",scale={target_w}:{picture_h}:force_original_aspect_ratio=decrease,"
-            f"pad={target_w}:{target_h}:(ow-iw)/2:{top}:color=0x101624"
+            ",split=2[portrait_bg][portrait_fg];"
+            f"[portrait_bg]scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h},gblur=sigma=64,eq=brightness=-0.12:saturation=0.65,"
+            "colorbalance=bs=0.06:bm=0.02[portrait_blur];"
+            f"[portrait_fg]scale={picture_w}:{picture_h}:flags=lanczos:"
+            "force_original_aspect_ratio=decrease:force_divisible_by=2[portrait_fit];"
+            f"[portrait_blur][portrait_fit]overlay=(W-w)/2:{top}"
         )
 
     # ── Fades ─────────────────────────────────────────────────────────────────
@@ -1328,7 +1370,7 @@ def export_clip(
         f"setpts=(PTS-STARTPTS)/{speed:.6f}[v_src];{v_filter}"
     )
 
-    # ── Captions (Quantum Holo-Glass) ────────────────────────────────────────
+    # ── Source-timed caption cards ───────────────────────────────────────────
     temp_cards_dir = None
     caption_cards = []
     if captions_enabled and caption_cfg.get("require_word_timing", False) and not transcript_segments:
@@ -1345,16 +1387,26 @@ def export_clip(
                 output_dir=temp_cards_dir,
                 max_words_per_cue=caption_cfg.get("max_words_per_cue", 4),
                 require_word_timing=caption_cfg.get("require_word_timing", False),
+                hinglish_model=caption_cfg.get("model"),
+                allow_documented_successor=caption_cfg.get("allow_documented_successor", False),
             )
+            # Preserve provenance before scratch is cleaned; model processing is
+            # never equivalent to listening approval.
+            for filename, suffix in (("caption_processing.json", "_captions.json"),
+                                     ("caption_design.json", "_caption_design.json")):
+                evidence_path = temp_cards_dir / filename
+                if evidence_path.is_file():
+                    output_file.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(evidence_path, output_file.with_name(output_file.stem + suffix))
             if caption_cards:
-                log.info("[%s] Generated %d Quantum Holo-Glass caption cards", clip_id, len(caption_cards))
+                log.info("[%s] Generated %d caption cards", clip_id, len(caption_cards))
         except Exception as e:
             if temp_cards_dir is not None:
                 shutil.rmtree(temp_cards_dir, ignore_errors=True)
                 temp_cards_dir = None
             if caption_cfg.get("require_word_timing", False):
                 raise RuntimeError(f"Required captions failed for {clip_id}: {e}") from e
-            log.warning("[%s] Quantum Holo-Glass caption generation skipped: %s", clip_id, e)
+            log.warning("[%s] Caption generation skipped: %s", clip_id, e)
             caption_cards = []
 
     output_file.parent.mkdir(parents=True, exist_ok=True)

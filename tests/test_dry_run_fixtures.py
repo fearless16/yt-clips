@@ -3,6 +3,14 @@ import json
 from dry_run import _ensure_skipped_transcript_fixture
 
 
+def test_dry_run_validates_current_config():
+    from automation.config import load
+    from dry_run import validate_config
+
+    missing = [name for name, valid, _ in validate_config(load()) if not valid]
+    assert not missing, f"Missing configuration: {missing}"
+
+
 def test_skip_transcribe_dry_run_creates_and_returns_temporary_fixture(tmp_path):
     transcript = _ensure_skipped_transcript_fixture(
         {"transcripts": str(tmp_path / "transcripts")},

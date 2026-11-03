@@ -66,6 +66,19 @@ def write_discovery_evidence(output_path: str, source: dict, transcript_path: st
                              segments: list[dict], candidates: list[dict], selected: list[dict],
                              decision: dict | None = None) -> Path:
     selected_ranges = {(c["start"], c["end"]) for c in selected}
+    editorial_rejections = {}
+    if decision:
+        considered = decision.get("considered_windows", [])
+        response = decision.get("response", {})
+        rejected = response.get("rejected", []) if isinstance(response, dict) else []
+        if isinstance(rejected, list):
+            for item in rejected:
+                if not isinstance(item, dict):
+                    continue
+                from automation.clip_selection.arbiter import _coerce_candidate_index
+                index = _coerce_candidate_index(item.get("candidate_id"), len(considered))
+                if index >= 0:
+                    editorial_rejections[tuple(considered[index])] = item.get("reason", "")
     alternatives = []
     for index, candidate in enumerate(candidates):
         alternatives.append({
@@ -74,6 +87,12 @@ def write_discovery_evidence(output_path: str, source: dict, transcript_path: st
             "selected": (candidate["start"], candidate["end"]) in selected_ranges,
             "hard_rejection": candidate.get("should_reject", False),
             "rejection_reasons": candidate.get("rejection_reasons", []),
+            "source_cue_ids": candidate.get("source_cue_ids", []),
+            "source_script": " ".join(str(cue.get("text", "")) for cue in segments
+                                       if cue["end"] > candidate["start"] and cue["start"] < candidate["end"]),
+            "source_script_scope": "intersecting original cues; may include speech outside cut",
+            "boundary_method": candidate.get("boundary_method", "unknown"),
+            "editorial_rejection": editorial_rejections.get((candidate["start"], candidate["end"])),
         })
     path = Path(output_path).with_suffix(".editorial.json")
     atomic_json(path, {

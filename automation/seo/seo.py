@@ -9,6 +9,7 @@ import math
 import os
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -35,6 +36,7 @@ from .context_engine import (
 )
 from .vidiq import VidiqClient
 from automation.artifacts import atomic_json, valid_metadata, validate_clip_id
+from prompts import SEO_SYSTEM
 
 SUGGEST_CACHE = TTLCache(maxsize=16, ttl=600)
 TREND_CACHE = TTLCache(maxsize=4, ttl=300)
@@ -172,18 +174,7 @@ SEO_BLOCKED_PROVIDERS = {"nvidia", "groq"}
 
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 
-_SYSTEM = (
-    "You write source-grounded cricket Shorts metadata for @cricketwithprajjwal2.0. "
-    "The retained clip transcript is the primary evidence. Source video title and "
-    "description are context, not verified match facts. Search suggestions are topic "
-    "hints, not proof of demand or facts. Never invent players, scores, venues or results. "
-    "Use natural Roman Hinglish or simple English matching the speech. Preserve names, "
-    "numbers, negation and opinion versus fact. One honest title promise, delivered "
-    "by the clip; no LIVE, fake urgency, mandatory emojis or generic source-title fallback. "
-    "Write a unique, concise description explaining THIS moment; add context only when "
-    "supported. No keyword stuffing, unrelated squad lists, forced CTA or length padding. "
-    "Return ONLY valid JSON."
-)
+_SYSTEM = SEO_SYSTEM
 
 _CRICKET_ONLY_PROMPT_TMPL = """CRICKET SHORT — VERIFIED CONTEXT:
   Source video title: {video_title}
@@ -224,11 +215,12 @@ TITLE RULES:
 - Promise the exact clip moment; avoid generic adjectives and fake urgency.
 """
 
-_CRICKET_ONLY_SALVAGE_TMPL = """Generate grounded, keyword-rich metadata for this cricket Short.
+_CRICKET_ONLY_SALVAGE_TMPL = """Generate grounded, clip-specific metadata for this cricket Short.
 Clip transcript: {transcript}
 Source title: {video_title}
 
-Return only JSON with title, description, hashtags, search_terms, primary_search_terms, and tags.
+Return only JSON with title, cover_text, description, hashtags, search_terms, primary_search_terms, and tags.
+- Cover text: one supported idea, at most three words; never infer scores from ambiguous ASR.
 - Description: concise, clip-specific explanation; no keyword lists, invented facts or padding.
 - Title: max 60 characters; one supported premise. No LIVE/#Shorts or mandatory emoji.
 - Use only relevant grounded search phrases and a few tags; no quantity quota.
@@ -629,9 +621,7 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     except (TypeError, ValueError):
         title_cap = 70
     title_cap = max(30, min(100, title_cap))
-    out["title"] = _ensure_title_emoji(
-        _clean_title(out.get("title"), title_cap), title_cap
-    )
+    out["title"] = _clean_title(out.get("title"), title_cap)
     out["description"] = _truncate_at_word(
         str(out.get("description") or ""), _description_max_chars()
     )
@@ -745,19 +735,6 @@ def _enforce_limits(item: Dict, fallback_terms: List[str] = None, is_shorts: boo
     return out
 
 
-def _ensure_title_emoji(title: str, cap: int) -> str:
-    """Shorts feed titles carry at least one emoji (mobile-first packaging).
-
-    Appends the channel-neutral cricket ball when the model forgot one.
-    Deterministic — never invents content, only completes the format.
-    """
-    if not title or _EMOJI_RE.search(title):
-        return title
-    if len(title) + 2 <= cap:
-        return title.rstrip() + " 🏏"
-    return title
-
-
 def _truncate_at_word(text: str, limit: int) -> str:
     """Cut prose at a whitespace boundary so no half-word survives.
 
@@ -790,6 +767,17 @@ def _validate_seo_quality(item: Dict) -> bool:
     """
     title = (item.get("title") or "").strip()
     description = (item.get("description") or "").strip()
+
+    # Older metadata may omit cover copy; never invent it from title fragments.
+    # When supplied, keep this viewer-facing promise readable and explicit.
+    if "cover_text" in item:
+        cover = item["cover_text"]
+        if (not isinstance(cover, str) or not 1 <= len(cover.split()) <= 3
+                or len(cover) > 72 or _DEVANAGARI_RE.search(cover)
+                or any(unicodedata.category(c).startswith("C") for c in cover)
+                or _has_ai_slop(cover)):
+            log.warning("Quality Gate Failed: invalid cover copy")
+            return False
 
     # 1. Title must exist and be meaningful
     if not title or len(title) < 10:
@@ -1860,6 +1848,7 @@ def generate_clip_seo(
 
     public_copy_text = " ".join([
         str(result.get("title", "")),
+        str(result.get("cover_text", "")),
         str(result.get("description", "")),
         " ".join(str(item) for item in result.get("hashtags", []) or []),
         " ".join(str(item) for item in result.get("search_terms", []) or []),

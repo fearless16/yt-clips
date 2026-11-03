@@ -376,14 +376,13 @@ def upload_video(
 
     chunk_mb = int(cfg.get("youtube", {}).get("upload_chunk_size_mb", 8))
     media_body = MediaFileUpload(video_path, chunksize=chunk_mb * 1024 * 1024, resumable=False)
-    insert_request = youtube.videos().insert(
-        part=",".join(body.keys()),
-        body=body,
-        media_body=media_body,
-        notifySubscribers=cfg.get("youtube", {}).get("notify_subscribers", True),
-    )
-
     try:
+        insert_request = youtube.videos().insert(
+            part=",".join(body.keys()),
+            body=body,
+            media_body=media_body,
+            notifySubscribers=cfg.get("youtube", {}).get("notify_subscribers", True),
+        )
         response = insert_request.execute()
         video_id = response["id"]
         log.info(f"✅ Upload successful! Video ID: {video_id}")
@@ -402,10 +401,14 @@ def upload_video(
         if thumb_path.exists():
             try:
                 log.info(f"🖼️ Uploading thumbnail: {thumb_path.name}...")
-                youtube.thumbnails().set(
-                    videoId=video_id,
-                    media_body=MediaFileUpload(str(thumb_path))
-                ).execute()
+                thumbnail_body = MediaFileUpload(str(thumb_path))
+                try:
+                    youtube.thumbnails().set(
+                        videoId=video_id,
+                        media_body=thumbnail_body,
+                    ).execute()
+                finally:
+                    thumbnail_body.stream().close()
                 log.info("✅ Thumbnail uploaded!")
             except Exception as e:
                 log.warning(f"Failed to upload thumbnail: {e}")
@@ -416,6 +419,8 @@ def upload_video(
     except Exception as e:
         log.error("❌ Error uploading %s: %s", video_path, e)
         return None
+    finally:
+        media_body.stream().close()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,6 @@
+[
+  {"id": "opening-context", "start": 80, "end": 94, "tags": ["Hindi-Hinglish", "numbers", "context"]},
+  {"id": "scores-and-teams", "start": 94, "end": 108, "tags": ["scores", "overs", "team-names", "negation"]},
+  {"id": "run-rate-and-boundary", "start": 108, "end": 121, "tags": ["numbers", "units", "negation"]},
+  {"id": "following-context", "start": 121, "end": 135, "tags": ["player-names", "context", "Hindi-Hinglish"]}
+]

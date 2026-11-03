@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -86,6 +87,14 @@ def decode_whisper_output(raw: bytes) -> tuple[dict, list[str]]:
 
 
 def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
+    """Own all whisper.cpp intermediates; preserve raw outputs from previous runs."""
+    scratch = Path(cfg.get("paths", {}).get("temp", "temp"))
+    scratch.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="whisper-cli-", dir=scratch) as directory:
+        return _transcribe_whisper_cli(video_path, output_path, cfg, Path(directory))
+
+
+def _transcribe_whisper_cli(video_path: str, output_path: str, cfg: dict, scratch: Path) -> bool:
     """Transcribe using whisper.cpp GPU (ROCm or Vulkan). Returns True on success."""
     result = _find_whisper_cli()
     if not result:
@@ -141,7 +150,7 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
 
     # Extract audio to WAV for whisper-cli
     video = str(Path(video_path))
-    audio_wav = Path(__file__).parent / "temp" / "whisper_input.wav"
+    audio_wav = scratch / "whisper_input.wav"
     audio_wav.parent.mkdir(parents=True, exist_ok=True)
 
     log.info("Extracting audio for whisper.cpp %s...", backend.upper())
@@ -157,19 +166,11 @@ def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
         return False
 
     # Build command — backend-specific flags
-    out_dir = Path(__file__).parent / "temp"
+    out_dir = scratch
     out_base = str(out_dir / f"whisper_{backend}_out")
 
-    # Drop any stale output from a previous (possibly failed) run: whisper.cpp
-    # only writes on success, so a leftover .json from another video would be
-    # parsed as this one's transcript and corrupt every downstream stage.
-    for _suffix in (".json", ".txt"):
-        _stale = Path(out_base + _suffix)
-        if _stale.exists():
-            try:
-                _stale.unlink()
-            except OSError:
-                pass
+    # The output base is unique to this invocation; no old raw JSON is deleted
+    # or eligible for parsing when the CLI fails to produce fresh output.
 
     cmd = [
         str(cli),

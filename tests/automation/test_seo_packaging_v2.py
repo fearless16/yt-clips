@@ -21,8 +21,8 @@ def test_title_cleanup_removes_shorts_fake_live_and_never_cuts_a_word(monkeypatc
     assert "live" not in result["title"].casefold()
     assert "#shorts" not in result["title"].casefold()
     assert not result["title"].startswith(("🔴", "|", "-", ":"))
-    # v3 packaging appends the channel-neutral emoji when the model omits one.
-    assert result["title"] == "Yuvraj Singh Coach Debate 🏏"
+    # Keep the deliberate title; the current prompt makes emojis optional.
+    assert result["title"] == "Yuvraj Singh Coach Debate"
 
 
 def test_packaging_contract_uses_focused_queries_and_scores_promise_alignment(monkeypatch):

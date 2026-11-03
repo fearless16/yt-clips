@@ -44,6 +44,10 @@ def setup_argparse():
         help="Skip clip export (use existing exported clips)",
     )
     parser.add_argument(
+        "--export-dir", default=None,
+        help="Choose a direct Shorts batch for --skip-export; required when batches are ambiguous",
+    )
+    parser.add_argument(
         "--skip-seo", action="store_true", default=False,
         help="Skip SEO generation (use existing metadata)",
     )
@@ -163,6 +167,7 @@ def main(args=None):
         auto_schedule=parsed.schedule,
         sample_minutes=parsed.sample_minutes,
         mode=parsed.mode,
+        existing_exports_dir=parsed.export_dir,
     )
     n = len(result.exported)
     f = len(result.failures)

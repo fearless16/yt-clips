@@ -5,6 +5,18 @@ import pytest
 from dry_run import _fake_ffmpeg_output, _isolated_run
 
 
+def test_dry_run_stubs_support_aurora_cover_without_hiding_composition_errors(tmp_path, monkeypatch):
+    from dry_run import _api_intercept_context
+    from automation.cover_design import compose_cover
+    from PIL import Image
+    monkeypatch.chdir(tmp_path)
+    with _api_intercept_context(str(tmp_path / "source.mp4")):
+        cover, evidence = compose_cover(Image.new("RGB", (1080, 1920)), None, "PEHLE OVER MEIN?")
+        cover.save(tmp_path / "cover.jpg")
+    assert (tmp_path / "cover.jpg").is_file()
+    assert evidence["design"] == "aurora-v1"
+
+
 def test_module_isolation_excludes_dependencies_and_face_os():
     from types import SimpleNamespace
     import dry_run
@@ -69,3 +81,71 @@ def test_isolation_restores_cwd_and_config_on_failure(tmp_path, monkeypatch):
     assert Path.cwd() == tmp_path
     assert not (tmp_path / "input").exists()
     assert config._config_cache == cached
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_sandbox_is_removed_after_success_or_failure(tmp_path, monkeypatch, crash):
+    monkeypatch.delenv("YT_CLIPS_KEEP_DRY_RUN", raising=False)
+    captured = []
+
+    @_isolated_run
+    def exercise():
+        captured.append(Path.cwd())
+        Path("scratch.bin").write_bytes(b"fake")
+        if crash:
+            raise RuntimeError("expected")
+        return {}
+
+    if crash:
+        with pytest.raises(RuntimeError, match="expected"):
+            exercise()
+    else:
+        result = exercise()
+        assert result["sandbox_retained"] is False
+    assert not captured[0].exists()
+
+
+def test_explicit_debug_retention_keeps_sandbox(monkeypatch):
+    import shutil
+    monkeypatch.setenv("YT_CLIPS_KEEP_DRY_RUN", "1")
+
+    @_isolated_run
+    def exercise():
+        return {}
+
+    result = exercise()
+    sandbox = Path(result["sandbox"])
+    try:
+        assert result["sandbox_retained"] is True
+        assert sandbox.is_dir()
+    finally:
+        shutil.rmtree(sandbox)
+
+
+def test_sandbox_log_handles_close_without_closing_live_logs(tmp_path, monkeypatch):
+    import logging
+    from utils.logger import JsonFileHandler
+    monkeypatch.delenv("YT_CLIPS_KEEP_DRY_RUN", raising=False)
+    logger = logging.getLogger("dry-run-owned-handles-regression")
+    live = logging.FileHandler(tmp_path / "live.log")
+    logger.addHandler(live)
+    owned = []
+
+    @_isolated_run
+    def exercise():
+        handler = JsonFileHandler("logs/test.log")
+        logger.addHandler(handler)
+        owned.append(handler)
+        return {}
+
+    try:
+        result = exercise()
+        assert owned[0]._file.closed
+        assert owned[0] not in logger.handlers
+        assert live in logger.handlers
+        assert not live.stream.closed
+        assert not Path(result["sandbox"]).exists()
+    finally:
+        for handler in [live, *owned]:
+            logger.removeHandler(handler)
+            handler.close()

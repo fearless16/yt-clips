@@ -292,40 +292,32 @@ def _find_ytdlp() -> str:
 
 
 def _fetch_via_ytdlp(video_id: str) -> dict | None:
-    """Fetch transcript via yt-dlp (VTT download). Returns None on failure."""
+    """Fetch only invocation-owned VTTs; missing/empty output permits ASR fallback."""
     import subprocess
-    import shutil as _shutil
     import tempfile
     try:
-        with tempfile.NamedTemporaryFile(suffix=".vtt", delete=False, mode="w") as f:
-            tmp_path = f.name
-        cmd = [
-            _find_ytdlp(), "--skip-download", "--write-auto-subs", "--sub-langs", "en,hi",
-            "--remote-components", "ejs:github",
-            "-o", tmp_path.replace(".vtt", ""), f"https://www.youtube.com/watch?v={video_id}",
-        ]
-        # Add deno to PATH if available
-        env = os.environ.copy()
-        deno_bin = str(Path.home() / ".deno" / "bin")
-        if Path(deno_bin).exists() and deno_bin not in env.get("PATH", ""):
-            env["PATH"] = deno_bin + ":" + env.get("PATH", "")
-        # Pass cookies if available (bypasses Colab IP blocks)
-        cookie_path = Path("cookies.txt")
-        if cookie_path.exists() and cookie_path.stat().st_size > 0:
-            cmd.extend(["--cookies", str(cookie_path)])
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
-        vtt_files = list(Path(tmp_path).parent.glob(f"{Path(tmp_path).stem}*.vtt"))
-        if not vtt_files and not result.returncode:
-            vtt_files = list(Path(tmp_path).parent.glob("*.vtt"))
-        if vtt_files:
-            text = Path(vtt_files[0]).read_text(encoding="utf-8", errors="replace")
-            for p in vtt_files:
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
-            segments = _parse_vtt(text)
-            return {"segments": segments, "language": "en", "source": "vtt"}
+        with tempfile.TemporaryDirectory(prefix="yt-clips-vtt-") as directory:
+            base = Path(directory) / "captions"
+            cmd = [
+                _find_ytdlp(), "--skip-download", "--write-auto-subs", "--sub-langs", "en,hi",
+                "--remote-components", "ejs:github",
+                "-o", str(base), f"https://www.youtube.com/watch?v={video_id}",
+            ]
+            env = os.environ.copy()
+            deno_bin = str(Path.home() / ".deno" / "bin")
+            if Path(deno_bin).exists() and deno_bin not in env.get("PATH", ""):
+                env["PATH"] = deno_bin + os.pathsep + env.get("PATH", "")
+            cookie_path = Path("cookies.txt")
+            if cookie_path.exists() and cookie_path.stat().st_size > 0:
+                cmd.extend(["--cookies", str(cookie_path)])
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
+            if result.returncode:
+                return None
+            for path in sorted(Path(directory).glob("captions*.vtt")):
+                segments = _parse_vtt(path.read_text(encoding="utf-8", errors="replace"))
+                if segments:
+                    language = path.stem.rsplit(".", 1)[-1] if "." in path.stem else "unknown"
+                    return {"segments": segments, "language": language, "source": "vtt"}
         log.warning("yt-dlp produced no VTT files for %s", video_id)
         return None
     except Exception as e:
@@ -388,33 +380,30 @@ def fetch(url: str, output_path: str | None = None, video_path: str | None = Non
     # Priority 1: YouTube Data API v3 (official, no bot detection)
     result = _fetch_via_youtube_data_api(video_id)
     # Priority 2: youtube-transcript-api (with cookies)
-    if result is None:
+    if not result or not result.get("segments"):
         result = _fetch_via_api(video_id)
     # Priority 3: yt-dlp VTT download
-    if result is None:
+    if not result or not result.get("segments"):
         result = _fetch_via_ytdlp(video_id)
-    if (result is None or result.get("source") == "unavailable") and video_path:
+    if (not result or not result.get("segments")) and video_path:
+        result = None
         try:
             from transcribe import transcribe
             import tempfile
-            temp_out = output_path or str(Path(tempfile.gettempdir()) / f"transcribe_{video_id}.json")
-            transcribe(video_path, temp_out)
-            if Path(temp_out).exists():
-                with open(temp_out, "r", encoding="utf-8") as f:
-                    local_data = json.load(f)
-                result = {
-                    "segments": local_data.get("segments", []),
-                    "language": local_data.get("language", "unknown"),
-                    "source": "local_whisper"
-                }
-                if not output_path:
-                    try:
-                        Path(temp_out).unlink()
-                    except OSError:
-                        pass
-        except Exception:
-            pass
-    if result is None:
+            # Never use the requested destination as scratch: a failed ASR run
+            # must not read a previous source's transcript or overwrite review work.
+            with tempfile.TemporaryDirectory(prefix="yt-clips-transcript-") as directory:
+                temp_out = Path(directory) / "transcript.json"
+                transcribe(video_path, str(temp_out))
+                if temp_out.exists():
+                    local_data = json.loads(temp_out.read_text(encoding="utf-8"))
+                    if local_data.get("segments"):
+                        result = {"segments": local_data["segments"],
+                                  "language": local_data.get("language", "unknown"),
+                                  "source": "local_whisper"}
+        except Exception as exc:
+            log.warning("Local transcript fallback failed for %s: %s", video_id, exc)
+    if not result or not result.get("segments"):
         result = {"segments": [], "language": "unknown", "source": "unavailable"}
 
     # Centralized cricket spelling correction for ALL sources (api/vtt/local).

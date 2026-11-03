@@ -50,6 +50,12 @@ sirf `run_pipeline.bat` hai (desktop shortcut isi ko chalata hai). Direct CLI:
 Useful flags: `--skip-download --skip-transcribe --skip-highlight
 --skip-export --skip-seo --skip-enhancement --sample-minutes N`.
 
+Resume a specific existing batch with `--skip-export --export-dir shorts/BATCH`.
+Multiple batches require that explicit choice; nested review renders are not
+auto-discovered. Existing covers are preserved, and Drive/DB backup requires
+`--sync`. See the [integration audit](docs/editorial/INTEGRATION_AUDIT_20261102.md)
+for verified checks and remaining production limitations.
+
 **Outputs:** clips + `<clip>_metadata.json` → `shorts/<date-folder>/`;
 selection YAML → `highlights/`; logs → `logs/pipeline.log`.
 Secrets (`*_token.json`, `client_secrets.json`, `cookies.txt`) gitignored

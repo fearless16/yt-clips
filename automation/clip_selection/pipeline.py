@@ -6,7 +6,9 @@ Usage:
 """
 
 import json
+import math
 import re
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -41,10 +43,17 @@ def _valid_word_timings(segment: dict) -> list[dict]:
             start = float(word["start"])
             end = float(word["end"])
         except (KeyError, TypeError, ValueError):
-            continue
-        if end > start:
-            words.append({"start": start, "end": end, "word": word.get("word", "")})
-    return sorted(words, key=lambda item: item["start"])
+            raise ValueError("Invalid source word timing") from None
+        if not (math.isfinite(start) and math.isfinite(end) and start >= 0 and end > start):
+            raise ValueError("Invalid source word timing")
+        words.append({**word, "start": start, "end": end})
+    words.sort(key=lambda item: item["start"])
+    if words and (words[0]["start"] < float(segment["start"]) - .02
+                  or words[-1]["end"] > float(segment["end"]) + .02):
+        raise ValueError("Source word timing exceeds its parent cue")
+    if any(current["start"] < previous["end"] - .02 for previous, current in zip(words, words[1:])):
+        raise ValueError("Overlapping source word timing requires review")
+    return words
 
 
 def _merge_caption_fragments(segments: list[dict]) -> list[dict]:
@@ -61,17 +70,18 @@ def _merge_caption_fragments(segments: list[dict]) -> list[dict]:
         if end <= start or not text:
             continue
 
-        if current is not None and start > float(current["end"]) + 1.0:
+        if current is not None and (segment.get("discovery_break_before") or start > float(current["end"]) + 1.0):
             merged.append(current)
             current = None
 
         if current is None:
-            current = {"start": start, "end": end, "text": text}
+            current = {**segment, "start": start, "end": end, "text": text}
             if segment.get("words"):
                 current["words"] = list(segment["words"])
         else:
             current["end"] = max(float(current["end"]), end)
             current["text"] = f"{current['text']} {text}".strip()
+            current["source_cue_ids"] = sorted(set(current.get("source_cue_ids", []) + segment.get("source_cue_ids", [])))
             if segment.get("words"):
                 current.setdefault("words", []).extend(segment["words"])
 
@@ -84,6 +94,19 @@ def _merge_caption_fragments(segments: list[dict]) -> list[dict]:
     return merged
 
 
+def _word_piece(segment: dict, words: list[dict], *, margin: float = 0) -> dict:
+    """Keep discovery cuts outside source words, including their provenance."""
+    return {
+        **segment,
+        "start": max(float(segment["start"]), words[0]["start"] - margin),
+        "end": min(float(segment["end"]), words[-1]["end"] + margin),
+        "text": " ".join(str(word.get("word", "")).strip() for word in words).strip(),
+        "words": words,
+        "boundary_method": "source_words",
+        "complete_thought": False,
+    }
+
+
 def _split_segments_on_pauses(
     segments: list[dict],
     pause_seconds: float = 0.55,
@@ -92,12 +115,8 @@ def _split_segments_on_pauses(
 ) -> list[dict]:
     """Split whisper's long punctuation-free blocks at speech pauses.
 
-    whisper.cpp emits ~30s blocks with no sentence punctuation, so the
-    complete-thought merger cannot find boundaries and glues whole minutes
-    into a single 'thought'. Word timestamps carry real silence gaps — cut
-    there; when timings are missing, hard-split oversized blocks
-    proportionally by word count. Boundaries stay inside the source segment;
-    no text is dropped or reordered.
+    Word evidence is never replaced by proportional text timing. Cue-only
+    subdivisions remain explicitly marked discovery estimates requiring ASR.
     """
     out: list[dict] = []
     max_words = max(4, int(max_block_seconds * words_per_second))
@@ -111,29 +130,22 @@ def _split_segments_on_pauses(
             continue
         words = _valid_word_timings(segment)
 
-        # Boundary indices where the speaker paused.
-        bounds: list[int] = [0]
-        if len(words) >= 2:
-            for i in range(1, len(words)):
-                gap = float(words[i]["start"]) - float(words[i - 1]["end"])
-                if gap >= pause_seconds:
-                    bounds.append(i)
-        bounds.append(len(words))
+        if words:
+            group = []
+            for word in words:
+                if group and (
+                    word["start"] - group[-1]["end"] >= pause_seconds
+                    or word["end"] - group[0]["start"] > max_block_seconds
+                    or len(group) >= max_words
+                ):
+                    out.append({**_word_piece(segment, group), "discovery_break_before": True})
+                    group = []
+                group.append(word)
+            if group:
+                out.append({**_word_piece(segment, group), "discovery_break_before": True})
+            continue
 
-        pieces: list[tuple[float, float, list[str]]] = []
-        if len(words) >= 1 and len(bounds) > 2:
-            for a, b in zip(bounds, bounds[1:]):
-                if b <= a:
-                    continue
-                toks = [str(w.get("word", "")).strip() for w in words[a:b]]
-                pieces.append((
-                    float(words[a]["start"]), float(words[b - 1]["end"]), toks,
-                ))
-        else:
-            pieces.append((
-                seg_start, seg_end,
-                [t for t in str(segment.get("text", "")).split()],
-            ))
+        pieces = [(seg_start, seg_end, str(segment.get("text", "")).split())]
 
         for p_start, p_end, toks in pieces:
             toks = [t for t in toks if t]
@@ -153,9 +165,13 @@ def _split_segments_on_pauses(
                 c_start = p_start + (p_end - p_start) * min(frac_a, 1.0)
                 c_end = p_start + (p_end - p_start) * min(frac_b, 1.0)
                 out.append({
+                    **segment,
                     "start": round(c_start, 3),
                     "end": round(c_end, 3),
                     "text": " ".join(chunk),
+                    "boundary_method": "estimated_cue_fraction",
+                    "complete_thought": False,
+                    "discovery_break_before": n_chunks > 1,
                 })
     return out
 
@@ -178,30 +194,31 @@ def _prepare_complete_thoughts(segments: list[dict]) -> list[dict]:
             continue
 
         timings = _valid_word_timings(segment)
+        if timings:
+            group = []
+            for word in timings:
+                group.append(word)
+                if re.search(r"[.!?।]+[\"')\]]*\s*$", str(word.get("word", ""))):
+                    prepared.append(_word_piece(segment, group, margin=0.1))
+                    group = []
+            if group:
+                prepared.append(_word_piece(segment, group, margin=0.1))
+            continue
         counts = [max(1, len(re.findall(r"\b\w+\b", part))) for part in original_parts]
         total_count = sum(counts)
-        cursor = 0
-
-        for index, (part, count) in enumerate(zip(original_parts, counts)):
-            if timings:
-                next_cursor = len(timings) if index == len(counts) - 1 else round(
-                    len(timings) * sum(counts[:index + 1]) / total_count
-                )
-                next_cursor = max(cursor + 1, min(len(timings), next_cursor))
-                selected_words = timings[cursor:next_cursor]
-                start = max(seg_start, selected_words[0]["start"] - 0.1)
-                end = min(seg_end, selected_words[-1]["end"] + 0.1)
-                cursor = next_cursor
-            else:
-                elapsed_before = sum(counts[:index]) / total_count
-                elapsed_after = sum(counts[:index + 1]) / total_count
-                start = seg_start + (seg_end - seg_start) * elapsed_before
-                end = seg_start + (seg_end - seg_start) * elapsed_after
+        for index, part in enumerate(original_parts):
+            elapsed_before = sum(counts[:index]) / total_count
+            elapsed_after = sum(counts[:index + 1]) / total_count
+            start = seg_start + (seg_end - seg_start) * elapsed_before
+            end = seg_start + (seg_end - seg_start) * elapsed_after
 
             prepared.append({
+                **segment,
                 "start": round(start, 3),
                 "end": round(end, 3),
                 "text": correct_cricket_spelling(part),
+                "boundary_method": "estimated_cue_fraction",
+                "complete_thought": False,
             })
 
     # Word margins can overlap at a sentence boundary. Resolve to one clean cut.
@@ -417,11 +434,15 @@ def _build_clip_yaml_entry(
 
 # ── Copied from highlight.py for audio RMS extraction ──────────────────
 def _extract_audio_rms(video_path: str, chunk_seconds: float = 1.0) -> list[tuple[float, float]]:
-    import subprocess
-    import wave
     temp_dir = Path(cfg["paths"]["temp"])
     temp_dir.mkdir(parents=True, exist_ok=True)
-    pcm_path = str(temp_dir / "audio_analysis.wav")
+    with tempfile.TemporaryDirectory(prefix="selection-rms-", dir=temp_dir) as folder:
+        return _read_audio_rms(video_path, str(Path(folder) / "audio.wav"), chunk_seconds)
+
+
+def _read_audio_rms(video_path: str, pcm_path: str, chunk_seconds: float) -> list[tuple[float, float]]:
+    import subprocess
+    import wave
     cmd = [
         "ffmpeg", "-y", "-i", video_path,
         "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", pcm_path,
@@ -565,6 +586,7 @@ def _build_livestream_windows(
             continue
         start = float(first.get("start", 0))
         parts: list[str] = []
+        members: list[dict] = []
         member_scores: list[float] = []
         previous_end = start
 
@@ -581,6 +603,7 @@ def _build_livestream_windows(
                 break
 
             parts.append(str(thought.get("text", "")).strip())
+            members.append(thought)
             member_scores.append(float(thought.get("score", 0) or 0))
             previous_end = thought_end
             duration = thought_end - start
@@ -599,6 +622,11 @@ def _build_livestream_windows(
                 "end": thought_end,
                 "text": text,
                 "score": round(max(member_scores, default=0.0), 4),
+                "source_cue_ids": sorted({cue_id for member in members for cue_id in member.get("source_cue_ids", [])}),
+                "words": [word for member in members for word in member.get("words", [])],
+                "boundary_method": "source_words" if all(member.get("boundary_method") == "source_words" for member in members)
+                                   else "estimated_cue_fraction",
+                "complete_thought": False,
             })
 
     return windows
@@ -610,8 +638,24 @@ def _select_diverse_windows(
     overlap_threshold: float = 0.5,
 ) -> list[dict]:
     """Keep the strongest variant of a moment instead of near-duplicates."""
+    limit = max(0, int(max_candidates))
+    if not limit:
+        return []
     selected: list[dict] = []
-    ranked = sorted(windows, key=lambda item: item.get("score", 0), reverse=True)
+    ranked = sorted(windows, key=lambda item: (-item.get("score", 0), item["start"], item["end"]))
+    # Reserve alternatives across source time before filling by score. This is
+    # discovery diversity, not a quota of final releases or proof of full review.
+    if len(ranked) > limit:
+        earliest = min(item["start"] for item in ranked)
+        span = max(item["end"] for item in ranked) - earliest
+        bins = min(6, limit)
+        representatives = {}
+        for item in ranked:
+            bucket = min(bins - 1, int((item["start"] - earliest) / max(span, .001) * bins))
+            representatives.setdefault(bucket, item)
+        reserved = list(representatives.values())
+        reserved_ids = {id(item) for item in reserved}
+        ranked = reserved + [item for item in ranked if id(item) not in reserved_ids]
     for candidate in ranked:
         start = float(candidate["start"])
         end = float(candidate["end"])
@@ -632,9 +676,9 @@ def _select_diverse_windows(
         if duplicate:
             continue
         selected.append(candidate)
-        if len(selected) >= max(0, int(max_candidates)):
+        if len(selected) >= limit:
             break
-    return selected
+    return sorted(selected, key=lambda item: (-item.get("score", 0), item["start"], item["end"]))
 
 
 # ── Heuristic pre-filter (same as highlight.py) ─────────────────────────
@@ -764,13 +808,19 @@ def detect_highlights(
     with open(t_path, encoding="utf-8") as f:
         data = json.load(f)
     segments = data if isinstance(data, list) else data.get("segments", [])
-    raw_segments = [dict(segment) for segment in segments]
+    import copy
+    segments = copy.deepcopy(segments)
+    for cue_id, segment in enumerate(segments):
+        segment["source_cue_ids"] = [cue_id]
+    raw_segments = copy.deepcopy(segments)
     # Whisper emits Devanagari for language=hi, but every downstream signal
     # (keyword lists, classifiers, SEO grounding) operates on Roman-Hinglish.
     # Transliterate once here so selection sees what the audience speaks.
     from utils.devanagari import to_roman
     for seg in segments:
         seg["text"] = to_roman(seg.get("text", ""))
+        for word in seg.get("words", []) or []:
+            word["word"] = to_roman(word.get("word", ""))
     segments = _split_segments_on_pauses(segments)
     segments = _prepare_complete_thoughts(segments)
     source_context = _load_source_context(paths["input"])
@@ -787,7 +837,7 @@ def detect_highlights(
     # such as "this changes everything" is weak alone but essential beside a
     # concrete wicket or scoreline. Each completed window must independently
     # pass the cricket gate in _build_livestream_windows().
-    log.info("Loaded %d complete transcript thoughts from %s", len(segments), t_path)
+    log.info("Loaded %d discovery speech units (semantic completeness unverified) from %s", len(segments), t_path)
 
     # ── Audio RMS extraction ───────────────────────────────────────────────
     rms_list = _extract_audio_rms(video_path)
@@ -830,6 +880,7 @@ def detect_highlights(
     for seg in segments:
         s = _score_segment(seg, rms_map, avg_rms, max_rms, h_cfg)
         scored.append({
+            **seg,
             "start": seg["start"],
             "end": seg["end"],
             "text": seg.get("text", ""),
@@ -937,7 +988,7 @@ def detect_highlights(
     # complete-thought gate just because a heuristic constructed a window.
     for candidate in scored_candidates:
         candidate["complete_thought"] = False
-        candidate["boundary_method"] = "heuristic_sentence_grouping"
+        candidate.setdefault("boundary_method", "heuristic_sentence_grouping")
     try:
         from shorts_intelligence.bridge import apply_selection_policy
 
@@ -1006,6 +1057,9 @@ def detect_highlights(
         )
         yaml_data[key]["selection_reason"] = w.get("ai_reason", "")
         yaml_data[key]["semantic_review"] = w.get("semantic_review", "NOT CHECKED")
+        yaml_data[key]["boundary_method"] = w.get("boundary_method", "unknown")
+        yaml_data[key]["source_cue_ids"] = w.get("source_cue_ids", [])
+        yaml_data[key]["complete_thought"] = False
 
         if "agent_scores" in w:
             yaml_data[key]["agent_scores"] = {

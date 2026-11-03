@@ -1,5 +1,5 @@
 """Phase-2 packaging contract: Full-English metadata, anti-AI-generic gates,
-emoji-mandatory titles, right-sized descriptions, trends→selection bridge,
+optional-emoji titles, right-sized descriptions, trends→selection bridge,
 and natural-pace duration targets."""
 
 import json
@@ -84,14 +84,14 @@ def test_quality_gate_accepts_clean_english_short_description():
     assert _validate_seo_quality(_base_item()) is True
 
 
-def test_enforce_limits_appends_emoji_when_missing():
+def test_enforce_limits_keeps_deliberate_title_without_forcing_emoji():
     from automation.seo.seo import _enforce_limits
 
     out = _enforce_limits(
         {"title": "Bumrah destroys stumps with a searing final-over yorker"},
         is_shorts=True,
     )
-    assert out["title"].count("🏏") == 1
+    assert out["title"] == "Bumrah destroys stumps with a searing final-over yorker"
 
 
 def test_enforce_limits_keeps_existing_emoji_title():

@@ -52,6 +52,14 @@ def fraction_republished(
     return min(1.0, shared / cand_duration)
 
 
+def same_moment(candidate: dict, previous: dict, threshold: float = .5) -> bool:
+    """Symmetric within-run overlap, unlike directional publication history."""
+    start, end = candidate["start"], candidate["end"]
+    prev_start, prev_end = previous["start"], previous["end"]
+    return max(fraction_republished(start, end, prev_start, prev_end),
+               fraction_republished(prev_start, prev_end, start, end)) >= threshold
+
+
 def _parse_timestamp(value: Any) -> float | None:
     """Parse a timestamp that may be a float or an "HH:MM:SS" string."""
     if value is None or isinstance(value, bool):

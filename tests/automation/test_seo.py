@@ -298,8 +298,6 @@ class TestLazyAIClientInit:
 
     def test_get_ai_returns_ai_client(self):
         import automation.seo.seo as seo_mod
-        if not hasattr(seo_mod, "_get_ai"):
-            pytest.skip("_get_ai not yet implemented")
         client = seo_mod._get_ai()
         assert client is not None
         # Same instance on second call

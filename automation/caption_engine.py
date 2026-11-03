@@ -305,70 +305,20 @@ def process_transcript_segments(
 
 
 def render_transparent_cards_batch(cues: List[CaptionCue], output_dir: Path) -> List[CaptionCard]:
-    """Render transparent PNG cards for cues using Playwright with thread safety.
-
-    Each card is rendered with an exact 1080x320 transparent canvas,
-    centered locked Design 2 (Quantum Holo-Glass) capsule.
-    """
+    """Render approved neon cards; measured frame/text bounds accompany each PNG."""
     from playwright.sync_api import sync_playwright
+    from automation.caption_design import caption_document, DESIGN_VERSION, MEASURE_CAPTION_JS
 
     output_dir.mkdir(parents=True, exist_ok=True)
     cards = []
 
-    html_card_template = """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<style>
-  @font-face { font-family: CaptionLocal; src: url('{FONT_URI}'); font-weight: 800; }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    width: 1080px; height: 320px; background: transparent; overflow: hidden;
-    display: flex; justify-content: center; align-items: center;
-    font-family: CaptionLocal, sans-serif;
-  }
-  .holo-glass {
-    position: relative; width: fit-content; max-width: 840px;
-    background: transparent; padding: 12px 16px;
-  }
-  .holo-body {
-    font-family: CaptionLocal, sans-serif; font-weight: 800;
-    font-size: 56px; line-height: 1.25; color: #ffffff;
-    text-align: center; letter-spacing: 0.3px;
-    -webkit-text-stroke: 1px #000; text-shadow: 0 3px 5px #000;
-    overflow-wrap: anywhere;
-  }
-  .holo-gold {
-    color: #ffd55c;
-  }
-  .holo-pill {
-    color: #ffffff;
-  }
-</style>
-</head>
-<body>
-  <div class="holo-glass">
-    <div class="holo-body">
-      {CONTENT}
-    </div>
-  </div>
-</body>
-</html>
-"""
-
-    font_candidates = [Path("C:/Windows/Fonts/arialbd.ttf"),
-                       Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
-                       Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf")]
-    font = next((path for path in font_candidates if path.is_file()), None)
-    if font is None:
-        raise FileNotFoundError("No supported local bold caption font; install one before rendering")
-    html_card_template = html_card_template.replace("{FONT_URI}", font.resolve().as_uri())
+    bounds = []
     with _PLAYWRIGHT_LOCK:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1080, "height": 320})
             for i, cue in enumerate(cues):
-                html_body = html_card_template.replace("{CONTENT}", cue.html)
+                html_body = caption_document(cue.text)
                 html_path = output_dir / f"card_{i}.html"
                 html_path.write_text(html_body, encoding="utf-8")
 
@@ -376,17 +326,10 @@ def render_transparent_cards_batch(cues: List[CaptionCue], output_dir: Path) -> 
                 # Use domcontentloaded with 5s timeout to guarantee fast rendering even offline
                 page.goto(html_path.as_uri(), wait_until="domcontentloaded", timeout=6000)
                 page.evaluate("() => document.fonts.ready.then(() => true)")
-                fits = page.evaluate("""() => {
-                    const box = document.querySelector('.holo-body');
-                    for (let size = 56; size >= 36; size -= 2) {
-                        box.style.fontSize = size + 'px';
-                        const r = box.getBoundingClientRect();
-                        if (r.height <= 180 && r.width <= 840 && box.scrollWidth <= box.clientWidth) return true;
-                    }
-                    return false;
-                }""")
-                if not fits:
-                    raise ValueError("Caption does not fit the safe text band")
+                measurement = page.evaluate(MEASURE_CAPTION_JS)
+                if not measurement:
+                    raise ValueError("Caption needs a shorter aligned phrase; exceeds readable card bounds")
+                bounds.append({"index": i, "text": cue.text, "start": cue.start, "end": cue.end, **measurement})
                 page.screenshot(path=str(png_path), omit_background=True)
                 cards.append(CaptionCard(
                     path=str(png_path),
@@ -396,6 +339,8 @@ def render_transparent_cards_batch(cues: List[CaptionCue], output_dir: Path) -> 
                 ))
             browser.close()
 
+    (output_dir / "caption_design.json").write_text(json.dumps(
+        {"design": DESIGN_VERSION, "canvas": [1080, 320], "cards": bounds}, indent=2), encoding="utf-8")
     return cards
 
 
@@ -406,14 +351,32 @@ def prepare_clip_captions(
     output_dir: Path,
     max_words_per_cue: int = 4,
     require_word_timing: bool = False,
+    hinglish_model: Optional[str] = None,
+    allow_documented_successor: bool = False,
 ) -> List[CaptionCard]:
-    """Prepare and render synchronized transparent Holo-Glass caption cards for a specific clip."""
+    """Prepare approved neon-style cards; model output remains unapproved speech evidence."""
     if not transcript_segments:
         if require_word_timing:
             raise ValueError("Word-timed captions required; no speech evidence supplied")
         return []
 
     if require_word_timing:
+        if hinglish_model is not None:
+            if hinglish_model != "deepseek-v4-flash":
+                raise ValueError("Caption route requires exact deepseek-v4-flash")
+            from automation.caption_hinglish import romanize_words_flash
+            from automation.speech_alignment import words_in_range
+            words = words_in_range(transcript_segments, clip_start, clip_end)
+            context = "\n".join(str(s.get("text", "")) for s in transcript_segments
+                                if float(s.get("end", 0)) > clip_start - 2
+                                and float(s.get("start", 0)) < clip_end + 2)
+            converted, evidence = romanize_words_flash(words, context=context,
+                allow_documented_successor=allow_documented_successor)
+            evidence.update({"clip_source_start": clip_start, "clip_source_end": clip_end})
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "caption_processing.json").write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+            transcript_segments = [{"start": clip_start, "end": clip_end, "words": converted}]
         cues = word_timed_cues(transcript_segments, clip_start, clip_end, max_words_per_cue)
         if not cues:
             raise ValueError("Word-timed captions required; cue-level estimates are not accepted")
@@ -490,17 +453,31 @@ def word_timed_cues(segments: List[Dict], clip_start: float, clip_end: float,
         text = str(word.get("word", word.get("text", ""))).strip()
         if not text:
             raise ValueError("Missing word text inside selected range")
-        words.append((word["start"], word["end"], rule_based_transliterate(text)))
-    cues = []
+        words.append((word["start"], word["end"], word.get("roman") or rule_based_transliterate(text)))
+    groups = []
     group = []
     for word in words:
-        if group and (len(group) >= max_words or word[0] - group[-1][1] > 0.45):
-            text = " ".join(item[2] for item in group)
-            cues.append(CaptionCue(group[0][0] - clip_start, group[-1][1] - clip_start,
-                                   text, highlight_keywords_html(text), [item[2] for item in group]))
+        # Joined Hindi source tokens may romanize to multiple display words.
+        # Keep their whole original interval, but count readable display words
+        # when choosing a phrase break. Never invent per-syllable timestamps.
+        display_words = sum(len(item[2].split()) for item in group)
+        display_chars = len(" ".join(item[2] for item in [*group, word]))
+        if group and (display_words + len(word[2].split()) > max_words
+                      or display_chars > 42 or word[0] - group[-1][1] > 0.45):
+            groups.append(group)
             group = []
         group.append(word)
     if group:
+        groups.append(group)
+    # Rebalance an orphan final auxiliary using its real preceding word. Do not
+    # extend display into silence or synthesize a new word boundary to hide it.
+    if (len(groups) >= 2 and len(groups[-1]) == 1 and len(groups[-2]) >= 3
+            and groups[-1][0][2].lower().strip(".,!?") in {"hai", "hain", "tha", "the", "hoon"}
+            and groups[-1][0][0] - groups[-2][-1][1] <= .45
+            and len(groups[-2][-1][2].split()) + len(groups[-1][0][2].split()) <= max_words):
+        groups[-1].insert(0, groups[-2].pop())
+    cues = []
+    for group in groups:
         text = " ".join(item[2] for item in group)
         cues.append(CaptionCue(group[0][0] - clip_start, group[-1][1] - clip_start,
                                text, highlight_keywords_html(text), [item[2] for item in group]))

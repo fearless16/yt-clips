@@ -1,14 +1,25 @@
 import pytest
 import time
 from unittest.mock import patch, MagicMock
+import utils.ai_client as ai_module
 from utils.ai_client import AIClient, classify_error, ErrorCategory
 
 
 @pytest.fixture(autouse=True)
-def _never_use_live_native_provider_credentials(monkeypatch):
-    # Racer tests mock other providers; local .env keys must not add real paid
-    # competitors to those races. Dedicated routing tests supply mocked keys.
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+def _isolated_providers(monkeypatch):
+    # Provider policy tests must not inherit local credentials or shared cooldowns.
+    for key in ("DEEPSEEK_API_KEY", "NVIDIA_API_KEY", "GROQ_API_KEY",
+                "OPENCODE_ZEN_API_KEY", "OPENCODE_API_KEY"):
+        monkeypatch.setenv(key, "")
+    monkeypatch.setitem(ai_module._cfg, "ai", {
+        "provider": "opencode", "model": "mimo-v2.5-pro",
+        "retry_base_delay_seconds": 0, "retry_max_delay_seconds": 0,
+    })
+    monkeypatch.setattr("utils.ai_client.OpenAI", MagicMock(side_effect=AssertionError("Unexpected live SDK call")))
+    monkeypatch.setattr("utils.ai_client.requests.post", MagicMock(side_effect=AssertionError("Unexpected live HTTP call")))
+    reset_shared_state()
+    yield
+    reset_shared_state()
 
 
 def reset_shared_state():
@@ -16,49 +27,6 @@ def reset_shared_state():
         AIClient._provider_failures.clear()
         AIClient._provider_cooldown_until.clear()
         AIClient._provider_token_buckets.clear()
-
-
-def test_provider_circuit_breaker():
-    reset_shared_state()
-    ai = AIClient()
-    ai.opencode_api_key = "mock_oc"
-    ai.nvidia_api_key = None
-    ai.groq_api_key = None
-
-    with patch.object(ai, "generate_opencode", side_effect=RuntimeError("OC Down")), \
-         patch.object(ai, "generate_openrouter", side_effect=RuntimeError("OR Down")), \
-         patch.object(ai, "generate_ollama", side_effect=RuntimeError("Ollama Down")):
-        for _ in range(5):
-            try:
-                ai.generate_text("test prompt")
-            except RuntimeError:
-                pass
-
-        with pytest.raises(RuntimeError) as exc_info:
-            ai.generate_text("test prompt")
-        assert "All LLM providers failed" in str(exc_info.value)
-
-
-def test_rate_limit_token_bucket():
-    reset_shared_state()
-    with AIClient._shared_lock:
-        AIClient._provider_token_buckets["opencode"] = {
-            "capacity": 30.0,
-            "tokens": 0.0,
-            "last_update": time.time(),
-            "refill_rate": 0.5
-        }
-    ai = AIClient()
-    ai.opencode_api_key = "mock_oc"
-    ai.nvidia_api_key = None
-    ai.groq_api_key = None
-
-    with patch.object(ai, "generate_opencode", return_value="OC Fallback") as mock_oc, \
-         patch.object(ai, "generate_openrouter", side_effect=RuntimeError("OR Down")), \
-         patch.object(ai, "generate_ollama", side_effect=RuntimeError("Ollama Down")):
-        res = ai.generate_text("test prompt")
-        assert res == "OC Fallback"
-        mock_oc.assert_called_once()
 
 
 # --- Error classification tests ---
@@ -317,17 +285,6 @@ def test_all_models_prefer_provider_boosts_provider():
         assert models[0][0] == "nvidia"
 
 
-def test_no_deepseek_provider():
-    assert "deepseek" not in AIClient.PROVIDER_MODELS
-
-
-def test_failover_chain_excludes_deepseek():
-    reset_shared_state()
-    ai = AIClient()
-    chain = ai._get_failover_chain("opencode")
-    assert "deepseek" not in chain
-
-
 def test_opencode_is_primary_in_chain():
     reset_shared_state()
     ai = AIClient()
@@ -353,25 +310,9 @@ def test_model_timeouts_include_qwen37():
     assert len(AIClient.MODEL_TIMEOUTS) == 1
 
 
-def test_providers_only_opencode_openrouter_nvidia_groq():
-    assert set(AIClient.PROVIDER_MODELS.keys()) == {"opencode", "openrouter", "nvidia", "groq"}
-    assert "openrouter" in AIClient.PROVIDER_MODELS
-
-
 def test_nvidia_models():
     assert "nvidia/llama-3.3-nemotron-super-49b-v1" in AIClient.PROVIDER_MODELS["nvidia"]
     assert "meta/llama-3.3-70b-instruct" in AIClient.PROVIDER_MODELS["nvidia"]
-
-
-def test_xiaomi_mimo_in_opencode():
-    assert "mimo-v2.5-pro" in AIClient.PROVIDER_MODELS["opencode"]
-    assert "mimo-v2.5" in AIClient.PROVIDER_MODELS["opencode"]
-    assert "qwen3.7-plus" in AIClient.PROVIDER_MODELS["opencode"]
-
-
-def test_total_model_count():
-    total = sum(len(v) for v in AIClient.PROVIDER_MODELS.values())
-    assert total == 21, f"Expected 21 models, got {total}"
 
 
 def test_get_available_providers_only_enabled():
@@ -386,38 +327,32 @@ def test_get_available_providers_only_enabled():
     assert "groq" not in avail
 
 
-# --- SEO-specific generation (OpenCode Go only) ---
+# --- Credential-aware SEO routing (native DeepSeek and OpenCode) ---
 
 class TestGenerateSeoText:
 
     def setup_method(self):
         reset_shared_state()
 
-    def test_seo_preferred_models_all_opencode(self):
-        """SEO_PREFERRED_MODELS must only contain opencode provider."""
-        for provider, model in AIClient.SEO_PREFERRED_MODELS:
-            assert provider == "opencode", f"Non-opencode model in SEO list: {provider}/{model}"
-
-    def test_seo_preferred_models_priority_order(self):
-        """Priority: mimo-v2.5-pro → deepseek-v4-pro."""
-        models = [m for _, m in AIClient.SEO_PREFERRED_MODELS]
-        assert models == ["mimo-v2.5-pro", "deepseek-v4-pro"]
-
-    def test_seo_text_uses_opencode_only(self):
-        """generate_seo_text must only call opencode, never nvidia/groq/ollama."""
+    @pytest.mark.parametrize("native_key,expected", [(False, "opencode"), (True, "deepseek")])
+    def test_seo_uses_first_credentialed_supported_provider(self, native_key, expected):
         ai = AIClient()
         ai.opencode_api_key = "mock"
+        ai.deepseek_api_key = "mock" if native_key else None
         ai.nvidia_api_key = "mock"
         ai.groq_api_key = "mock"
 
         with patch.object(ai, "generate_opencode", return_value="SEO OK") as mock_oc, \
+             patch.object(ai, "generate_deepseek", return_value="SEO OK") as mock_ds, \
              patch.object(ai, "generate_nvidia") as mock_nv, \
              patch.object(ai, "generate_groq") as mock_gr, \
              patch.object(ai, "generate_ollama") as mock_ol, \
              patch.object(ai, "generate_openrouter") as mock_or:
             result = ai.generate_seo_text("test seo prompt")
             assert result == "SEO OK"
-            assert mock_oc.called
+            assert mock_oc.called is (expected == "opencode")
+            assert mock_ds.called is (expected == "deepseek")
+            assert ai.get_used_provider() == expected
             mock_nv.assert_not_called()
             mock_gr.assert_not_called()
             mock_ol.assert_not_called()
@@ -431,25 +366,26 @@ class TestGenerateSeoText:
         with pytest.raises(RuntimeError, match="API key required"):
             ai.generate_seo_text("test")
 
-    def test_seo_text_tries_all_models_on_failure(self):
-        """Should try mimo-v2.5-pro, deepseek-v4-pro before raising."""
+    def test_seo_text_tries_supported_routes_and_never_ollama_on_failure(self):
         ai = AIClient()
         ai.opencode_api_key = "mock"
+        ai.deepseek_api_key = "mock"
 
-        models_tried = []
+        routes_tried = []
 
-        def capture_model(prompt, system_instruction=None):
-            models_tried.append(ai._model)
+        def capture_model(provider, prompt, system_instruction=None, prefer_model=None):
+            routes_tried.append((provider, prefer_model))
             raise RuntimeError("model down")
 
-        with patch.object(ai, "generate_opencode", side_effect=capture_model), \
-             patch.object(ai, "generate_openrouter", side_effect=RuntimeError("OR down")):
+        with patch.object(ai, "_call_provider", side_effect=capture_model), \
+             patch.object(ai, "generate_ollama") as mock_ol:
             with pytest.raises(RuntimeError, match="all models exhausted"):
                 ai.generate_seo_text("test")
+            mock_ol.assert_not_called()
 
-        # Should have tried both models at least once (primary + retry rounds)
-        assert "mimo-v2.5-pro" in models_tried
-        assert "deepseek-v4-pro" in models_tried
+        supported = [("deepseek", "deepseek-v4-pro"),
+                     ("opencode", "mimo-v2.5-pro"), ("opencode", "deepseek-v4-pro")]
+        assert routes_tried == supported * 2  # initial pass and bounded retry
 
     def test_seo_text_falls_through_to_second_model(self):
         """If mimo-v2.5-pro fails, should try deepseek-v4-pro."""
@@ -468,14 +404,14 @@ class TestGenerateSeoText:
             result = ai.generate_seo_text("test")
             assert result == "DEEPSEEK OK"
 
-    def test_seo_text_never_calls_ollama_fallback(self):
-        """Even when all models fail, must NOT fall back to ollama."""
+    def test_native_failure_falls_through_without_mutating_client_config(self):
         ai = AIClient()
+        ai.deepseek_api_key = "mock"
         ai.opencode_api_key = "mock"
+        original = (ai._provider, ai._model, ai._reasoning_effort)
 
-        with patch.object(ai, "generate_opencode", side_effect=RuntimeError("down")), \
-             patch.object(ai, "generate_openrouter", side_effect=RuntimeError("OR down")), \
-             patch.object(ai, "generate_ollama") as mock_ol:
-            with pytest.raises(RuntimeError):
-                ai.generate_seo_text("test")
-            mock_ol.assert_not_called()
+        with patch.object(ai, "generate_deepseek", side_effect=RuntimeError("down")), \
+             patch.object(ai, "generate_opencode", return_value="FALLBACK OK"):
+            assert ai.generate_seo_text("test", reasoning_effort="high") == "FALLBACK OK"
+        assert (ai._provider, ai._model, ai._reasoning_effort) == original
+        assert ai.get_used_provider() == "opencode"

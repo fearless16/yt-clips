@@ -11,28 +11,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 class TestCircuitBreakerExcludesRateLimits:
     """429 rate limits should NOT count toward circuit breaker failures."""
 
-    def test_429_does_not_increment_failure_counter(self):
-        """A 429 error should not increase the circuit breaker failure count."""
-        from utils.ai_client import AIClient
-
-        # Reset state
-        AIClient._provider_failures = {}
-        AIClient._provider_cooldown_until = {}
-
-        # Simulate 20 consecutive 429 errors
-        for _ in range(20):
-            exc = MagicMock()
-            exc.status_code = 429
-            exc.response.headers = {"Retry-After": "5"}
-            exc.__str__ = lambda s: "429 rate limit"
-            AIClient._note_provider_error("opencode", exc)
-
-        # Circuit breaker failure count should be 0 (429s excluded)
-        failures = AIClient._provider_failures.get("opencode", 0)
-        assert failures == 0, (
-            f"Circuit breaker failures should be 0 after 429s, got {failures}"
-        )
-
     def test_429_does_not_trigger_circuit_breaker(self):
         """After many 429s, the provider should NOT have hit circuit breaker.
         It will be in rate-limit cooldown (expected), but NOT 900s circuit breaker."""

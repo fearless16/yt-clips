@@ -6,8 +6,52 @@ behind a UnicodeEncodeError on Windows).
 """
 import logging
 import sys
+import io
+import json
 
 import pytest
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_run_phase_records_stage_run_id_and_outcome(failure):
+    """Keep the live logging contract formerly buried in the skipped overhaul suite."""
+    from utils.logger import JsonStreamHandler, new_run_id, run_phase
+
+    buffer = io.StringIO()
+    handler = JsonStreamHandler(buffer)
+    logger = logging.Logger("test-phase-contract", level=logging.DEBUG)
+    logger.addHandler(handler)
+    run_id = new_run_id()
+    try:
+        def exercise():
+            with run_phase(logger, "test phase", "test_stage", run_id=run_id) as phase:
+                phase.set(items=42)
+                if failure:
+                    raise ValueError("fixture failure")
+
+        if failure:
+            with pytest.raises(ValueError, match="fixture failure"):
+                exercise()
+        else:
+            exercise()
+        entries = [json.loads(line) for line in buffer.getvalue().splitlines()]
+        assert [entry["status"] for entry in entries] == ["start", "failed" if failure else "ok"]
+        assert all(entry["stage"] == "test_stage" and entry["run_id"] == run_id for entry in entries)
+        assert entries[-1]["duration_ms"] >= 0
+        if failure:
+            assert entries[-1]["error_type"] == "ValueError"
+            assert "fixture failure" in entries[-1]["exc"]
+        else:
+            assert entries[-1]["metadata"]["items"] == 42
+    finally:
+        logger.removeHandler(handler)
+        handler.close()
+
+
+def test_run_id_is_unique_per_call():
+    from utils.logger import new_run_id
+
+    assert len({new_run_id() for _ in range(100)}) == 100
 
 
 def test_logger_emits_emoji_without_crashing(monkeypatch):

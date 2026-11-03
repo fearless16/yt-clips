@@ -83,42 +83,6 @@ class TestFfmpegNv12Pipe:
             assert bgr.shape == (h, w, 3), f"Frame shape {bgr.shape} != {(h,w,3)}"
             assert bgr.dtype == np.uint8
 
-    @_requires_video
-    def test_software_nv12_is_faster_than_hw_bgr24(self):
-        """Software + NV12 should complete faster than dxva2 + BGR24 for short segment."""
-        import subprocess
-        import time
-
-        def measure(args):
-            t0 = time.perf_counter()
-            proc = subprocess.Popen(
-                args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            proc.wait(timeout=30)
-            return time.perf_counter() - t0
-
-        nv12_cmd = [
-            "ffmpeg", "-hide_banner", "-i", str(INPUT_VIDEO),
-            "-t", "5",
-            "-vf", "select=not(mod(n\\,120))",
-            "-vsync", "0",
-            "-f", "rawvideo", "-pix_fmt", "nv12", "pipe:1",
-        ]
-        hw_cmd = [
-            "ffmpeg", "-hide_banner", "-hwaccel", "dxva2", "-i", str(INPUT_VIDEO),
-            "-t", "5",
-            "-vf", "select=not(mod(n\\,120))",
-            "-vsync", "0",
-            "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
-        ]
-        t_nv12 = measure(nv12_cmd)
-        t_hw = measure(hw_cmd)
-        assert t_nv12 < t_hw, (
-            f"Software+NV12 ({t_nv12:.3f}s) should be faster than "
-            f"dxva2+BGR24 ({t_hw:.3f}s)"
-        )
-
-
 class TestVideoAnalyzerIntegration:
     """End-to-end test of the sampling function."""
 

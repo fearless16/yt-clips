@@ -14,6 +14,7 @@ from utils.logger import get_logger
 
 from automation.clip_selection.agents import ALL_AGENTS, BrutalRejectionAgent
 from automation.clip_selection.arbiter import compute_weighted_score, llm_arbiter_refine
+from automation.clip_selection.dedupe import same_moment
 
 cfg = load_config()
 log = get_logger("clip_selector")
@@ -99,6 +100,8 @@ class ClipSelector:
         Returns:
             Final ranked clip list.
         """
+        if max_selected <= 0:
+            return []
         # Filter rejects
         keep = [c for c in scored_candidates if not c.get("should_reject", False)]
         rejected_count = sum(1 for c in scored_candidates if c.get("should_reject", False))
@@ -125,7 +128,10 @@ class ClipSelector:
         if self.use_llm_arbiter:
             final = llm_arbiter_refine(quality_pass, context, max_selected)
         else:
-            final = sorted(quality_pass, key=lambda c: c.get("final_score", 0), reverse=True)[:max_selected]
+            final = []
+            for candidate in sorted(quality_pass, key=lambda c: (-c.get("final_score", 0), c["start"], c["end"])):
+                if not any(same_moment(candidate, previous) for previous in final):
+                    final.append(candidate)
 
         return final[:max_selected]
 

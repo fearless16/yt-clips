@@ -34,6 +34,11 @@
 
 ## Transcript synchronization hardening (2026-11-01)
 
+Follow-on clipping/selection and scratch-lifecycle work is tracked in
+`EDITORIAL_QUALITY_PLAN.md`, including TDD acceptance, implementation status and
+the remaining human-reviewed benchmark/pilot gates. Latest required suite:
+**970 passed, 47 skipped, 18 xfailed**; sandbox dry run passes and self-cleans.
+
 - Preserve source word intervals, corrected word text, confidence and provenance
   when loading transcripts. Missing/empty/corrupt files can reach local ASR.
   Partial or invalid existing word evidence is held, not silently retranscribed.

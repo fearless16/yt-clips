@@ -59,8 +59,9 @@ def test_reserved_band_fits_complete_speaker_region(monkeypatch):
     graph = export._build_enhance_stack({"export_strategy": {
         "use_solo_frame": True, "active_crop": {"x": 400, "y": 0, "width": 1000, "height": 1080}}}, use_logo=False)
     assert "crop=1000:1080:400:0" in graph
-    assert "scale=1080:1116:force_original_aspect_ratio=decrease" in graph
-    assert "pad=1080:1920:(ow-iw)/2:76" in graph
+    assert "[portrait_fg]scale=972:998:flags=lanczos:force_original_aspect_ratio=decrease" in graph
+    assert "[portrait_blur][portrait_fit]overlay=(W-w)/2:210" in graph
+    assert "pad=" not in graph
     assert export._caption_card_y() == 1216
 
 
@@ -75,4 +76,7 @@ def test_unknown_geometry_does_not_silently_center_crop(monkeypatch):
     import export
     monkeypatch.setitem(export.cfg["export"], "reserve_caption_band", True)
     graph = export._build_enhance_stack({}, use_logo=False)
-    assert "crop=" not in graph
+    # Unknown camera geometry keeps the full source foreground; only background
+    # is cover-cropped to fill portrait, never silently face/center-cropped.
+    assert "[portrait_fg]scale=" in graph
+    assert graph.count("crop=") == 1

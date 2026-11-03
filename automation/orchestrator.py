@@ -135,6 +135,33 @@ def _url_match_key(url: str | None) -> str | None:
     return (slug[:64] or None).lower()
 
 
+def _existing_exports(shorts_dir: str, chosen_dir: str | None = None) -> list[Path]:
+    """Resume one batch, never recursively discover review renders or guess a batch."""
+    root = Path(shorts_dir).resolve()
+    if chosen_dir:
+        chosen = Path(chosen_dir).resolve()
+        if not chosen.is_relative_to(root) or chosen not in (root, root / chosen.name):
+            raise ValueError("--export-dir must be the Shorts root or one direct batch directory")
+        if not chosen.is_dir():
+            raise ValueError("--export-dir does not exist")
+        directories = [chosen]
+    elif root.exists():
+        directories = [root, *sorted(p for p in root.iterdir()
+                                     if p.is_dir() and not p.is_symlink()
+                                     and not getattr(p, "is_junction", lambda: False)())]
+    else:
+        return []
+    batches = []
+    for directory in directories:
+        clips = sorted(p for p in directory.glob("*.mp4")
+                       if p.is_file() and not p.is_symlink() and "test_output" not in p.name)
+        if clips:
+            batches.append(clips)
+    if len(batches) > 1:
+        raise ValueError("Multiple export batches found; choose --export-dir explicitly")
+    return batches[0] if batches else []
+
+
 def run(
     url: str,
     skip_download: bool = False,
@@ -151,6 +178,7 @@ def run(
     sync_from_drive: bool = False,
     mode: str | None = None,
     learn_only: bool = False,
+    existing_exports_dir: str | None = None,
 ) -> PipelineResult:
     """Execute the 9-stage yt-clips pipeline.
 
@@ -163,6 +191,8 @@ def run(
     log.info("[START] pipeline run_id=%s url=%s", rid, url)
 
     cfg = _cfg()
+    if existing_exports_dir is not None and not skip_export:
+        return _abort_required_stage(result, start, "--export-dir requires --skip-export")
     if learn_only:
         try:
             from automation.seo.analytics import sync_clip_performance_from_youtube
@@ -210,7 +240,7 @@ def run(
                 _PROVIDER_HEALTH.record_success("drive")
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("drive")
-                result.failures.append(f"stage1b: {e}")
+                return _abort_required_stage(result, start, f"stage1b: {e}")
 
         # ── Stage 1c: Download ──────────────────────────────────
         if not skip_download:
@@ -295,7 +325,12 @@ def run(
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("llm")
                 _emit_infra_failed(stem, str(e), stage="stage3-5")
-                result.failures.append(f"stage3-5: {e}")
+                return _abort_required_stage(result, start, f"stage3-5: {e}")
+
+        if not skip_highlight and not highlights and not skip_export:
+            result.total_seconds = time.monotonic() - start
+            log.info("[EXIT] no clips selected; no cached highlights will be exported (run_id=%s)", rid)
+            return result
 
         # ── Stage 6: Export + SEO (merged — SEO runs immediately after export) ──
         if not skip_export:
@@ -402,11 +437,10 @@ def run(
                 _emit_infra_failed(stem, str(e), stage="stage6")
                 result.failures.append(f"stage6: {e}")
         else:
-            existing = sorted(Path(shorts_dir).rglob("*.mp4")) if Path(shorts_dir).exists() else []
-            existing = [p for p in existing if "test_output" not in p.name]
-            if existing:
-                latest_dir = max(set(p.parent for p in existing), key=lambda d: d.name)
-                existing = sorted(latest_dir.glob("*.mp4"))
+            try:
+                existing = _existing_exports(shorts_dir, existing_exports_dir)
+            except ValueError as exc:
+                return _abort_required_stage(result, start, f"stage6: {exc}")
             if existing:
                 result.exported = existing
                 log.info("[stage 6] skipped — using %d existing clips", len(existing))
@@ -474,6 +508,7 @@ def run(
 
         if cfg.get("delivery_qc", {}).get("enabled", False):
             from automation.delivery_qc import check_delivery
+            qc_failures = []
             for clip in result.exported:
                 expected_duration = None
                 try:
@@ -483,7 +518,10 @@ def run(
                     pass
                 qc = check_delivery(clip, expected_duration)
                 if qc["status"] != "PASS":
-                    result.failures.append(f"delivery_qc {clip.name}: {'; '.join(qc['errors'])}")
+                    qc_failures.append(f"delivery_qc {clip.name}: {'; '.join(qc['errors'])}")
+                    result.release_held += 1
+            if qc_failures:
+                return _abort_required_stage(result, start, "; ".join(qc_failures))
 
         # Recover once before covers, sync, scheduling or publication. A marker
         # invalidates stale metadata even when --skip-seo prevents regeneration.
@@ -499,7 +537,7 @@ def run(
             result.seo_generated = sum(read_metadata(p) is not None for p in result.exported)
 
         # ── Stage 7b: Thumbnails ────────────────────────────────
-        if result.exported:
+        if result.exported and cfg.get("thumbnail", {}).get("enabled", True):
             try:
                 with run_phase(log, "stage 7b Thumbnails", "thumbnails", run_id=rid):
                     from thumbnail import process_all_thumbnails
@@ -732,12 +770,13 @@ def run(
         except Exception as e:
             log.warning("[shorts_intelligence] shadow status failed: %s", e)
 
-        # Canonical DB persistence.
-        try:
-            from sync import sync_db_to_drive
-            sync_db_to_drive()
-        except Exception as e:
-            log.warning("[db_sync] Failed: %s", e)
+        # Remote DB backup is a sync side effect, not local telemetry.
+        if auto_sync and not skip_sync:
+            try:
+                from sync import sync_db_to_drive
+                sync_db_to_drive()
+            except Exception as e:
+                log.warning("[db_sync] Failed: %s", e)
 
     status = "partial" if result.failures else "ok"
     log.info(

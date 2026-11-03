@@ -31,6 +31,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import shutil
 import copy
 from functools import wraps
 from dataclasses import dataclass, field
@@ -130,6 +131,7 @@ _FAKE_HIGHLIGHTS = {
 }
 
 _FAKE_SEO_JSON = json.dumps({
+    "cover_text": "KOHLI KA CHHAKKA",
     "title": "🔴 Kohli ne maara CHHAKKA! 💥 | RCB vs CSK IPL 2026 | Live Score #Shorts",
     "description": (
         "📝 Virat Kohli smashes a massive six over long-on! The crowd at Chinnaswamy "
@@ -219,83 +221,121 @@ def _project_module(module) -> bool:
     return not any(part.startswith(".") or part in {"face_os", "site-packages"} for part in relative.parts)
 
 
+def _loggers() -> list:
+    import logging
+    return [logging.getLogger(), *[
+        logger for logger in logging.Logger.manager.loggerDict.values()
+        if isinstance(logger, logging.Logger)
+    ]]
+
+
+def _close_sandbox_logs(sandbox: Path, preserved: set) -> None:
+    """Release only new owned file handles before Windows directory cleanup."""
+    for logger in _loggers():
+        for handler in list(logger.handlers):
+            if handler in preserved:
+                continue
+            filename = getattr(handler, "baseFilename", None)
+            if filename is None:
+                filename = getattr(getattr(handler, "_file", None), "name", None)
+            if not isinstance(filename, (str, os.PathLike)):
+                continue
+            path = Path(filename)
+            path = path if path.is_absolute() else sandbox / path
+            if path.resolve().is_relative_to(sandbox):
+                logger.removeHandler(handler)
+                handler.close()
+
+
 def _isolated_run(function):
     """Keep relative files, cached configuration and generated evidence off live paths.
 
     Like the existing API patches this harness is process-global, not thread-safe.
-    Preserve artifacts for debugging, but restore cwd/config/environment on exit.
+    Set YT_CLIPS_KEEP_DRY_RUN=1 to retain debugging artifacts explicitly.
     """
     @wraps(function)
     def isolated(*args, **kwargs):
-        import yaml
-        import automation.config as config_module
-        import utils.config as utils_config
-
-        original_cwd = Path.cwd()
-        original = config_module.load()
-        config = copy.deepcopy(original)
+        keep = os.environ.get("YT_CLIPS_KEEP_DRY_RUN") == "1"
         temp_base = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir())) / "Temp" / "opencode"
         temp_base.mkdir(parents=True, exist_ok=True)
         sandbox = Path(tempfile.mkdtemp(prefix="yt-clips-dry-run-", dir=temp_base))
-        config["paths"] = {name: str(sandbox / name) for name in
-                           ("input", "temp", "transcripts", "highlights", "shorts", "logs")}
-        config.setdefault("shorts_intelligence", {})["enabled"] = False
-        config["shorts_intelligence"]["db_path"] = str(sandbox / "shorts_intelligence.db")
-        # Stubbed media cannot receive a real owner approval. Release gating is
-        # tested separately; this run exercises only the fake API happy path.
-        config["release_review"] = {"required": False}
-        config["delivery_qc"] = {"enabled": False}
-        config.setdefault("export", {}).setdefault("captions", {})["require_word_timing"] = False
-        (sandbox / "config.yaml").write_text(yaml.safe_dump(config, allow_unicode=False), encoding="utf-8")
-        # Fake credentials only: never copy production tokens/cookies into a test.
-        (sandbox / "yt_channel_token.json").write_text('{"token": "fake"}', encoding="utf-8")
-        saved = []
-        for name, module in list(sys.modules.items()):
-            if module is None or name.startswith("face_os"):
-                continue
-            if not _project_module(module):
+        preserved_handlers = {handler for logger in _loggers() for handler in logger.handlers}
+        try:
+            return _run_in_sandbox(function, args, kwargs, sandbox, keep)
+        finally:
+            _close_sandbox_logs(sandbox, preserved_handlers)
+            if not keep:
+                shutil.rmtree(sandbox)
+    return isolated
+
+
+def _run_in_sandbox(function, args, kwargs, sandbox: Path, keep: bool):
+    import yaml
+    import automation.config as config_module
+    import utils.config as utils_config
+
+    original_cwd = Path.cwd()
+    original = config_module.load()
+    config = copy.deepcopy(original)
+    config["paths"] = {name: str(sandbox / name) for name in
+                       ("input", "temp", "transcripts", "highlights", "shorts", "logs")}
+    config.setdefault("shorts_intelligence", {})["enabled"] = False
+    config["shorts_intelligence"]["db_path"] = str(sandbox / "shorts_intelligence.db")
+    # Stubbed media cannot receive a real owner approval. Release gating is
+    # tested separately; this run exercises only the fake API happy path.
+    config["release_review"] = {"required": False}
+    config["delivery_qc"] = {"enabled": False}
+    config.setdefault("export", {}).setdefault("captions", {})["require_word_timing"] = False
+    (sandbox / "config.yaml").write_text(yaml.safe_dump(config, allow_unicode=False), encoding="utf-8")
+    # Fake credentials only: never copy production tokens/cookies into a test.
+    (sandbox / "yt_channel_token.json").write_text('{"token": "fake"}', encoding="utf-8")
+    saved = []
+    for name, module in list(sys.modules.items()):
+        if module is None or name.startswith("face_os"):
+            continue
+        if not _project_module(module):
+            continue
+        for attr in ("cfg", "_CONFIG"):
+            if hasattr(module, attr):
+                saved.append((module, attr, getattr(module, attr)))
+                setattr(module, attr, config)
+        for attr in ("_ai_instance", "_ai"):
+            if hasattr(module, attr):
+                saved.append((module, attr, getattr(module, attr)))
+                setattr(module, attr, None)
+        if name == "automation.orchestrator":
+            from automation.memory.decision_store import DecisionStore
+            from automation.providers.provider_health import ProviderHealth
+            for attr, replacement in (("_DECISION_STORE", DecisionStore()),
+                                      ("_PROVIDER_HEALTH", ProviderHealth())):
+                saved.append((module, attr, getattr(module, attr)))
+                setattr(module, attr, replacement)
+    previous_modules = set(sys.modules)
+    cache = dict(utils_config._config_cache)
+    utils_config._config_cache.clear()
+    try:
+        os.chdir(sandbox)
+        result = function(*args, **kwargs)
+        result["sandbox"] = str(sandbox)
+        result["sandbox_retained"] = keep
+        return result
+    finally:
+        os.chdir(original_cwd)
+        for module, attr, value in saved:
+            setattr(module, attr, value)
+        for name in set(sys.modules) - previous_modules:
+            module = sys.modules[name]
+            if module is None or not _project_module(module):
                 continue
             for attr in ("cfg", "_CONFIG"):
-                if hasattr(module, attr):
-                    saved.append((module, attr, getattr(module, attr)))
-                    setattr(module, attr, config)
+                value = getattr(module, attr, None)
+                if isinstance(value, dict) and value.get("paths", {}).get("input") == config["paths"]["input"]:
+                    setattr(module, attr, utils_config.Config(original))
             for attr in ("_ai_instance", "_ai"):
                 if hasattr(module, attr):
-                    saved.append((module, attr, getattr(module, attr)))
                     setattr(module, attr, None)
-            if name == "automation.orchestrator":
-                from automation.memory.decision_store import DecisionStore
-                from automation.providers.provider_health import ProviderHealth
-                for attr, replacement in (("_DECISION_STORE", DecisionStore()),
-                                          ("_PROVIDER_HEALTH", ProviderHealth())):
-                    saved.append((module, attr, getattr(module, attr)))
-                    setattr(module, attr, replacement)
-        previous_modules = set(sys.modules)
-        cache = dict(utils_config._config_cache)
         utils_config._config_cache.clear()
-        try:
-            os.chdir(sandbox)
-            result = function(*args, **kwargs)
-            result["sandbox"] = str(sandbox)
-            return result
-        finally:
-            os.chdir(original_cwd)
-            for module, attr, value in saved:
-                setattr(module, attr, value)
-            for name in set(sys.modules) - previous_modules:
-                module = sys.modules[name]
-                if module is None or not _project_module(module):
-                    continue
-                for attr in ("cfg", "_CONFIG"):
-                    value = getattr(module, attr, None)
-                    if isinstance(value, dict) and value.get("paths", {}).get("input") == config["paths"]["input"]:
-                        setattr(module, attr, utils_config.Config(original))
-                for attr in ("_ai_instance", "_ai"):
-                    if hasattr(module, attr):
-                        setattr(module, attr, None)
-            utils_config._config_cache.clear()
-            utils_config._config_cache.update(cache)
-    return isolated
+        utils_config._config_cache.update(cache)
 
 
 def _create_fake_clip(export_dir: str, stem: str):
@@ -564,7 +604,8 @@ def _api_intercept_context(video_path: str):
     class _FakeTranscript:
         language_code = "en"
         def fetch(self):
-            return _FAKE_SEGMENTS
+            return [{"start": s["start"], "duration": s["end"] - s["start"], "text": s["text"]}
+                    for s in _FAKE_SEGMENTS]
 
     class _FakeTranscriptList:
         def list(self, video_id):
@@ -632,6 +673,14 @@ def _api_intercept_context(video_path: str):
             pass
         def rectangle(self, *args, **kwargs):
             pass
+        def rounded_rectangle(self, *args, **kwargs):
+            pass
+        def ellipse(self, *args, **kwargs):
+            pass
+        def line(self, *args, **kwargs):
+            pass
+        def textlength(self, text, **kwargs):
+            return len(text) * 10
         def textbbox(self, *args, **kwargs):
             return (0, 0, 100, 20)
         def multiline_textbbox(self, *args, **kwargs):
@@ -701,6 +750,7 @@ def _api_intercept_context(video_path: str):
     from google.oauth2.credentials import Credentials as RealCredentials
 
     class _FakeCredentials(RealCredentials):
+        scopes = ["https://www.googleapis.com/auth/youtube.force-ssl"]
         valid = True
         expired = False
         refresh_token = "fake_refresh"
@@ -760,6 +810,7 @@ def _api_intercept_context(video_path: str):
         # PIL
         patch("PIL.Image.open", _fake_pil_open),
         patch("PIL.Image.new", _fake_pil_open),
+        patch("PIL.Image.alpha_composite", lambda *_: _fake_pil_open()),
         patch("PIL.ImageEnhance.Contrast", _fake_image_enhance),
         patch("PIL.ImageEnhance.Brightness", _fake_image_enhance),
         patch("PIL.ImageEnhance.Sharpness", _fake_image_enhance),
