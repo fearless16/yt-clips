@@ -213,6 +213,7 @@ Output: `reports/analytics/analytics_report.html`
 | `AGENTS.md` | Source of truth, testing gates, module pointers |
 | `face_os/STATE.md` | Face OS state reference & drift status |
 | `automation/AGENTS.md` | Orchestrator + learning ownership rules |
+| `docs/REPOSITORY_CLEANUP_20261104.md` | Main integration, removed unused modules and preserved cleanup candidates |
 
 ---
 
