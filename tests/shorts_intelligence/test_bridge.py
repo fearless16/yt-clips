@@ -60,7 +60,8 @@ def test_bridge_records_only_exported_highlights_and_pending_upload(tmp_path):
     with ShortsStore(db, channel_id=CHANNEL_ID) as store:
         production = store.get_production("batch/clip1")
         assert production["features"]["duration_bucket"] == "under_15"
-        assert production["features"]["complete_thought"] == "true"
+        assert production["features"]["complete_thought"] == "unknown"
+        assert production["features"]["completeness_status"] == "UNVERIFIED"
         assert production["features"]["hook_type"] == "instant_payoff"
         assert production["features"]["seo_title_length_bucket"] == "50_59"
         assert production["features"]["seo_description_length_bucket"] == "2500_3499"

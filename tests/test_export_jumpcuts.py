@@ -7,6 +7,7 @@ import export
 
 
 def test_export_keeps_rendered_timeline_and_precise_boundaries(monkeypatch, tmp_path):
+    monkeypatch.setitem(export.cfg["export"], "composition", "portrait-caption-v1")
     observed = []
 
     def render(source, start, end, output, *_args, **_kwargs):

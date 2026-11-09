@@ -64,6 +64,25 @@ def check_delivery(clip: Path, expected_duration: float | None = None) -> dict:
                         "-map", "0:v:0", "-map", "0:a:0", "-f", "null", "-"],
                        capture_output=True, text=True, check=True, timeout=300)
         result["full_decode"] = "PASS"
+        gameplay_sidecar = clip.with_name(f"{clip.stem}_gameplay.json")
+        if gameplay_sidecar.exists():
+            gameplay = json.loads(gameplay_sidecar.read_text(encoding="utf-8"))
+            if gameplay["media_sha256"] != result["media_sha256"]:
+                raise ValueError("Stale gameplay panel evidence")
+            panel = gameplay["bottom"]
+            if (not isinstance(panel, list) or len(panel) != 4
+                    or any(type(v) is not int for v in panel)
+                    or min(panel[:2]) < 0 or min(panel[2:]) <= 40
+                    or panel[0]+panel[2] > int(video["width"])
+                    or panel[1]+panel[3] > int(video["height"])):
+                raise ValueError("Invalid gameplay panel geometry")
+            from automation.gameplay_visual_qc import scan_dark_intervals
+            inset = [panel[0]+20, panel[1]+20, panel[2]-40, panel[3]-40]
+            dark = scan_dark_intervals(clip, 0, duration, inset)
+            result["gameplay_visual"] = {"status": "FAIL" if dark else "PASS",
+                "method": "every-frame delivered gameplay-panel blackdetect", "dark_intervals": dark}
+            if dark:
+                result["errors"].append("Dark frames in encoded gameplay panel")
         loudness = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-i", str(clip), "-vn",
                                    "-af", "loudnorm=I=-16:TP=-2:LRA=11:print_format=json", "-f", "null", "-"],
                                   capture_output=True, text=True, check=True, timeout=300)

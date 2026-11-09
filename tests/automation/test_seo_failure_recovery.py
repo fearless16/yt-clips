@@ -195,6 +195,25 @@ def test_stage8b_falsey_upload_is_failed_not_published(
     assert all(event[1].value != "published" for event in emitted)
 
 
+def test_stage8b_incomplete_thumbnail_is_not_counted_or_published(existing_export, monkeypatch):
+    from upload import DeliveryIncompleteError
+
+    existing_export.with_name("clip1_metadata.json").write_text(
+        json.dumps({"title": "grounded", "description": "specific clip context"}), encoding="utf-8")
+    (existing_export.parents[2] / "cookies.txt").write_text("auth")
+    emitted = []
+
+    def incomplete(*_args, **_kwargs):
+        raise DeliveryIncompleteError("already-uploaded-id", "thumbnail verification pending")
+
+    monkeypatch.setattr("upload.upload_video", incomplete)
+    monkeypatch.setattr("automation.orchestrator._emit_event", lambda *args: emitted.append(args))
+    result = _run_existing_export(auto_upload=True)
+    assert result.uploaded_count == 0
+    assert any("already-uploaded-id" in failure and "thumbnail" in failure for failure in result.failures)
+    assert all(event[1].value != "published" for event in emitted)
+
+
 def test_stage8b_schedules_only_clips_with_metadata_after_retry(
     existing_export, monkeypatch
 ):
@@ -237,6 +256,30 @@ def test_stage8b_schedules_only_clips_with_metadata_after_retry(
     assert scheduled == ["clip2"]
     assert uploads == [str(valid_clip)]
     assert result.uploaded_count == 1
+
+
+def test_stage8b_does_not_assign_a_new_slot_to_an_existing_delivery(existing_export, monkeypatch):
+    from thumbnail import ThumbnailBatchResult
+    monkeypatch.setattr("thumbnail.process_all_thumbnails", lambda *_: ThumbnailBatchResult())
+    existing_export.with_name("clip1_metadata.json").write_text(json.dumps({
+        "title": "grounded", "description": "specific clip context"}))
+    # The uploader, not the scheduler, must validate/reconcile this receipt.
+    existing_export.with_name("clip1_delivery.json").write_text('{"status":"THUMBNAIL_PENDING"}')
+    (existing_export.parents[2] / "cookies.txt").write_text("auth")
+    calls = []
+    monkeypatch.setattr("scheduler.assign_clips_to_slots",
+                        lambda **kwargs: calls.append(("scheduled", kwargs["clips"])) or [])
+    def uploaded(*args, **kwargs):
+        calls.append(("upload", kwargs))
+        return "existing-video"
+    monkeypatch.setattr("upload.upload_video", uploaded)
+    monkeypatch.setattr("shorts_intelligence.bridge.record_upload", lambda *_: None)
+    result = _run_existing_export(auto_upload=True, auto_schedule=True)
+    assert result.uploaded_count == 1
+    assert all("clip1" not in value for kind, value in calls if kind == "scheduled")
+    kwargs = next(value for kind, value in calls if kind == "upload")
+    assert kwargs["privacy"] == "scheduled"
+    assert kwargs["publish_at"] is None, "Uploader must reuse and validate its bound slot"
 
 
 def test_seo_failure_marker_persists_error_without_forwarding_it_on_retry(
@@ -394,6 +437,7 @@ def _stub_export_all(tmp_path, monkeypatch, export):
     })
     monkeypatch.setitem(export.cfg, "export", {
         **export.cfg.get("export", {}),
+        "composition": "portrait-caption-v1",
         "max_workers": 1,
         "super_resolution": False,
         "captions": {"enabled": False, "require_word_timing": False},
@@ -435,11 +479,12 @@ def test_export_all_aborts_when_seo_artifact_persistence_fails(
 
     monkeypatch.setattr(export, "_seo_worker", seo_worker)
 
-    with pytest.raises(OSError, match="metadata disk full"):
+    with pytest.raises(OSError, match="metadata disk full") as error:
         export.export_all(
             {"clip1": {"start": 0, "end": 10, "text": "Kohli six"}},
             str(tmp_path / "source.mp4"),
         )
+    assert error.value.exported == [tmp_path / "shorts/batch/clip1.mp4"]
 
 
 def test_export_all_aborts_at_finite_seo_deadline_without_waiting_on_shutdown(
@@ -502,15 +547,49 @@ def test_export_all_aborts_at_finite_seo_deadline_without_waiting_on_shutdown(
 
     monkeypatch.setattr(export, "ThreadPoolExecutor", Executor)
 
-    with pytest.raises(TimeoutError, match="SEO generation exceeded"):
+    with pytest.raises(TimeoutError, match="SEO generation exceeded") as error:
         export.export_all(
             {"clip1": {"start": 0, "end": 10, "text": "Kohli six"}},
             str(tmp_path / "source.mp4"),
         )
+    assert error.value.exported == [tmp_path / "shorts/batch/clip1.mp4"]
 
     assert observed_timeouts and observed_timeouts[0] is not None
     assert all(future.cancelled for future in seo_pending)
     assert (True, False, True) in shutdowns
+    marker = tmp_path / "shorts/batch/clip1_seo_failed.json"
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    assert payload["transcript"] == "Kohli six"
+    assert "deadline" in payload["error"]
+
+
+def test_fast_seo_failure_is_partial_not_success_even_when_both_videos_render(tmp_path, monkeypatch):
+    import export
+    _stub_export_all(tmp_path, monkeypatch, export)
+    monkeypatch.setattr(export, "_seo_worker", lambda *_: {"_seo_failed": True, "error": "invalid cover"})
+    with pytest.raises(export.ExportBatchError, match="SEO packaging incomplete") as error:
+        export.export_all({"clip1": {"start": 0, "end": 10, "text": "Kohli six"}}, "source.mp4")
+    assert len(error.value.exported) == 1
+    assert (error.value.exported[0].parent / "clip1_seo_failed.json").is_file()
+
+
+def test_retry_marker_disk_failure_does_not_erase_successfully_rendered_media(tmp_path, monkeypatch):
+    import export
+    import automation.artifacts as artifacts
+    _stub_export_all(tmp_path, monkeypatch, export)
+    monkeypatch.setattr(export, "_seo_worker", lambda *_: {"_seo_failed": True, "error": "provider failed"})
+    write = artifacts.atomic_json
+
+    def disk_failure(path, payload):
+        if str(path).endswith("_seo_failed.json"):
+            raise OSError("retry marker disk full")
+        return write(path, payload)
+
+    monkeypatch.setattr(artifacts, "atomic_json", disk_failure)
+    with pytest.raises(export.ExportBatchError, match="retry marker disk full") as error:
+        export.export_all({"clip1": {"start": 0, "end": 10, "text": "Kohli six"}}, "source.mp4")
+    assert len(error.value.exported) == 1
+    assert error.value.exported[0].read_bytes() == b"video"
 
 
 def test_orchestrator_rejects_malformed_and_incomplete_metadata(

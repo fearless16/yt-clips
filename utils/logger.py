@@ -1,5 +1,6 @@
 import logging
 import json
+import os
 import sys
 import time
 import uuid
@@ -180,7 +181,7 @@ class ProgressManager:
 # Keeping this list explicit makes the on-disk log schema stable and queryable.
 _STRUCTURED_FIELDS = (
     "stage",         # logical pipeline stage, e.g. "export", "seo"
-    "status",        # "start" | "ok" | "failed" | "skipped" | "partial"
+    "status",        # start | ok | failed | skipped | partial | review | empty | cancelled
     "phase",         # human phase label, e.g. "phase 4 Export"
     "phase_index",   # 1-based position in the run
     "phase_total",   # total phases in the run
@@ -245,40 +246,66 @@ class JsonStreamHandler(logging.StreamHandler):
             self.handleError(record)
 
 
-def get_logger(name: str, log_file: str = "logs/pipeline.log", level: str = "INFO") -> logging.Logger:
+def _console_handler(console_format: str, level: str) -> logging.Handler:
+    if console_format == "json":
+        handler = JsonStreamHandler(_safe_stream(sys.stdout))
+    else:
+        from utils.pipeline_display import PipelineConsoleHandler
+        handler = PipelineConsoleHandler(
+            console=_CONSOLE, show_time=False, show_path=False,
+            rich_tracebacks=False, tracebacks_show_locals=False,
+            markup=False, show_level=False,
+        )
+    handler.setLevel(getattr(logging, level.upper(), logging.INFO))
+    return handler
+
+
+def configure_console(*, verbose: bool = False, json_logs: bool = False) -> None:
+    """CLI-only overrides; leave file handlers and on-disk config unchanged."""
+    console_format = "json" if json_logs else "text"
+    level = "DEBUG" if verbose else "INFO"
+    os.environ["YT_CLIPS_CONSOLE_FORMAT"] = console_format
+    os.environ["YT_CLIPS_LOG_LEVEL"] = level
+    for logger in logging.Logger.manager.loggerDict.values():
+        if not isinstance(logger, logging.Logger) or not any(isinstance(h, JsonFileHandler) for h in logger.handlers):
+            continue
+        for handler in list(logger.handlers):
+            if isinstance(handler, (RichHandler, JsonStreamHandler)):
+                logger.removeHandler(handler)
+                handler.close()
+        logger.addHandler(_console_handler(console_format, level))
+
+
+def get_logger(name: str, log_file: Optional[str] = None, level: Optional[str] = None) -> logging.Logger:
     logger = logging.getLogger(name)
     if logger.handlers:
         return logger
 
-    logger.setLevel(getattr(logging, level.upper(), logging.INFO))
+    # Console verbosity must not discard diagnostic records before the JSON
+    # handler sees them. Each handler owns its own threshold.
+    logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
     # Dynamic check for console log format
     console_format = "text"
+    configured_level = "INFO"
+    configured_file = "logs/pipeline.log"
     try:
         from utils.config import load_config
         cfg = load_config()
         if isinstance(cfg, dict) and "logging" in cfg:
             console_format = cfg["logging"].get("console_format", "text")
+            configured_level = cfg["logging"].get("level", "INFO")
+            configured_file = cfg["logging"].get("log_file", "logs/pipeline.log")
     except Exception:
         pass
 
-    if console_format == "json":
-        c_handler = JsonStreamHandler(sys.stdout)
-    else:
-        c_handler = RichHandler(
-            console=_CONSOLE,
-            show_time=False,
-            show_path=False,
-            rich_tracebacks=True,
-            tracebacks_show_locals=False,
-            markup=False,
-            show_level=False,
-        )
-    c_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
+    console_format = os.environ.get("YT_CLIPS_CONSOLE_FORMAT", console_format)
+    level = os.environ.get("YT_CLIPS_LOG_LEVEL", level or configured_level)
+    c_handler = _console_handler(console_format, level)
     logger.addHandler(c_handler)
 
-    f_handler = JsonFileHandler(log_file)
+    f_handler = JsonFileHandler(log_file or configured_file)
     f_handler.setLevel(logging.DEBUG)
     logger.addHandler(f_handler)
 
@@ -305,14 +332,30 @@ class _PhaseHandle:
             ph.set(exported=len(clips))
     """
 
-    __slots__ = ("metadata",)
+    __slots__ = ("metadata", "status")
 
     def __init__(self) -> None:
         self.metadata: dict = {}
+        self.status = "ok"
 
     def set(self, **kwargs) -> None:
         """Attach key/value metadata recorded on the phase's completion log."""
         self.metadata.update(kwargs)
+
+    def outcome(self, status: str, **metadata) -> None:
+        """Record a non-exception outcome without falsely logging success."""
+        if status not in {"ok", "failed", "partial", "review", "empty", "skipped"}:
+            raise ValueError(f"Invalid phase outcome: {status}")
+        self.status = status
+        self.set(**metadata)
+
+
+def log_skipped(logger, name: str, stage: str, run_id: str, reason: str, **metadata) -> None:
+    """A skip is observable, but is not a completed stage."""
+    logger.info("[%s] skipped: %s", name, reason, extra={
+        "stage": stage, "phase": name, "status": "skipped", "run_id": run_id,
+        "duration_ms": 0, "metadata": {"reason": reason, **metadata},
+    })
 
 
 @contextmanager
@@ -384,10 +427,12 @@ def run_phase(
         raise
     else:
         duration_ms = int((time.monotonic() - t0) * 1000)
-        logger.info(
-            "[%s]%s done %.1fs", name, prog, duration_ms / 1000.0,
+        level = logging.INFO if handle.status in {"ok", "skipped"} else logging.WARNING
+        logger.log(
+            level, "[%s]%s %s %.1fs", name, prog,
+            "done" if handle.status == "ok" else handle.status, duration_ms / 1000.0,
             extra=_extra(
-                "ok", duration_ms,
+                handle.status, duration_ms,
                 metadata=handle.metadata or None,
             ),
         )

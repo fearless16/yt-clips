@@ -5,6 +5,8 @@ import re
 from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Set
 
+from utils.devanagari import to_roman
+
 # Spelling corrections for common Whisper audio transcript errors
 CRICKET_SPELLING_CORRECTIONS = {
     # Players
@@ -137,9 +139,32 @@ CRICKET_SPELLING_CORRECTIONS = {
     "wct20": "T20 World Cup",
 }
 
+# Full phrases only: a city, surname, or guessed ASR name is not an entity.
+# Derive Roman aliases with the same scheme used by discovery, rather than
+# maintaining a second set of hand-written phonetic spellings.
+_HINDI_CRICKET_PHRASES = {
+    "हार्दिक पांड्या": "Hardik Pandya",
+    "हर्षित राणा": "Harshit Rana",
+    "गौतम गंभीर": "Gautam Gambhir",
+    "पंजाब किंग्स": "Punjab Kings",
+    "मुंबई इंडियंस": "Mumbai Indians",
+    "टेस्ट मैच": "test match",
+    "रोहित शर्मा": "Rohit Sharma",
+    "केएल राहुल": "KL Rahul",
+    "के एल राहुल": "KL Rahul",
+    "यशस्वी जायसवाल": "Yashasvi Jaiswal",
+    "जसप्रीत बुमराह": "Jasprit Bumrah",
+    "ऋषभ पंत": "Rishabh Pant",
+    "कुलदीप यादव": "Kuldeep Yadav",
+}
+for _phrase, _canonical in _HINDI_CRICKET_PHRASES.items():
+    CRICKET_SPELLING_CORRECTIONS[_phrase] = _canonical
+    CRICKET_SPELLING_CORRECTIONS[to_roman(_phrase).casefold()] = _canonical
+
 # Canonical player names for SEO tag enrichment
 CRICKET_PLAYERS: Set[str] = {
     "Yuvraj Singh",
+    "Harshit Rana", "Gautam Gambhir",
     "Virat Kohli", "Rohit Sharma", "Jasprit Bumrah", "MS Dhoni", "Hardik Pandya",
     "Suryakumar Yadav", "Rishabh Pant", "Shubman Gill", "Yashasvi Jaiswal",
     "Ravindra Jadeja", "KL Rahul", "Shreyas Iyer", "Rinku Singh", "Axar Patel",

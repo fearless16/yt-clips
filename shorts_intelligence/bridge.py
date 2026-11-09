@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from shorts_intelligence.config import RuntimeConfig
+from shorts_intelligence.completeness import completeness_status, completeness_value
 from shorts_intelligence.policy import SelectionPolicy
 from shorts_intelligence.store import ShortsStore
 
@@ -45,7 +46,9 @@ def record_exported(
                 "duration_bucket": _duration_bucket(duration),
                 "selection_score_bucket": _score_bucket(score),
                 "speed_bucket": _speed_bucket(speed),
-                "complete_thought": "true",
+                "complete_thought": {True: "true", False: "false", None: "unknown"}[completeness_value(item)],
+                "completeness_status": completeness_status(item),
+                "semantic_review": str(item.get("semantic_review", "NOT CHECKED")),
             }
             segments = item.get("intelligence_segments") or []
             if segments:
@@ -155,7 +158,11 @@ def apply_selection_policy(
     root_config: dict[str, Any],
     candidates: Iterable[dict[str, Any]],
 ) -> int:
-    """Apply only bounded evidence scores; never alter clip boundaries."""
+    """Adjust reviewed candidates only; unknown drafts await review, failures reject.
+
+    The semantic gate remains mandatory for selection/release. Abstaining here
+    lets discovery reach the reviewer without awarding an unverified bonus.
+    """
     config = RuntimeConfig.from_mapping(root_config)
     if not config.enabled:
         return 0
@@ -168,23 +175,29 @@ def apply_selection_policy(
     )
     matched = 0
     for candidate in candidates:
+        complete = completeness_value(candidate)
+        base_score = _float(candidate.get("final_score")) - _float(candidate.get("intelligence_adjustment"))
         result = policy.evaluate(
             duration_seconds=max(
                 0.0,
                 _float(candidate.get("end")) - _float(candidate.get("start")),
             ),
-            complete_thought=bool(candidate.get("complete_thought", True)),
+            complete_thought=complete,
         )
         candidate["intelligence_shadow_adjustment"] = result.shadow_adjustment
         candidate["intelligence_adjustment"] = result.applied_adjustment
         candidate["intelligence_segments"] = list(result.matched_segments)
-        if not result.eligible:
+        candidate["intelligence_policy_reason"] = result.reason
+        # Unknown discovery candidates need editorial review, not a hard veto.
+        # The policy still refuses to award them any learned score adjustment.
+        if complete is False:
             candidate["should_reject"] = True
-            candidate.setdefault("rejection_reasons", []).append(result.reason)
+            reasons = candidate.setdefault("rejection_reasons", [])
+            if result.reason not in reasons:
+                reasons.append(result.reason)
         if result.matched_segments:
             matched += 1
-        if result.applied_adjustment:
-            candidate["final_score"] = float(candidate.get("final_score", 0.0)) + result.applied_adjustment
+        candidate["final_score"] = base_score + result.applied_adjustment
     return matched
 
 

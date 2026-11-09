@@ -292,11 +292,11 @@ def test_one_click_windows_script_uses_canonical_safe_cli():
     assert 'set /p "UPLOAD=' in script
     assert '/i "%UPLOAD%"=="y"' in script
     assert (
-        '"%PY%" -m automation.cli "%URL%" --sync --upload --schedule'
+        '"%PY%" -m automation.cli "%URL%" --source-scoped --sync --upload --schedule --skip-instagram'
         in script
     )
     assert (
-        '"%PY%" -m automation.cli "%URL%" --skip-instagram\n'
+        '"%PY%" -m automation.cli "%URL%" --source-scoped --skip-instagram\n'
         in script
     )
     assert (
@@ -328,7 +328,7 @@ def test_windows_launcher_checks_oauth_only_for_explicit_upload():
     assert "setup_auth.py" not in script
     assert script.index(":upload") < script.index("ensure_fresh_tokens(True)")
     assert script.index("ensure_fresh_tokens(True)") < script.index(
-        '"%PY%" -m automation.cli "%URL%" --sync --upload --schedule'
+        '"%PY%" -m automation.cli "%URL%" --source-scoped --sync --upload --schedule --skip-instagram'
     )
 
 
@@ -337,8 +337,8 @@ def test_windows_launcher_propagates_pipeline_failures():
         encoding="utf-8"
     )
     commands = [
-        '"%PY%" -m automation.cli "%URL%" --sync --upload --schedule',
-        '"%PY%" -m automation.cli "%URL%" --skip-instagram',
+        '"%PY%" -m automation.cli "%URL%" --source-scoped --sync --upload --schedule --skip-instagram',
+        '"%PY%" -m automation.cli "%URL%" --source-scoped --skip-instagram',
         ('"%PY%" -m automation.cli "https://youtu.be/local" '
          '--skip-download --skip-transcribe --skip-instagram'),
         ('"%PY%" dry_run.py "https://youtu.be/test" '
@@ -408,7 +408,7 @@ def test_required_download_failure_stops_all_downstream_stages(monkeypatch):
         "export.export_all", lambda *a, **k: calls.append("export") or []
     )
 
-    result = orchestrator.run("https://youtu.be/AbC123xyz98")
+    result = orchestrator.run("https://youtu.be/AbC123xyz98", composition="portrait-caption-v1")
 
     assert calls == ["download"]
     assert result.failures == ["stage1c: network unavailable"]

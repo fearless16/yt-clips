@@ -58,13 +58,16 @@ def _upload_file(service, local_path: Path, parent_folder_id: str) -> str:
         resumable=False,
     )
 
-    log.info("⬆️  Uploading: %s (%.1f MB) …", local_path.name, local_path.stat().st_size / 1_048_576)
-
-    request = service.files().create(
-        body=file_metadata, media_body=media, fields="id,name,webViewLink"
-    )
-
-    response = request.execute()
+    try:
+        log.info("⬆️  Uploading: %s (%.1f MB) …", local_path.name, local_path.stat().st_size / 1_048_576)
+        request = service.files().create(
+            body=file_metadata, media_body=media, fields="id,name,webViewLink"
+        )
+        response = request.execute()
+    finally:
+        # Requests (including failed ones) may retain MediaFileUpload references.
+        # Release the owned file deterministically instead of waiting for GC.
+        media.stream().close()
 
     file_id = response.get("id")
     link = response.get("webViewLink", "")
@@ -242,6 +245,7 @@ def sync_db_to_drive() -> bool:
 
     for fname in db_files:
         local_path = Path(fname)
+        media = None
         try:
             # If file already exists on Drive, update it instead of creating duplicate
             query = f"'{db_folder_id}' in parents and name = '{fname}' and trashed = false"
@@ -261,6 +265,9 @@ def sync_db_to_drive() -> bool:
             log.info("[db_sync] Uploaded %s (%.1f KB)", fname, local_path.stat().st_size / 1024)
         except Exception as e:
             log.warning("[db_sync] Failed to upload %s: %s", fname, e)
+        finally:
+            if media is not None:
+                media.stream().close()
 
     return True
 

@@ -37,6 +37,7 @@ download:
 # ─── Transcription ────────────────────────────────────────────────────────────
 transcription:
   alignment_model: "medium"             # shortlisted ranges only; benchmark Hindi names/numbers before release
+  alignment_fallback_model: "large-v3-turbo" # one explicit retry; never fabricate/drop bad word intervals
   alignment_context_seconds: 2.0        # preserve neighboring speech when checking cut boundaries
   model: "small"                        # tiny | base | small | medium | large-v3
   language: "hi"                        # Hindi commentary — use hi for better accuracy
@@ -132,7 +133,9 @@ layout:
 
 # ─── Export ───────────────────────────────────────────────────────────────────
 export:
-  reserve_caption_band: true           # moving-blur portrait canvas; sharp picture above approved neon card
+  composition: "cricket-gameplay-stadium-v1"  # approved stadium, equal 16:9 panels, EA07 preferred
+  gameplay_manifest: "input/gameplay/library-clean-v2.json"  # enabled EA07 stock; screened ranges, exact-file owner release still required
+  reserve_caption_band: true           # legacy fallback only; dominant hosts use full-width portrait composition
   width: 1080
   height: 1920
   global_speed_factor: 1.0              # Set to 1.0 to use variable speed only (frame_analyzer.py calculates dynamic speed)
@@ -175,12 +178,12 @@ export:
     stroke_width: 3
     font_file: ""               # optional .ttf path; use forward slashes e.g. C:/Windows/Fonts/arial.ttf
 
-  # ─── Hinglish Captions (approved neon renderer) ──────────────────────────
+  # ─── Hinglish Captions (reference portrait renderer) ─────────────────────
   captions:
     require_word_timing: true          # local word-timed ASR for shortlisted ranges
     enabled: true
-    style: "neon-reference-v2"    # informational identity; renderer is pinned, not a theme switch
-    from_bottom: 0.20            # Fixed 20% height from bottom (384px)
+    style: "portrait-glass-v1"    # legacy portrait; stadium profile forces its own 96px reference style
+    from_bottom: 0.20            # legacy neon position only; portrait uses shared face-safe geometry
     max_words_per_cue: 4         # Micro-chunking (2-4 words per card, no walls of text)
     model: "deepseek-v4-flash"   # exact contextual Roman Hindi; no silent provider/model fallback
     allow_documented_successor: true  # V4 retired: explicitly accept official deepseek-flash (V4.1); record actual ID
@@ -204,6 +207,10 @@ youtube:
   upload_chunk_size_mb: 8               # Resumable chunk size (finite => real progress + resume)
   upload_max_retries: 6                 # Max transient-error retries per upload
   upload_deadline_seconds: 1800         # Hard wall-clock cap per upload (prevents hangs)
+  thumbnail_processing_timeout_seconds: 180  # wait for succeeded before thumbnails.set
+  thumbnail_verify_timeout_seconds: 90       # API + served 9:16 image propagation
+  thumbnail_poll_interval_seconds: 3
+  thumbnail_max_poll_attempts: 60             # second bound even if a clock stalls
 
 # ─── Shorts Intelligence v2 ─────────────────────────────────────────────────
 # Isolated canonical learner. Promotion requires a leak-free temporal replay.
@@ -269,6 +276,8 @@ testing:
 # ── SEO ────────────────────────────────────────────────────────────────────────
 # Clip-specific, source-grounded packaging; no paid keyword dependency.
 seo:
+  export_deadline_seconds: 300          # finite packaging wait; late workers cannot publish artifacts
+  format_repair_timeout_seconds: 60     # one title/cover-only JSON correction, no generic fallback
   title_max_chars: 60                   # one honest premise, mobile-first
   min_search_terms: 1                   # internal grounded research, not public keyword stuffing
   max_search_terms: 12
@@ -354,7 +363,19 @@ clip_selection:
   use_llm_arbiter: true                # Run LLM Final Arbiter pass
   min_quality: 38.0                    # Hard publishability floor after transcript-aware discovery
   min_selected: 0                      # zero READY clips is valid; never backfill rejection
-  max_selected: 3                      # Max clips per stream — fewer, better Shorts beat spam volume
+  max_selected: 2                      # default stock pair: two distinct moments, never forced approval
+  alignment_max_boundary_shift: 3       # bounded word/phrase repair; changed cuts need fresh text review
+  editorial:
+    enabled: true                      # original transcript -> shortlist -> word preflight -> final review
+    target_min: 2                      # target, never forced approval
+    shortlist_size: 6
+    max_alignment_candidates: 8         # includes one bounded search for replacement moments
+    max_speech_recoveries: 2             # fresh primary ASR rejected as garbled -> fallback before rediscovery
+    max_transcript_chars: 180000        # per section, original cues; oversized input is explicit REVIEW
+    max_sections: 3
+    max_calls: 8                        # all initial/retry/rescue/final requests combined
+    max_tokens: 32768                  # high thinking plus complete final JSON
+    timeout_seconds: 300
   discovery_candidates: 60             # Deep scan across a long stream before final ranking
   prefer_source_match: true             # For match streams, prioritize clips naming either advertised team
   source_match_min_candidates: 3        # Fall back to all cricket clips if evidence is too sparse
@@ -365,6 +386,7 @@ clip_selection:
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging:
   level: "INFO"                         # DEBUG | INFO | WARNING | ERROR
+  console_format: "text"                # text = styled dashboard; json = machine-readable
   log_file: "logs/pipeline.log"
 
 # ── Instagram Reels (SEO + upload, PLAN.md §config) ──────────────────────────

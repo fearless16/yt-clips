@@ -17,6 +17,32 @@ def test_dry_run_stubs_support_aurora_cover_without_hiding_composition_errors(tm
     assert evidence["design"] == "aurora-v1"
 
 
+@pytest.mark.parametrize("outcome", ["exception", "silent_missing"])
+def test_dry_run_cannot_pass_when_thumbnail_generation_fails(monkeypatch, outcome):
+    import dry_run
+    import thumbnail
+
+    def fail(*_):
+        raise ValueError("fixture thumbnail failure")
+
+    if outcome == "exception":
+        monkeypatch.setattr(thumbnail.ThumbnailGenerator, "generate_for_clip", fail)
+    else:
+        # Verify acceptance independently of the batch's own error reporting.
+        monkeypatch.setattr(thumbnail, "process_all_thumbnails", lambda *_: thumbnail.ThumbnailBatchResult())
+    result = dry_run.dry_run("https://youtu.be/test", skip_download=True, skip_transcribe=True)
+    assert result["exported"]
+    assert "download" in result["skipped_stages"]
+    assert "download" not in result["logged_stages"]
+    if outcome == "exception":
+        assert any("stage7b" in failure and "fixture thumbnail failure" in failure
+                   for failure in result["failures"])
+    else:
+        assert any("acceptance: missing thumbnails" in failure for failure in result["failures"])
+    assert result["validation"]["thumbnails_missing"] == len(result["exported"])
+    assert not dry_run._print_validation_report(result)
+
+
 def test_module_isolation_excludes_dependencies_and_face_os():
     from types import SimpleNamespace
     import dry_run
@@ -149,3 +175,19 @@ def test_sandbox_log_handles_close_without_closing_live_logs(tmp_path, monkeypat
         for handler in [live, *owned]:
             logger.removeHandler(handler)
             handler.close()
+
+
+def test_first_import_dry_run_cannot_leave_fake_asr_models_in_live_cache():
+    """A fresh worker differs from pytest, which imports alignment at collection."""
+    import subprocess
+    import sys
+    program = """
+import dry_run
+result = dry_run.dry_run('https://youtu.be/test', skip_download=True, skip_transcribe=True)
+assert not result['failures'], result['failures']
+from automation import speech_alignment
+assert not speech_alignment._MODELS, 'fake Whisper instances escaped sandbox isolation'
+"""
+    result = subprocess.run([sys.executable, "-c", program], capture_output=True,
+                            text=True, encoding="utf-8", errors="replace", timeout=90)
+    assert result.returncode == 0, result.stdout[-1500:] + result.stderr[-1500:]

@@ -304,10 +304,19 @@ def process_transcript_segments(
     return all_cues
 
 
-def render_transparent_cards_batch(cues: List[CaptionCue], output_dir: Path) -> List[CaptionCard]:
-    """Render approved neon cards; measured frame/text bounds accompany each PNG."""
+def render_transparent_cards_batch(cues: List[CaptionCue], output_dir: Path, *,
+                                   style: str = "neon-reference-v2") -> List[CaptionCard]:
+    """Render the selected local design; measured bounds accompany each PNG."""
     from playwright.sync_api import sync_playwright
     from automation.caption_design import caption_document, DESIGN_VERSION, MEASURE_CAPTION_JS
+    if style == "portrait-glass-v1":
+        from automation.portrait_caption import caption_document, DESIGN_VERSION, MEASURE_CAPTION_JS
+    elif style == "gameplay-hud-v1":
+        from automation.gameplay_caption import caption_document, DESIGN_VERSION, MEASURE_CAPTION_JS
+    elif style == "stadium-reference-v1":
+        from automation.stadium_caption import caption_document, DESIGN_VERSION, MEASURE_CAPTION_JS
+    elif style != "neon-reference-v2":
+        raise ValueError("Unknown caption style: " + style)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     cards = []
@@ -353,8 +362,9 @@ def prepare_clip_captions(
     require_word_timing: bool = False,
     hinglish_model: Optional[str] = None,
     allow_documented_successor: bool = False,
+    caption_style: str = "neon-reference-v2",
 ) -> List[CaptionCard]:
-    """Prepare approved neon-style cards; model output remains unapproved speech evidence."""
+    """Prepare styled cards; model output remains unapproved speech evidence."""
     if not transcript_segments:
         if require_word_timing:
             raise ValueError("Word-timed captions required; no speech evidence supplied")
@@ -377,9 +387,15 @@ def prepare_clip_captions(
             (output_dir / "caption_processing.json").write_text(
                 json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
             transcript_segments = [{"start": clip_start, "end": clip_end, "words": converted}]
-        cues = word_timed_cues(transcript_segments, clip_start, clip_end, max_words_per_cue)
+        phrase_fits = None
+        if caption_style == "stadium-reference-v1":
+            from automation.stadium_caption import phrase_fits
+        cues = word_timed_cues(transcript_segments, clip_start, clip_end, max_words_per_cue,
+                               phrase_fits=phrase_fits)
         if not cues:
             raise ValueError("Word-timed captions required; cue-level estimates are not accepted")
+        if caption_style != "neon-reference-v2":
+            return render_transparent_cards_batch(cues, output_dir, style=caption_style)
         return render_transparent_cards_batch(cues, output_dir)
 
     # 1. Normalize rolling timestamps to true spoken utterance boundaries
@@ -433,11 +449,13 @@ def prepare_clip_captions(
     if not cues:
         return []
 
+    if caption_style != "neon-reference-v2":
+        return render_transparent_cards_batch(cues, output_dir, style=caption_style)
     return render_transparent_cards_batch(cues, output_dir)
 
 
 def word_timed_cues(segments: List[Dict], clip_start: float, clip_end: float,
-                    max_words: int = 4) -> List[CaptionCue]:
+                    max_words: int = 4, *, phrase_fits=None) -> List[CaptionCue]:
     """Use actual ASR/alignment word intervals; never slice text by character share.
 
     Timings remain ASR estimates and require listening review. Boundary-straddling
@@ -457,13 +475,16 @@ def word_timed_cues(segments: List[Dict], clip_start: float, clip_end: float,
     groups = []
     group = []
     for word in words:
+        if phrase_fits is not None and not phrase_fits(word[2]):
+            raise ValueError("Aligned source word exceeds approved caption bounds; review wording, do not shrink/drop it")
         # Joined Hindi source tokens may romanize to multiple display words.
         # Keep their whole original interval, but count readable display words
         # when choosing a phrase break. Never invent per-syllable timestamps.
         display_words = sum(len(item[2].split()) for item in group)
         display_chars = len(" ".join(item[2] for item in [*group, word]))
         if group and (display_words + len(word[2].split()) > max_words
-                      or display_chars > 42 or word[0] - group[-1][1] > 0.45):
+                      or display_chars > 42 or word[0] - group[-1][1] > 0.45
+                      or (phrase_fits is not None and not phrase_fits(" ".join(item[2] for item in [*group,word])))):
             groups.append(group)
             group = []
         group.append(word)
@@ -474,7 +495,8 @@ def word_timed_cues(segments: List[Dict], clip_start: float, clip_end: float,
     if (len(groups) >= 2 and len(groups[-1]) == 1 and len(groups[-2]) >= 3
             and groups[-1][0][2].lower().strip(".,!?") in {"hai", "hain", "tha", "the", "hoon"}
             and groups[-1][0][0] - groups[-2][-1][1] <= .45
-            and len(groups[-2][-1][2].split()) + len(groups[-1][0][2].split()) <= max_words):
+            and len(groups[-2][-1][2].split()) + len(groups[-1][0][2].split()) <= max_words
+            and (phrase_fits is None or phrase_fits(groups[-2][-1][2]+" "+groups[-1][0][2]))):
         groups[-1].insert(0, groups[-2].pop())
     cues = []
     for group in groups:

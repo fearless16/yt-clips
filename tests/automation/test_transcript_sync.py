@@ -16,6 +16,12 @@ from automation.delivery_qc import av_timing_issues
 from automation.speech_alignment import alignment_issues, transcribe_range
 
 
+@pytest.fixture(autouse=True)
+def standard_renderer_profile(monkeypatch):
+    """These regressions target the standard trim/retime renderer, not gameplay."""
+    monkeypatch.setitem(export.cfg["export"], "composition", "portrait-caption-v1")
+
+
 def word(start, end, text="retained", probability=0.99):
     return {"start": start, "end": end, "word": text, "probability": probability}
 
@@ -155,9 +161,10 @@ def test_overlapping_words_are_held_before_render():
 @pytest.mark.parametrize("start", [0.5, 10.25])
 def test_asr_adds_context_and_offsets_words_from_context_start(tmp_path, monkeypatch, start):
     import automation.speech_alignment as alignment
+    import numpy as np
     context_start = max(0, start - 2)
-    local_word = SimpleNamespace(start=start-context_start-0.1, end=start-context_start+0.3,
-                                 word="crossing", probability=0.99)
+    local_word = SimpleNamespace(start=np.float64(start-context_start-0.1), end=np.float64(start-context_start+0.3),
+                                 word="crossing", probability=np.float64(0.99))
     local_segment = SimpleNamespace(start=local_word.start, end=local_word.end,
                                     text="crossing", words=[local_word])
     model = Mock()
@@ -172,6 +179,11 @@ def test_asr_adds_context_and_offsets_words_from_context_start(tmp_path, monkeyp
     assert float(cmd[cmd.index("-t")+1]) == start+12-context_start
     assert segments[0]["words"][0]["start"] == pytest.approx(start-0.1)
     assert segments[0]["requested_range"] == [start, start+10]
+    assert model.transcribe.call_args.kwargs["chunk_length"] == 8
+    assert model.transcribe.call_args.kwargs["condition_on_previous_text"] is False
+    assert model.transcribe.call_args.kwargs["vad_filter"] is False
+    assert type(segments[0]["start"]) is float
+    assert all(type(segments[0]["words"][0][key]) is float for key in ("start", "end", "probability"))
     assert any("straddles" in issue for issue in alignment_issues(segments, start, start+10))
 
 
@@ -184,7 +196,7 @@ def test_required_caption_preparation_rejects_empty_evidence(tmp_path):
 def test_required_captions_force_standard_renderer(tmp_path, monkeypatch, alternate):
     monkeypatch.setattr(export, "premium_enabled", alternate == "premium_enabled")
     monkeypatch.setattr(export, "super_res_enabled", alternate == "super_res_enabled")
-    monkeypatch.setattr(export, "_get_video_info", lambda *a: {"fps": 30})
+    monkeypatch.setattr(export, "_get_video_info", lambda *a: {"fps": 30, "width": 1920, "height": 1080})
     monkeypatch.setattr(export, "_get_best_encoder", lambda: "libx264")
     monkeypatch.setattr(export, "_has_audio_stream", lambda *a: True)
     monkeypatch.setattr(export, "_check_free_space", lambda *a: True)

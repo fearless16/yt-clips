@@ -78,11 +78,12 @@ def candidate(start, score=60, text="India win the cricket match!"):
 
 def run_arbiter(monkeypatch, candidates, selected, context=None):
     ai = Mock()
-    ai.generate_text.return_value = json.dumps({"selected": selected})
+    ai.generate_json.return_value = json.dumps({"selected": [
+        {"complete_thought": True, **selection} for selection in selected]})
     monkeypatch.setattr(arbiter, "_get_ai", lambda: ai)
     context = context if context is not None else {"transcript_segments": []}
     result = arbiter.llm_arbiter_refine(candidates, context, max_selected=1)
-    return result, ai.generate_text.call_args.args[0], context
+    return result, ai.generate_json.call_args.args[0], context
 
 
 def test_arbiter_compares_late_candidate_outside_old_top_k(monkeypatch):
@@ -111,9 +112,9 @@ def test_truncated_script_cannot_be_selected_as_complete(monkeypatch):
 
 def test_final_selection_cannot_repeat_overlapping_moment(monkeypatch):
     ai = Mock()
-    ai.generate_text.return_value = json.dumps({"selected": [
-        {"candidate_id": 1, "score": 90, "reason": "payoff"},
-        {"candidate_id": 2, "score": 80, "reason": "same payoff"}]})
+    ai.generate_json.return_value = json.dumps({"selected": [
+        {"candidate_id": 1, "score": 90, "complete_thought": True, "reason": "payoff"},
+        {"candidate_id": 2, "score": 80, "complete_thought": True, "reason": "same payoff"}]})
     monkeypatch.setattr(arbiter, "_get_ai", lambda: ai)
     result = arbiter.llm_arbiter_refine([candidate(0), candidate(1)], {}, max_selected=2)
     assert len(result) == 1
@@ -155,7 +156,7 @@ def test_candidate_window_retains_cue_identity_and_word_provenance():
     assert result[0]["source_cue_ids"] == [8]
     assert result[0]["boundary_method"] == "source_words"
     assert result[0]["words"] == words()
-    assert result[0]["complete_thought"] is False
+    assert result[0]["complete_thought"] is None
 
 
 def test_merging_cues_preserves_all_source_ids():
@@ -184,7 +185,9 @@ def test_actual_word_overlap_is_never_hidden_by_midpoint_cut():
 
 def test_non_llm_selection_also_deduplicates_overlapping_events():
     from automation.clip_selection.selector import ClipSelector
-    result = ClipSelector(use_llm_arbiter=False).select([candidate(0), candidate(1)], {}, max_selected=2)
+    result = ClipSelector(use_llm_arbiter=False).select([
+        {**candidate(0), "complete_thought": True},
+        {**candidate(1), "complete_thought": True}], {}, max_selected=2)
     assert len(result) == 1
 
 
@@ -223,6 +226,7 @@ def test_real_discovery_preserves_original_script_and_provenance(tmp_path, monke
     import yaml
     from automation.clip_selection.selector import ClipSelector
     import automation.editorial_evidence as evidence
+    monkeypatch.setitem(pipeline.cfg["clip_selection"], "editorial", {"enabled": False})
 
     transcript = tmp_path / "speech.json"
     original = [{"start": 0, "end": 15, "text": "इंडिया क्रिकेट मैच में छह रन बनाता है।", "words": [
@@ -236,7 +240,12 @@ def test_real_discovery_preserves_original_script_and_provenance(tmp_path, monke
     monkeypatch.setattr("shorts_intelligence.bridge.apply_selection_policy", lambda *args: 0)
     monkeypatch.setattr(ClipSelector, "score_candidates", lambda self, candidates, context: [
         {**c, "final_score": 80} for c in candidates])
-    monkeypatch.setattr(ClipSelector, "select", lambda self, candidates, *args, **kwargs: candidates[:1])
+    def select_reviewed(self, candidates, *args, **kwargs):
+        from shorts_intelligence.completeness import set_completeness
+        set_completeness(candidates[0], "PASS", reason="retained setup and payoff", method="text_only")
+        candidates[0]["semantic_review"] = "text_only"
+        return candidates[:1]
+    monkeypatch.setattr(ClipSelector, "select", select_reviewed)
     monkeypatch.setattr(evidence, "source_identity", lambda _: {"duration": 15})
     monkeypatch.setitem(pipeline.cfg, "release_review", {"required": True})
     output = tmp_path / "highlights.yaml"
@@ -245,7 +254,8 @@ def test_real_discovery_preserves_original_script_and_provenance(tmp_path, monke
     payload = yaml.safe_load(output.read_text(encoding="utf-8"))["clip1"]
     assert payload["source_cue_ids"] == [0]
     assert payload["boundary_method"] == "source_words"
-    assert payload["complete_thought"] is False
+    assert payload["complete_thought"] is True
+    assert payload["completeness"]["method"] == "text_only"
     # Original text must remain available to compare against selection-normalized script.
     stored = json.loads(output.with_suffix(".editorial.json").read_text(encoding="utf-8"))
     assert stored["candidates"][0]["source_script"] == original[0]["text"]

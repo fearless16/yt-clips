@@ -141,10 +141,10 @@ def test_arbiter_prompt_carries_trend_demand(monkeypatch):
     captured = {}
 
     class FakeAI:
-        def generate_text(self, prompt, system_instruction=None):
+        def generate_json(self, prompt, system_instruction=None):
             captured["prompt"] = prompt
             captured["system"] = system_instruction
-            return '{"selected":[{"candidate_id":1,"score":80,"reason":"hot topic"}]}'
+            return '{"selected":[{"candidate_id":1,"score":80,"complete_thought":true,"reason":"hot topic"}]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: FakeAI())
     candidates = [
@@ -186,9 +186,9 @@ def test_arbiter_candidate_lines_carry_content_type(monkeypatch):
     captured = {}
 
     class FakeAI:
-        def generate_text(self, prompt, system_instruction=None):
+        def generate_json(self, prompt, system_instruction=None):
             captured["prompt"] = prompt
-            return '{"selected":[{"candidate_id":1,"score":70,"reason":"ok"}]}'
+            return '{"selected":[{"candidate_id":1,"score":70,"complete_thought":true,"reason":"ok"}]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: FakeAI())
     candidates = [
@@ -243,6 +243,8 @@ def test_bridge_records_content_type_feature(tmp_path, monkeypatch):
 def test_pipeline_attaches_content_type_to_highlights(tmp_path, monkeypatch):
     """detect_highlights must stamp every selected clip with its angle."""
     import automation.clip_selection.pipeline as cs_pipeline
+    # Isolate the legacy selector under test; the curator stamps types too.
+    monkeypatch.setitem(cs_pipeline.cfg["clip_selection"], "editorial", {"enabled": False})
 
     input_dir = tmp_path / "input"
     transcripts_dir = tmp_path / "transcripts"
@@ -282,6 +284,9 @@ def test_pipeline_attaches_content_type_to_highlights(tmp_path, monkeypatch):
             return candidates
 
         def select(self, scored, context, max_selected=3, min_selected=0, min_quality=45.0):
+            from shorts_intelligence.completeness import set_completeness
+            for candidate in scored:
+                set_completeness(candidate, "PASS", reason="retained setup and payoff", method="text_only")
             return [dict(c) for c in scored[:max_selected]]
 
     monkeypatch.setattr(cs_pipeline, "ClipSelector", FakeSelector)
@@ -316,5 +321,5 @@ def test_config_targets_natural_pace_shorts():
     assert int(hl.get("preferred_duration_max", 99)) <= 40
     assert exp.get("variable_speed_aggressive") is False
     assert float(sel["min_quality"]) >= 38.0
-    assert int(sel["max_selected"]) == 3
+    assert int(sel["max_selected"]) == 2
     assert int(seo["title_max_chars"]) == 60

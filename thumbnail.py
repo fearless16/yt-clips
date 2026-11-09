@@ -2,6 +2,7 @@ import os
 import json
 import subprocess
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
@@ -42,10 +43,13 @@ class ThumbnailGenerator:
         self.text_color = self.config.get("text_color", "#FFFFFF")
         self.stroke_color = self.config.get("stroke_color", "#000000")
         self.stroke_width = self.config.get("stroke_width", 8)
+        # Batch rendering defers evidence installation along with the JPEG.
+        self._cover_evidence_path = None
 
     def generate_for_clip(self, video_path: str, metadata_path: str, output_path: str):
         """Generates a thumbnail for a given clip using AI if available."""
-        log.info(f"Generating thumbnail for {video_path}...")
+        log.info("[%s] Generating cover", Path(video_path).stem)
+        log.debug("Cover input=%s metadata=%s output=%s", video_path, metadata_path, output_path)
         
         # Load metadata for text and context
         with open(metadata_path, "r", encoding="utf-8") as f:
@@ -156,7 +160,7 @@ class ThumbnailGenerator:
             if logo and Path(logo).is_file():
                 cover = self._add_logo(cover, logo)
         cover.save(output, quality=95)
-        atomic_json(clip.with_name(f"{clip.stem}_cover.json"), {
+        atomic_json(self._cover_evidence_path or clip.with_name(f"{clip.stem}_cover.json"), {
             "source_path": str(source.resolve()), "selected": winner, "candidates": candidates,
             "text": cover_text, "review_status": "NOT CHECKED",
             "selection_method": "technical sharpness/exposure ranking only; expression/context require owner review",
@@ -230,26 +234,75 @@ class ThumbnailGenerator:
         img.paste(logo, (w - logo_w - 40, 40), logo)
         return img
 
-def process_all_thumbnails(shorts_dir: str):
-    from automation.artifacts import read_metadata
+@dataclass
+class ThumbnailBatchResult:
+    """Artifact outcomes only; a generated cover still needs editorial review."""
 
+    generated: list[Path] = field(default_factory=list)
+    preserved: list[Path] = field(default_factory=list)
+    skipped: list[Path] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+
+
+def process_all_thumbnails(shorts_dir: str) -> ThumbnailBatchResult:
+    from automation.artifacts import read_metadata
+    from automation.youtube_delivery import delivery_lock
+
+    result = ThumbnailBatchResult()
     if not cfg.get("thumbnail", {}).get("enabled", True):
-        return
+        return result
     generator = ThumbnailGenerator()
     shorts_path = Path(shorts_dir)
     
-    videos = list(shorts_path.glob("*.mp4"))
+    videos = sorted(shorts_path.glob("*.mp4"))
     for video in videos:
         meta_path = video.with_name(f"{video.stem}_metadata.json")
-        if read_metadata(video) is not None:
-            thumb_path = video.with_name(f"{video.stem}_thumb.jpg")
+        if read_metadata(video) is None:
+            result.skipped.append(video)
+            continue
+        thumb_path = video.with_name(f"{video.stem}_thumb.jpg")
+        try:
             if thumb_path.exists():
+                if not thumb_path.is_file() or thumb_path.stat().st_size == 0:
+                    raise ValueError("Existing cover is empty or not a file; explicit rebuild required")
                 log.info("Preserving existing cover for %s; explicit rebuild required", video.name)
+                result.preserved.append(thumb_path)
                 continue
-            try:
-                generator.generate_for_clip(str(video), str(meta_path), str(thumb_path))
-            except Exception as e:
-                log.warning("Thumbnail generation failed for %s: %s", video.name, e)
+            # Failed/partial outputs must not become a preserved cover on retry.
+            with tempfile.TemporaryDirectory(prefix=f".{video.stem}-thumbnail-", dir=shorts_path) as directory:
+                pending = Path(directory) / "cover.jpg"
+                pending_evidence = Path(directory) / "cover.json"
+                generator._cover_evidence_path = pending_evidence
+                success = generator.generate_for_clip(str(video), str(meta_path), str(pending))
+                if not success:
+                    raise ValueError("Thumbnail generator reported failure")
+                if not pending.is_file() or pending.stat().st_size == 0:
+                    raise ValueError("Thumbnail generator produced no non-empty cover")
+                # Render outside the lock so an owner can stage approved artwork
+                # while this slow job runs. Serialize installation with staging
+                # and upload, then recheck: the earlier absence is stale evidence.
+                with delivery_lock(video):
+                    if thumb_path.exists():
+                        if not thumb_path.is_file() or thumb_path.stat().st_size == 0:
+                            raise ValueError("Existing cover is empty or not a file; explicit rebuild required")
+                        result.preserved.append(thumb_path)
+                        continue
+                    # Atomic, same-filesystem, no-clobber installation even if an
+                    # uncooperative writer creates a destination after our check.
+                    thumb_path.hardlink_to(pending)
+                    try:
+                        if pending_evidence.exists():
+                            pending_evidence.replace(video.with_name(f"{video.stem}_cover.json"))
+                    except Exception:
+                        # We own this just-installed link under the shared lock.
+                        # A failed evidence commit must remain retryable.
+                        thumb_path.unlink()
+                        raise
+            result.generated.append(thumb_path)
+        except Exception as e:
+            result.failures.append(f"{video.name}: {e}")
+            log.warning("Thumbnail generation failed for %s: %s", video.name, e)
+    return result
 
 if __name__ == "__main__":
     import sys

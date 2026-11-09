@@ -31,6 +31,16 @@ class ErrorCategory:
     UNKNOWN = "unknown"
 
 
+class JSONResponseError(ValueError):
+    """Bounded final-answer evidence, never the provider's private reasoning."""
+
+    def __init__(self, message: str, content: str | None, finish_reason: str):
+        super().__init__(message)
+        self.response_text = content[:16000] if isinstance(content, str) else ""
+        self.response_chars = len(content) if isinstance(content, str) else 0
+        self.finish_reason = finish_reason
+
+
 def _extract_status(exc: Exception) -> Optional[int]:
     for attr in ("status_code", "code", "http_status"):
         val = getattr(exc, attr, None)
@@ -307,7 +317,7 @@ class AIClient:
         }
         rate = rates.get(provider, {"in": 0.50, "out": 0.50})
         cost = (in_tokens * rate["in"] + out_tokens * rate["out"]) / 1_000_000
-        log.info("LLM cost: %s/%s input=%d output=%d est=$%.6f",
+        log.debug("LLM cost: %s/%s input=%d output=%d est=$%.6f",
                  provider, model, in_tokens, out_tokens, cost,
                  extra={"stage": "llm_cost", "metadata": {"provider": provider, "model": model, "cost": cost}})
 
@@ -408,6 +418,65 @@ class AIClient:
             errors.append(f"ollama: {e}")
 
         raise RuntimeError(f"All LLM providers failed. Errors: {'; '.join(errors)}")
+
+    def generate_json(self, prompt: str, system_instruction: Optional[str] = None, *,
+                      reasoning_effort: Optional[str] = None, max_tokens: int = 16384,
+                      timeout: float = 120) -> str:
+        """Strict JSON on the configured route; no silent model/provider fallback.
+
+        The caller owns bounded retries and semantic/schema validation. Never
+        substitute reasoning_content for an incomplete or empty final answer.
+        """
+        provider, model = self._provider, self._model
+        routes = {
+            "deepseek": (self.deepseek_api_key, self.deepseek_base_url),
+            "opencode": (self.opencode_api_key, self.opencode_base_url),
+            "openrouter": (os.getenv("OPENROUTER_API_KEY"), "https://openrouter.ai/api/v1"),
+            "nvidia": (self.nvidia_api_key, self.nvidia_base_url),
+            "groq": (self.groq_api_key, self.groq_base_url),
+        }
+        if provider not in routes:
+            raise ValueError(f"Strict JSON is unsupported for configured provider {provider}")
+        key, base_url = routes[provider]
+        if not key:
+            raise ValueError(f"{provider} API key required for strict JSON")
+        if not self._check_and_consume_token(provider, model):
+            raise RuntimeError(f"{provider}/{model} is rate-limited or in cooldown")
+        messages = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+        kwargs = {
+            "model": model, "messages": messages,
+            "response_format": {"type": "json_object"}, "max_tokens": max_tokens,
+        }
+        if provider == "deepseek":
+            # V4 thinking defaults to high effort. Leave room for the final
+            # decision instead of accepting a reasoning-budget-truncated reply.
+            kwargs["reasoning_effort"] = reasoning_effort or "low"
+            if reasoning_effort:
+                kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        self._last_provider, self._last_model = provider, model
+        start = time.monotonic()
+        with OpenAI(api_key=key, base_url=base_url, timeout=timeout, max_retries=0) as client:
+            response = client.chat.completions.create(**kwargs)
+        choice = response.choices[0]
+        content = choice.message.content
+        log.info("LLM JSON: %s/%s finish_reason=%s chars=%d elapsed=%.1fs",
+                 provider, model, choice.finish_reason,
+                 len(content) if isinstance(content, str) else 0, time.monotonic() - start)
+        if choice.finish_reason != "stop":
+            raise JSONResponseError(f"{provider}/{model} incomplete JSON response (finish_reason={choice.finish_reason})",
+                                    content, choice.finish_reason)
+        if not isinstance(content, str) or not content.strip():
+            raise JSONResponseError(f"{provider}/{model} returned blank final JSON", content, choice.finish_reason)
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise JSONResponseError(f"{provider}/{model} invalid final JSON: {exc}", content, choice.finish_reason) from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("Strict JSON response must be an object")
+        return content.strip()
 
     def _all_models(self, prefer_provider: Optional[str] = None,
                     prefer_model: Optional[str] = None) -> List[tuple]:

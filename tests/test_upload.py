@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 import json
+from tests.youtube_fakes import add_video_status_api
 
 from upload import (
     _validate_shorts_video,
@@ -14,6 +15,8 @@ from upload import (
 def _transport_tests_are_separate_from_release_review(monkeypatch):
     import upload
     monkeypatch.setitem(upload.cfg, "release_review", {"required": False})
+    # Real cover handling/verification has its own image + CDN tests.
+    monkeypatch.setitem(upload.cfg, "thumbnail", {"enabled": False})
 
 def test_validate_shorts_video():
     with patch("upload._probe_video", return_value={"width": 1080, "height": 1920, "duration": 30.0}):
@@ -57,11 +60,12 @@ def test_upload_video_success_path(tmp_path):
     mock_insert = MagicMock()
     mock_service.videos().insert.return_value = mock_insert
     mock_insert.execute.return_value = {"id": "uploaded_vid_123"}
+    import upload
+    add_video_status_api(mock_service, "uploaded_vid_123", upload.cfg["youtube"].get("channel_id"))
     
     with patch("upload._validate_shorts_video", return_value=True), \
          patch("upload.get_authenticated_service", return_value=mock_service), \
-         patch("upload.MediaFileUpload"), \
-         patch("upload.Path.exists", return_value=True):
+         patch("upload.MediaFileUpload"):
              
         vid_id = upload_video(str(video_file), str(metadata_file), privacy="public")
         
@@ -76,7 +80,8 @@ def test_upload_video_success_path(tmp_path):
         assert body["snippet"]["tags"] == [
             "shorts", "Kohli", "cricket", "Kohli highlights", "IPL highlights"
         ]
-        assert body["status"]["privacyStatus"] == "public"
+        assert body["status"]["privacyStatus"] == "private"
+        assert mock_service.videos().update.call_args.kwargs["body"]["status"]["privacyStatus"] == "public"
         assert body["status"]["selfDeclaredMadeForKids"] is False
         assert body["status"]["containsSyntheticMedia"] is False
         assert kwargs["notifySubscribers"] is False
@@ -99,8 +104,7 @@ def test_upload_video_transient_error_returns_none(tmp_path):
     
     with patch("upload._validate_shorts_video", return_value=True), \
          patch("upload.get_authenticated_service", return_value=mock_service), \
-         patch("upload.MediaFileUpload"), \
-         patch("upload.Path.exists", return_value=True):
+         patch("upload.MediaFileUpload"):
              
         vid_id = upload_video(str(video_file), str(metadata_file), privacy="public")
         
@@ -116,11 +120,12 @@ def test_upload_video_with_single_token(tmp_path):
     mock_insert = MagicMock()
     mock_service.videos().insert.return_value = mock_insert
     mock_insert.execute.return_value = {"id": "single_token_vid_id"}
+    import upload
+    add_video_status_api(mock_service, "single_token_vid_id", upload.cfg["youtube"].get("channel_id"))
     
     with patch("upload._validate_shorts_video", return_value=True), \
          patch("upload.get_authenticated_service", return_value=mock_service), \
-         patch("upload.MediaFileUpload"), \
-         patch("upload.Path.exists", return_value=True):
+         patch("upload.MediaFileUpload"):
              
         vid_id = upload_video(str(video_file), str(metadata_file), privacy="public")
         
@@ -202,6 +207,7 @@ def test_upload_body_synthetic_media_from_metadata(tmp_path):
     mock_insert = MagicMock()
     mock_service.videos().insert.return_value = mock_insert
     mock_insert.execute.return_value = {"id": "vid"}
+    add_video_status_api(mock_service, "vid", upload_mod.cfg["youtube"].get("channel_id"))
     mock_service.videoCategories().list().execute.return_value = {
         "items": [{"id": "17", "snippet": {"assignable": True}}]
     }
@@ -209,8 +215,7 @@ def test_upload_body_synthetic_media_from_metadata(tmp_path):
 
     with patch("upload._validate_shorts_video", return_value=True), \
          patch("upload.get_authenticated_service", return_value=mock_service), \
-         patch("upload.MediaFileUpload") as mock_media, \
-         patch("upload.Path.exists", return_value=True):
+         patch("upload.MediaFileUpload") as mock_media:
         upload_video(str(video_file), str(metadata_file), privacy="public")
 
     _, kwargs = mock_service.videos().insert.call_args

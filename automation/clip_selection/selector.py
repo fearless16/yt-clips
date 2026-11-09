@@ -15,6 +15,7 @@ from utils.logger import get_logger
 from automation.clip_selection.agents import ALL_AGENTS, BrutalRejectionAgent
 from automation.clip_selection.arbiter import compute_weighted_score, llm_arbiter_refine
 from automation.clip_selection.dedupe import same_moment
+from shorts_intelligence.completeness import completeness_value
 
 cfg = load_config()
 log = get_logger("clip_selector")
@@ -100,17 +101,26 @@ class ClipSelector:
         Returns:
             Final ranked clip list.
         """
+        summary = context["selection_summary"] = {
+            "status": "NO_PUBLISHABLE_CANDIDATES", "candidates": len(scored_candidates),
+            "hard_rejected": 0, "below_quality": 0, "review_candidates": 0,
+            "editorial_rejected": 0, "selected": 0,
+        }
         if max_selected <= 0:
+            summary["status"] = "DISABLED"
             return []
         # Filter rejects
-        keep = [c for c in scored_candidates if not c.get("should_reject", False)]
-        rejected_count = sum(1 for c in scored_candidates if c.get("should_reject", False))
+        keep = [c for c in scored_candidates if not c.get("should_reject", False)
+                and completeness_value(c) is not False]
+        rejected_count = len(scored_candidates) - len(keep)
+        summary["hard_rejected"] = rejected_count
         if rejected_count:
-            log.info("Rejected %d/%d candidates by agent consensus",
+            log.info("Rejected %d/%d candidates by agent/policy gates",
                      rejected_count, len(scored_candidates))
 
         # Quality threshold
         quality_pass = [c for c in keep if c.get("final_score", 0) >= min_quality]
+        summary["below_quality"] = len(keep) - len(quality_pass)
         if min_selected:
             log.info("Ignoring min_selected=%s: editorial rejection cannot be backfilled", min_selected)
         if not quality_pass:
@@ -126,14 +136,35 @@ class ClipSelector:
 
         # LLM arbiter refinement
         if self.use_llm_arbiter:
+            summary["review_candidates"] = len(quality_pass)
             final = llm_arbiter_refine(quality_pass, context, max_selected)
         else:
             final = []
             for candidate in sorted(quality_pass, key=lambda c: (-c.get("final_score", 0), c["start"], c["end"])):
+                if completeness_value(candidate) is not True:
+                    continue
                 if not any(same_moment(candidate, previous) for previous in final):
                     final.append(candidate)
 
-        return final[:max_selected]
+        final = [candidate for candidate in final if completeness_value(candidate) is True][:max_selected]
+        decision = context.get("editorial_decision", {})
+        response = decision.get("response", {})
+        rejected = response.get("rejected", []) if isinstance(response, dict) else []
+        if isinstance(rejected, list):
+            from automation.clip_selection.arbiter import _coerce_candidate_index
+            summary["editorial_rejected"] = len({
+                _coerce_candidate_index(item.get("candidate_id"), len(quality_pass))
+                for item in rejected if isinstance(item, dict)
+                and isinstance(item.get("reason"), str) and item["reason"].strip()
+                and _coerce_candidate_index(item.get("candidate_id"), len(quality_pass)) >= 0
+            })
+        summary["selected"] = len(final)
+        if final:
+            summary["status"] = "DRAFTS_SELECTED"
+        elif decision.get("status") != "TEXT_REVIEWED":
+            summary["status"] = "REVIEW_REQUIRED"
+        log.debug("Selection outcome: %s", summary)
+        return final
 
     def _score_single(self, candidate: dict, context: dict) -> dict:
         """Run all 7 agents on one candidate."""

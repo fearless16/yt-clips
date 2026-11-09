@@ -217,6 +217,9 @@ def test_word_cues_can_consume_validated_roman_without_changing_timing():
 
 def test_solo_reserved_layout_is_moving_blur_not_solid_pad(monkeypatch):
     import export
+    # Historical inset layout remains explicit; the new reference mode has its
+    # own actual-frame regressions rather than inheriting these old coordinates.
+    monkeypatch.setitem(export.cfg["export"]["captions"], "style", "neon-reference-v2")
     monkeypatch.setitem(export.cfg["export"], "reserve_caption_band", True)
     graph = export._build_enhance_stack({"export_strategy": {"use_solo_frame": True,
         "active_crop": {"x": 580, "y": 0, "width": 830, "height": 1040}}}, use_logo=False)

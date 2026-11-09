@@ -19,21 +19,20 @@ Two pipelines in one repo:
 Double-click se ye hota hai:
 
 ```
-[1/3] OAuth token check → expired ho toh browser re-auth khud kholta hai
-      (pehle PERSONAL Google account, phir CHANNEL account select karo)
-[2/3] Mode menu:
+[1/3] Mode menu:
         1) NEW RUN  — URL poochega → download, transcribe, select,
                       export, SEO. Upload? alag se y/N poochhta hai.
         2) QUICK    — existing input\video.mp4 + transcript reuse,
                       local export only
         3) DRY RUN  — saare external APIs stubbed, sirf plumbing check
-[3/3] "PIPELINE FINISHED" + pause
+[2/3] OAuth check only if upload requested
+[3/3] Truthful outcome + artifact paths + pause
 ```
 
 | Mode | Command jo chalta hai | Upload? |
 |---|---|---|
-| NEW RUN | `automation.cli "<URL>"` | sirf jab tu `y` bole (`--upload --schedule`) |
-| NEW RUN + upload | `automation.cli "<URL>" --upload --schedule` | ✅ scheduled slots pe |
+| NEW RUN | `automation.cli "<URL>" --source-scoped --skip-instagram` | ❌ local drafts |
+| NEW RUN + upload | `automation.cli "<URL>" --source-scoped --sync --upload --schedule --skip-instagram` | scheduled slots, only after rights/release checks |
 | QUICK | `automation.cli "https://youtu.be/local" --skip-download --skip-transcribe` | ❌ |
 | DRY RUN | `dry_run.py "https://youtu.be/test" --skip-download --skip-transcribe` | ❌ |
 
@@ -41,14 +40,36 @@ Double-click se ye hota hai:
 sirf `run_pipeline.bat` hai (desktop shortcut isi ko chalata hai). Direct CLI:
 
 ```bash
-.venv/Scripts/python.exe -m automation.cli "<URL>"               # local only, no upload
-.venv/Scripts/python.exe -m automation.cli "<URL>" --upload      # + scheduled upload
-.venv/Scripts/python.exe -m automation.cli "<URL>" --sync        # + Drive sync
+.venv/Scripts/python.exe -m automation.cli "<URL>" --source-scoped --skip-instagram # local only
+.venv/Scripts/python.exe -m automation.cli "<URL>" --source-scoped --upload --schedule --skip-instagram # gated delivery
 .venv/Scripts/python.exe -m automation.cli --learn               # shelf + Analytics sync + model refit
 ```
 
 Useful flags: `--skip-download --skip-transcribe --skip-highlight
 --skip-export --skip-seo --skip-enhancement --sample-minutes N`.
+
+**Default:** two distinct source moments with `cricket-gameplay-stadium-v1`,
+existing EA07 stock, seeded continuous gameplay excerpts, muted gameplay and
+original source voice at natural speed. Weak/incomplete cuts are never forced
+to meet the target. Branding: **CRICKET WITH PRAJJWAL**, no handle/2.0 in artwork.
+On a fresh Windows environment:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m playwright install chromium
+```
+
+FFmpeg/ffprobe must be on PATH, and the reviewed licensed Arial Black font must
+be installed. Preflight checks the artwork/font, launches a local headless
+Chromium page, and requires approved continuous gameplay covering the configured
+clip ceiling (currently 38 seconds). No browser or media is downloaded at runtime.
+The configured `input/gameplay/library-clean-v2.json` is enabled stock (`STOCK` /
+`AVAILABLE`), with seeded excerpts embedded automatically. Drive sync is allowed;
+scheduled YouTube upload still requires the configured exact-file owner release.
+Provenance hashes, attribution and unresolved rights records are preserved, not
+silently relabelled cleared. Legacy private-review manifests stay private.
+See [stock runtime and recovery](docs/STOCK_GAMEPLAY_RUNTIME.md) and
+[stadium setup and release requirements](docs/STADIUM_PIPELINE_INTEGRATION.md).
 
 Resume a specific existing batch with `--skip-export --export-dir shorts/BATCH`.
 Multiple batches require that explicit choice; nested review renders are not
@@ -56,8 +77,16 @@ auto-discovered. Existing covers are preserved, and Drive/DB backup requires
 `--sync`. See the [integration audit](docs/editorial/INTEGRATION_AUDIT_20261102.md)
 for verified checks and remaining production limitations.
 
-**Outputs:** clips + `<clip>_metadata.json` → `shorts/<date-folder>/`;
-selection YAML → `highlights/`; logs → `logs/pipeline.log`.
+**NEW RUN outputs:** clips + `<clip>_metadata.json` → `shorts/<source-id>/<batch>/`;
+input, transcript and selection YAML also live under their source ID. The earlier
+canonical `input/video.mp4` is not overwritten. Legacy QUICK/direct CLI without
+`--source-scoped` retains its configured paths. Logs → `logs/pipeline.log`.
+
+Stock ranges are decoded frame-by-frame for dark transitions before selection;
+the delivered gameplay panel is checked again during encoded QC. Only a clean
+continuous excerpt long enough for the whole Short is usable—no looping or speed
+changes. Search queries use the actual clip's grounded players/topics rather than
+the full stream roster, and final internal terms are entity-checked after ranking.
 Secrets (`*_token.json`, `client_secrets.json`, `cookies.txt`) gitignored
 hain — Drive pe synced hote hain, kabhi commit mat karna.
 
@@ -99,26 +128,24 @@ See `face_os/STATE.md` for architecture map, drift status and entry points.
 Convert 16:9 live streams → 9:16 shorts automatically.
 
 ```bash
-.venv/Scripts/python.exe -m automation.cli "https://youtu.be/VIDEO_ID"
+.venv/Scripts/python.exe -m automation.cli "<YouTube video URL>" --source-scoped --skip-instagram
 ```
 
 ### Pipeline Flow
 
 ```
-URL → Download (yt-dlp + aria2c)
-    → Transcribe (faster-whisper, Hindi/English)
-    → Complete-thought segmentation + cricket-only gate
-    → 7-agent clip selection (+ LLM arbiter with full clip scripts,
-      match facts, live YouTube search demand; max 3 clips/stream,
-      empty selection allowed on weak batches)
+URL → Source-scoped download (yt-dlp + aria2c)
+    → Original YouTube transcript / local Hindi ASR
+    → Whole-transcript discovery → word-ID boundaries → final text review
+      (target two distinct moments; bounded speech recovery; no forced quota)
     → Frame Analysis / Face crop
-    → Export 1080x1920 (natural pace: target 25s thoughts, speedup rare)
-    → SEO packaging v3 (promise_v3_english):
-        - Full-English public copy, Devanagari banned everywhere
-        - Title <=60 chars, one premise, 1-2 mandatory emojis
-        - Description 350-900 chars, moment-first, AI-slop gate
-        - Grounded search terms/tags (API-only), 3 hashtags
-    → Upload to YouTube [opt-in via flags]
+    → Stadium export 1080x1920, 1x voice + muted seeded EA07 stock
+    → Encoded audio/A–V/full-decode QC
+    → Source-grounded SEO + source-derived covers:
+        - Roman Hinglish / English title <=60 chars, one supported premise
+        - Cover 1-3 words; no mandatory emojis or keyword padding
+        - Bounded title/cover format correction; failures remain resumable
+    → Exact-file owner/rights review → YouTube [opt-in, existing schedule]
     → shorts_intelligence outcome learning (engaged views + avg %viewed)
 ```
 

@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 
@@ -18,11 +19,17 @@ def test_removed_learning_implementations_cannot_return():
 
 def test_production_python_has_no_legacy_learning_database_reference():
     offenders = []
-    for path in ROOT.rglob("*.py"):
-        relative = path.relative_to(ROOT).as_posix()
-        if relative.startswith(("tests/", "face_os/")):
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        if "seo_performance.json" in text or "automation.seo.seo_learner" in text:
-            offenders.append(relative)
+    for directory, folders, files in os.walk(ROOT):
+        # Production code only: never read thousands of dependency/generated
+        # files under .venv/temp or traverse downloaded media/model trees.
+        folders[:] = [name for name in folders if not name.startswith(".") and name not in {
+            "tests", "face_os", "node_modules", "temp", "input", "shorts", "logs",
+            "transcripts", "highlights", "graphify-out", "__pycache__"}]
+        for name in files:
+            if not name.endswith(".py"):
+                continue
+            path = Path(directory) / name
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if "seo_performance.json" in text or "automation.seo.seo_learner" in text:
+                offenders.append(path.relative_to(ROOT).as_posix())
     assert offenders == []

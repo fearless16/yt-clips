@@ -129,6 +129,9 @@ def build_grounded_search_queries(
     suggestions: Optional[Iterable[str]] = None,
     player_names: Optional[Iterable[str]] = None,
     player_aliases: Optional[Dict[str, str]] = None,
+    *,
+    clip_player_names: Optional[Iterable[str]] = None,
+    clip_topic_phrases: Optional[Iterable[str]] = None,
 ) -> List[str]:
     """Return 8-15 queries tied to source/clip entities and current suggest.
 
@@ -136,17 +139,32 @@ def build_grounded_search_queries(
     local evidence.  If the network is unavailable, deterministic combinations
     preserve the same grounding contract without inventing match facts.
     """
-    runtime_players = list(player_names or [])
+    runtime_players = list(dict.fromkeys([*(player_names or []), *(clip_player_names or [])]))
     title = _clean(video_title, runtime_players, player_aliases)
     description = _clean(video_description, runtime_players, player_aliases)
     transcript = _clean(clip_transcript, runtime_players, player_aliases)
     evidence = " ".join((title, description, transcript))
     entities = find_canonical_entities(evidence, runtime_players)
-    anchors = _query_anchors(evidence, entities)
+    clip_entities = find_canonical_entities(transcript, runtime_players)
+    # A source roster is a spelling catalog, not proof that this moment
+    # discusses every player. Explicit clip names come from the existing
+    # transcript-grounding pass, not autocomplete or the full description.
+    clip_entities["players"] = list(dict.fromkeys([
+        *clip_entities["players"], *[str(p) for p in (clip_player_names or []) if str(p).strip()]]))
+    query_entities = {"players": clip_entities["players"] if transcript else entities["players"],
+                      "teams": list(dict.fromkeys([*clip_entities["teams"], *entities["teams"]]))}
+    query_text = " ".join([transcript, *query_entities["players"], *(clip_topic_phrases or [])]) if transcript else evidence
+    anchors = _query_anchors(query_text, query_entities)
+    focus_topics = list(clip_topic_phrases or [])
+    focus_topic = _topic_from_text(" ".join(focus_topics)) or _topic_from_text(transcript)
+    events = {"six", "four", "wicket", "yorker", "century", "captaincy", "coach", "selection"}
+    supported_events = {term for term in events if re.search(r"\b"+term+r"\b", " ".join(focus_topics), re.I)}
+    if not focus_topics and focus_topic in events:
+        supported_events.add(focus_topic)
 
     accepted = []
-    evidence_players = set(entities["players"])
-    evidence_teams = set(entities["teams"])
+    evidence_players = set(query_entities["players"])
+    evidence_teams = set(query_entities["teams"])
     for suggestion in suggestions or []:
         clean = _clean_query(suggestion)
         words = set(re.findall(r"[a-z0-9]+", clean.casefold()))
@@ -155,21 +173,25 @@ def build_grounded_search_queries(
         # Autocomplete is discovery evidence, not factual evidence. A suggestion
         # that introduces another canonical player/team can poison the vidIQ seed
         # even though it shares a broad anchor such as "India". Reject it here.
-        suggested_entities = find_canonical_entities(clean, runtime_players)
+        suggested_entities = find_canonical_entities(_clean(clean, runtime_players, player_aliases), runtime_players)
         if set(suggested_entities["players"]) - evidence_players:
             continue
         if set(suggested_entities["teams"]) - evidence_teams:
             continue
+        if evidence_players and not set(suggested_entities["players"]) & evidence_players:
+            continue  # source-level team queries cannot crowd out this player
+        query_events = {term for term in events if re.search(r"\b"+term+r"\b", clean, re.I)}
+        if focus_topics and query_events - supported_events:
+            continue  # a score's lost wickets must not relabel a six as a wicket
         accepted.append(clean)
 
-    clip_entities = find_canonical_entities(transcript, runtime_players)
     # The exact spoken player is usually the best Shorts search anchor. Fall back
     # to a clip team, then source-level entities. This keeps vidIQ research from
     # starting with a broad team query when the clip is really about one player.
     candidates = [
         *clip_entities["players"],
         *clip_entities["teams"],
-        *entities["players"],
+        *query_entities["players"],
         *entities["teams"],
     ]
     candidates = list(dict.fromkeys(candidates))
@@ -180,10 +202,12 @@ def build_grounded_search_queries(
     secondary = [
         name for name in candidates
         if name != subject and _is_canonical_subject(name, evidence)
+        and (not clip_entities["players"] or name in clip_entities["players"])
     ][:4]
     team_pool = list(dict.fromkeys([*clip_entities["teams"], *entities["teams"]]))
     team_context = next((team for team in team_pool if team != subject), "")
-    topic = _topic_from_text(transcript) or _topic_from_text(evidence) or "cricket"
+    topic = (focus_topic
+             or (_topic_from_text(evidence) if not transcript else "") or "cricket")
     local = _local_query_combos(subject, topic, team_context, secondary)
     local.extend(f"{subject} {suffix}" for suffix in _QUERY_SUFFIXES)
 
@@ -255,6 +279,8 @@ def build_cricket_evidence_pack(
         research.get("search_queries") or [],
         runtime_players,
         runtime_aliases,
+        clip_player_names=research.get("clip_player_names", []),
+        clip_topic_phrases=research.get("clip_topic_phrases", []),
     )
     return {
         "source_video": {"title": title, "description": description},

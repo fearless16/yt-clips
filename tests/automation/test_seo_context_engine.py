@@ -209,7 +209,9 @@ def test_generated_queries_are_replaced_by_approved_evidence(monkeypatch):
         approved_search_queries=_approved_queries(),
     )
 
-    assert result["search_terms"][:len(_approved_queries())] == _approved_queries()
+    # Broad source-team research cannot replace this clip's named subject.
+    clip_queries = [q for q in _approved_queries() if q != "team india coach discussion"]
+    assert result["search_terms"][:len(clip_queries)] == clip_queries
     assert len(_approved_queries()) <= len(result["search_terms"]) <= 12
     assert result["primary_search_terms"][:2] == _approved_queries()[:2]
     assert 1 <= len(result["primary_search_terms"]) <= 2
@@ -239,7 +241,8 @@ def test_research_queries_can_stay_in_metadata_when_primary_queries_are_embedded
         approved_search_queries=_approved_queries(),
     )
 
-    assert result["search_terms"][:len(_approved_queries())] == _approved_queries()
+    clip_queries = [q for q in _approved_queries() if q != "team india coach discussion"]
+    assert result["search_terms"][:len(clip_queries)] == clip_queries
     assert len(_approved_queries()) <= len(result["search_terms"]) <= 12
     assert result["primary_search_terms"][:2] == _approved_queries()[:2]
 

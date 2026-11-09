@@ -1,10 +1,11 @@
 @echo off
 setlocal
-title yt-clips - One Click Pipeline
+chcp 65001 >nul
+title YT // CLIPS - Pipeline Control
 cd /d "%~dp0"
 
 echo ============================================
-echo   YT CLIPS - One Click Pipeline
+echo   YT // CLIPS  -  PIPELINE CONTROL
 echo ============================================
 echo.
 
@@ -41,7 +42,7 @@ if /i "%UPLOAD%"=="y" goto upload
 
 echo.
 echo [3/3] Full run, local only (no upload)...
-"%PY%" -m automation.cli "%URL%" --skip-instagram
+"%PY%" -m automation.cli "%URL%" --source-scoped --skip-instagram
 if errorlevel 1 goto failed
 goto done
 
@@ -55,7 +56,7 @@ if errorlevel 1 (
 )
 echo.
 echo [3/3] Full run + Drive sync + scheduled YouTube upload...
-"%PY%" -m automation.cli "%URL%" --sync --upload --schedule
+"%PY%" -m automation.cli "%URL%" --source-scoped --sync --upload --schedule --skip-instagram
 if errorlevel 1 goto failed
 goto done
 
@@ -76,7 +77,7 @@ goto done
 :done
 echo.
 echo ============================================
-echo   PIPELINE FINISHED  -  outputs: shorts\  logs\pipeline.log
+echo   RUN CLOSED - see the outcome and artifact paths above
 echo ============================================
 pause
 exit /b 0

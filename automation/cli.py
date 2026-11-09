@@ -91,6 +91,14 @@ def setup_argparse():
         "--version", action="store_true", default=False,
         help="Print version and exit",
     )
+    parser.add_argument("--composition", choices=("portrait-caption-v1", "cricket-gameplay-split-v1", "cricket-gameplay-stadium-v1"),
+                         default=None, help="Override configured layout; does not change config.yaml")
+    parser.add_argument("--gameplay-manifest", default=None,
+                         help="Local gameplay library JSON; local-review stock renders drafts only")
+    parser.add_argument("--source-scoped", action="store_true",
+                        help="Isolate input, transcript, highlights and Shorts under the YouTube source ID")
+    parser.add_argument("--verbose", action="store_true", help="Show debug detail (always retained in JSON logs)")
+    parser.add_argument("--json-logs", action="store_true", help="Emit structured JSON instead of the terminal dashboard")
     return parser
 
 
@@ -153,30 +161,39 @@ def main(args=None):
     if parsed.skip_instagram:
         os.environ["YT_CLIPS_SKIP_INSTAGRAM"] = "1"
 
+    if parsed.verbose or parsed.json_logs:
+        from utils.logger import configure_console
+        configure_console(verbose=parsed.verbose, json_logs=parsed.json_logs)
+
     from automation.orchestrator import run
-    result = run(
-        url=parsed.url,
-        skip_download=parsed.skip_download,
-        skip_transcribe=parsed.skip_transcribe,
-        skip_highlight=parsed.skip_highlight,
-        skip_export=parsed.skip_export,
-        skip_seo=parsed.skip_seo,
-        skip_enhancement=parsed.skip_enhancement,
-        auto_sync=parsed.sync,
-        auto_upload=parsed.upload,
-        auto_schedule=parsed.schedule,
-        sample_minutes=parsed.sample_minutes,
-        mode=parsed.mode,
-        existing_exports_dir=parsed.export_dir,
-    )
-    n = len(result.exported)
-    f = len(result.failures)
-    print(
-        f"Pipeline done: {n} clips exported, "
-        f"{result.uploaded_count} uploaded, "
-        f"{f} failure(s) in {result.total_seconds:.1f}s"
-    )
-    return 1 if f else 0
+    from contextlib import nullcontext
+    from automation.source_runtime import source_runtime
+    try:
+        scope = source_runtime(parsed.url) if parsed.source_scoped else nullcontext()
+        with scope:
+            result = run(
+                url=parsed.url,
+                skip_download=parsed.skip_download,
+                skip_transcribe=parsed.skip_transcribe,
+                skip_highlight=parsed.skip_highlight,
+                skip_export=parsed.skip_export,
+                skip_seo=parsed.skip_seo,
+                skip_enhancement=parsed.skip_enhancement,
+                auto_sync=parsed.sync,
+                auto_upload=parsed.upload,
+                auto_schedule=parsed.schedule,
+                sample_minutes=parsed.sample_minutes,
+                mode=parsed.mode,
+                existing_exports_dir=parsed.export_dir,
+                composition=parsed.composition,
+                gameplay_manifest=parsed.gameplay_manifest,
+            )
+    except (ValueError, RuntimeError) as exc:
+        print(f"Pipeline configuration failed: {exc}", file=sys.stderr)
+        return 1
+    # The runner renders one truthful summary for every exit path. Don't print
+    # a second, unconditional "done" banner (or contaminate JSON mode).
+    return 1 if result.failures else 0
 
 
 if __name__ == "__main__":

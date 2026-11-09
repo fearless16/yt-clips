@@ -185,7 +185,7 @@ def _create_fake_video(path: str, size_mb: int = 10):
     p.parent.mkdir(parents=True, exist_ok=True)
     if not p.exists():
         p.write_bytes(b"X" * (size_mb * 1024 * 1024))
-        log.info("  [FAKE] Created %s (%d MB)", path, size_mb)
+        log.debug("  [FAKE] Created %s (%d MB)", path, size_mb)
 
 
 def _fake_ffmpeg_output(cmd, root: Path) -> Path | None:
@@ -277,18 +277,47 @@ def _run_in_sandbox(function, args, kwargs, sandbox: Path, keep: bool):
     original_cwd = Path.cwd()
     original = config_module.load()
     config = copy.deepcopy(original)
+    # This synthetic acceptance fixture intentionally tests three candidates
+    # and reserve handling, independently of the production two-Short default.
+    config.setdefault("clip_selection", {})["max_selected"] = 3
     config["paths"] = {name: str(sandbox / name) for name in
                        ("input", "temp", "transcripts", "highlights", "shorts", "logs")}
-    config.setdefault("shorts_intelligence", {})["enabled"] = False
+    # Exercise the real policy/selection integration against an isolated DB.
+    config.setdefault("shorts_intelligence", {})["enabled"] = True
     config["shorts_intelligence"]["db_path"] = str(sandbox / "shorts_intelligence.db")
     # Stubbed media cannot receive a real owner approval. Release gating is
     # tested separately; this run exercises only the fake API happy path.
     config["release_review"] = {"required": False}
     config["delivery_qc"] = {"enabled": False}
-    config.setdefault("export", {}).setdefault("captions", {})["require_word_timing"] = False
+    # Keep production word requirements ON. Stub ASR output, not validation.
+    config.setdefault("export", {}).setdefault("captions", {})["require_word_timing"] = True
+    if kwargs.get("composition") is not None:
+        config["export"]["composition"] = kwargs["composition"]
+    from automation.cricket_gameplay import GAMEPLAY_COMPOSITIONS, sha256
+    if config["export"].get("composition") in GAMEPLAY_COMPOSITIONS:
+        # Exercise enabled stock with synthetic provenance, NEVER live permissions.
+        game_dir = sandbox / "input/gameplay"
+        game_dir.mkdir(parents=True)
+        game = game_dir / "fixture.mp4"
+        game.write_bytes(b"SYNTHETIC DRY-RUN MEDIA; NOT A PRODUCTION RECORDING")
+        grant = game_dir / "test-only-recording.json"
+        grant.write_text(json.dumps({"id": "synthetic-stock", "uploader": "SYNTHETIC TEST ONLY",
+            "license": "Creative Commons Attribution license (reuse allowed)"}), encoding="utf-8")
+        manifest = game_dir / "library.json"
+        manifest.write_text(json.dumps({"schema_version":1,"usage":"STOCK","assets":[{
+            "id":"dry-run-test-only","game":"EA Cricket 07","publisher":"EA",
+            "status":"AVAILABLE","rights_status":"UNRESOLVED",
+            "reviewer":"SYNTHETIC FIXTURE ONLY","reviewed_at":"2026-11-08",
+            "path":game.name,"sha256":sha256(game),
+            "source_video_id":"synthetic-stock","owner":"SYNTHETIC TEST ONLY",
+            "license_evidence":{"path":grant.name,"sha256":sha256(grant)},
+            "attribution":"SYNTHETIC TEST ONLY; not licensed production gameplay",
+            "approved_ranges":[[0,180]],"crop":[0,0,1920,1080]}]}),encoding="utf-8")
+        config["export"]["gameplay_manifest"] = str(manifest)
     (sandbox / "config.yaml").write_text(yaml.safe_dump(config, allow_unicode=False), encoding="utf-8")
     # Fake credentials only: never copy production tokens/cookies into a test.
     (sandbox / "yt_channel_token.json").write_text('{"token": "fake"}', encoding="utf-8")
+    (sandbox / "drive_token.json").write_text('{"token": "fake"}', encoding="utf-8")
     saved = []
     for name, module in list(sys.modules.items()):
         if module is None or name.startswith("face_os"):
@@ -303,6 +332,9 @@ def _run_in_sandbox(function, args, kwargs, sandbox: Path, keep: bool):
             if hasattr(module, attr):
                 saved.append((module, attr, getattr(module, attr)))
                 setattr(module, attr, None)
+        if name == "automation.speech_alignment":
+            saved.append((module, "_MODELS", module._MODELS))
+            module._MODELS = {}
         if name == "automation.orchestrator":
             from automation.memory.decision_store import DecisionStore
             from automation.providers.provider_health import ProviderHealth
@@ -334,6 +366,8 @@ def _run_in_sandbox(function, args, kwargs, sandbox: Path, keep: bool):
             for attr in ("_ai_instance", "_ai"):
                 if hasattr(module, attr):
                     setattr(module, attr, None)
+            if name == "automation.speech_alignment":
+                module._MODELS = {}  # newly imported models were created under ASR stubs
         utils_config._config_cache.clear()
         utils_config._config_cache.update(cache)
 
@@ -376,46 +410,121 @@ def _api_intercept_context(video_path: str):
     code touches an external dependency (network, subprocess, ML model, GPU,
     local binary).  All internal business logic runs unchanged.
     """
+    # Real local cover bytes allow the uploader's actual image preflight and
+    # CDN pixel verification to run, rather than stubbing their verdicts.
+    from PIL import Image as _FixtureImage
+    _real_image_open = _FixtureImage.open
+    _jpeg_buffer = io.BytesIO()
+    _FixtureImage.new("RGB", (1080, 1920), (25, 35, 55)).save(_jpeg_buffer, format="JPEG")
+    _cover_fixture_bytes = _jpeg_buffer.getvalue()
+    _fixture_thumb_url = "https://i.ytimg.com/vi/test_video_id/custom.jpg"
+    _fixture_videos = {}
+
     # ── 1. AI / LLM providers ──────────────────────────────────────────────
 
     def _fake_generate_fastest_first(self, prompt="", system_instruction=None,
                                      prefer_provider=None, prefer_model=None):
-        log.info("  [FAKE AI] generate_fastest_first (prompt=%.60s...)",
+        log.debug("  [FAKE AI] generate_fastest_first (prompt=%.60s...)",
                  prompt.replace("\n", " ")[:60])
         return _FAKE_SEO_JSON
 
     def _fake_generate_text(self, prompt="", system_instruction=None,
-                            prefer_model=None, prefer_provider=None):
-        log.info("  [FAKE AI] generate_text (prompt=%.60s...)",
+                            prefer_model=None, prefer_provider=None, **options):
+        log.debug("  [FAKE AI] generate_text (prompt=%.60s...)",
                  prompt.replace("\n", " ")[:60])
         if "candidate_id" in prompt:
             return json.dumps({
                 "selected": [
-                    {"candidate_id": 1, "score": 90, "reason": "strong hook"},
-                    {"candidate_id": 2, "score": 85, "reason": "clear payoff"},
+                    {"candidate_id": 1, "score": 90, "complete_thought": True, "reason": "retained setup and payoff"},
+                    {"candidate_id": 2, "score": 85, "complete_thought": True, "reason": "retained setup and payoff"},
                 ],
                 "rejected": [],
                 "notes": {"overall_quality": "high"},
             })
         return "Kohli hit a six. Bumrah bowled a yorker. Amazing catch."
 
+    sdk_requests = []
+    globals()["_editorial_sdk_requests"] = sdk_requests
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.chat = self
+            self.completions = self
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+        def create(self, **kwargs):
+            from types import SimpleNamespace
+            sdk_requests.append({key: kwargs.get(key) for key in
+                                 ("model", "reasoning_effort", "extra_body", "max_tokens")})
+            prompt = kwargs["messages"][-1]["content"]
+            payload, _ = json.JSONDecoder().raw_decode(prompt)
+            sdk_requests[-1]["stage"] = payload.get("stage")
+            if payload.get("stage") == "discovery":
+                proposals = []
+                for cue in payload["cues"]:
+                    if cue["cue_id"] not in (1, 2, 3, 4):
+                        continue
+                    tokens = cue["text"].split()
+                    proposals.append({"start_cue_id": cue["cue_id"], "end_cue_id": cue["cue_id"],
+                        "opening_phrase": " ".join(tokens[:3]), "closing_phrase": " ".join(tokens[-3:]),
+                        "score": 95-cue["cue_id"], "reason": "Retained cricket setup and actual payoff"})
+                response = {"proposals": proposals}
+            elif payload.get("stage") == "boundary_review":
+                cuts = []
+                for c in payload["candidates"]:
+                    a, b = c["original_source_range"]
+                    ids = [w["word_id"] for w in c["words"] if w["start"] >= a and w["end"] <= b]
+                    cuts.append({"candidate_id": c["candidate_id"], "first_word_id": ids[0],
+                        "last_word_id": ids[-1], "reason": "Contiguous actual cricket setup and payoff"})
+                response = {"cuts": cuts, "rejected": []}
+            elif payload.get("stage") == "final_review":
+                choices = [{"candidate_id": c["candidate_id"], "score": 95-c["candidate_id"],
+                            "complete_thought": True, "reason": "Retained setup and cricket payoff"}
+                           for c in payload["candidates"]]
+                response = {"selected": choices[:3], "reserves": choices[3:6], "rejected": []}
+            else:
+                raise RuntimeError("Missing dry-run structured provider fixture")
+            # A completed final object must follow an initially truncated
+            # response; exercise real JSONResponseError -> bounded retry.
+            finish_reason = "length" if len(sdk_requests) == 1 else "stop"
+            return SimpleNamespace(choices=[SimpleNamespace(finish_reason=finish_reason,
+                message=SimpleNamespace(content=json.dumps(response)))])
+
+    def _fake_urlopen(request, **kwargs):
+        """Run real caption schema/fidelity checks; substitute HTTP only."""
+        if not getattr(request, "data", None):
+            raise RuntimeError("Dry-run has no urllib fixture for this request")
+        body = json.loads(request.data)
+        payload = json.loads(body["messages"][-1]["content"])
+        if body.get("model") != "deepseek-v4-flash" or "source_words" not in payload:
+            raise RuntimeError("Dry-run refuses unrecognized urllib network access")
+        entries = [{"id": word["id"], "roman": word["source"], "uncertain": False, "reason": ""}
+                   for word in payload["source_words"]]
+        return io.BytesIO(json.dumps({"model": "deepseek-v4-flash", "choices": [
+            {"finish_reason": "stop", "message": {"content": json.dumps({"words": entries})}}]}).encode())
+
     def _fake_generate_seo_text(self, prompt="", system_instruction=None, reasoning_effort=None):
-        log.info("  [FAKE AI] generate_seo_text (prompt=%.60s...)",
+        log.debug("  [FAKE AI] generate_seo_text (prompt=%.60s...)",
                  prompt.replace("\n", " ")[:60])
         import re
         match = re.search(r"COMPLETE CLIP TRANSCRIPT:\s*(.*?)\n\nAPPROVED", prompt, re.DOTALL)
         script = match.group(1).strip() if match else "Kohli hits a six over the boundary."
         title = "Kohli hits a massive six" if "kohli" in script.lower() or "coaly" in script.lower() else script.split(".")[0][:60]
         return json.dumps({"title": title, "description": script + "\n\nIndependent cricket commentary and analysis, not official match footage.",
+                           "cover_text": "KOHLI SIX" if "kohli" in title.lower() else "CRICKET MOMENT",
                            "hashtags": ["#Shorts", "#Cricket"], "tags": ["cricket commentary"],
                            "search_terms": [], "primary_search_terms": []})
 
     def _fake_generate_image(self, prompt="", **kwargs):
-        log.info("  [FAKE AI] generate_image (prompt=%.60s...)", prompt[:60])
+        log.debug("  [FAKE AI] generate_image (prompt=%.60s...)", prompt[:60])
         return b"JPEG" * 1024
 
-    def _fake_caption_cards(cues, output_dir):
+    def _fake_caption_cards(cues, output_dir, *, style="neon-reference-v2"):
         from automation.caption_engine import CaptionCard
+        if style not in ("neon-reference-v2", "portrait-glass-v1", "gameplay-hud-v1", "stadium-reference-v1"):
+            raise ValueError("Unsupported fixture caption design")
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         cards = []
         for index, cue in enumerate(cues):
@@ -430,6 +539,7 @@ def _api_intercept_context(video_path: str):
     _original_subprocess_popen = subprocess.Popen
     _last_ffmpeg_t = [10.0]  # list to allow mutation in nested function
     _output_durations = {}
+    _audio_ranges = {}
 
     def _fake_subprocess_run(cmd, *args, **kwargs):
         cmd_str = " ".join(str(c) for c in cmd) if isinstance(cmd, list) else str(cmd)
@@ -441,18 +551,28 @@ def _api_intercept_context(video_path: str):
             return "" if text_mode else b""
         # ffprobe: return contextual fake JSON
         if "ffprobe" in low:
-            log.info("  [FAKE ffprobe] %s", cmd_str[:100])
+            log.debug("  [FAKE ffprobe] %s", cmd_str[:100])
             text = cmd_str.lower()
-            if "format=duration" in text and "show_entries" in text:
+            target = str(Path(str(cmd[-1])).resolve()) if isinstance(cmd, (list, tuple)) else ""
+            is_source = target == str(Path(video_path).resolve()) or Path(target).name == "fixture.mp4"
+            probe_w, probe_h = (1920, 1080) if is_source else (1080, 1920)
+            if "-show_streams" in text:
+                dur = _output_durations.get(target,180.0)
+                fake = json.dumps({"streams":[
+                    {"codec_type":"video","width":probe_w,"height":probe_h,"start_time":"0.0","duration":str(dur)},
+                    {"codec_type":"audio","start_time":"0.0","duration":str(dur)}],"format":{"duration":str(dur)}})
+            elif "stream=duration" in text:
+                fake = json.dumps({"streams":[{"duration":str(_output_durations.get(target,180.0))}]})
+            elif "format=duration" in text and "show_entries" in text:
                 # If this looks like a clip validation file, use a small duration.
                 # Otherwise fall back to the full video duration.
                 target = str(Path(str(cmd[-1])).resolve()) if isinstance(cmd, (list, tuple)) else ""
                 dur = _output_durations.get(target, 180.0)
                 fake = json.dumps({"format": {"duration": str(dur)}})
             elif "r_frame_rate" in text:
-                fake = json.dumps({"streams": [{"width": 1080, "height": 1920, "r_frame_rate": "30/1"}]})
+                fake = json.dumps({"streams": [{"width": probe_w, "height": probe_h, "r_frame_rate": "30/1"}]})
             elif "stream=width,height" in text and "codec_type" not in text:
-                fake = json.dumps({"streams": [{"width": 1080, "height": 1920}]})
+                fake = json.dumps({"streams": [{"width": probe_w, "height": probe_h}]})
             elif "stream=codec_type,start_time,duration" in text:
                 target = str(Path(str(cmd[-1])).resolve())
                 dur = _output_durations.get(target, 180.0)
@@ -466,17 +586,34 @@ def _api_intercept_context(video_path: str):
             return subprocess.CompletedProcess(cmd, 0, _out(fake), _empty())
         # ffmpeg: create output file at last position argument
         if "ffmpeg" in low:
-            log.info("  [FAKE ffmpeg] %s", cmd_str[:120])
+            log.debug("  [FAKE ffmpeg] %s", cmd_str[:120])
+            if "blackdetect=" in low:
+                # External decoder boundary only: the real no-frame guard,
+                # interval subtraction and selector still run. Synthetic
+                # non-dark frames are not visual approval of actual media.
+                return subprocess.CompletedProcess(cmd, 0, _empty(), _out("frame= 5400 time=00:03:00.00\n"))
+            if "print_format=json" in low:
+                return subprocess.CompletedProcess(cmd,0,_empty(),_out('{"input_i":"-16.0","input_tp":"-1.5","input_lra":"1.0","input_thresh":"-26.0","target_offset":"0.0"}'))
             # encoders list: return a real-looking list
             if "-encoders" in low:
                 return subprocess.CompletedProcess(cmd, 0,
                     _out("Encoders:\n V..... libx264              H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10 (codec h264)\n"),
                     _empty())
+            if "rawvideo" in low and "bgr24" in low and "-vf" in cmd:
+                import re
+                size = re.search(r"scale=(\d+):(\d+)", cmd[cmd.index("-vf")+1])
+                if size:
+                    # Decode/model boundary fixture; real face crop selection,
+                    # motion-envelope planning and final filter routing still run.
+                    w, h = map(int, size.groups())
+                    return subprocess.CompletedProcess(cmd, 0, bytes([96])*(w*h*3), b"")
             # Capture -t flag value for later ffprobe duration matching
+            command_duration = _last_ffmpeg_t[0]
             for i, c in enumerate(cmd):
                 if isinstance(c, str) and c == "-t" and i + 1 < len(cmd):
                     try:
-                        _last_ffmpeg_t[0] = float(cmd[i + 1])
+                        command_duration = float(cmd[i + 1])
+                        _last_ffmpeg_t[0] = command_duration
                     except (ValueError, IndexError):
                         pass
             out_path = _fake_ffmpeg_output(cmd, Path.cwd())
@@ -484,19 +621,21 @@ def _api_intercept_context(video_path: str):
                 import re
                 duration_match = re.search(r"(?<!a)trim=start=[0-9.]+:duration=([0-9.]+)", cmd_str)
                 speed_match = re.search(r"setpts=\(PTS-STARTPTS\)/([0-9.]+)", cmd_str)
-                duration = float(duration_match.group(1)) if duration_match else _last_ffmpeg_t[0]
+                duration = float(duration_match.group(1)) if duration_match else command_duration
                 if speed_match:
                     duration /= float(speed_match.group(1))
                 _output_durations[str(out_path)] = duration
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 if out_path.suffix == ".wav":
+                    source_start = float(cmd[cmd.index("-ss")+1]) if "-ss" in cmd else 0
+                    _audio_ranges[str(out_path)] = (source_start, source_start+duration)
                     out_path.write_bytes(_make_valid_wav_bytes(16000))
                 else:
                     out_path.write_bytes(b"F" * 1024 * 500)
             return subprocess.CompletedProcess(cmd, 0, _empty(), _empty())
         # yt-dlp call: create fake video file
         if "yt-dlp" in low or ("yt" in low and "dlp" in low):
-            log.info("  [FAKE yt-dlp] %s", cmd_str[:100])
+            log.debug("  [FAKE yt-dlp] %s", cmd_str[:100])
             _create_fake_video(video_path)
             # --dump-json needs real-looking metadata
             if "--dump-json" in low or "dump" in low:
@@ -522,7 +661,7 @@ def _api_intercept_context(video_path: str):
     class _FakePopen:
         def __init__(self, cmd, *args, **kwargs):
             cmd_str = " ".join(str(c) for c in cmd) if isinstance(cmd, list) else str(cmd)
-            log.info("  [FAKE Popen] %s", cmd_str[:100])
+            log.debug("  [FAKE Popen] %s", cmd_str[:100])
             if "yt-dlp" in cmd_str.lower():
                 _create_fake_video(video_path)
             self.returncode = 0
@@ -543,15 +682,48 @@ def _api_intercept_context(video_path: str):
     # ── 3. Google APIs — YouTube Data, Drive ───────────────────────────────
 
     def _fake_google_build(service_name, version, *args, **kwargs):
-        log.info("  [FAKE Google API] build %s %s", service_name, version)
+        log.debug("  [FAKE Google API] build %s %s", service_name, version)
         svc = MagicMock()
         if service_name == "youtube":
-            # videos().insert() → executed → {"id": "test_video_id"}
-            insert_mock = MagicMock()
-            insert_mock.execute.return_value = {"id": "test_video_id"}
-            svc.videos().insert.return_value = insert_mock
+            def _fake_insert(**kwargs):
+                def execute():
+                    video_id = f"test_video_id_{len(_fixture_videos)+1}"
+                    _fixture_videos[video_id] = copy.deepcopy(kwargs["body"]["status"])
+                    return {"id": video_id}
+                request = MagicMock()
+                request.execute.side_effect = execute
+                return request
+            svc.videos().insert.side_effect = _fake_insert
             # thumbnails().set() → executed
-            svc.thumbnails().set().execute.return_value = {"id": "test_thumb_id"}
+            svc.thumbnails().set().execute.return_value = {"items": [{
+                "shortsAspectRatio": {"url": _fixture_thumb_url, "width": 1080, "height": 1920}}]}
+            def _fake_video_readback(**kwargs):
+                video_id = kwargs["id"]
+                item = {"id": video_id}
+                if kwargs["part"] == "processingDetails":
+                    item["processingDetails"] = {"processingStatus": "succeeded"}
+                elif "status" in kwargs["part"]:
+                    from utils.config import load_config
+                    item["status"] = copy.deepcopy(_fixture_videos.get(video_id, {}))
+                    item["snippet"] = {"channelId": load_config()["youtube"].get("channel_id")}
+                else:
+                    item["snippet"] = {"thumbnails": {"shortsAspectRatio": {
+                        "url": _fixture_thumb_url, "width": 1080, "height": 1920}}}
+                request = MagicMock()
+                request.execute.return_value = {"items": [item]}
+                return request
+            svc.videos().list.side_effect = _fake_video_readback
+            def _fake_update(**kwargs):
+                def execute():
+                    video_id = kwargs["body"]["id"]
+                    if video_id not in _fixture_videos:
+                        raise ValueError("Dry-run refuses status update for unknown video")
+                    _fixture_videos[video_id] = copy.deepcopy(kwargs["body"]["status"])
+                    return {"id": video_id, "status": copy.deepcopy(_fixture_videos[video_id])}
+                request = MagicMock()
+                request.execute.side_effect = execute
+                return request
+            svc.videos().update.side_effect = _fake_update
             # videoCategories().list() → assignable categories
             svc.videoCategories().list().execute.return_value = {
                 "items": [{"id": "17", "snippet": {"assignable": True}},
@@ -584,12 +756,31 @@ def _api_intercept_context(video_path: str):
 
     class _FakeWhisperModel:
         def __init__(self, *args, **kwargs):
-            log.info("  [FAKE faster-whisper] WhisperModel.__init__ (skipping GPU)")
+            log.debug("  [FAKE faster-whisper] WhisperModel.__init__ (skipping GPU)")
+            self.model_name = args[0] if args else "fixture"
         def transcribe(self, audio, *args, **kwargs):
-            log.info("  [FAKE faster-whisper] model.transcribe(audio=%s)", str(audio)[:60])
-            seg = MagicMock()
-            seg.start = 0.0; seg.end = 5.0; seg.text = "Kohli hit a six"; seg.words = []
-            return iter([seg]), _FakeWhisperInfo()
+            log.debug("  [FAKE faster-whisper] model.transcribe(audio=%s)", str(audio)[:60])
+            from types import SimpleNamespace
+            offset, end = _audio_ranges.get(str(audio), (0, 180))
+            output = []
+            for cue in _FAKE_SEGMENTS:
+                if cue["start"] < offset or cue["end"] > end:
+                    continue
+                tokens = cue["text"].split()
+                if cue["start"] == 5:
+                    # Caption/ASR wording mismatch must use a word-ID edit,
+                    # not nearest-time approval or a hidden phrase substitution.
+                    tokens[0] = "Aaj"
+                step = (cue["end"]-cue["start"]-.2)/len(tokens)
+                word_list = [SimpleNamespace(start=cue["start"]-offset+.1+i*step,
+                    end=cue["start"]-offset+.1+(i+1)*step, word=token, probability=.99)
+                    for i, token in enumerate(tokens)]
+                if self.model_name == "medium" and word_list:
+                    # Exercise the real zero-duration ASR regression and retry.
+                    word_list[0].end = word_list[0].start
+                output.append(SimpleNamespace(start=cue["start"]-offset,
+                    end=cue["end"]-offset, text=cue["text"], words=word_list))
+            return iter(output), _FakeWhisperInfo()
 
     class _FakeBatchedPipeline:
         def __init__(self, model=None, *args, **kwargs):
@@ -628,6 +819,15 @@ def _api_intercept_context(video_path: str):
     # ── 6. PIL ─────────────────────────────────────────────────────────────
 
     def _fake_pil_open(*args, **kwargs):
+        if args and isinstance(args[0], io.BytesIO):
+            return _real_image_open(*args, **kwargs)
+        if args and isinstance(args[0], (str, Path)):
+            candidate = Path(args[0])
+            if candidate.is_file():
+                with candidate.open("rb") as handle:
+                    header = handle.read(8)
+                    if header.startswith(b"\xff\xd8") or header == b"\x89PNG\r\n\x1a\n":
+                        return _real_image_open(*args, **kwargs)
         img = MagicMock()
         img.width = 1080
         img.height = 1920
@@ -642,7 +842,7 @@ def _api_intercept_context(video_path: str):
             if not target.is_relative_to(Path.cwd()):
                 raise ValueError("Fake image output escaped sandbox")
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(b"fake-image")
+            target.write_bytes(_cover_fixture_bytes if target.suffix.lower() in (".jpg", ".jpeg") else b"fake-image")
         img.save.side_effect = save
         return img
 
@@ -660,9 +860,13 @@ def _api_intercept_context(video_path: str):
     class _FakeFont:
         @staticmethod
         def truetype(*args, **kwargs):
-            return MagicMock()
+            return _FakeFont()
         def getbbox(self, text):
             return (0, 0, len(text) * 10, 20)
+        def getlength(self, text):
+            return len(text) * 10
+        def set_variation_by_axes(self, axes):
+            pass
 
     # ── 9. Pillow ImageDraw ────────────────────────────────────────────────
 
@@ -698,6 +902,10 @@ def _api_intercept_context(video_path: str):
     _fake_response.status_code = 200
     _fake_response.text = "<html>fake</html>"
     _fake_response.content = b"fake"
+    _fake_response.headers = {"Content-Type": "image/jpeg"}
+    _fake_response.iter_content.side_effect = lambda **_kw: iter([_cover_fixture_bytes])
+    _fake_response.__enter__.return_value = _fake_response
+    _fake_response.__exit__.return_value = False
     _fake_response.json.return_value = {"items": []}
     _fake_response.ok = True
 
@@ -706,7 +914,7 @@ def _api_intercept_context(video_path: str):
             self.headers = {}
             self.cookies = MagicMock()
         def get(self, *args, **kwargs):
-            log.info("  [FAKE HTTP] GET %s", str(args[0])[:80] if args else "")
+            log.debug("  [FAKE HTTP] GET %s", str(args[0])[:80] if args else "")
             return _fake_response
         def post(self, *args, **kwargs):
             return _fake_response
@@ -726,18 +934,18 @@ def _api_intercept_context(video_path: str):
 
     class _FakeSuperRes:
         def upscale_video(self, input_path, output_path, *args, **kwargs):
-            log.info("  [FAKE SuperRes] upscale %s -> %s", input_path, output_path)
+            log.debug("  [FAKE SuperRes] upscale %s -> %s", input_path, output_path)
             Path(output_path).write_bytes(Path(input_path).read_bytes())
             return output_path
 
     # ── 15. face_mapper / ref_grade / premium_analyzer ─────────────────────
 
     def _fake_face_map_video(*args, **kwargs):
-        log.info("  [FAKE face_mapper] map_video")
+        log.debug("  [FAKE face_mapper] map_video")
         return None
 
     def _fake_ref_grade(*args, **kwargs):
-        log.info("  [FAKE ref_grade] grade_video")
+        log.debug("  [FAKE ref_grade] grade_video")
         return kwargs.get("output_path", args[-1] if args else "")
 
     # ── 16. upload._probe_video ────────────────────────────────────────────
@@ -763,12 +971,12 @@ def _api_intercept_context(video_path: str):
 
     @classmethod
     def _fake_from_authorized_user_file(cls, *args, **kwargs):
-        log.info("  [FAKE OAuth] Credentials.from_authorized_user_file")
+        log.debug("  [FAKE OAuth] Credentials.from_authorized_user_file")
         return _FakeCredentials()
 
     @classmethod
     def _fake_from_authorized_user_info(cls, *args, **kwargs):
-        log.info("  [FAKE OAuth] Credentials.from_authorized_user_info")
+        log.debug("  [FAKE OAuth] Credentials.from_authorized_user_info")
         return _FakeCredentials()
 
     # ── 18. scheduler ──────────────────────────────────────────────────────
@@ -782,7 +990,7 @@ def _api_intercept_context(video_path: str):
     globals()["_insta_stub_calls"] = {"count": 0}
 
     def _fake_process_instagram_for_clip(*args, **kwargs):
-        log.info("  [FAKE Instagram] process_instagram_for_clip")
+        log.debug("  [FAKE Instagram] process_instagram_for_clip")
         globals()["_insta_stub_calls"]["count"] += 1
         return None
 
@@ -792,16 +1000,27 @@ def _api_intercept_context(video_path: str):
         # AI providers
         patch("utils.ai_client.AIClient.generate_fastest_first", _fake_generate_fastest_first),
         patch("utils.ai_client.AIClient.generate_text", _fake_generate_text),
+        patch("utils.ai_client.OpenAI", _FakeOpenAI),
+        patch.dict(os.environ, {"DEEPSEEK_API_KEY": "dry-run-key-not-real"}),
+        patch("urllib.request.urlopen", _fake_urlopen),
+        patch("socket.create_connection", side_effect=RuntimeError("Dry-run blocked unstubbed network access")),
         patch("utils.ai_client.AIClient.generate_seo_text", _fake_generate_seo_text),
         patch("utils.ai_client.AIClient.generate_image", _fake_generate_image),
         patch("automation.caption_engine.convert_hindi_to_hinglish_llm", lambda texts, **_: texts),
         patch("automation.caption_engine.render_transparent_cards_batch", _fake_caption_cards),
+        # Probe and caption rendering launch external browser processes. Stub
+        # only that boundary; real rights/range/assets/runtime orchestration runs.
+        patch("automation.stadium_layout._check_caption_browser", lambda: None),
+        patch("frame_analyzer.find_host_in_frame", lambda frame, **kwargs: {
+            "x": 700, "y": 260, "width": 400, "height": 650, "confidence": .99}),
         # subprocess intercept
         patch("subprocess.run", _fake_subprocess_run),
         patch("subprocess.check_output", _fake_subprocess_run),
         patch("subprocess.Popen", _FakePopen),
         # Google APIs
         patch("googleapiclient.discovery.build", _fake_google_build),
+        # upload caches a from-import: warm processes need its binding patched too.
+        patch("upload.build", _fake_google_build),
         # faster-whisper (module-level mock)
         patch("faster_whisper.WhisperModel", _FakeWhisperModel),
         patch("faster_whisper.BatchedInferencePipeline", _FakeBatchedPipeline),
@@ -820,6 +1039,7 @@ def _api_intercept_context(video_path: str):
         patch("PIL.ImageStat.Stat", lambda *_: type("Stats", (), {"mean": [128.0], "var": [50.0]})()),
         # requests
         patch("requests.Session", _FakeSession),
+        patch("requests.get", lambda *_a, **_kw: _fake_response),
         # OpenAI SDK (covered by AIClient patches above — the `chat` attribute
         # is a cached_property so string-path patching won't work here)
         # torch CUDA
@@ -871,7 +1091,7 @@ def dry_run(url: str,
             skip_enhancement=False,
             auto_sync=False, auto_upload=False,
             auto_schedule=False, sample_minutes=None,
-            sync_from_drive=False, mode=None) -> dict:
+            sync_from_drive=False, mode=None, composition=None) -> dict:
     """Execute the REAL pipeline with all external API calls intercepted."""
 
     from automation.config import load as load_config
@@ -980,6 +1200,86 @@ def dry_run(url: str,
     if not skip_export and not skip_seo and result.seo_generated != len(result.exported):
         result.failures.append("acceptance: exported/valid metadata count mismatch")
 
+    # Check actual artifacts too: a successful stage log or counter is not a
+    # cover. Metadata failures are reported separately, not double-counted here.
+    from automation.artifacts import read_metadata
+    thumbnail_clips = [Path(clip) for clip in result.exported if read_metadata(Path(clip)) is not None]
+    thumbnails_enabled = cfg.get("thumbnail", {}).get("enabled", True)
+    missing_covers = []
+    if thumbnails_enabled:
+        for clip in thumbnail_clips:
+            cover = clip.with_name(f"{clip.stem}_thumb.jpg")
+            if not cover.is_file() or cover.stat().st_size == 0:
+                missing_covers.append(clip.name)
+    validation.update(
+        thumbnails_expected=len(thumbnail_clips) if thumbnails_enabled else 0,
+        thumbnails_generated=getattr(pipeline_result, "thumbnails_generated", 0),
+        thumbnails_preserved=getattr(pipeline_result, "thumbnails_preserved", 0),
+        thumbnails_missing=len(missing_covers),
+    )
+    if missing_covers:
+        result.failures.append("acceptance: missing thumbnails: " + ", ".join(missing_covers))
+
+    # Independently verify actual word evidence and final edit ranges. Neither
+    # an LLM attestation, stage tick nor a nonempty fake MP4 can satisfy this.
+    from automation.speech_alignment import alignment_issues, words_in_range
+    word_aligned = 0
+    portrait_exports = 0
+    stadium_exports = 0
+    for clip in result.exported:
+        try:
+            speech = json.loads(clip.with_name(f"{clip.stem}_speech.json").read_text(encoding="utf-8"))
+            edit = json.loads(clip.with_name(f"{clip.stem}_edit.json").read_text(encoding="utf-8"))
+            start_s, end_s = speech["source_range"]
+            if alignment_issues(speech["segments"], start_s, end_s):
+                raise ValueError("invalid source word evidence")
+            if [edit["source_start"], edit["source_end"]] != [start_s, end_s]:
+                raise ValueError("speech/edit ranges disagree")
+            retained = " ".join(str(w["word"]).strip() for w in words_in_range(speech["segments"], start_s, end_s))
+            if edit["text"] != retained:
+                raise ValueError("edit script is not retained speech")
+            word_aligned += 1
+            layout = edit.get("portrait_layout")
+            if (isinstance(layout, dict) and layout["picture_width"] == cfg["export"]["width"]
+                    and layout["face_bottom"]+60 <= layout["caption_top"]):
+                portrait_exports += 1
+            if cfg["export"].get("composition") == "cricket-gameplay-stadium-v1":
+                from automation.cricket_gameplay import sha256, credit_text
+                from automation.stadium_layout import HOST, GAMEPLAY, OVERLAY_HASH, FONT_HASH
+                gameplay = json.loads(clip.with_name(f"{clip.stem}_gameplay.json").read_text(encoding="utf-8"))
+                if (edit.get("composition") != "cricket-gameplay-stadium-v1"
+                        or gameplay["media_sha256"] != sha256(clip)
+                        or gameplay["top"] != HOST or gameplay["bottom"] != GAMEPLAY
+                        or gameplay["caption_style"] != "stadium-reference-v1"
+                        or gameplay["design_assets"]["overlay"]["sha256"] != OVERLAY_HASH
+                        or gameplay["design_assets"]["font"]["sha256"] != FONT_HASH
+                        or gameplay["gameplay_crop"] != gameplay["selection"]["asset"]["crop"]):
+                    raise ValueError("stadium layout/crop/asset evidence mismatch")
+                metadata = read_metadata(clip)
+                if not skip_seo and credit_text(gameplay["selection"]) not in metadata.get("description", ""):
+                    raise ValueError("gameplay attribution missing after SEO")
+                stadium_exports += 1
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            result.failures.append(f"acceptance: word alignment {clip.name}: {exc}")
+    validation["word_aligned_exports"] = word_aligned
+    validation["portrait_exports"] = portrait_exports
+    validation["stadium_exports"] = stadium_exports
+    sdk_calls = globals().get("_editorial_sdk_requests", [])
+    validation["editorial_high_requests"] = sum(r["reasoning_effort"] == "high" and
+        r["extra_body"] == {"thinking": {"type": "enabled"}} for r in sdk_calls)
+    validation["boundary_review_requests"] = sum(r.get("stage") == "boundary_review" for r in sdk_calls)
+    if not skip_export and not skip_highlight and cfg.get("clip_selection", {}).get("editorial", {}).get("enabled"):
+        if cfg["export"].get("composition") == "portrait-caption-v1" and portrait_exports != len(result.exported):
+            result.failures.append("acceptance: fixture exports did not use full-width face-safe portrait layout")
+        if cfg["export"].get("composition") == "cricket-gameplay-stadium-v1" and stadium_exports != len(result.exported):
+            result.failures.append("acceptance: fixture exports did not use approved stadium layout and gameplay evidence")
+        if not 2 <= len(result.exported) <= 3:
+            result.failures.append("acceptance: fixture must produce 2-3 complete drafts")
+        if validation["editorial_high_requests"] < 2:
+            result.failures.append("acceptance: discovery and final review did not use explicit high thinking")
+        if validation["boundary_review_requests"] < 1:
+            result.failures.append("acceptance: fixture phrase mismatch did not exercise word-ID boundary review")
+
     # ── Post-pipeline transcript correction validation ─────────────────────
     try:
         from automation.transcript import TRANSCRIPT_CACHE
@@ -1030,7 +1330,10 @@ def dry_run(url: str,
         except Exception:
             pass
     logged_stages = sorted({r.get("stage") for r in struct_records
-                             if r.get("run_id") == rid and r.get("stage")})
+                             if r.get("run_id") == rid and r.get("stage")
+                             and r.get("status") != "skipped"})
+    skipped_stages = sorted({r.get("stage") for r in struct_records
+                              if r.get("run_id") == rid and r.get("status") == "skipped"})
     if not struct_records:
         result.failures.append("acceptance: no structured pipeline records captured")
 
@@ -1053,12 +1356,15 @@ def dry_run(url: str,
         "uploaded_count": result.uploaded_count,
         "selected_clips": result.selected_clips,
         "seo_generated": result.seo_generated,
+        "thumbnails_generated": validation["thumbnails_generated"],
+        "thumbnails_preserved": validation["thumbnails_preserved"],
         "failures": result.failures,
         "total_seconds": result.total_seconds,
         "transcript_source": result.transcript_source,
         "config_checks": validate_config(cfg),
         "struct_records": len(struct_records),
         "logged_stages": logged_stages,
+        "skipped_stages": skipped_stages,
         "validation": validation,
         "prompts_ok": prompts_ok,
         "event_count": event_count_new,
@@ -1122,6 +1428,7 @@ def _print_validation_report(result: dict):
     print(f"        run_id generated:        {'PASS' if result['run_id'] else 'FAIL'}")
     print(f"        structured records:      {result['struct_records']}")
     print(f"        stages logged:           {sorted(logged)}")
+    print(f"        explicitly skipped:      {result.get('skipped_stages', [])}")
     print()
     print("  [3] Transcript correction (utils.transcript_postproc):")
     if not v["transcript_phase_ran"]:
@@ -1159,6 +1466,18 @@ def _print_validation_report(result: dict):
           f"{'PASS' if insta_gate_ok else 'FAIL — stub never invoked'} "
           f"(calls={_insta_stub_calls['count']})")
     print()
+    print("  [9] Thumbnail artifacts (stubbed media; not visual approval):")
+    print(f"        expected/generated/preserved/missing: "
+          f"{v.get('thumbnails_expected', 0)}/{v.get('thumbnails_generated', 0)}/"
+           f"{v.get('thumbnails_preserved', 0)}/{v.get('thumbnails_missing', 0)}")
+    print()
+    print("  [10] Editorial preflight (real validation, fixture ASR/HTTP):")
+    print(f"        exports with matching word/edit evidence: {v.get('word_aligned_exports', 0)}")
+    print(f"        explicit high-thinking SDK requests:     {v.get('editorial_high_requests', 0)}")
+    print(f"        word-ID boundary review requests:        {v.get('boundary_review_requests', 0)}")
+    print(f"        full-width face-safe portrait exports:   {v.get('portrait_exports', 0)}")
+    print(f"        approved stadium/evidence exports:       {v.get('stadium_exports', 0)}")
+    print()
     if result["failures"]:
         print("  Failures detail:")
         for f in result["failures"]:
@@ -1166,7 +1485,7 @@ def _print_validation_report(result: dict):
     export_ok = not result.get("export_expected", True) or bool(result["exported"])
     ok = (cfg_ok == len(cfg_checks) and result["run_id"] and export_ok and
           transcript_ok and prompts_ok and insta_gate_ok and
-          not result["failures"])
+          not v.get("thumbnails_missing", 0) and not result["failures"])
     print("=" * 70)
     print(f"  OVERALL: {'PASS ✅' if ok else 'CHECK ⚠'}")
     print("=" * 70)
@@ -1194,9 +1513,16 @@ def main():
     parser.add_argument("--sample-minutes", type=int, default=None)
     parser.add_argument("--sync-from-drive", action="store_true")
     parser.add_argument("--mode", choices=["face_mapper", "ref_grade"], default=None)
+    parser.add_argument("--composition", choices=["portrait-caption-v1", "cricket-gameplay-split-v1", "cricket-gameplay-stadium-v1"], default=None)
     parser.add_argument("--list-external", action="store_true")
     parser.add_argument("--validate-config", action="store_true")
+    parser.add_argument("--verbose", action="store_true", help="Show stub calls and detailed diagnostics")
     args = parser.parse_args()
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+        from utils.logger import configure_console
+        configure_console(verbose=True)
 
     if args.skip_instagram:
         os.environ["YT_CLIPS_SKIP_INSTAGRAM"] = "1"
@@ -1233,6 +1559,7 @@ def main():
         sample_minutes=args.sample_minutes,
         sync_from_drive=args.sync_from_drive,
         mode=args.mode,
+        composition=args.composition,
     )
 
     ok = _print_validation_report(result)

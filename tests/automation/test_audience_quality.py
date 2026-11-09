@@ -55,6 +55,7 @@ def test_invalid_edit_map_is_rejected(start, end, speed):
 
 def test_reserved_band_fits_complete_speaker_region(monkeypatch):
     import export
+    monkeypatch.setitem(export.cfg["export"]["captions"], "style", "neon-reference-v2")
     monkeypatch.setitem(export.cfg["export"], "reserve_caption_band", True)
     graph = export._build_enhance_stack({"export_strategy": {
         "use_solo_frame": True, "active_crop": {"x": 400, "y": 0, "width": 1000, "height": 1080}}}, use_logo=False)

@@ -18,6 +18,7 @@ import yaml
 
 from utils.config import load_config
 from utils.logger import get_logger
+from shorts_intelligence.completeness import completeness_value, set_completeness
 
 from automation.clip_selection.selector import ClipSelector
 from automation.clip_selection.arbiter import fmt_ts
@@ -56,10 +57,24 @@ def _valid_word_timings(segment: dict) -> list[dict]:
     return words
 
 
-def _merge_caption_fragments(segments: list[dict]) -> list[dict]:
-    """Join rolling YouTube caption cues until a spoken sentence completes."""
+def _merge_caption_fragments(segments: list[dict], max_merge_seconds: float = 20.0) -> list[dict]:
+    """Join short sentences; retain cue entry points when punctuation is sparse.
+
+    A long punctuation group can straddle unrelated topics. In that case use
+    its original cues for discovery, not one oversized, proportionally timed
+    sentence. These are still unverified boundaries, not complete thoughts.
+    """
     merged: list[dict] = []
     current: dict | None = None
+    members: list[dict] = []
+
+    def flush() -> None:
+        if current is not None:
+            if len(members) > 1 and current["end"] - current["start"] > max_merge_seconds:
+                merged.extend(members)
+            else:
+                merged.append(current)
+
     for segment in segments or []:
         try:
             start = float(segment["start"])
@@ -71,8 +86,11 @@ def _merge_caption_fragments(segments: list[dict]) -> list[dict]:
             continue
 
         if current is not None and (segment.get("discovery_break_before") or start > float(current["end"]) + 1.0):
-            merged.append(current)
+            flush()
             current = None
+            members = []
+
+        members.append({**segment, "start": start, "end": end, "text": text})
 
         if current is None:
             current = {**segment, "start": start, "end": end, "text": text}
@@ -86,11 +104,11 @@ def _merge_caption_fragments(segments: list[dict]) -> list[dict]:
                 current.setdefault("words", []).extend(segment["words"])
 
         if re.search(r"[.!?।]+[\"')\]]*\s*$", text):
-            merged.append(current)
+            flush()
             current = None
+            members = []
 
-    if current is not None:
-        merged.append(current)
+    flush()
     return merged
 
 
@@ -103,7 +121,7 @@ def _word_piece(segment: dict, words: list[dict], *, margin: float = 0) -> dict:
         "text": " ".join(str(word.get("word", "")).strip() for word in words).strip(),
         "words": words,
         "boundary_method": "source_words",
-        "complete_thought": False,
+        "complete_thought": None,
     }
 
 
@@ -170,7 +188,7 @@ def _split_segments_on_pauses(
                     "end": round(c_end, 3),
                     "text": " ".join(chunk),
                     "boundary_method": "estimated_cue_fraction",
-                    "complete_thought": False,
+                    "complete_thought": None,
                     "discovery_break_before": n_chunks > 1,
                 })
     return out
@@ -218,7 +236,7 @@ def _prepare_complete_thoughts(segments: list[dict]) -> list[dict]:
                 "end": round(end, 3),
                 "text": correct_cricket_spelling(part),
                 "boundary_method": "estimated_cue_fraction",
-                "complete_thought": False,
+                "complete_thought": None,
             })
 
     # Word margins can overlap at a sentence boundary. Resolve to one clean cut.
@@ -421,8 +439,9 @@ def _build_clip_yaml_entry(
     return {
         "start": fmt_ts(start),
         "end": fmt_ts(end),
-        "start_sec": round(start, 2),
-        "end_sec": round(end, 2),
+        # Keep the exact reviewed range; display timecodes are not edit points.
+        "start_sec": float(start),
+        "end_sec": float(end),
         "score": round(score, 2),
         "speed_factor": _compute_speed_factor(
             duration, target_duration, max_speedup,
@@ -545,19 +564,32 @@ def _is_livestream_filler(text: str) -> bool:
 
 
 def _has_dense_cricket_evidence(text: str) -> bool:
-    """Reject long tangents that mention cricket only as an afterthought."""
-    from automation.seo.cricket_context import correct_cricket_spelling
+    """Require local domain coverage, including discussion rather than just play.
 
-    canonical = correct_cricket_spelling(str(text or "")).casefold()
+    Count non-overlapping phrase tokens so player/team names and Test-match
+    jokes are not invisible. Keep the same minimum hits and density; generic
+    transfer/team chatter and a lone name in a long tangent remain insufficient.
+    """
+    from automation.seo.cricket_context import (
+        correct_cricket_spelling, find_canonical_entities,
+    )
+    from utils.devanagari import to_roman
+
+    canonical = correct_cricket_spelling(to_roman(str(text or ""))).casefold()
     words = re.findall(r"\b\w+\b", canonical)
+    entities = find_canonical_entities(canonical)
+    phrases = {name.casefold() for names in entities.values() for name in names}
+    phrases.add("test match")
+    phrase_pattern = "|".join(re.escape(phrase) for phrase in sorted(phrases, key=len, reverse=True))
     signals = re.findall(
-        r"\b(?:cricket|match|test|t20|odi|wicket|run|score|over|ball|"
+        r"\b(?:" + phrase_pattern + r"|cricket|ipl|match|test|t20|odi|wicket|runs?|score|over|ball|"
         r"batting|bowling|innings?|partnership|four|six|boundary|century|"
         r"batsman|batter|bowler|pakistan|england|india|australia|"
         r"sri\s+lanka|south\s+africa|new\s+zealand)\b",
         canonical,
     )
-    return len(signals) >= 2 and len(signals) / max(len(words), 1) >= 0.07
+    covered_tokens = sum(len(signal.split()) for signal in signals)
+    return len(signals) >= 2 and covered_tokens / max(len(words), 1) >= 0.07
 
 
 def _build_livestream_windows(
@@ -626,7 +658,7 @@ def _build_livestream_windows(
                 "words": [word for member in members for word in member.get("words", [])],
                 "boundary_method": "source_words" if all(member.get("boundary_method") == "source_words" for member in members)
                                    else "estimated_cue_fraction",
-                "complete_thought": False,
+                "complete_thought": None,
             })
 
     return windows
@@ -773,6 +805,7 @@ def detect_highlights(
     video_path: str | None = None,
     output_path: str | None = None,
     match_key: str | None = None,
+    diagnostics: dict | None = None,
 ) -> list[dict]:
     """Replace ``highlight.detect_highlights()`` with 7-agent clip selection.
 
@@ -831,13 +864,16 @@ def detect_highlights(
     from automation.seo.cricket_context import is_cricket_content
     if not is_cricket_content(stream_context):
         _write_empty_highlights(output_path)
+        if diagnostics is not None:
+            diagnostics.update(status="NON_CRICKET_SOURCE", candidates=0, hard_rejected=0)
         log.warning("Cricket-only gate rejected non-cricket source; wrote empty highlights")
         return []
     # Keep generic setup/payoff sentences until window construction. A phrase
     # such as "this changes everything" is weak alone but essential beside a
     # concrete wicket or scoreline. Each completed window must independently
     # pass the cricket gate in _build_livestream_windows().
-    log.info("Loaded %d discovery speech units (semantic completeness unverified) from %s", len(segments), t_path)
+    log.info("Transcript: %d speech units; semantic completeness unverified", len(segments))
+    log.debug("Discovery transcript path: %s", t_path)
 
     # ── Audio RMS extraction ───────────────────────────────────────────────
     rms_list = _extract_audio_rms(video_path)
@@ -858,7 +894,7 @@ def detect_highlights(
         avg_rms = 1.0
         max_rms = 1.0
 
-    log.info("Audio RMS - avg: %.4f | max: %.4f", avg_rms, max_rms)
+    log.debug("Audio RMS - avg: %.4f | max: %.4f", avg_rms, max_rms)
 
     # ── Topic segmentation + cricket heuristics ───────────────────────────
     topics = []
@@ -987,7 +1023,7 @@ def detect_highlights(
     # Sentence grouping is not semantic proof. Do not grant the learner's
     # complete-thought gate just because a heuristic constructed a window.
     for candidate in scored_candidates:
-        candidate["complete_thought"] = False
+        set_completeness(candidate, "UNVERIFIED")
         candidate.setdefault("boundary_method", "heuristic_sentence_grouping")
     try:
         from shorts_intelligence.bridge import apply_selection_policy
@@ -1013,15 +1049,34 @@ def detect_highlights(
     min_quality = cfg.get("clip_selection", {}).get("min_quality", 20.0)
     max_selected = cfg.get("clip_selection", {}).get("max_selected", MAX_SELECTED_CLIPS)
     min_selected = cfg.get("clip_selection", {}).get("min_selected", 0)
-    top = selector.select(scored_candidates, context_for_agents,
-                          max_selected=max_selected, min_selected=min_selected,
-                          min_quality=min_quality)
+    editorial_enabled = selection_cfg.get("editorial", {}).get("enabled", False)
+    if editorial_enabled:
+        from automation.editorial_planner import curate_clips
+        top = curate_clips(raw_segments, scored_candidates, video_path, cfg, context_for_agents,
+                           Path(output_path).with_suffix(".curation.json"))
+    else:
+        top = selector.select(scored_candidates, context_for_agents,
+                              max_selected=max_selected, min_selected=min_selected,
+                              min_quality=min_quality)
+
+    # Semantic eligibility precedes learning. Text review is not audio/visual
+    # certification: these remain drafts behind the separate release gate.
+    top = [candidate for candidate in top if completeness_value(candidate) is True]
+    try:
+        from shorts_intelligence.bridge import apply_selection_policy
+        apply_selection_policy(cfg, top)
+    except Exception as exc:
+        log.warning("Shorts Intelligence post-review policy unavailable: %s", exc)
+    summary = context_for_agents.get("selection_summary", {})
+    if diagnostics is not None:
+        diagnostics.update(summary)
 
     if cfg.get("release_review", {}).get("required", False):
         from automation.editorial_evidence import source_identity, write_discovery_evidence
         write_discovery_evidence(output_path, source_identity(video_path), transcript_path,
                                  raw_segments, scored_candidates, top,
-                                 context_for_agents.get("editorial_decision"))
+                                 context_for_agents.get("editorial_decision"),
+                                 selection_summary=summary)
 
     top.sort(key=lambda w: w["start"])
 
@@ -1037,13 +1092,18 @@ def detect_highlights(
     yaml_data = {}
     highlights = []
 
-    for i, w in enumerate(top, start=1):
-        key = f"clip{i}"
-        window_text_parts = [
-            seg.get("text", "") for seg in segments
-            if seg["end"] > w["start"] and seg["start"] < w["end"]
-        ]
-        window_text = " ".join(window_text_parts).strip() or "Cricket Highlights"
+    reserves = context_for_agents.get("editorial_reserves", [])
+    for i, w in enumerate(top + reserves, start=1):
+        is_reserve = i > len(top)
+        key = f"reserve{i-len(top)}" if is_reserve else f"clip{i}"
+        if editorial_enabled:
+            window_text = w["text"]  # exact retained words, never intersecting cue spillover
+        else:
+            window_text_parts = [
+                seg.get("text", "") for seg in segments
+                if seg["end"] > w["start"] and seg["start"] < w["end"]
+            ]
+            window_text = " ".join(window_text_parts).strip() or "Cricket Highlights"
 
         yaml_data[key] = _build_clip_yaml_entry(
             start=w["start"],
@@ -1059,7 +1119,12 @@ def detect_highlights(
         yaml_data[key]["semantic_review"] = w.get("semantic_review", "NOT CHECKED")
         yaml_data[key]["boundary_method"] = w.get("boundary_method", "unknown")
         yaml_data[key]["source_cue_ids"] = w.get("source_cue_ids", [])
-        yaml_data[key]["complete_thought"] = False
+        yaml_data[key]["complete_thought"] = completeness_value(w)
+        yaml_data[key]["completeness"] = w.get("completeness")
+        if editorial_enabled:
+            from automation.speech_alignment import _fingerprint
+            yaml_data[key].update(speech_segments=w["speech_segments"], role="reserve" if is_reserve else "primary",
+                                 source_identity=_fingerprint(video_path))
 
         if "agent_scores" in w:
             yaml_data[key]["agent_scores"] = {
@@ -1071,7 +1136,7 @@ def detect_highlights(
         if "hook_score" in w:
             yaml_data[key]["hook_score"] = w["hook_score"]
 
-        highlights.append({
+        highlight = {
             "id": key,
             "start": w["start"],
             "end": w["end"],
@@ -1081,6 +1146,9 @@ def detect_highlights(
             "speed_factor": yaml_data[key]["speed_factor"],
             "text": window_text,
             "content_type": w.get("content_type"),
+            "complete_thought": completeness_value(w),
+            "completeness": w.get("completeness"),
+            "semantic_review": w.get("semantic_review", "NOT CHECKED"),
             "agent_scores": w.get("agent_scores", {}),
             "hook_score": w.get("hook_score"),
             "intelligence_adjustment": w.get("intelligence_adjustment", 0.0),
@@ -1088,7 +1156,11 @@ def detect_highlights(
                 "intelligence_shadow_adjustment", 0.0
             ),
             "intelligence_segments": w.get("intelligence_segments", []),
-        })
+        }
+        if not is_reserve:
+            highlights.append(highlight)
+        elif diagnostics is not None:
+            diagnostics.setdefault("reserves", []).append(highlight)
 
         log.info("  %s: %s -> %s (score=%.1f, speed=%.2fx)", key, fmt_ts(w["start"]),
                  fmt_ts(w["end"]), w.get("final_score", 0),

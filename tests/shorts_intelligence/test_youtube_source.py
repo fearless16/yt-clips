@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from shorts_intelligence.youtube_source import SourceConfig, YouTubeShortsSource
 
 
@@ -96,3 +100,66 @@ def test_source_drops_cross_channel_video_even_if_loader_returns_it():
 
 def test_iso_duration_parser_supports_hours_minutes_and_seconds():
     assert YouTubeShortsSource.parse_duration("PT1H2M3S") == 3723
+
+
+@pytest.fixture
+def receipt_package(tmp_path):
+    from automation.youtube_delivery import artifact_hashes
+    clip = tmp_path / "clip.mp4"
+    metadata = tmp_path / "clip_metadata.json"
+    cover = tmp_path / "clip_thumb.jpg"
+    clip.write_bytes(b"fixture video")
+    metadata.write_text(json.dumps({"title": "Cricket analysis", "hook_type": "debate"}))
+    cover.write_bytes(b"fixture cover; hash validation is separate from image decoding")
+    payload = {"schema_version": 2, "channel_id": CHANNEL_ID, "video_id": "receipt-short",
+               "status": "COMPLETE", "artifacts": artifact_hashes(clip, metadata, cover),
+               "intent": {"privacy": "public", "publish_at": None, "notify_subscribers": False}}
+    proof = tmp_path / "clip_delivery.json"
+    proof.write_text(json.dumps(payload))
+    source = YouTubeShortsSource(SourceConfig(channel_id=CHANNEL_ID, handle="@fixture", local_metadata_root=str(tmp_path)))
+    return source, clip, metadata, cover, proof, payload
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_local_metadata_joins_hash_bound_receipts_without_mutation(receipt_package, version):
+    source, _, metadata, _, proof, payload = receipt_package
+    payload["schema_version"] = version
+    proof.write_text(json.dumps(payload))
+    before = metadata.read_bytes()
+    assert source._load_local_metadata()["receipt-short"]["hook_type"] == "debate"
+    assert metadata.read_bytes() == before
+
+
+@pytest.mark.parametrize("damage", ["media", "metadata", "cover", "channel", "path", "schema", "unknown", "corrupt"])
+def test_invalid_receipt_cannot_supply_trusted_metadata(receipt_package, damage):
+    source, clip, metadata, cover, proof, payload = receipt_package
+    if damage in {"media", "metadata", "cover"}:
+        {"media": clip, "metadata": metadata, "cover": cover}[damage].write_bytes(b"changed")
+    elif damage == "channel":
+        payload["channel_id"] = "other-channel"
+    elif damage == "path":
+        payload["artifacts"]["metadata"]["path"] = str(metadata.parent / "outside_metadata.json")
+    elif damage == "schema":
+        payload["schema_version"] = 999
+    elif damage == "unknown":
+        payload["status"] = "VIDEO_UPLOAD_UNKNOWN"
+    if damage == "corrupt":
+        proof.write_text("{")
+    else:
+        proof.write_text(json.dumps(payload))
+    assert source._load_local_metadata() == {}
+
+
+def test_legacy_metadata_id_remains_supported_without_a_receipt(tmp_path):
+    metadata = {"youtube_video_id": "legacy-short", "hook_type": "debate"}
+    (tmp_path / "legacy_metadata.json").write_text(json.dumps(metadata))
+    source = YouTubeShortsSource(SourceConfig(channel_id=CHANNEL_ID, handle="@fixture", local_metadata_root=str(tmp_path)))
+    assert source._load_local_metadata() == {"legacy-short": metadata}
+
+
+def test_receipt_does_not_bypass_shelf_or_owner_gates(receipt_package):
+    source, _, _, _, _, _ = receipt_package
+    source._shelf_loader = lambda: [{"id": "different-shelf-short"}]
+    source._video_loader = lambda _: []
+    source._analytics_loader = lambda *_: []
+    assert source.fetch().records == []

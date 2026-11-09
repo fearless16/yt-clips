@@ -255,6 +255,7 @@ class TestHookOverlayIntegration:
     @pytest.fixture(autouse=True)
     def _explicitly_enable_optional_hook(self, monkeypatch):
         import export
+        monkeypatch.setitem(export.cfg["export"], "composition", "portrait-caption-v1")
         monkeypatch.setitem(export.cfg["export"]["hook_overlay"], "enabled", True)
         monkeypatch.setitem(export.cfg["export"], "captions", {"enabled": False})
 
@@ -361,6 +362,7 @@ class TestHookOverlayExportIntegration:
     @pytest.fixture(autouse=True)
     def _explicitly_enable_optional_hook(self, monkeypatch):
         import export
+        monkeypatch.setitem(export.cfg["export"], "composition", "portrait-caption-v1")
         monkeypatch.setitem(export.cfg["export"]["hook_overlay"], "enabled", True)
         monkeypatch.setitem(export.cfg["export"], "captions", {"enabled": False})
 

@@ -1,0 +1,23 @@
+{
+  "provenance": "Verbatim timestamp/word excerpts from run 22e9299c, shorts/2026-11-04_140944_db694b02/clip{1,2}_speech.json. Excerpts reproduce failures; they are not approved transcripts.",
+  "cases": [
+    {
+      "source_range": [1499.36, 1525.925],
+      "segments": [{"start": 1497.36, "end": 1499.8799999999999,
+        "words": [
+          {"start": 1497.36, "end": 1497.6999999999998, "word": "せ", "probability": 0.00008035024802666157},
+          {"start": 1497.6999999999998, "end": 1497.6999999999998, "word": " कल", "probability": 0.17054302711039782},
+          {"start": 1499.06, "end": 1499.8799999999999, "word": " में", "probability": 0.5089287039202949}
+        ]}]
+    },
+    {
+      "source_range": [1812.04, 1834.92],
+      "segments": [{"start": 1810.96, "end": 1817.08,
+        "words": [
+          {"start": 1811.76, "end": 1812.1599999999999, "word": " गौतम", "probability": 0.82144167025884},
+          {"start": 1812.1599999999999, "end": 1812.42, "word": " कमबीर", "probability": 0.5763661473368605},
+          {"start": 1816.44, "end": 1816.44, "word": " 快", "probability": 0.000028700947950710543}
+        ]}]
+    }
+  ]
+}

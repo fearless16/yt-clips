@@ -21,6 +21,12 @@ from typing import Dict, List, Optional, Tuple
 
 from utils.config import load_config
 from utils.logger import get_logger
+from automation.youtube_delivery import (
+    DeliveryIncompleteError, artifact_hashes, delivery_lock, finish_thumbnail,
+    load_receipt, save_receipt, thumbnail_path, validate_thumbnail, RECEIPT_VERSION,
+    delivery_intent, finish_publication, read_publication_status,
+    require_private_staging, require_future_schedule, wait_for_processing,
+)
 
 cfg = load_config()
 log = get_logger("upload", cfg["logging"]["log_file"], cfg["logging"]["level"])
@@ -194,6 +200,49 @@ def _ensure_shorts_metadata(title: str, description: str, tags: List[str]) -> Tu
     return title[:100], _truncate_bytes(description, 5000), _limit_youtube_tags(tags)
 
 
+def _prepare_upload_metadata(meta, video):
+    """Validate the exact outgoing credit after all transport transformations."""
+    import re
+
+    title = meta.get("title", "Cricket Highlights #Shorts")
+    description = meta.get("description", "")
+    if not isinstance(title, str) or not isinstance(description, str):
+        raise ValueError("Upload title and description must be text")
+    tags = []
+    for key in ("tags", "search_terms"):
+        values = meta.get(key) or []
+        if not isinstance(values, list):
+            raise ValueError(f"Upload {key} must be a list")
+        tags.extend(str(t).strip() for t in values if str(t).strip())
+    title, description, tags = _ensure_shorts_metadata(title, description, list(dict.fromkeys(tags)))
+    description = re.sub(r'(?m)^#+\s+', '', description)
+    description = re.sub(r'(\*\*|__)(.*?)\1', r'\2', description)
+    description = re.sub(r'(?m)^\s*[-*]\s+', '• ', description)
+    description = _truncate_bytes(re.sub(r'\n{3,}', '\n\n', description).strip(), 5000)
+    sidecar = Path(video).with_name(f"{Path(video).stem}_gameplay.json")
+    if sidecar.exists():
+        from automation.cricket_gameplay import credit_text
+        try:
+            evidence = json.loads(sidecar.read_text(encoding="utf-8"))
+            selection = evidence["selection"]
+            if selection["asset"].get("status") == "REVIEW_ONLY":
+                raise ValueError("Local-review gameplay cannot be uploaded; publication review is still required")
+            if selection["asset"].get("status") == "AVAILABLE":
+                from automation.cricket_gameplay import load_delivery_library, sha256
+                library = load_delivery_library(selection["manifest"])
+                if (library["manifest_sha256"] != selection["manifest_sha256"]
+                        or selection["asset"] not in library["assets"]):
+                    raise ValueError("Gameplay stock changed after rendering; repackage and review")
+                if evidence.get("media_sha256") != sha256(video):
+                    raise ValueError("Gameplay media changed after rendering; repackage and review")
+            credit = credit_text(selection)
+        except (KeyError, TypeError, AttributeError) as exc:
+            raise ValueError("Invalid gameplay attribution evidence") from exc
+        if credit not in description:
+            raise ValueError("Gameplay attribution would be missing, rewritten or truncated during upload; repackage and review")
+    return title, description, tags
+
+
 def _is_colab() -> bool:
     try:
         import google.colab
@@ -271,6 +320,53 @@ def upload_video(
     privacy: str = "scheduled",
     publish_at: Optional[str] = None,
 ) -> Optional[str]:
+    """Deliver once, then resume only missing thumbnail work on the same video.
+
+    Returns an ID only for complete delivery. A known uploaded video with an
+    incomplete cover raises DeliveryIncompleteError carrying its video_id.
+    """
+    if not Path(video_path).is_file():
+        log.error("Video file not found: %s", video_path)
+        return None
+    with delivery_lock(Path(video_path)):
+        return _upload_video(video_path, metadata_path, privacy, publish_at)
+
+
+def _complete_delivery(youtube, video, metadata, cover, artifacts, receipt):
+    video_id = receipt["video_id"]
+    try:
+        if receipt["status"] == "THUMBNAIL_PENDING":
+            require_private_staging(read_publication_status(youtube, video_id, receipt["channel_id"]))
+            if cover is not None:
+                receipt["thumbnail"] = finish_thumbnail(
+                    youtube, video_id, cover, cfg.get("youtube", {}), media_factory=MediaFileUpload)
+            else:
+                wait_for_processing(youtube, video_id, cfg.get("youtube", {}))
+                receipt["thumbnail"] = {"status": "DISABLED"}
+            receipt["status"] = "PUBLICATION_PENDING"
+            save_receipt(video, receipt)
+        if artifact_hashes(video, metadata, cover) != artifacts:
+            raise ValueError("Reviewed artifacts changed during thumbnail delivery")
+        if cfg.get("release_review", {}).get("required", False):
+            from automation.release_review import require_ready
+            require_ready(video)
+        receipt["publication"] = finish_publication(youtube, video, receipt)
+        if artifact_hashes(video, metadata, cover) != artifacts:
+            raise ValueError("Reviewed artifacts changed during publication; remote visibility may already be applied")
+        completed = {**receipt, "status": "COMPLETE"}
+        completed.pop("error", None)
+        save_receipt(video, completed)
+        log.info("YouTube delivery complete (thumbnail %s): https://youtu.be/%s",
+                 receipt["thumbnail"]["status"], video_id)
+        return video_id
+    except Exception as exc:
+        receipt["error"] = str(exc)
+        save_receipt(video, receipt)
+        phase = "thumbnail/processing" if receipt["status"] == "THUMBNAIL_PENDING" else "publication"
+        raise DeliveryIncompleteError(video_id, f"{phase} incomplete: {exc}") from exc
+
+
+def _upload_video(video_path, metadata_path, privacy, publish_at):
     """
     Upload a single video to YouTube.
 
@@ -292,6 +388,18 @@ def upload_video(
     if not m_path.exists():
         log.error(f"Metadata file not found: {metadata_path}")
         return None
+    cover = thumbnail_path(v_path) if cfg.get("thumbnail", {}).get("enabled", True) else None
+    try:
+        if cover is not None:
+            validate_thumbnail(cover)
+        with m_path.open("r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+        if not isinstance(meta, dict):
+            raise ValueError("Metadata must be a JSON object")
+        title, clean_desc, all_tags = _prepare_upload_metadata(meta, v_path)
+    except (OSError, ValueError) as exc:
+        log.error("Delivery preflight failed before authentication: %s", exc)
+        return None
     if cfg.get("release_review", {}).get("required", False):
         from automation.release_review import require_ready
         # Approval binds the canonical metadata file, not an arbitrary override.
@@ -306,32 +414,35 @@ def upload_video(
     if not _validate_shorts_video(v_path):
         return None
 
+    artifacts = artifact_hashes(v_path, m_path, cover)
+    channel_id = cfg.get("youtube", {}).get("channel_id")
+    receipt = load_receipt(v_path, artifacts, channel_id=channel_id)
+    if receipt is None and meta.get("youtube_video_id"):
+        raise DeliveryIncompleteError(meta["youtube_video_id"],
+                                      "Legacy upload ID exists without a bound receipt; reconcile, do not re-upload")
+    try:
+        intent = delivery_intent(
+            privacy, publish_at, notify_subscribers=cfg.get("youtube", {}).get("notify_subscribers", True),
+            previous=receipt["intent"] if receipt is not None else None)
+        if receipt is not None and intent != receipt["intent"]:
+            raise ValueError("Delivery intent/settings changed (privacy, schedule or notifications); explicit reconciliation required")
+        if receipt is None:
+            require_future_schedule(intent)
+    except (ValueError, TypeError) as exc:
+        if receipt is not None:
+            raise DeliveryIncompleteError(receipt["video_id"], str(exc)) from exc
+        log.error("Delivery intent preflight failed: %s", exc)
+        return None
+    if receipt is not None and receipt.get("status") == "COMPLETE":
+        return receipt["video_id"]
+
     youtube = get_authenticated_service()
     if not youtube:
         log.error("[EXIT] upload_video failed: no YouTube service (check yt_channel_token.json)")
         return None
-
-    # Load and validate SEO metadata
-    with open(metadata_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
-
-    title = meta.get("title", "Cricket Highlights #Shorts")
-    description = meta.get("description", "")
-    # Use dedicated SEO tags + search_terms for YouTube API tags field
-    seo_tags = meta.get("tags", [])
-    search_terms = meta.get("search_terms", [])
-    # Merge both: SEO tags (dedicated discoverability tags) + search terms (search phrases)
-    all_tags = list(dict.fromkeys([str(t).strip() for t in seo_tags + search_terms if str(t).strip()]))
-    title, description, all_tags = _ensure_shorts_metadata(title, description, all_tags)
-
-    if publish_at or privacy == "scheduled":
-        if not publish_at:
-            from scheduler import get_next_upload_time
-            publish_at = get_next_upload_time()
-            log.info(f"⏰ Privacy set to 'scheduled'. Auto-scheduling for: {publish_at}")
-        else:
-            log.info(f"⏰ Scheduled for: {publish_at}")
-        privacy = "private"  # YouTube API requires "private" for scheduled videos
+    if receipt is not None:
+        log.info("Resuming %s for existing video %s; no video insert", receipt["status"], receipt["video_id"])
+        return _complete_delivery(youtube, v_path, m_path, cover, artifacts, receipt)
 
     # Validate category against assignable categories (avoids invalidCategoryId).
     category_id = _assignable_category_id(
@@ -345,14 +456,6 @@ def upload_video(
                  cfg.get("youtube", {}).get("contains_synthetic_media", False))
     )
 
-    import re
-    # Strip markdown headers (##), Bold (** or __), and convert lists to clean bullets
-    safe_desc = description or ""
-    clean_desc = re.sub(r'(?m)^#+\s+', '', safe_desc)
-    clean_desc = re.sub(r'(\*\*|__)(.*?)\1', r'\2', clean_desc)
-    clean_desc = re.sub(r'(?m)^\s*[-*]\s+', '• ', clean_desc)
-    clean_desc = re.sub(r'\n{3,}', '\n\n', clean_desc).strip()
-
     body = {
         "snippet": {
             "title": title[:100] if title else "Shorts",
@@ -361,61 +464,41 @@ def upload_video(
             "categoryId": category_id,
         },
         "status": {
-            "privacyStatus": privacy,
+            # Never expose or schedule a video before thumbnail/release checks.
+            "privacyStatus": "private",
             "selfDeclaredMadeForKids": cfg.get("youtube", {}).get("self_declared_made_for_kids", False),
             "containsSyntheticMedia": contains_synthetic,
         },
     }
-
-    if publish_at:
-        body["status"]["publishAt"] = publish_at
-
-    thumb_path = Path(video_path).with_name(f"{Path(video_path).stem}_thumb.jpg")
 
     log.info(f"🚀 Uploading to YouTube: {title[:80]}...")
 
     chunk_mb = int(cfg.get("youtube", {}).get("upload_chunk_size_mb", 8))
     media_body = MediaFileUpload(video_path, chunksize=chunk_mb * 1024 * 1024, resumable=False)
     try:
+        # Persist intent BEFORE insert: an ambiguous timeout must never cause a
+        # second insert on the next invocation. Do not mutate reviewed metadata.
+        receipt = {"schema_version": RECEIPT_VERSION, "channel_id": channel_id, "artifacts": artifacts,
+                   "intent": intent,
+                   "status": "VIDEO_UPLOAD_UNKNOWN", "video_id": None,
+                   "thumbnail": {"status": "PENDING" if cover is not None else "DISABLED"}}
+        save_receipt(v_path, receipt)
         insert_request = youtube.videos().insert(
             part=",".join(body.keys()),
             body=body,
             media_body=media_body,
-            notifySubscribers=cfg.get("youtube", {}).get("notify_subscribers", True),
+            notifySubscribers=intent["notify_subscribers"],
         )
         response = insert_request.execute()
-        video_id = response["id"]
-        log.info(f"✅ Upload successful! Video ID: {video_id}")
-
-        try:
-            if Path(metadata_path).exists():
-                with open(metadata_path, "r", encoding="utf-8") as f:
-                    meta_data = json.load(f)
-                meta_data["youtube_video_id"] = video_id
-                with open(metadata_path, "w", encoding="utf-8") as f:
-                    json.dump(meta_data, f, indent=2, ensure_ascii=False)
-                log.info(f"📝 Saved youtube_video_id: {video_id} to {Path(metadata_path).name}")
-        except Exception as e:
-            log.warning(f"Failed to write video_id to metadata: {e}")
-
-        if thumb_path.exists():
-            try:
-                log.info(f"🖼️ Uploading thumbnail: {thumb_path.name}...")
-                thumbnail_body = MediaFileUpload(str(thumb_path))
-                try:
-                    youtube.thumbnails().set(
-                        videoId=video_id,
-                        media_body=thumbnail_body,
-                    ).execute()
-                finally:
-                    thumbnail_body.stream().close()
-                log.info("✅ Thumbnail uploaded!")
-            except Exception as e:
-                log.warning(f"Failed to upload thumbnail: {e}")
-
-        log.info(f"🔗 URL: https://youtu.be/{video_id}")
-        return video_id
-
+        video_id = response.get("id") if isinstance(response, dict) else None
+        if not isinstance(video_id, str) or not video_id.strip():
+            raise ValueError("Insert returned no valid video ID; outcome unknown, reconcile before retry")
+        receipt.update(video_id=video_id, status="THUMBNAIL_PENDING")
+        save_receipt(v_path, receipt)
+        log.info("Video received by YouTube: %s; thumbnail delivery still pending", video_id)
+        return _complete_delivery(youtube, v_path, m_path, cover, artifacts, receipt)
+    except DeliveryIncompleteError:
+        raise
     except Exception as e:
         log.error("❌ Error uploading %s: %s", video_path, e)
         return None

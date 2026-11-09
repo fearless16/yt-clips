@@ -22,10 +22,14 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from functools import wraps
+from inspect import signature
 from pathlib import Path
 from typing import Any
 
@@ -33,7 +37,7 @@ from automation.memory.event_models import EventType, ClipEvent
 from automation.memory.decision_store import DecisionStore
 from automation.providers.provider_health import ProviderHealth
 
-from utils.logger import get_logger, run_phase, new_run_id
+from utils.logger import get_logger, run_phase, new_run_id, log_skipped
 from automation.artifacts import read_metadata
 
 log = get_logger("orchestrator")
@@ -90,9 +94,103 @@ class PipelineResult:
     run_id: str = ""
     selected_clips: int = 0
     rejected_clips: int = 0
+    selection_status: str = "NOT_RUN"
+    candidate_count: int = 0
+    review_candidates: int = 0
     seo_generated: int = 0
+    thumbnails_generated: int = 0
+    thumbnails_preserved: int = 0
     release_ready: int = 0
     release_held: int = 0
+    stage_results: list[dict] = field(default_factory=list)
+
+
+def _result_status(result: PipelineResult, *, upload_requested: bool = False) -> str:
+    if result.selection_status == "REVIEW_REQUIRED":
+        return "review"
+    if result.failures:
+        return "partial" if result.exported else "failed"
+    if result.release_held:
+        return "review"
+    if upload_requested and result.exported and result.uploaded_count < len(result.exported):
+        return "partial"
+    return "ok" if result.exported else "empty"
+
+
+def _report_run(function):
+    """Finalize every exit path, including early aborts, after phases close."""
+    call_signature = signature(function)
+
+    @wraps(function)
+    def reported(*args, **kwargs):
+        started = time.monotonic()
+        options = call_signature.bind(*args, **kwargs)
+        options.apply_defaults()
+        events = []
+
+        class StageCollector(logging.Handler):
+            def emit(self, record):
+                if (getattr(record, "stage", None) not in (None, "pipeline")
+                        and getattr(record, "status", None) not in (None, "start")):
+                    events.append({key: getattr(record, key, None) for key in
+                                   ("run_id", "stage", "phase", "status", "duration_ms", "metadata")})
+
+        collector = StageCollector()
+        log.addHandler(collector)
+        try:
+            result = function(*args, **kwargs)
+        except (Exception, KeyboardInterrupt) as exc:
+            log.error("[EXIT] pipeline interrupted: %s", exc, extra={
+                "stage": "pipeline", "status": "cancelled" if isinstance(exc, KeyboardInterrupt) else "failed",
+                "duration_ms": int((time.monotonic() - started) * 1000),
+                "metadata": {"failures": [str(exc) or type(exc).__name__]},
+            })
+            raise
+        finally:
+            log.removeHandler(collector)
+            collector.close()
+        result.total_seconds = time.monotonic() - started
+        result.stage_results = [event for event in events if event["run_id"] == result.run_id]
+        config = _cfg()
+        editorial = config.get("clip_selection", {}).get("editorial", {})
+        if (editorial.get("enabled") and not options.arguments["learn_only"]
+                and not options.arguments["skip_highlight"] and not options.arguments["skip_export"]
+                and not result.failures):
+            target = min(int(editorial.get("target_min", 2)),
+                         int(config.get("clip_selection", {}).get("max_selected", 3)))
+            count = len(result.exported)
+            from automation.cricket_gameplay import GAMEPLAY_COMPOSITIONS
+            if (options.arguments.get("composition") or config.get("export", {}).get("composition")) in GAMEPLAY_COMPOSITIONS:
+                from automation.cricket_gameplay import count_distinct_exports
+                count = count_distinct_exports(result.exported)
+            if count < target:
+                result.failures.append(
+                    f"editorial_target: {count} exports/distinct moments; target {target}-3 not met after bounded recovery")
+        status = "ok" if options.arguments["learn_only"] and not result.failures else _result_status(
+            result, upload_requested=options.arguments["auto_upload"])
+        metadata = {
+            "exported": len(result.exported), "uploaded": result.uploaded_count,
+            "selected": result.selected_clips, "candidates": result.candidate_count,
+            "rejected": result.rejected_clips, "selection_status": result.selection_status,
+            "seo_generated": result.seo_generated, "thumbnails_generated": result.thumbnails_generated,
+            "thumbnails_preserved": result.thumbnails_preserved,
+            "transcript_source": result.transcript_source, "failures": result.failures,
+            "output_dirs": sorted({str(clip.parent) for clip in result.exported}),
+            "log_file": config.get("logging", {}).get("log_file", "logs/pipeline.log"),
+            "review_required": config.get("release_review", {}).get("required", False),
+            "upload_requested": options.arguments["auto_upload"],
+            "stages": result.stage_results,
+        }
+        log.log(logging.INFO if status == "ok" else logging.WARNING,
+                "[EXIT] pipeline run_id=%s status=%s exported=%d uploaded=%d failures=%d elapsed=%.1fs",
+                result.run_id, status, len(result.exported), result.uploaded_count,
+                len(result.failures), result.total_seconds, extra={
+                    "stage": "pipeline", "phase": "Pipeline", "status": status,
+                    "run_id": result.run_id, "duration_ms": int(result.total_seconds * 1000),
+                    "metadata": metadata,
+                })
+        return result
+    return reported
 
 
 # ── Short-hands to keep stage code readable ─────────────────────────────
@@ -153,6 +251,18 @@ def _existing_exports(shorts_dir: str, chosen_dir: str | None = None) -> list[Pa
         return []
     batches = []
     for directory in directories:
+        finalization = directory / "finalization.json"
+        if finalization.exists():
+            try:
+                package = json.loads(finalization.read_text(encoding="utf-8"))
+                if not isinstance(package, dict):
+                    raise ValueError("expected an object")
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"Final-layout manifest invalid; preserve and review {finalization}: {exc}") from exc
+            if package.get("publication_authorized") is not True:
+                if chosen_dir:
+                    raise ValueError("Final-layout package is not a production/release-approved batch; use cleared exports")
+                continue
         clips = sorted(p for p in directory.glob("*.mp4")
                        if p.is_file() and not p.is_symlink() and "test_output" not in p.name)
         if clips:
@@ -162,6 +272,36 @@ def _existing_exports(shorts_dir: str, chosen_dir: str | None = None) -> list[Pa
     return batches[0] if batches else []
 
 
+def _validate_enhancement_inputs(clips):
+    """Inspect actual media evidence, never the profile requested for a new run."""
+    from automation.cricket_gameplay import GAMEPLAY_COMPOSITIONS
+    for clip in clips:
+        clip = Path(clip)
+        if clip.with_name(f"{clip.stem}_gameplay.json").exists():
+            raise ValueError(f"{clip.name}: gameplay export cannot receive post-render enhancement")
+        edit_path = clip.with_name(f"{clip.stem}_edit.json")
+        if not edit_path.exists():
+            raise ValueError(f"{clip.name}: enhancement held: missing edit evidence; cannot identify the rendered profile")
+        try:
+            edit = json.loads(edit_path.read_text(encoding="utf-8"))
+            if not isinstance(edit, dict):
+                raise ValueError("Invalid edit evidence")
+            export_config = edit.get("export_config", {})
+            if not isinstance(export_config, dict):
+                raise ValueError("Invalid edit evidence")
+            # The saved global config can still say stadium when the original
+            # export explicitly selected portrait. Prefer the actual edit profile.
+            composition = edit.get("composition") or export_config.get("composition")
+            if (composition in GAMEPLAY_COMPOSITIONS
+                    or edit.get("gameplay_layout") is not None):
+                raise ValueError("gameplay export cannot receive post-render enhancement")
+            if composition != "portrait-caption-v1":
+                raise ValueError("Unknown rendered composition; review or re-export before enhancement")
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            raise ValueError(f"{clip.name}: enhancement held: {exc}") from exc
+
+
+@_report_run
 def run(
     url: str,
     skip_download: bool = False,
@@ -179,6 +319,8 @@ def run(
     mode: str | None = None,
     learn_only: bool = False,
     existing_exports_dir: str | None = None,
+    composition: str | None = None,
+    gameplay_manifest: str | None = None,
 ) -> PipelineResult:
     """Execute the 9-stage yt-clips pipeline.
 
@@ -188,11 +330,36 @@ def run(
     result = PipelineResult()
     result.run_id = new_run_id()
     rid = result.run_id
-    log.info("[START] pipeline run_id=%s url=%s", rid, url)
-
     cfg = _cfg()
+    log.info("[START] pipeline run_id=%s url=%s", rid, url, extra={
+        "stage": "pipeline", "phase": "Pipeline", "status": "start", "run_id": rid,
+        "duration_ms": 0, "metadata": {"source": url, "mode": "LEARN" if learn_only else
+                                      "YOUTUBE UPLOAD REQUESTED" if auto_upload else "LOCAL / NO YOUTUBE UPLOAD"},
+    })
     if existing_exports_dir is not None and not skip_export:
         return _abort_required_stage(result, start, "--export-dir requires --skip-export")
+    composition = composition or cfg.get("export", {}).get("composition")
+    from automation.cricket_gameplay import GAMEPLAY_COMPOSITIONS
+    if composition and composition not in (*GAMEPLAY_COMPOSITIONS, "portrait-caption-v1"):
+        return _abort_required_stage(result, start, f"Unknown composition: {composition}")
+    if composition in GAMEPLAY_COMPOSITIONS and mode and not skip_enhancement and not learn_only and not skip_export:
+        return _abort_required_stage(result, start,
+            "Gameplay composition does not support post-render enhancement; it changes approved artwork and invalidates hash-bound QC")
+    if gameplay_manifest and composition not in GAMEPLAY_COMPOSITIONS:
+        return _abort_required_stage(result, start, "--gameplay-manifest requires the gameplay composition")
+    if composition in GAMEPLAY_COMPOSITIONS and not learn_only and not skip_export:
+        try:
+            from automation.cricket_gameplay import load_delivery_library, load_render_library
+            from automation.gameplay_export import preflight_library, pipeline_gameplay_seconds
+            manifest = gameplay_manifest or cfg.get("export", {}).get("gameplay_manifest")
+            if not manifest:
+                raise ValueError("No gameplay recording: supply --gameplay-manifest with cleared local media")
+            loader = load_delivery_library if auto_upload or (auto_sync and not skip_sync) else load_render_library
+            library = loader(manifest)
+            preflight_library(library,composition,
+                              required_seconds=pipeline_gameplay_seconds(cfg))
+        except (ValueError, OSError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+            return _abort_required_stage(result, start, f"gameplay preflight: {exc}")
     if learn_only:
         try:
             from automation.seo.analytics import sync_clip_performance_from_youtube
@@ -218,6 +385,7 @@ def run(
     transcript_path = str(Path(transcripts_dir) / f"{stem}.json")
     highlights_path = str(Path(highlights_dir) / f"{stem}.yaml")
     highlights: list[dict] = []
+    reserve_highlights: list[dict] = []
 
     # Dedup-history namespace: derive a stable per-match key from the run URL
     # so skip-download / drive-sync runs (which never write video_metadata.json)
@@ -256,16 +424,20 @@ def run(
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("download")
                 return _abort_required_stage(result, start, f"stage1c: {e}")
+        else:
+            log_skipped(log, "Download", "download", rid, "--skip-download; using local input", video_path=video_path)
 
         # ── Stage 2: Transcribe ─────────────────────────────────
         if not skip_transcribe:
             try:
-                with run_phase(log, "stage 2 Transcribe", "transcribe", run_id=rid):
+                with run_phase(log, "stage 2 Transcribe", "transcribe", run_id=rid) as ph:
                     from automation.transcript import fetch
                     t_data = fetch(url, output_path=transcript_path, video_path=video_path)
                     if t_data and t_data.get("segments"):
+                        result.transcript_source = str(t_data.get("source", "unknown"))
                         with open(transcript_path, "w", encoding="utf-8") as f:
                             json.dump(t_data, f, indent=2, ensure_ascii=False)
+                        ph.set(source=result.transcript_source, segments=len(t_data["segments"]))
                     else:
                         raise Exception("Failed to fetch or generate transcript")
                 _PROVIDER_HEALTH.record_success("transcriber")
@@ -273,16 +445,40 @@ def run(
                 _PROVIDER_HEALTH.record_failure("transcriber")
                 return _abort_required_stage(result, start, f"stage2: {e}")
 
+        elif Path(transcript_path).is_file():
+            try:
+                cached_transcript = json.loads(Path(transcript_path).read_text(encoding="utf-8"))
+                result.transcript_source = "cached:" + str(cached_transcript.get("source", "unknown"))
+            except (OSError, ValueError, AttributeError):
+                result.transcript_source = "cached:unknown"
+
+        if skip_transcribe:
+            log_skipped(log, "Transcribe", "transcribe", rid, "--skip-transcribe", source=result.transcript_source)
+
         # ── Stage 3-5: Highlight detection + agent scoring + rank ──
         if not skip_highlight:
             try:
                 with run_phase(log, "stage 3-5 Highlight + Score + Rank",
                                "highlight", run_id=rid) as ph:
                     from automation.clip_selection.pipeline import detect_highlights
+                    diagnostics = {}
                     highlights = detect_highlights(transcript_path, video_path,
                                                    highlights_path,
-                                                   match_key=match_key)
+                                                   match_key=match_key,
+                                                   diagnostics=diagnostics)
                     result.selected_clips = len(highlights)
+                    reserve_highlights = diagnostics.get("reserves", [])
+                    result.selection_status = diagnostics.get("status", "DRAFTS_SELECTED" if highlights else "NO_PUBLISHABLE_CANDIDATES")
+                    result.candidate_count = diagnostics.get("candidates", 0)
+                    result.review_candidates = diagnostics.get("review_candidates", 0)
+                    result.rejected_clips = sum(diagnostics.get(key, 0) for key in
+                                                ("hard_rejected", "below_quality", "editorial_rejected"))
+                    ph.set(candidates=result.candidate_count, selected=result.selected_clips,
+                           rejected=result.rejected_clips, review_candidates=result.review_candidates)
+                    if result.selection_status == "REVIEW_REQUIRED" and not highlights:
+                        ph.outcome("review", reason="no approved drafts")
+                        return _abort_required_stage(result, start,
+                                                     "stage3-5: editorial review required; no approved drafts")
                     from automation.scoring.feature_extractor import FeatureExtractor
                     from automation.scoring.scoring import ClipScorer
                     _lock_scorer = ClipScorer(FeatureExtractor())
@@ -321,11 +517,14 @@ def run(
                         })
 
                     _PROVIDER_HEALTH.record_success("llm")
-                    ph.set(selected=result.selected_clips)
+                    if not highlights:
+                        ph.outcome("empty", reason=result.selection_status)
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("llm")
                 _emit_infra_failed(stem, str(e), stage="stage3-5")
                 return _abort_required_stage(result, start, f"stage3-5: {e}")
+        else:
+            log_skipped(log, "Discovery + selection", "highlight", rid, "--skip-highlight")
 
         if not skip_highlight and not highlights and not skip_export:
             result.total_seconds = time.monotonic() - start
@@ -336,12 +535,22 @@ def run(
         if not skip_export:
             try:
                 with run_phase(log, "stage 6 Export + SEO", "export", run_id=rid) as ph:
-                    from export import export_all
-                    result.exported = export_all(
-                        highlights_path, video_path,
-                        transcript_path=transcript_path,
-                        generate_seo=not skip_seo,
-                    )
+                    from export import ExportBatchError, export_all
+                    try:
+                        layout_options = {"composition": composition} if composition else {}
+                        if composition in GAMEPLAY_COMPOSITIONS:
+                            layout_options["gameplay_manifest"] = gameplay_manifest
+                        result.exported = export_all(
+                            highlights_path, video_path,
+                            transcript_path=transcript_path,
+                            generate_seo=not skip_seo,
+                            **layout_options,
+                        )
+                    except ExportBatchError as exc:
+                        result.exported = exc.exported
+                        result.failures.append(f"stage6: {exc}")
+                        ph.outcome("partial" if result.exported else "failed", failures=len(exc.failures))
+                        _emit_infra_failed(stem, str(exc), stage="stage6")
                     for clip_path in result.exported:
                         _emit_event(f"{stem}/{clip_path.stem}", EventType.exported, {
                             "path": str(clip_path),
@@ -350,7 +559,7 @@ def run(
                         try:
                             from shorts_intelligence.bridge import record_exported
 
-                            shadow_count = record_exported(cfg, highlights, result.exported)
+                            shadow_count = record_exported(cfg, highlights + reserve_highlights, result.exported)
                             if shadow_count:
                                 log.info(
                                     "[shorts_intelligence] shadow-captured %d exports",
@@ -365,13 +574,13 @@ def run(
                     if result.exported:
                         try:
                             with run_phase(log, "stage 6a Hook audit",
-                                           "hook_audit", run_id=rid) as ph:
+                                           "hook_audit", run_id=rid) as audit_phase:
                                 from automation.clip_selection.hook_auditor import (
                                     HookAuditor,
                                 )
                                 _auditor = HookAuditor()
                                 highlights_by_id = {
-                                    h["id"]: h for h in highlights
+                                    h["id"]: h for h in highlights + reserve_highlights
                                 }
                                 hook_audited = 0
                                 for clip_path in result.exported:
@@ -419,19 +628,20 @@ def run(
                                         },
                                     )
                                     hook_audited += 1
-                                ph.set(audited=hook_audited)
-                                log.info(
-                                    "[hook_audit] %d clips analyzed",
-                                    hook_audited,
-                                )
+                                audit_phase.set(audited=hook_audited)
                         except Exception as e:
                             log.warning("[hook_audit] failed: %s", e)
                     # SEO is now handled per-clip inside export_all()
                     if not skip_seo and result.exported:
                         result.seo_generated = sum(read_metadata(p) is not None for p in result.exported)
-                    _PROVIDER_HEALTH.record_success("export")
+                    if any(f.startswith("stage6:") for f in result.failures):
+                        _PROVIDER_HEALTH.record_failure("export")
+                    else:
+                        _PROVIDER_HEALTH.record_success("export")
                     ph.set(exported=len(result.exported),
                            seo_generated=result.seo_generated)
+                    if not result.exported and not result.failures:
+                        ph.outcome("empty", reason="no clips exported")
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("export")
                 _emit_infra_failed(stem, str(e), stage="stage6")
@@ -443,12 +653,16 @@ def run(
                 return _abort_required_stage(result, start, f"stage6: {exc}")
             if existing:
                 result.exported = existing
-                log.info("[stage 6] skipped — using %d existing clips", len(existing))
+                log_skipped(log, "Export", "export", rid, "--skip-export; existing batch", existing=len(existing))
             else:
-                log.warning("[stage 6] skipped — no .mp4 files found in %s", shorts_dir)
+                log_skipped(log, "Export", "export", rid, "--skip-export; no existing clips", directory=shorts_dir)
 
         # ── Stage 6b: Enhancement (optional) ────────────────────
         if result.exported and mode and not skip_enhancement:
+            try:
+                _validate_enhancement_inputs(result.exported)
+            except ValueError as exc:
+                return _abort_required_stage(result, start, f"stage6b: {exc}")
             try:
                 with run_phase(log, f"stage 6b Enhancement ({mode})",
                                "enhancement", run_id=rid) as ph:
@@ -539,12 +753,23 @@ def run(
         # ── Stage 7b: Thumbnails ────────────────────────────────
         if result.exported and cfg.get("thumbnail", {}).get("enabled", True):
             try:
-                with run_phase(log, "stage 7b Thumbnails", "thumbnails", run_id=rid):
+                with run_phase(log, "stage 7b Thumbnails", "thumbnails", run_id=rid) as ph:
                     from thumbnail import process_all_thumbnails
-                    export_dir = str(result.exported[0].parent)
-                    process_all_thumbnails(export_dir)
+                    for directory in sorted({clip.parent for clip in result.exported}):
+                        batch = process_all_thumbnails(str(directory))
+                        result.thumbnails_generated += len(batch.generated)
+                        result.thumbnails_preserved += len(batch.preserved)
+                        result.failures.extend(f"stage7b: {failure}" for failure in batch.failures)
+                        for failure in batch.failures:
+                            log.error("[stage7b] %s", failure)
+                    ph.set(generated=result.thumbnails_generated, preserved=result.thumbnails_preserved,
+                           failures=sum(failure.startswith("stage7b:") for failure in result.failures))
+                    if ph.metadata["failures"]:
+                        ph.outcome("partial", reason="one or more covers failed")
             except Exception as e:
                 result.failures.append(f"stage7b: {e}")
+        elif result.exported:
+            log_skipped(log, "Thumbnails", "thumbnails", rid, "disabled in config")
 
         # Prepare an honest review draft; never turn sampled checks into PASS.
         if cfg.get("release_review", {}).get("required", False):
@@ -568,6 +793,8 @@ def run(
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("drive")
                 result.failures.append(f"stage8a: {e}")
+        elif result.exported:
+            log_skipped(log, "Drive sync", "sync", rid, "sync not requested or explicitly skipped")
 
         # ── Stage 8b: Upload (auto when auth exists) ─────────────
         has_auth = Path("cookies.txt").exists() or Path("yt_channel_token.json").exists()
@@ -615,8 +842,13 @@ def run(
                     slot_map: dict[str, datetime] = {}
                     if auto_schedule:
                         from scheduler import assign_clips_to_slots, format_for_youtube
+                        from automation.youtube_delivery import receipt_path
+                        # Existing deliveries already have an authorized slot.
+                        # Do not feed them a newly jittered time on every retry;
+                        # the uploader must validate/reuse (or hold) its receipt.
+                        new_deliveries = [clip for clip in eligible if not receipt_path(clip).exists()]
                         clip_scores: dict[str, float] = {}
-                        for clip_path in eligible:
+                        for clip_path in new_deliveries:
                             meta_path = clip_path.with_name(
                                 f"{clip_path.stem}_metadata.json"
                             )
@@ -633,11 +865,11 @@ def run(
                                 except (ValueError, OSError):
                                     pass
                         assignments = assign_clips_to_slots(
-                            clips=[p.stem for p in eligible],
+                            clips=[p.stem for p in new_deliveries],
                             interval_hours=interval,
                             clip_scores=clip_scores or None,
                             schedule_config=cfg.get("upload_schedule", {}),
-                        )
+                        ) if new_deliveries else []
                         slot_map = {stem: dt for stem, dt in assignments}
 
                         # Dead-day gating: if any slot lands on a dead day,
@@ -682,7 +914,7 @@ def run(
                         try:
                             video_id = upload_video(
                                 str(clip_path), str(meta_path),
-                                privacy=privacy, publish_at=publish_at,
+                                privacy="scheduled" if auto_schedule else privacy, publish_at=publish_at,
                             )
                             if not isinstance(video_id, str) or not video_id.strip():
                                 raise RuntimeError("upload returned no video ID")
@@ -690,7 +922,7 @@ def run(
                             _emit_event(
                                 f"{stem}/{clip_path.stem}",
                                 EventType.published,
-                                {"privacy": privacy, "publish_at": publish_at,
+                                {"privacy": "scheduled" if auto_schedule else privacy, "publish_at": publish_at,
                                  "youtube_video_id": str(video_id) if video_id else None},
                             )
                             if video_id:
@@ -722,6 +954,9 @@ def run(
                         _PROVIDER_HEALTH.record_success("youtube")
                     ph.set(uploaded=result.uploaded_count,
                            skipped_no_meta=skipped_no_meta)
+                    upload_failures = sum(failure.startswith("stage8b") for failure in result.failures)
+                    if upload_failures:
+                        ph.outcome("partial", failures=upload_failures)
             except Exception as e:
                 _PROVIDER_HEALTH.record_failure("youtube")
                 result.failures.append(f"stage8b: {e}")
@@ -731,17 +966,16 @@ def run(
                 if not auto_upload
                 else "no auth (cookies.txt or yt_channel_token.json)"
             )
-            log.info("[stage 8b] Upload skipped — %s", reason)
+            log_skipped(log, "YouTube upload", "upload", rid, reason)
 
     # Stage 9: telemetry and canonical persistence
-    result.total_seconds = time.monotonic() - start
     if result.exported:
         try:
             with run_phase(log, "stage 9a Analytics", "analytics", run_id=rid):
                 from automation.seo.analytics import Analytics
                 a = Analytics(_DECISION_STORE)
                 summary = a.get_summary()
-                log.info("[analytics] summary: %s", summary)
+                log.debug("[analytics] summary: %s", summary)
         except Exception as e:
             result.failures.append(f"stage9a: {e}")
 
@@ -753,7 +987,7 @@ def run(
                                  "export", "enhancement", "drive", "youtube"):
                     stats = _PROVIDER_HEALTH.get_stats(provider)
                     if stats["total_calls"]:
-                        log.info(
+                        log.log(logging.WARNING if stats["failures"] else logging.DEBUG,
                             "[provider_health] %s: status=%s calls=%d ok=%d fail=%d",
                             provider, stats["status"].value,
                             stats["total_calls"], stats["successes"],
@@ -766,7 +1000,7 @@ def run(
             from shorts_intelligence.bridge import shadow_status
 
             shadow = shadow_status(cfg)
-            log.info("[shorts_intelligence] %s", shadow)
+            log.debug("[shorts_intelligence] %s", shadow)
         except Exception as e:
             log.warning("[shorts_intelligence] shadow status failed: %s", e)
 
@@ -778,19 +1012,6 @@ def run(
             except Exception as e:
                 log.warning("[db_sync] Failed: %s", e)
 
-    status = "partial" if result.failures else "ok"
-    log.info(
-        "[EXIT] pipeline run_id=%s url=%s exported=%d uploaded=%d "
-        "selected=%d seo=%d failures=%d elapsed=%.1fs transcript=%s",
-        rid, url, len(result.exported), result.uploaded_count,
-        result.selected_clips, result.seo_generated,
-        len(result.failures), result.total_seconds, result.transcript_source,
-    )
-    if result.failures:
-        log.warning(
-            "[EXIT] %d stage failure(s) — see ERROR records above (run_id=%s)",
-            len(result.failures), rid,
-        )
     return result
 
 

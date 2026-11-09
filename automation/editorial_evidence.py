@@ -64,7 +64,8 @@ def source_identity(video_path: str) -> dict:
 
 def write_discovery_evidence(output_path: str, source: dict, transcript_path: str,
                              segments: list[dict], candidates: list[dict], selected: list[dict],
-                             decision: dict | None = None) -> Path:
+                             decision: dict | None = None,
+                             selection_summary: dict | None = None) -> Path:
     selected_ranges = {(c["start"], c["end"]) for c in selected}
     editorial_rejections = {}
     if decision:
@@ -92,6 +93,8 @@ def write_discovery_evidence(output_path: str, source: dict, transcript_path: st
                                        if cue["end"] > candidate["start"] and cue["start"] < candidate["end"]),
             "source_script_scope": "intersecting original cues; may include speech outside cut",
             "boundary_method": candidate.get("boundary_method", "unknown"),
+            "complete_thought": candidate.get("complete_thought"),
+            "completeness": candidate.get("completeness"),
             "editorial_rejection": editorial_rejections.get((candidate["start"], candidate["end"])),
         })
     path = Path(output_path).with_suffix(".editorial.json")
@@ -99,10 +102,13 @@ def write_discovery_evidence(output_path: str, source: dict, transcript_path: st
         "schema_version": 1, "source": source,
         "transcript": {"path": str(Path(transcript_path).resolve()), "sha256": sha256(Path(transcript_path))},
         "coverage": transcript_coverage(segments, source.get("duration")),
-        "discovery_method": "full transcript heuristic windows then diverse shortlist; not full audiovisual review",
+        "discovery_method": (decision or {}).get("method", "full transcript heuristic windows then diverse shortlist; not full audiovisual review"),
         "candidates": alternatives, "editorial_decision": decision or {"status": "NOT CHECKED"},
+        "selection_summary": selection_summary or {},
         "selected": [{"source_range": [c["start"], c["end"]], "reason": c.get("ai_reason", ""),
-                      "semantic_review": c.get("semantic_review", "NOT CHECKED")} for c in selected],
+                      "semantic_review": c.get("semantic_review", "NOT CHECKED"),
+                      "complete_thought": c.get("complete_thought"),
+                      "completeness": c.get("completeness")} for c in selected],
         "release_status": "REVIEW",
     })
     return path

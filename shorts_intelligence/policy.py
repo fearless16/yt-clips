@@ -35,12 +35,14 @@ class SelectionPolicy:
         self,
         *,
         duration_seconds: float,
-        complete_thought: bool,
+        complete_thought: bool | None,
         features: dict[str, str] | None = None,
     ) -> PolicyResult:
         """Evaluate without changing boundaries, transcript, or playback speed."""
-        if not complete_thought:
+        if complete_thought is False:
             return PolicyResult(False, 0.0, 0.0, (), "incomplete_thought")
+        if complete_thought is not True:
+            return PolicyResult(False, 0.0, 0.0, (), "completeness_unverified")
         candidate = dict(features or {})
         candidate["duration_bucket"] = _duration_bucket(duration_seconds)
         effect = 0.0

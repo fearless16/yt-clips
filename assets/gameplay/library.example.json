@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {
+      "id": "ea-cricket-07-own-capture-001",
+      "path": "ea-cricket-07.mp4",
+      "sha256": "REPLACE_WITH_RECORDING_SHA256",
+      "game": "EA Cricket 07",
+      "publisher": "EA",
+      "modified": false,
+      "status": "REVIEW",
+      "reviewer": "",
+      "reviewed_at": "2026-11-07",
+      "publisher_permission": {
+        "kind": "publisher_policy",
+        "commercial_youtube": false,
+        "editing": false,
+        "split_screen_background": false,
+        "no_third_party_promotion": false,
+        "url": "https://help.ea.com/en/articles/security-and-rules/ea-content-policy/",
+        "evidence": "ea-content-policy-saved.txt",
+        "sha256": "REPLACE_WITH_SAVED_POLICY_SHA256"
+      },
+      "recording_permission": {
+        "kind": "self_recorded",
+        "owner": "",
+        "commercial_youtube": false,
+        "editing": false,
+        "split_screen_background": false,
+        "evidence": "recording-provenance.txt",
+        "sha256": "REPLACE_WITH_RECORDING_PERMISSION_SHA256"
+      },
+      "third_party_visuals_cleared": false,
+      "attribution": "Gameplay: REPLACE_WITH_RECORDING_OWNER; EA Cricket 07. Not affiliated with EA.",
+      "approved_ranges": [[0, 120]],
+      "crop": [240, 128, 1440, 810]
+    }
+  ]
+}

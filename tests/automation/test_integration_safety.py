@@ -56,6 +56,96 @@ def test_zero_selection_cannot_export_an_old_file(runtime, monkeypatch):
     assert result.failures == [] and result.exported == []
 
 
+def test_review_block_is_reported_instead_of_successful_empty_run(runtime, monkeypatch):
+    orchestrator, _, _ = runtime
+    def blocked(*args, diagnostics, **kwargs):
+        diagnostics.update(status="REVIEW_REQUIRED", candidates=29, hard_rejected=8,
+                           below_quality=8, review_candidates=13, editorial_rejected=0)
+        return []
+    monkeypatch.setattr("automation.clip_selection.pipeline.detect_highlights", blocked)
+    export = Mock()
+    monkeypatch.setattr("export.export_all", export)
+    result = run_local(orchestrator)
+    assert result.selection_status == "REVIEW_REQUIRED"
+    assert result.candidate_count == 29
+    assert result.rejected_clips == 16
+    assert result.review_candidates == 13
+    assert result.failures == ["stage3-5: editorial review required; no approved drafts"]
+    assert next(stage for stage in result.stage_results if stage["stage"] == "highlight")["status"] == "review"
+    export.assert_not_called()
+
+
+def test_early_empty_run_has_one_structured_non_success_summary(runtime, monkeypatch):
+    import io
+    from utils.logger import JsonStreamHandler
+
+    orchestrator, _, _ = runtime
+    monkeypatch.setattr("automation.clip_selection.pipeline.detect_highlights", Mock(return_value=[]))
+    stream = io.StringIO()
+    handler = JsonStreamHandler(stream)
+    orchestrator.log.addHandler(handler)
+    try:
+        result = run_local(orchestrator)
+    finally:
+        orchestrator.log.removeHandler(handler)
+        handler.close()
+    records = [json.loads(line) for line in stream.getvalue().splitlines()]
+    endings = [record for record in records if record.get("stage") == "pipeline" and record["status"] != "start"]
+    assert len(endings) == 1
+    assert endings[0]["status"] == "empty"
+    assert endings[0]["metadata"]["stages"] == result.stage_results
+    assert next(stage for stage in result.stage_results if stage["stage"] == "highlight")["status"] == "empty"
+
+
+def test_nested_hook_phase_does_not_steal_export_completion_counts(runtime, tmp_path, monkeypatch):
+    orchestrator, _, _ = runtime
+    batch = tmp_path / "shorts/batch"
+    batch.mkdir(parents=True)
+    clip = batch / "clip1.mp4"
+    clip.write_bytes(b"fixture")
+    monkeypatch.setattr("export.export_all", Mock(return_value=[clip]))
+    monkeypatch.setattr("automation.clip_selection.hook_auditor.HookAuditor.analyze_clip_hook",
+                        Mock(return_value={"hook_score": 50, "hook_type": "test", "swipe_risk": "low"}))
+    result = run_local(orchestrator, skip_highlight=True)
+    stages = {stage["stage"]: stage for stage in result.stage_results}
+    assert stages["export"]["metadata"]["exported"] == 1
+    assert stages["hook_audit"]["metadata"]["audited"] == 1
+
+
+def test_partial_batch_keeps_successful_outputs_and_reports_non_success_phase(runtime, tmp_path, monkeypatch):
+    from export import ExportBatchError
+    orchestrator, _, _ = runtime
+    clip = tmp_path / "shorts/batch/clip1.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"successful current-run export")
+    monkeypatch.setattr("export.export_all", Mock(side_effect=ExportBatchError(["clip2: alignment held"], [clip])))
+    result = run_local(orchestrator, skip_highlight=True)
+    assert result.exported == [clip]
+    assert result.failures == ["stage6: Export batch incomplete: clip2: alignment held"]
+    export_stage = next(stage for stage in result.stage_results if stage["stage"] == "export")
+    assert export_stage["status"] == "partial"
+    assert export_stage["metadata"]["exported"] == 1
+
+
+def test_editorial_target_shortfall_is_not_a_successful_job(runtime, tmp_path, monkeypatch):
+    orchestrator, config, _ = runtime
+    config["clip_selection"] = {"max_selected": 3, "editorial": {"enabled": True, "target_min": 2}}
+    clip = tmp_path / "shorts/batch/clip1.mp4"
+    clip.parent.mkdir(parents=True)
+    clip.write_bytes(b"one acceptable export")
+
+    def one(*args, diagnostics, **kwargs):
+        diagnostics.update(status="DRAFTS_SELECTED", candidates=10)
+        return [{"id": "clip1", "start": 1, "end": 20, "text": "India cricket"}]
+
+    monkeypatch.setattr("automation.clip_selection.pipeline.detect_highlights", one)
+    monkeypatch.setattr("export.export_all", Mock(return_value=[clip]))
+    result = run_local(orchestrator)
+    assert result.exported == [clip]
+    assert any("target" in failure and "2" in failure for failure in result.failures)
+    assert orchestrator._result_status(result) == "partial"
+
+
 def test_failed_drive_pull_aborts_before_using_stale_local_source(runtime, monkeypatch):
     orchestrator, _, _ = runtime
     monkeypatch.setattr("sync.download_from_drive", Mock(side_effect=RuntimeError("drive unavailable")))
@@ -149,6 +239,26 @@ def test_public_seo_prompts_share_runtime_contract():
     assert "2000-4500" not in prompts.SEO_USER_TEMPLATE
     assert "algorithm" not in prompts.SEO_SYSTEM.lower()
     assert "cover_text" in seo._CRICKET_ONLY_SALVAGE_TMPL
+
+
+def test_thumbnail_failure_reaches_pipeline_result(runtime, tmp_path, monkeypatch):
+    import thumbnail
+
+    orchestrator, config, _ = runtime
+    batch = tmp_path / "shorts/batch"
+    batch.mkdir(parents=True)
+    (batch / "clip1.mp4").write_bytes(b"video")
+    (batch / "clip1_metadata.json").write_text(json.dumps({
+        "title": "Cricket discussion", "description": "Grounded context"}))
+    config["thumbnail"] = {"enabled": True}
+    monkeypatch.setitem(thumbnail.cfg, "thumbnail", {"enabled": True})
+    monkeypatch.setattr("thumbnail.ThumbnailGenerator.generate_for_clip",
+                        Mock(side_effect=ValueError("Cover text needs review")))
+    result = run_local(orchestrator, skip_highlight=True, skip_export=True)
+    assert result.failures == ["stage7b: clip1.mp4: Cover text needs review"]
+    assert result.exported == [batch / "clip1.mp4"]
+    assert result.thumbnails_generated == 0
+    assert next(stage for stage in result.stage_results if stage["stage"] == "thumbnails")["status"] == "partial"
 
 
 def test_ranker_prompt_cannot_excuse_missing_context():

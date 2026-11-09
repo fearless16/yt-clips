@@ -65,6 +65,7 @@ data/
 !expectation.png
 !channel_logo.png
 !photos/*.png
+!assets/gameplay/stadium-reference-v1/overlay.png
 benchmark_llms.py
 .push_cache.json
 kaggle_url.txt

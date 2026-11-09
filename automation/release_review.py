@@ -26,6 +26,31 @@ CHECKS = (
 )
 
 
+def required_checks(clip):
+    # A missing/changed edit sidecar must not hide extant gameplay obligations.
+    gameplay_required = False
+    for suffix in ("_edit.json", "_gameplay.json"):
+        path = clip.with_name(f"{clip.stem}{suffix}")
+        if not path.exists():
+            continue
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(evidence, dict):
+            raise ValueError(f"Invalid release evidence: {path.name}")
+        export_config = evidence.get("export_config", {})
+        if not isinstance(export_config, dict):
+            raise ValueError(f"Invalid export config evidence: {path.name}")
+        composition = evidence.get("composition") or export_config.get("composition")
+        from automation.cricket_gameplay import GAMEPLAY_COMPOSITIONS
+        # Presence is itself evidence: an emptied or legacy sidecar must never
+        # turn a gameplay package into a portrait-only review.
+        if (suffix == "_gameplay.json" or composition in GAMEPLAY_COMPOSITIONS
+                or evidence.get("gameplay_layout") is not None):
+            gameplay_required = True
+    if gameplay_required:
+        return (*CHECKS, "gameplay_rights_and_attribution", "gameplay_label_and_framing")
+    return CHECKS
+
+
 def sha256(path: Path) -> str:
     with Path(path).open("rb") as handle:
         digest = hashlib.file_digest(handle, "sha256")
@@ -36,7 +61,7 @@ def review_path(clip: Path) -> Path:
     return clip.with_name(f"{clip.stem}_review.json")
 
 
-def _artifacts(clip: Path, source: Path) -> dict:
+def _artifacts(clip: Path, source: Path, *, local_draft=False) -> dict:
     paths = {
         "media": clip,
         "metadata": clip.with_name(f"{clip.stem}_metadata.json"),
@@ -49,9 +74,47 @@ def _artifacts(clip: Path, source: Path) -> dict:
         "speech": clip.with_name(f"{clip.stem}_speech.json"),
         "cover_plan": clip.with_name(f"{clip.stem}_cover.json"),
         "discovery": clip.parent / "editorial.json",
+        "gameplay": clip.with_name(f"{clip.stem}_gameplay.json"),
     }.items():
         if path.exists():
             paths[name] = path
+    if "gameplay_rights_and_attribution" in required_checks(clip):
+        gameplay = clip.with_name(f"{clip.stem}_gameplay.json")
+        evidence = json.loads(gameplay.read_text(encoding="utf-8"))
+        from automation.cricket_gameplay import load_delivery_library, load_render_library
+        selection = evidence.get("selection")
+        if (not isinstance(selection, dict) or not isinstance(selection.get("asset"), dict)
+                or not isinstance(selection.get("manifest"), str)
+                or not isinstance(selection.get("manifest_sha256"), str)
+                or not isinstance(evidence.get("media_sha256"), str)):
+            raise ValueError("Gameplay selection/media evidence missing or invalid")
+        library = (load_render_library if local_draft else load_delivery_library)(selection["manifest"])
+        if (library["manifest_sha256"] != selection["manifest_sha256"]
+                or evidence["media_sha256"] != sha256(clip)
+                or selection["asset"] not in library["assets"]):
+            raise ValueError("Gameplay permissions or media changed after rendering")
+        asset = selection["asset"]
+        from automation.cricket_gameplay import STADIUM_COMPOSITION
+        edit_path = clip.with_name(f"{clip.stem}_edit.json")
+        edit = json.loads(edit_path.read_text(encoding="utf-8")) if edit_path.exists() else {}
+        if STADIUM_COMPOSITION in (evidence.get("composition"),edit.get("composition")):
+            from automation.stadium_layout import preflight_assets
+            design = preflight_assets()
+            if (evidence.get("composition") != STADIUM_COMPOSITION
+                    or evidence.get("design_assets") != design or evidence.get("gameplay_crop") != asset.get("crop")):
+                raise ValueError("Approved stadium artwork/font/crop changed after rendering")
+            paths.update(stadium_overlay=Path(design["overlay"]["path"]),
+                         stadium_font=Path(design["font"]["path"]))
+        from automation.cricket_gameplay import credit_text
+        metadata = read_metadata(clip) or {}
+        if credit_text(selection) not in metadata.get("description", ""):
+            raise ValueError("Gameplay attribution/illustrative disclosure missing from reviewed description")
+        paths.update(gameplay_manifest=Path(selection["manifest"]), gameplay_recording=Path(asset["path"]))
+        if library.get("usage") in ("STOCK", "LOCAL_REVIEW_ONLY"):
+            paths["gameplay_license_evidence"] = Path(asset["license_evidence"]["path"])
+        else:
+            paths.update(gameplay_publisher_permission=Path(asset["publisher_permission"]["evidence"]),
+                         gameplay_recording_permission=Path(asset["recording_permission"]["evidence"]))
     return {name: {"path": str(path.resolve()), "sha256": sha256(path)}
             for name, path in paths.items()}
 
@@ -65,9 +128,9 @@ def create_review(clip: Path, source: Path) -> dict:
         raise ValueError("Valid, non-failed metadata is required before review")
     payload = {
         "schema_version": 1,
-        "artifacts": _artifacts(clip, source),
+        "artifacts": _artifacts(clip, source, local_draft=True),
         "checks": {name: {"status": "NOT CHECKED", "evidence": "", "method": "owner review"}
-                   for name in CHECKS},
+                   for name in required_checks(clip)},
         "selection": {"source_ranges": [], "alternatives": [], "reason": "", "coverage_gaps": []},
         "approval": None,
     }
@@ -98,7 +161,11 @@ def _validate(clip: Path, payload: dict) -> list[str]:
     checks = payload.get("checks", {})
     if not isinstance(checks, dict):
         return ["Invalid review checks"]
-    for name in CHECKS:
+    try:
+        names = required_checks(clip)
+    except (OSError, ValueError, TypeError, AttributeError):
+        return ["Invalid edit evidence"]
+    for name in names:
         check = checks.get(name)
         if not isinstance(check, dict) or check.get("status") != "PASS":
             errors.append(f"{name}: not PASS")

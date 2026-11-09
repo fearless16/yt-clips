@@ -850,6 +850,10 @@ def _build_enhance_stack(
     target_w = int(cfg["export"]["width"])    # 1080
     target_h = int(cfg["export"]["height"])   # 1920
     export_cfg = cfg.get("export", {})
+    portrait = None
+    if analysis.get("composition", export_cfg.get("composition")) == "portrait-caption-v1" and not native_res:
+        from automation.portrait_layout import plan_portrait
+        portrait = plan_portrait(analysis, target_w, target_h)
 
     def bounded_float(key, default, low, high):
         try:
@@ -872,7 +876,23 @@ def _build_enhance_stack(
 
     # ── Filter selection ──────────────────────────────────────────────────────
 
-    if guest_cam_on:
+    if portrait:
+        cx, cy, cw, ch = portrait["crop"]
+        ph, top = portrait["picture_height"], portrait["picture_top"]
+        # Full-width sharp portrait, never a small inset. Only the otherwise
+        # missing bottom canvas uses blurred pixels from the source shirt area.
+        strip_h = max(2, ch//8//2*2)
+        filter_base = (
+            f"{enhance},crop={cw}:{ch}:{cx}:{cy},split=3[portrait_sharp][portrait_lower][portrait_upper];"
+            f"[portrait_lower]crop=iw:{strip_h}:0:ih-{strip_h},"
+            f"scale={target_w}:{target_h},gblur=sigma=48[portrait_lower_canvas];"
+            f"[portrait_upper]crop=iw:16:0:0,scale={target_w}:{top},gblur=sigma=8[portrait_top_edge];"
+            "[portrait_lower_canvas][portrait_top_edge]overlay=0:0[portrait_canvas];"
+            f"[portrait_sharp]scale={target_w}:{ph}:flags=lanczos[portrait_picture];"
+            f"[portrait_canvas][portrait_picture]overlay=0:{top}"
+        )
+        analysis["portrait_layout"] = portrait
+    elif guest_cam_on:
         # Guest has video: stack both halves vertically into 9:16
         # Left half → top panel, right half → bottom panel
         log.debug("GUEST CAM ON → vertical stack (both panels)")
@@ -1034,7 +1054,7 @@ def _build_enhance_stack(
         filter_base += f",framerate=fps={target_fps:.6f}"
 
     if (export_cfg.get("reserve_caption_band", False) and not native_res
-            and not is_screen_share and not guest_cam_on):
+            and not is_screen_share and not guest_cam_on and not portrait):
         # Explicit camera-local blur of a small baked source badge. This is not
         # face synthesis/removal, and is never inferred or applied to other clips.
         for index, region in enumerate(strategy.get("source_overlay_blurs", [])):
@@ -1171,6 +1191,11 @@ def _export_native_res(
 def _caption_options(analysis: dict) -> tuple[dict, bool, bool]:
     """Use the same per-highlight caption contract in preparation and rendering."""
     options = cfg.get("export", {}).get("captions", {})
+    from automation.cricket_gameplay import GAMEPLAY_COMPOSITIONS, STADIUM_COMPOSITION
+    composition = analysis.get("composition", cfg.get("export", {}).get("composition"))
+    if composition in GAMEPLAY_COMPOSITIONS:
+        style = "stadium-reference-v1" if composition == STADIUM_COMPOSITION else "gameplay-hud-v1"
+        return {**options, "enabled": True, "require_word_timing": True, "style": style}, True, True
     enabled = options.get("enabled", False)
     overlay = analysis.get("caption_overlay")
     if isinstance(overlay, dict):
@@ -1179,6 +1204,9 @@ def _caption_options(analysis: dict) -> tuple[dict, bool, bool]:
 
 
 def _caption_card_y() -> int:
+    if cfg["export"].get("captions", {}).get("style") == "portrait-glass-v1":
+        from automation.portrait_layout import caption_geometry
+        return caption_geometry(int(cfg["export"]["width"]), int(cfg["export"]["height"]))["transport_y"]
     height = int(cfg["export"]["height"])
     from_bottom = float(cfg["export"].get("captions", {}).get("from_bottom", 0.20))
     if not math.isfinite(from_bottom) or not 0.18 <= from_bottom <= 0.4:
@@ -1226,6 +1254,13 @@ def export_clip(
         return None
 
     info = _get_video_info(video_path)
+    analysis["source_dimensions"] = {"width": info["width"], "height": info["height"]}
+    from automation.cricket_gameplay import GAMEPLAY_COMPOSITIONS
+    if analysis.get("composition", cfg.get("export", {}).get("composition")) in GAMEPLAY_COMPOSITIONS:
+        from automation.gameplay_export import render_gameplay_clip
+        if not _check_free_space(output_path, end-start):
+            return None
+        return render_gameplay_clip(video_path, start, end, output_path, analysis, transcript_segments, cfg)
     encoder = _get_best_encoder()
     logo_file = Path(cfg["thumbnail"].get("template_path", "channel_logo.png"))
     use_logo = logo_file.exists()
@@ -1281,7 +1316,7 @@ def export_clip(
         if analysis_speed > 1.0:
             log.warning("[%s] Variable speed disabled — speed_factor %.2fx ignored, using global %.2fx",
                         clip_id, analysis_speed, speed)
-        log.info("[%s] Variable speed disabled, using global speed: %.2fx", clip_id, speed)
+        log.debug("[%s] Variable speed disabled, using global speed: %.2fx", clip_id, speed)
 
     try:
         pre_seek = float(cfg["export"].get("pre_seek", 4.0))
@@ -1389,6 +1424,7 @@ def export_clip(
                 require_word_timing=caption_cfg.get("require_word_timing", False),
                 hinglish_model=caption_cfg.get("model"),
                 allow_documented_successor=caption_cfg.get("allow_documented_successor", False),
+                caption_style=caption_cfg.get("style", "neon-reference-v2"),
             )
             # Preserve provenance before scratch is cleaned; model processing is
             # never equivalent to listening approval.
@@ -1555,7 +1591,7 @@ def _validate_av_sync(video_path: str, clip_id: str, tolerance: float = 0.1) -> 
 
 
 def _parse_time_to_seconds(time_val) -> float:
-    if isinstance(time_val, (int, float)):
+    if type(time_val) in (int, float):
         return float(time_val)
     if isinstance(time_val, str):
         try:
@@ -1564,9 +1600,9 @@ def _parse_time_to_seconds(time_val) -> float:
             for p in parts:
                 secs = secs * 60 + float(p)
             return secs
-        except ValueError:
-            pass
-    return 0.0
+        except ValueError as exc:
+            raise ValueError("Invalid timestamp") from exc
+    raise ValueError("Timestamp must be numeric or a timecode")
 
 
 def _export_insta_worker(clip_id, info, clip_dir, out_dir, seo_context):
@@ -1593,6 +1629,33 @@ def _export_insta_worker(clip_id, info, clip_dir, out_dir, seo_context):
 
 def _seo_worker(clip_id: str, info: dict, output_dir: Path, ctx: dict):
     """Generate metadata; a failed return is not a completed SEO artifact."""
+    control = ctx.get("_seo_control")
+    if control is not None:
+        # Providers may outlive Future.result(timeout). Give them private work
+        # space, not permission to mutate the outgoing batch after its deadline.
+        import tempfile
+        from automation.artifacts import atomic_json
+        with tempfile.TemporaryDirectory(prefix=f".seo-{clip_id}-", dir=output_dir) as scratch:
+            staging = Path(scratch)
+            gameplay = output_dir / f"{clip_id}_gameplay.json"
+            if gameplay.exists():
+                shutil.copyfile(gameplay, staging / gameplay.name)
+            worker_context = {key: value for key, value in ctx.items() if key != "_seo_control"}
+            worker_context["_seo_staged"] = True
+            result = _seo_worker(clip_id, info, staging, worker_context)
+            with control["lock"]:
+                if control["cancelled"].is_set():
+                    log.warning("Late SEO result discarded, batch unchanged: %s", clip_id)
+                    return {"_seo_failed": True, "error": "SEO result arrived after batch deadline; not published"}
+                for suffix in ("_metadata.json", "_seo_failed.json"):
+                    artifact = staging / f"{clip_id}{suffix}"
+                    if artifact.exists():
+                        payload = json.loads(artifact.read_text(encoding="utf-8"))
+                        atomic_json(output_dir / artifact.name, payload)
+                if result and not result.get("_seo_failed"):
+                    (output_dir / f"{clip_id}_seo_failed.json").unlink(missing_ok=True)
+                    log.info("SEO done: %s", clip_id)
+            return result
     from automation.seo.seo import generate_seo_for_exported_clip
     result = generate_seo_for_exported_clip(
         clip_id=clip_id, transcript=info.get("text", ""), output_dir=str(output_dir),
@@ -1602,8 +1665,32 @@ def _seo_worker(clip_id: str, info: dict, output_dir: Path, ctx: dict):
     if not result or result.get("_seo_failed"):
         log.error("SEO failed for %s: %s", clip_id, (result or {}).get("error", "empty result"))
         return result
-    log.info("SEO done: %s", clip_id)
+    gameplay = output_dir / f"{clip_id}_gameplay.json"
+    if gameplay.exists():
+        from automation.artifacts import atomic_json
+        from automation.cricket_gameplay import append_gameplay_credit
+        result = append_gameplay_credit(result, gameplay)
+        atomic_json(output_dir / f"{clip_id}_metadata.json", result)
+    if not ctx.get("_seo_staged"):
+        log.info("SEO done: %s", clip_id)
     return result
+
+
+class ExportBatchError(RuntimeError):
+    """A failed sibling cannot erase successfully encoded current-run outputs."""
+
+    def __init__(self, failures, exported):
+        super().__init__("Export batch incomplete: " + "; ".join(failures))
+        self.exported = sorted(exported)
+        self.failures = list(failures)
+
+
+class ExportMetadataError(ExportBatchError, OSError):
+    """Keep OSError compatibility and current media after persistence fails."""
+
+
+class ExportDeadlineError(ExportMetadataError, TimeoutError):
+    """Keep TimeoutError compatibility without losing completed media."""
 
 
 def export_all(
@@ -1611,12 +1698,28 @@ def export_all(
     video_path: str,
     transcript_path: Optional[str] = None,
     generate_seo: bool = True,
+    composition: Optional[str] = None,
+    gameplay_manifest: Optional[str] = None,
 ) -> List[Path]:
     """
     Export all clips sequentially.
     After each successful export, immediately generates SEO for that clip
     (one AI call per clip, with breathing room between calls).
     """
+    composition = composition or cfg.get("export", {}).get("composition")
+    gameplay_library = None
+    from automation.cricket_gameplay import GAMEPLAY_COMPOSITIONS
+    if composition and composition not in (*GAMEPLAY_COMPOSITIONS, "portrait-caption-v1"):
+        raise ValueError(f"Unknown composition: {composition}")
+    if composition in GAMEPLAY_COMPOSITIONS:
+        from automation.cricket_gameplay import load_render_library
+        from automation.gameplay_export import preflight_library
+        gameplay_manifest = gameplay_manifest or cfg.get("export", {}).get("gameplay_manifest")
+        if not gameplay_manifest:
+            raise ValueError("Gameplay manifest required before export")
+        gameplay_library = preflight_library(load_render_library(gameplay_manifest),composition)
+    elif gameplay_manifest:
+        raise ValueError("Gameplay manifest requires a gameplay composition")
     selection_file = Path(highlights) if isinstance(highlights, (str, Path)) else None
     if isinstance(highlights, (str, Path)):
         import yaml
@@ -1627,6 +1730,21 @@ def export_all(
         log.error("Invalid highlights: expected mapping, got %s", type(highlights).__name__)
         return []
 
+    # IDs become filenames, including sidecars. Reject unsafe names before any
+    # analysis, directory creation or writes (also on non-Windows test hosts).
+    seen_ids = set()
+    reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                *(f"LPT{i}" for i in range(1, 10))}
+    for clip_id, info in highlights.items():
+        if not isinstance(info, dict):
+            continue
+        if (not isinstance(clip_id, str) or not clip_id or clip_id in (".", "..")
+                or any(c in '<>:"/\\|?*' or ord(c) < 32 for c in clip_id)
+                or clip_id[-1] in ". " or clip_id.split(".")[0].upper() in reserved
+                or clip_id.casefold() in seen_ids):
+            raise ValueError(f"Unsafe or colliding clip ID: {clip_id!r}")
+        seen_ids.add(clip_id.casefold())
+
     if transcript_path is None:
         candidate = Path(cfg["paths"]["transcripts"]) / f"{Path(video_path).stem}.json"
         if not candidate.exists():
@@ -1635,7 +1753,7 @@ def export_all(
     transcript_segments = _load_transcript_segments(transcript_path)
     source_cricket_context = _load_export_cricket_context()
 
-    log.info("🚀 Export phase starting...")
+    log.debug("Export batch starting")
     out_dir = Path(cfg["paths"]["shorts"]) / _new_export_batch_id()
     out_dir.mkdir(parents=True, exist_ok=True)
     if selection_file is not None:
@@ -1686,30 +1804,66 @@ def export_all(
                 "scorecard": match_context,
                 "live_stream_url": live_stream_url,
             }
-            log.info("Source context loaded for per-clip SEO research.")
+            log.debug("Source context loaded for per-clip SEO research.")
         except Exception as e:
             log.warning("Could not load trend context: %s", e)
 
     # Parse and validate highlights
     items = []
+    export_errors = []
+    target_exports = 0
     for clip_id, info in highlights.items():
         if not isinstance(info, dict):
             continue
-        start = _parse_time_to_seconds(info.get("start_sec", info.get("start", 0.0)))
-        end = _parse_time_to_seconds(info.get("end_sec", info.get("end", 0.0)))
-        if end <= start:
-            log.warning("Skipping invalid highlight %s: start=%.3f end=%.3f", clip_id, start, end)
+        target_exports += info.get("role") != "reserve"
+        try:
+            start = _parse_time_to_seconds(info.get("start_sec", info.get("start", 0.0)))
+            end = _parse_time_to_seconds(info.get("end_sec", info.get("end", 0.0)))
+            if not all(math.isfinite(t) for t in (start, end)) or start < 0 or end <= start:
+                raise ValueError("expected finite 0 <= start < end")
+        except (ValueError, TypeError, OverflowError) as exc:
+            export_errors.append(f"{clip_id}: invalid source range: {exc}")
+            log.warning("[%s] Invalid source range: %s", clip_id, exc)
             continue
         items.append((clip_id, start, end, info))
 
-    items.sort(key=lambda x: x[1])
+    items.sort(key=lambda x: (x[3].get("role") == "reserve", x[1]))
 
     # Pre-filter: run analysis upfront to reject bad clips early
     # Degraded mode: if face detection fails, try center crop instead of dropping
     filtered_items = []
     for clip_id, start, end, info in items:
-        analysis = analyze_clip(video_path, start, end,
-                                transcript_segments=transcript_segments, clip_id=clip_id)
+        if info.get("role") == "reserve":
+            from shorts_intelligence.completeness import completeness_value
+            if (completeness_value({**info, "start": start, "end": end}) is not True
+                    or info.get("semantic_review") != "text_only"):
+                log.warning("[%s] Reserve held: missing/stale final completeness review", clip_id)
+                continue
+        if gameplay_library is not None:
+            from automation.cricket_gameplay import select_gameplay
+            try:
+                select_gameplay(gameplay_library, end-start, "coverage-preflight")
+            except ValueError as exc:
+                # Preserve sibling successes and bounded, reviewed reserve
+                # recovery, but reject this range before analysis/alignment/SEO.
+                export_errors.append(f"{clip_id}: gameplay coverage preflight: {exc}")
+                log.warning("[%s] Gameplay coverage held: %s", clip_id, exc)
+                continue
+        try:
+            analysis = analyze_clip(video_path, start, end,
+                                    transcript_segments=transcript_segments, clip_id=clip_id)
+            if not isinstance(analysis, dict):
+                raise ValueError("expected an analysis object")
+        except Exception as exc:
+            # Analysis is per candidate, just like rendering. One failed detector
+            # must not erase siblings or prevent already-reviewed reserve recovery.
+            export_errors.append(f"{clip_id}: analysis failed: {exc}")
+            log.warning("[%s] Analysis held: %s", clip_id, exc)
+            continue
+        if composition:
+            analysis["composition"] = composition
+        if composition in GAMEPLAY_COMPOSITIONS:
+            analysis["gameplay_manifest"] = str(gameplay_manifest)
         strategy = analysis.get("export_strategy", {})
         # Duration-compression speed from the clip YAML (interesting content
         # must complete within the target seconds) overrides the frame-analysis speed.
@@ -1766,6 +1920,11 @@ def export_all(
     log.info("Pre-filter: %d/%d clips passed (degraded mode for dropped)", len(filtered_items), len(items))
 
     if not filtered_items:
+        if export_errors:
+            from automation.artifacts import atomic_json
+            atomic_json(out_dir / "batch_failures.json", {"status": "PARTIAL", "errors": export_errors,
+                                                         "exported": []})
+            raise ExportBatchError(export_errors, [])
         log.warning("No clips passed pre-filter — nothing to export")
         return []
 
@@ -1822,12 +1981,17 @@ def export_all(
                     log.debug("Warm-up skip for %s: %s", dev, e)
 
     exported_clips = []
-    export_errors = []
 
     def _export_one(args):
         """Worker function for parallel export."""
         idx, total, clip_id, start, end, info, analysis = args
-        clip_transcript = transcript_segments or []
+        clip_transcript = info.get("speech_segments", transcript_segments or [])
+        if info.get("source_identity") is not None:
+            from automation.speech_alignment import _fingerprint
+            from shorts_intelligence.completeness import completeness_value
+            if info["source_identity"] != _fingerprint(video_path) or completeness_value({
+                    **info, "start": start, "end": end}) is not True:
+                raise ValueError("Source or cut changed after editorial preflight; review is stale")
         _, _, required_captions = _caption_options(analysis)
         if required_captions:
             relevant = [s for s in clip_transcript if s["end"] > start and s["start"] < end]
@@ -1868,7 +2032,9 @@ def export_all(
             sr_inst = _sr_instances.get(device)
         path = export_clip(video_path, start, end, str(out_file),
                            clip_id, transcript_segments=clip_transcript, analysis=analysis,
-                           device=device, sr_instance=sr_inst)
+                            device=device, sr_instance=sr_inst)
+        if path and (not Path(path).is_file() or Path(path).stat().st_size == 0):
+            raise ValueError(f"{clip_id}: renderer returned missing or empty media")
 
         # Keep the rendered timeline intact. Transcript display gaps are not
         # verified silence and source times cannot trim a speed-adjusted output.
@@ -1880,10 +2046,16 @@ def export_all(
             atomic_json(out_dir / f"{clip_id}_edit.json", {
                 "schema_version": 1, "source_path": str(Path(video_path).resolve()),
                 "source_start": start, "source_end": end,
+                "complete_thought": info.get("complete_thought"),
+                "completeness": info.get("completeness"),
+                "semantic_review": info.get("semantic_review", "NOT CHECKED"),
                 "timeline": analysis.get("edit_timeline", []),
                 "text": info.get("text", ""),
                 "active_crop": analysis.get("export_strategy", {}).get("active_crop"),
                 "layout_type": analysis.get("layout", {}).get("layout_type"),
+                "portrait_layout": analysis.get("portrait_layout"),
+                "composition": composition,
+                "gameplay_layout": analysis.get("gameplay_layout"),
                 "export_config": cfg.get("export", {}),
                 "qc_status": "NOT CHECKED",
             })
@@ -1924,6 +2096,8 @@ def export_all(
     # Export clips in parallel. As each clip finishes, its SEO is submitted
     # to a separate thread pool immediately — no waiting for all exports.
     # SEO uses OpenCode Go models only (qwen3.7-max, mimo-v2.5-pro, deepseek-v4-pro).
+    import threading
+    seo_control = {"lock": threading.Lock(), "cancelled": threading.Event()}
     seo_futures = []
     insta_executor = _make_insta_executor() if generate_seo else None
     insta_futures = []
@@ -1931,12 +2105,18 @@ def export_all(
         # SEO pool: 2 workers max (API rate limits)
         seo_executor = ThreadPoolExecutor(max_workers=2) if (generate_seo and seo_context) else None
 
-        futures = [
-            export_executor.submit(_export_one, (idx, len(filtered_items), clip_id, start, end, info, analysis))
-            for idx, (clip_id, start, end, info, analysis) in enumerate(filtered_items, start=1)
-        ]
-
-        for future in as_completed(futures):
+        primaries = [item for item in filtered_items if item[3].get("role") != "reserve"]
+        reserves = [item for item in filtered_items if item[3].get("role") == "reserve"]
+        futures = {export_executor.submit(_export_one, (idx, target_exports, *item)): item[0]
+                   for idx, item in enumerate(primaries, start=1)}
+        # A bounded reserve queue: only already aligned/reviewed candidates,
+        # never arbitrary backfill. Submit another only when a slot is missing.
+        while futures or (reserves and len(exported_clips) < target_exports):
+            if not futures:
+                item = reserves.pop(0)
+                futures[export_executor.submit(_export_one, (len(exported_clips)+1, target_exports, *item))] = item[0]
+            future = next(as_completed(futures))
+            failed_id = futures.pop(future)
             try:
                 idx, total, clip_id, path, info = future.result()
                 if path:
@@ -1945,9 +2125,9 @@ def export_all(
                     # Fire SEO immediately — runs parallel to remaining exports
                     if seo_executor and seo_context:
                         seo_fut = seo_executor.submit(
-                            _seo_worker, clip_id, info, out_dir, seo_context
+                            _seo_worker, clip_id, info, out_dir, {**seo_context, "_seo_control": seo_control}
                         )
-                        seo_futures.append(seo_fut)
+                        seo_futures.append((seo_fut, clip_id, info))
                     if insta_executor is not None:
                         insta_futures.append(insta_executor.submit(
                             _insta_worker, clip_id, info,
@@ -1957,8 +2137,8 @@ def export_all(
                     log.warning("[%d/%d] Export failed or dropped: %s", idx, total, clip_id)
                     export_errors.append(f"{clip_id}: render failed or held by quality checks")
             except Exception as e:
-                log.error(f"Parallel export error: {e}")
-                export_errors.append(str(e))
+                log.error("[%s] Export error: %s", failed_id, e)
+                export_errors.append(f"{failed_id}: {e}")
 
     # Wait for any remaining SEO tasks to finish
     try:
@@ -1968,14 +2148,46 @@ def export_all(
                 raise ValueError("SEO export deadline must be finite and positive")
             seo_deadline_at = time.monotonic() + deadline
             log.info("Waiting for %d remaining SEO tasks...", len(seo_futures))
-            for fut in seo_futures:
+            seo_errors = []
+            for fut, clip_id, _info in seo_futures:
                 remaining = max(0.0, seo_deadline_at - time.monotonic())
                 try:
-                    fut.result(timeout=remaining)
+                    outcome = fut.result(timeout=remaining)
+                    if isinstance(outcome, dict) and outcome.get("_seo_failed"):
+                        seo_errors.append(f"{clip_id}: {outcome.get('error', 'SEO failed')}")
                 except TimeoutError as exc:
                     raise TimeoutError(f"SEO generation exceeded the {deadline}s export deadline") from exc
+            if seo_errors:
+                raise ValueError("SEO packaging incomplete: " + "; ".join(seo_errors))
+    except Exception as exc:
+        from automation.artifacts import atomic_json
+        from automation.artifacts import read_metadata
+        failures = [*export_errors, str(exc)]
+        with seo_control["lock"]:
+            seo_control["cancelled"].set()
+            # A deadline needs resumable per-clip evidence immediately, not
+            # minutes later when an abandoned provider finally returns.
+            for _future, clip_id, info in seo_futures:
+                clip = out_dir / f"{clip_id}.mp4"
+                marker = out_dir / f"{clip_id}_seo_failed.json"
+                try:
+                    if read_metadata(clip) is None and not marker.exists():
+                        atomic_json(marker, {"clip_id": clip_id, "transcript": info.get("text", ""),
+                            "video_title": (seo_context or {}).get("video_title", ""),
+                            "video_description": (seo_context or {}).get("video_description", ""),
+                            "live_stream_url": (seo_context or {}).get("live_stream_url", ""),
+                            "error": str(exc)})
+                except OSError as marker_error:
+                    failures.append(f"{clip_id}: could not persist SEO retry evidence: {marker_error}")
+        try:
+            atomic_json(out_dir / "batch_failures.json", {"status": "PARTIAL", "errors": failures,
+                "exported": [str(path) for path in exported_clips]})
+        except OSError:
+            log.error("Could not persist batch failure report", exc_info=True)
+        error_type = ExportDeadlineError if isinstance(exc, TimeoutError) else ExportMetadataError if isinstance(exc, OSError) else ExportBatchError
+        raise error_type(failures, exported_clips) from exc
     finally:
-        for fut in seo_futures:
+        for fut, _clip_id, _info in seo_futures:
             fut.cancel()
         if seo_executor is not None:
             seo_executor.shutdown(wait=False, cancel_futures=True)
@@ -1990,11 +2202,16 @@ def export_all(
     if insta_executor is not None:
         insta_executor.shutdown(wait=False)
 
+    if len(exported_clips) < target_exports and not export_errors:
+        export_errors.append(f"Pre-filter held {target_exports-len(exported_clips)} required clip(s)")
     if export_errors:
         from automation.artifacts import atomic_json
-        atomic_json(out_dir / "batch_failures.json", {"status": "PARTIAL", "errors": export_errors,
-                                                     "exported": [str(path) for path in exported_clips]})
-        raise RuntimeError("Export batch incomplete: " + "; ".join(export_errors))
+        recovered = len(exported_clips) >= target_exports
+        atomic_json(out_dir / "batch_failures.json", {"status": "RECOVERED" if recovered else "PARTIAL", "errors": export_errors,
+                                                      "exported": [str(path) for path in exported_clips]})
+        if not recovered:
+            raise ExportBatchError(export_errors, exported_clips)
+        log.warning("Export recovered with reviewed reserves; failed attempts retained in batch_failures.json")
 
     log.info("✨ Export complete: %d clips in %s", len(exported_clips), out_dir)
     return exported_clips

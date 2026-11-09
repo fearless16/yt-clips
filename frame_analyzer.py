@@ -838,6 +838,8 @@ def analyze_clip(
 
     return {
         "black_frames": black,
+        "source_dimensions": info,
+        "face_samples": face_candidates,
         "lighting": lighting,
         "layout": layout,
         "dead_air": silence,

@@ -63,6 +63,9 @@ def test_remote_fetch_corrects_api_segments(monkeypatch, tmp_path):
                 "language": "en", "source": "api"}
 
     monkeypatch.setattr(tr, "_fetch_via_api", fake_api)
+    # The official endpoint is tried before this fallback. Never let this unit
+    # test refresh a real OAuth token or contact YouTube.
+    monkeypatch.setattr(tr, "_fetch_via_youtube_data_api", lambda *_: None)
     tr.TRANSCRIPT_CACHE.clear() if hasattr(tr.TRANSCRIPT_CACHE, "clear") else None
     res = tr.fetch("https://www.youtube.com/watch?v=abcdef12345")
     assert res["source"] == "api"

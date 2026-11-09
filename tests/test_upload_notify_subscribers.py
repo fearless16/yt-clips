@@ -5,6 +5,7 @@ import json
 
 def test_upload_respects_notify_subscribers_config(monkeypatch, tmp_path):
     monkeypatch.setitem(upload.cfg, "release_review", {"required": False})
+    monkeypatch.setitem(upload.cfg, "thumbnail", {"enabled": False})
     monkeypatch.setattr("time.sleep", lambda x: None)
     
     original_cfg_get = upload.cfg.get

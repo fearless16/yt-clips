@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -212,16 +213,68 @@ class YouTubeShortsSource:
     def _load_local_metadata(self) -> dict[str, dict[str, Any]]:
         root = Path(self.config.local_metadata_root)
         result: dict[str, dict[str, Any]] = {}
+        conflicts: set[str] = set()
         if not root.exists():
             return result
         for path in root.glob("**/*_metadata.json"):
             try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                metadata_bytes = path.read_bytes()
+                payload = json.loads(metadata_bytes)
+            except (OSError, ValueError):
                 continue
+            if not isinstance(payload, dict):
+                continue
+            stem = path.name.removesuffix("_metadata.json")
+            proof_path = path.with_name(f"{stem}_delivery.json")
             video_id = payload.get("youtube_video_id")
-            if video_id:
-                result[str(video_id)] = payload
+            if proof_path.exists():
+                # Receipts identify local evidence, never prove an outcome. The
+                # caller still requires the exact shelf, owner and real Analytics.
+                try:
+                    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+                    if (not isinstance(proof, dict) or proof.get("schema_version") not in (1, 2)
+                            or proof.get("channel_id") != self.config.channel_id
+                            or proof.get("status") not in {
+                                "THUMBNAIL_PENDING", "PUBLICATION_PENDING", "PUBLICATION_UNKNOWN", "COMPLETE"}):
+                        continue
+                    receipt_id = proof.get("video_id")
+                    if not isinstance(receipt_id, str) or not receipt_id.strip():
+                        continue
+                    if video_id and video_id != receipt_id:
+                        continue
+                    artifacts = proof["artifacts"]
+                    if not isinstance(artifacts, dict) or set(artifacts) not in (
+                            {"media", "metadata"}, {"media", "metadata", "cover"}):
+                        continue
+                    # Only open canonical siblings, never arbitrary receipt paths.
+                    siblings = {"media": path.with_name(f"{stem}.mp4"), "metadata": path,
+                                "cover": path.with_name(f"{stem}_thumb.jpg")}
+                    valid = True
+                    for name, recorded in artifacts.items():
+                        sibling = siblings[name]
+                        if not isinstance(recorded, dict) or recorded.get("path") != str(sibling.resolve()):
+                            valid = False
+                            break
+                        if name == "metadata":
+                            digest = hashlib.sha256(metadata_bytes).hexdigest()
+                        else:
+                            with sibling.open("rb") as handle:
+                                digest = hashlib.file_digest(handle, "sha256").hexdigest()
+                        if digest != recorded.get("sha256"):
+                            valid = False
+                            break
+                    if not valid:
+                        continue
+                    video_id = receipt_id
+                except (OSError, ValueError, TypeError, KeyError):
+                    continue
+            if isinstance(video_id, str) and video_id.strip() and video_id not in conflicts:
+                if video_id in result and result[video_id] != payload:
+                    # Conflicting local bindings must not depend on glob order.
+                    result.pop(video_id)
+                    conflicts.add(video_id)
+                else:
+                    result[video_id] = payload
         return result
 
 

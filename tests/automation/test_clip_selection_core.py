@@ -61,8 +61,8 @@ def test_llm_arbiter_does_not_refill_candidates_it_rejected(monkeypatch):
     import automation.clip_selection.arbiter as arbiter
 
     class FakeAI:
-        def generate_text(self, *args, **kwargs):
-            return '{"selected":[{"candidate_id":2,"score":91,"reason":"complete"}],"rejected":[]}'
+        def generate_json(self, *args, **kwargs):
+            return '{"selected":[{"candidate_id":2,"score":91,"complete_thought":true,"reason":"complete"}],"rejected":[]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: FakeAI())
     candidates = [
@@ -86,10 +86,10 @@ def test_llm_arbiter_receives_source_video_title(monkeypatch):
     captured = {}
 
     class FakeAI:
-        def generate_text(self, prompt, system_instruction=None):
+        def generate_json(self, prompt, system_instruction=None):
             captured["prompt"] = prompt
             captured["system"] = system_instruction
-            return '{"selected":[{"candidate_id":1,"score":90,"reason":"on-match"}]}'
+            return '{"selected":[{"candidate_id":1,"score":90,"complete_thought":true,"reason":"on-match"}]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: FakeAI())
     candidates = [
@@ -116,9 +116,9 @@ def test_llm_arbiter_receives_full_candidate_script(monkeypatch):
     captured = {}
 
     class FakeAI:
-        def generate_text(self, prompt, system_instruction=None):
+        def generate_json(self, prompt, system_instruction=None):
             captured["prompt"] = prompt
-            return '{"selected":[{"candidate_id":1,"score":90,"reason":"full"}]}'
+            return '{"selected":[{"candidate_id":1,"score":90,"complete_thought":true,"reason":"full"}]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: FakeAI())
     long_script = (
@@ -148,10 +148,10 @@ def test_llm_arbiter_prompt_states_candidate_id_contract(monkeypatch):
     captured = {}
 
     class FakeAI:
-        def generate_text(self, prompt, system_instruction=None):
+        def generate_json(self, prompt, system_instruction=None):
             captured["prompt"] = prompt
             captured["system"] = system_instruction
-            return '{"selected":[{"candidate_id":1,"score":90,"reason":"ok"}]}'
+            return '{"selected":[{"candidate_id":1,"score":90,"complete_thought":true,"reason":"ok"}]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: FakeAI())
     candidates = [
@@ -172,9 +172,9 @@ def test_llm_arbiter_receives_match_context(monkeypatch):
     captured = {}
 
     class FakeAI:
-        def generate_text(self, prompt, system_instruction=None):
+        def generate_json(self, prompt, system_instruction=None):
             captured["prompt"] = prompt
-            return '{"selected":[{"candidate_id":1,"score":90,"reason":"ok"}]}'
+            return '{"selected":[{"candidate_id":1,"score":90,"complete_thought":true,"reason":"ok"}]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: FakeAI())
     candidates = [
@@ -202,11 +202,11 @@ def test_llm_arbiter_retries_once_on_unparseable_json(monkeypatch):
         def __init__(self):
             self.calls = 0
 
-        def generate_text(self, *args, **kwargs):
+        def generate_json(self, *args, **kwargs):
             self.calls += 1
             if self.calls == 1:
                 return "I think clip one is nice but let me explain without JSON"
-            return '{"selected":[{"candidate_id":1,"score":88,"reason":"second try"}]}'
+            return '{"selected":[{"candidate_id":1,"score":88,"complete_thought":true,"reason":"second try"}]}'
 
     ai = FlakyAI()
     monkeypatch.setattr(arbiter, "_get_ai", lambda: ai)
@@ -263,7 +263,7 @@ def test_selector_preserves_partial_arbiter_selection_despite_minimum(monkeypatc
     monkeypatch.setattr(
         selector_module,
         "llm_arbiter_refine",
-        lambda items, context, max_selected: [items[0]],
+        lambda items, context, max_selected: [{**items[0], "complete_thought": True}],
     )
 
     selected = ClipSelector(use_llm_arbiter=True).select(
@@ -274,7 +274,7 @@ def test_selector_preserves_partial_arbiter_selection_despite_minimum(monkeypatc
         min_quality=38.0,
     )
 
-    assert selected == [candidates[0]]
+    assert selected == [{**candidates[0], "complete_thought": True}]
     assert candidates[1] not in selected
     assert candidates[2] not in selected
 
@@ -290,7 +290,7 @@ def test_selector_minimum_never_refills_hard_rejected_candidate(monkeypatch):
     monkeypatch.setattr(
         selector_module,
         "llm_arbiter_refine",
-        lambda items, context, max_selected: [items[0]],
+        lambda items, context, max_selected: [{**items[0], "complete_thought": True}],
     )
 
     selected = ClipSelector(use_llm_arbiter=True).select(
@@ -301,7 +301,7 @@ def test_selector_minimum_never_refills_hard_rejected_candidate(monkeypatch):
         min_quality=38.0,
     )
 
-    assert selected == candidates[:1]
+    assert selected == [{**candidates[0], "complete_thought": True}]
 
 
 # ── Adversarial: LLM returns garbage shapes ─────────────────────────────────
@@ -318,8 +318,8 @@ def test_llm_arbiter_handles_string_candidate_id(monkeypatch):
     import automation.clip_selection.arbiter as arbiter
 
     class FakeAI:
-        def generate_text(self, *args, **kwargs):
-            return '{"selected":[{"candidate_id":"2","score":77,"reason":"string id"}]}'
+        def generate_json(self, *args, **kwargs):
+            return '{"selected":[{"candidate_id":"2","score":77,"complete_thought":true,"reason":"string id"}]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: FakeAI())
 
@@ -332,12 +332,12 @@ def test_llm_arbiter_skips_out_of_range_and_nondict_selections(monkeypatch):
     import automation.clip_selection.arbiter as arbiter
 
     class FakeAI:
-        def generate_text(self, *args, **kwargs):
+        def generate_json(self, *args, **kwargs):
             return (
                 '{"selected":['
                 '{"candidate_id":99,"score":99,"reason":"out of range"},'
                 '"just a string entry",'
-                '{"candidate_id":1,"score":70,"reason":"valid"}'
+                '{"candidate_id":1,"score":70,"complete_thought":true,"reason":"valid"}'
                 "]}"
             )
 
@@ -353,10 +353,10 @@ def test_llm_arbiter_dedupes_duplicate_candidate_ids(monkeypatch):
     import automation.clip_selection.arbiter as arbiter
 
     class FakeAI:
-        def generate_text(self, *args, **kwargs):
+        def generate_json(self, *args, **kwargs):
             return (
                 '{"selected":['
-                '{"candidate_id":1,"score":80,"reason":"first"},'
+                '{"candidate_id":1,"score":80,"complete_thought":true,"reason":"first"},'
                 '{"candidate_id":1,"score":81,"reason":"dup"}'
                 "]}"
             )
@@ -375,7 +375,7 @@ def test_llm_arbiter_holds_when_both_attempts_malformed(monkeypatch):
         def __init__(self):
             self.calls = 0
 
-        def generate_text(self, *args, **kwargs):
+        def generate_json(self, *args, **kwargs):
             self.calls += 1
             return '{"selected": [{"candidate_id": '  # braces present, never valid
 
@@ -396,11 +396,11 @@ def test_llm_arbiter_survives_exception_then_succeeds(monkeypatch):
         def __init__(self):
             self.calls = 0
 
-        def generate_text(self, *args, **kwargs):
+        def generate_json(self, *args, **kwargs):
             self.calls += 1
             if self.calls == 1:
                 raise RuntimeError("provider socket exploded")
-            return '{"selected":[{"candidate_id":2,"score":66,"reason":"after crash"}]}'
+            return '{"selected":[{"candidate_id":2,"score":66,"complete_thought":true,"reason":"after crash"}]}'
 
     ai = CrashThenOkAI()
     monkeypatch.setattr(arbiter, "_get_ai", lambda: ai)
@@ -417,9 +417,9 @@ def test_llm_arbiter_survives_unserializable_match_context(monkeypatch):
     captured = {}
 
     class FakeAI:
-        def generate_text(self, prompt, system_instruction=None):
+        def generate_json(self, prompt, system_instruction=None):
             captured["prompt"] = prompt
-            return '{"selected":[{"candidate_id":1,"score":60,"reason":"ok"}]}'
+            return '{"selected":[{"candidate_id":1,"score":60,"complete_thought":true,"reason":"ok"}]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: FakeAI())
     context = {
@@ -439,9 +439,9 @@ def test_llm_arbiter_caps_pathological_script_with_marker(monkeypatch):
     captured = {}
 
     class FakeAI:
-        def generate_text(self, prompt, system_instruction=None):
+        def generate_json(self, prompt, system_instruction=None):
             captured["prompt"] = prompt
-            return '{"selected":[{"candidate_id":1,"score":60,"reason":"ok"}]}'
+            return '{"selected":[{"candidate_id":1,"score":60,"complete_thought":true,"reason":"ok"}]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: FakeAI())
     monster_script = "bla " * 1000  # ~4000 chars pathological outlier
@@ -461,7 +461,7 @@ def test_selector_respects_arbiter_abstention(monkeypatch):
     from automation.clip_selection.selector import ClipSelector
 
     class EmptyAI:
-        def generate_text(self, *args, **kwargs):
+        def generate_json(self, *args, **kwargs):
             return '{"selected":[],"rejected":[]}'
 
     monkeypatch.setattr(arbiter, "_get_ai", lambda: EmptyAI())
