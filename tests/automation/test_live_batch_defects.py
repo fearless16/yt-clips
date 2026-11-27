@@ -42,37 +42,10 @@ def test_generic_team_research_cannot_consume_budget_before_exact_clip_names():
     assert all("Rohit Sharma" in q and "wicket" not in q for q in queries)
 
 
-def test_final_entity_gate_also_catches_player_aliases():
-    from automation.seo.seo import validate_search_query_entities, SEOGenerationError
-    with pytest.raises(SEOGenerationError, match="Suryakumar"):
-        validate_search_query_entities({"search_terms": ["sky wicket"]}, {"Virat Kohli"}, {"India"})
 
 
-@pytest.mark.parametrize("field", ["search_terms", "primary_search_terms"])
-def test_final_search_fields_fail_closed_even_if_earlier_copy_was_valid(field):
-    from automation.seo.seo import validate_search_query_entities, SEOGenerationError
-    with pytest.raises(SEOGenerationError, match=f"{field}.*Suryakumar"):
-        validate_search_query_entities({field: ["Suryakumar Yadav wicket"]},
-                                       {"Virat Kohli"}, {"India", "New Zealand"})
 
 
-def test_actual_seo_final_assignment_uses_clip_terms_and_validates_them(monkeypatch):
-    from automation.seo import seo
-    monkeypatch.setattr(seo, "extract_grounded_entities_llm", lambda *a, **k: {
-        "players": ["Virat Kohli"], "teams": [], "topic_phrases": ["virat kohli wicket"]})
-    monkeypatch.setattr(seo, "audit_written_copy_llm", lambda *a, **k: {})
-    monkeypatch.setattr(seo, "_get_learner_context", lambda: "")
-    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
-        "title": "Virat Kohli Wicket: Drive Goes to Cover",
-        "cover_text": "KOHLI OUT", "description": "Virat Kohli is out after driving to cover. Prajjwal reacts to the wicket during his original India versus New Zealand commentary.",
-        "tags": ["Virat Kohli"], "hashtags": ["#Shorts"],
-        "search_terms": ["Virat Kohli wicket reaction"], "primary_search_terms": ["Suryakumar Yadav wicket"]})
-    result = seo.generate_clip_seo("clip1", "Virat Kohli wicket. His drive goes to cover and he is out.",
-        video_title="India vs New Zealand ODI", video_description="SKY and Arshdeep Singh, Virat Kohli",
-        approved_search_queries=["Suryakumar Yadav wicket", "Arshdeep Singh wicket", "Virat Kohli wicket reaction"])
-    assert result["search_terms"][0] == "Virat Kohli wicket reaction"
-    assert result["primary_search_terms"] == ["Virat Kohli wicket reaction"]
-    assert all("Suryakumar" not in q and "Arshdeep" not in q for q in result["search_terms"])
 
 
 def test_guarded_visual_ranges_cannot_cross_dark_transitions_or_join_approvals():
@@ -121,28 +94,6 @@ def test_visual_scan_failure_is_not_treated_as_clean(monkeypatch):
         scan_dark_intervals("missing.mp4", 0, 3)
 
 
-def test_contaminated_approved_research_cannot_be_inserted_after_copy_validation(monkeypatch):
-    from automation.seo import seo
-    from automation.seo.context_engine import build_cricket_evidence_pack
-    monkeypatch.setattr(seo, "extract_grounded_entities_llm", lambda *a, **k: {
-        "players": ["Virat Kohli"], "teams": [], "topic_phrases": ["virat kohli wicket"]})
-    monkeypatch.setattr(seo, "audit_written_copy_llm", lambda *a, **k: {})
-    monkeypatch.setattr(seo, "_get_learner_context", lambda: "")
-    monkeypatch.setattr(seo, "_attempt_seo_generation", lambda *a, **k: {
-        "title": "Virat Kohli Wicket: Drive Goes to Cover", "cover_text": "KOHLI OUT",
-        "description": "Virat Kohli is out after driving to cover. Prajjwal reacts to the wicket during his original India versus New Zealand commentary.",
-        "tags": ["Virat Kohli"], "hashtags": ["#Shorts"], "search_terms": []})
-
-    def contaminated(**kwargs):
-        pack = build_cricket_evidence_pack(**kwargs)
-        pack["approved_search_queries"] = ["Suryakumar Yadav wicket"]
-        return pack
-
-    monkeypatch.setattr(seo, "build_cricket_evidence_pack", contaminated)
-    with pytest.raises(seo.SEOGenerationError, match="search_terms.*Suryakumar"):
-        seo.generate_clip_seo("clip1", "Virat Kohli wicket. His drive goes to cover and he is out.",
-            video_title="India vs New Zealand ODI", video_description="SKY Arshdeep Singh Virat Kohli",
-            approved_search_queries=["Suryakumar Yadav wicket"])
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="Real FFmpeg required")

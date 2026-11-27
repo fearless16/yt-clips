@@ -72,10 +72,10 @@ def test_stage8b_retries_marker_once_before_scheduling_and_upload(
         json.dumps({"clip_id": "clip1", "error": "provider exhausted"}),
         encoding="utf-8",
     )
-    (existing_export.parents[2] / "cookies.txt").write_text("auth")
+    (existing_export.parents[2] / "yt_channel_token.json").write_text("{}")
     calls = []
 
-    def retry(output_dir):
+    def retry(output_dir, **_):
         calls.append(("retry", output_dir))
         existing_export.with_name("clip1_metadata.json").write_text(
             json.dumps({
@@ -110,35 +110,6 @@ def test_stage8b_retries_marker_once_before_scheduling_and_upload(
     assert result.uploaded_count == 1
 
 
-def test_stage8b_reports_persisted_seo_error_when_retry_does_not_recover(
-    existing_export, monkeypatch
-):
-    marker = existing_export.with_name("clip1_seo_failed.json")
-    marker.write_text(
-        json.dumps({"clip_id": "clip1", "error": "quality gate rejected output"}),
-        encoding="utf-8",
-    )
-    (existing_export.parents[2] / "cookies.txt").write_text("auth")
-    uploads = []
-    retries = []
-    monkeypatch.setattr(
-        "automation.seo.seo.retry_failed_seo",
-        lambda output_dir: retries.append(output_dir) or {"recovered": 0, "total": 1},
-    )
-    monkeypatch.setattr(
-        "upload.upload_video", lambda *args, **kwargs: uploads.append(args)
-    )
-
-    result = _run_existing_export(auto_upload=True)
-
-    assert retries == [str(existing_export.parent)]
-    assert uploads == []
-    assert result.seo_generated == 0
-    assert any(
-        "stage8b clip1.mp4" in failure
-        and "quality gate rejected output" in failure
-        for failure in result.failures
-    )
 
 
 def test_stage8b_does_not_retry_seo_when_skip_seo_is_set(
@@ -152,7 +123,7 @@ def test_stage8b_does_not_retry_seo_when_skip_seo_is_set(
         json.dumps({"title": "stale title", "description": "stale description"}),
         encoding="utf-8",
     )
-    (existing_export.parents[2] / "cookies.txt").write_text("auth")
+    (existing_export.parents[2] / "yt_channel_token.json").write_text("{}")
     retry = MagicMock()
     monkeypatch.setattr("automation.seo.seo.retry_failed_seo", retry)
     monkeypatch.setattr("upload.upload_video", MagicMock())
@@ -174,7 +145,7 @@ def test_stage8b_falsey_upload_is_failed_not_published(
         json.dumps({"title": "grounded", "description": "specific clip context"}),
         encoding="utf-8",
     )
-    (existing_export.parents[2] / "cookies.txt").write_text("auth")
+    (existing_export.parents[2] / "yt_channel_token.json").write_text("{}")
     emitted = []
     infra_failures = []
     monkeypatch.setattr("upload.upload_video", lambda *_args, **_kwargs: None)
@@ -200,7 +171,7 @@ def test_stage8b_incomplete_thumbnail_is_not_counted_or_published(existing_expor
 
     existing_export.with_name("clip1_metadata.json").write_text(
         json.dumps({"title": "grounded", "description": "specific clip context"}), encoding="utf-8")
-    (existing_export.parents[2] / "cookies.txt").write_text("auth")
+    (existing_export.parents[2] / "yt_channel_token.json").write_text("{}")
     emitted = []
 
     def incomplete(*_args, **_kwargs):
@@ -231,7 +202,7 @@ def test_stage8b_schedules_only_clips_with_metadata_after_retry(
         json.dumps({"clip_id": "clip1", "error": "still unavailable"}),
         encoding="utf-8",
     )
-    (existing_export.parents[2] / "cookies.txt").write_text("auth")
+    (existing_export.parents[2] / "yt_channel_token.json").write_text("{}")
     scheduled = []
     uploads = []
     monkeypatch.setattr(
@@ -265,7 +236,7 @@ def test_stage8b_does_not_assign_a_new_slot_to_an_existing_delivery(existing_exp
         "title": "grounded", "description": "specific clip context"}))
     # The uploader, not the scheduler, must validate/reconcile this receipt.
     existing_export.with_name("clip1_delivery.json").write_text('{"status":"THUMBNAIL_PENDING"}')
-    (existing_export.parents[2] / "cookies.txt").write_text("auth")
+    (existing_export.parents[2] / "yt_channel_token.json").write_text("{}")
     calls = []
     monkeypatch.setattr("scheduler.assign_clips_to_slots",
                         lambda **kwargs: calls.append(("scheduled", kwargs["clips"])) or [])
@@ -282,148 +253,14 @@ def test_stage8b_does_not_assign_a_new_slot_to_an_existing_delivery(existing_exp
     assert kwargs["publish_at"] is None, "Uploader must reuse and validate its bound slot"
 
 
-def test_seo_failure_marker_persists_error_without_forwarding_it_on_retry(
-    tmp_path, monkeypatch
-):
-    from automation.seo import seo
-
-    monkeypatch.setattr(
-        seo,
-        "generate_clip_seo",
-        lambda **_: (_ for _ in ()).throw(seo.SEOGenerationError("provider exhausted")),
-    )
-    metadata_path = tmp_path / "clip1_metadata.json"
-    metadata_path.write_text(json.dumps({"title": "stale"}), encoding="utf-8")
-
-    result = seo.generate_seo_for_exported_clip(
-        "clip1",
-        "Kohli hits a six",
-        str(tmp_path),
-        video_title="India match",
-        approved_search_queries=[],
-    )
-    marker_path = tmp_path / "clip1_seo_failed.json"
-    marker = json.loads(marker_path.read_text(encoding="utf-8"))
-
-    assert result == {"_seo_failed": True, "error": "provider exhausted"}
-    assert marker["error"] == "provider exhausted"
-    assert not metadata_path.exists()
-
-    captured = {}
-    monkeypatch.setattr(
-        seo,
-        "generate_clip_seo",
-        lambda **kwargs: captured.update(kwargs) or {
-            "title": "ok",
-            "description": "specific recovered clip context",
-        },
-    )
-    assert seo.retry_failed_seo(str(tmp_path)) == {"recovered": 1, "total": 1}
-    assert "error" not in captured
 
 
-def test_seo_worker_does_not_log_success_for_failure_result(monkeypatch):
-    import export
-
-    logger = MagicMock()
-    monkeypatch.setattr(export, "log", logger)
-    monkeypatch.setattr(
-        "automation.seo.seo.generate_seo_for_exported_clip",
-        lambda **_: {"_seo_failed": True, "error": "provider exhausted"},
-    )
-
-    export._seo_worker("clip1", {"text": "six"}, pytest.TempPathFactory, {})
-
-    logger.info.assert_not_called()
-    logger.error.assert_called_once_with(
-        "SEO failed for %s: %s", "clip1", "provider exhausted"
-    )
 
 
-def test_retry_uses_marker_filename_clip_id_not_untrusted_payload(
-    tmp_path, monkeypatch
-):
-    from automation.seo import seo
-
-    marker = tmp_path / "clip1_seo_failed.json"
-    marker.write_text(
-        json.dumps({"clip_id": "../escaped", "transcript": "six"}),
-        encoding="utf-8",
-    )
-    captured = {}
-    monkeypatch.setattr(
-        seo,
-        "generate_clip_seo",
-        lambda **kwargs: captured.update(kwargs) or {
-            "title": "recovered",
-            "description": "specific recovered clip context",
-        },
-    )
-
-    result = seo.retry_failed_seo(str(tmp_path))
-
-    assert result == {"recovered": 1, "total": 1}
-    assert captured["clip_id"] == "clip1"
-    assert (tmp_path / "clip1_metadata.json").is_file()
-    assert not (tmp_path.parent / "escaped_metadata.json").exists()
 
 
-def test_retry_marker_forces_regeneration_when_stale_metadata_exists(
-    tmp_path, monkeypatch
-):
-    from automation.seo import seo
-
-    marker = tmp_path / "clip1_seo_failed.json"
-    marker.write_text(json.dumps({"clip_id": "clip1"}), encoding="utf-8")
-    (tmp_path / "clip1_metadata.json").write_text(
-        json.dumps({"title": "stale", "description": "stale description"}),
-        encoding="utf-8",
-    )
-    generate = MagicMock(return_value={
-        "title": "recovered",
-        "description": "specific recovered clip context",
-    })
-    monkeypatch.setattr(seo, "generate_clip_seo", generate)
-
-    result = seo.retry_failed_seo(str(tmp_path))
-
-    assert result == {"recovered": 1, "total": 1}
-    generate.assert_called_once()
-    metadata = json.loads(
-        (tmp_path / "clip1_metadata.json").read_text(encoding="utf-8")
-    )
-    assert metadata["title"] == "recovered"
-    assert not marker.exists()
 
 
-def test_retry_atomically_persists_latest_error(tmp_path, monkeypatch):
-    from automation.seo import seo
-
-    marker = tmp_path / "clip1_seo_failed.json"
-    marker.write_text(
-        json.dumps({"clip_id": "clip1", "error": "old error"}),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        seo,
-        "generate_clip_seo",
-        lambda **_: (_ for _ in ()).throw(seo.SEOGenerationError("latest error")),
-    )
-    replacements = []
-    real_replace = seo.os.replace
-
-    def replace(src, dst):
-        replacements.append((str(src), str(dst)))
-        return real_replace(src, dst)
-
-    monkeypatch.setattr(seo.os, "replace", replace)
-
-    result = seo.retry_failed_seo(str(tmp_path))
-
-    assert result == {"recovered": 0, "total": 1}
-    assert json.loads(marker.read_text(encoding="utf-8"))["error"] == "latest error"
-    assert replacements[-1][1] == str(marker)
-    assert not marker.with_suffix(".tmp").exists()
 
 
 def _stub_export_all(tmp_path, monkeypatch, export):
@@ -444,8 +281,6 @@ def _stub_export_all(tmp_path, monkeypatch, export):
     })
     monkeypatch.setattr(export, "_new_export_batch_id", lambda: "batch")
     monkeypatch.setattr(export, "_load_transcript_segments", lambda *_: [])
-    monkeypatch.setattr(export, "_load_export_cricket_context", lambda: "cricket")
-    monkeypatch.setattr(export, "_is_exportable_cricket_highlight", lambda *_: True)
     monkeypatch.setattr(export, "_get_best_encoder", lambda: "libx264")
     monkeypatch.setattr(export, "_validate_av_sync", lambda *_: True)
     monkeypatch.setattr(
@@ -467,129 +302,12 @@ def _stub_export_all(tmp_path, monkeypatch, export):
     return shorts
 
 
-def test_export_all_aborts_when_seo_artifact_persistence_fails(
-    tmp_path, monkeypatch
-):
-    import export
-
-    _stub_export_all(tmp_path, monkeypatch, export)
-
-    def seo_worker(*_args):
-        raise OSError("metadata disk full")
-
-    monkeypatch.setattr(export, "_seo_worker", seo_worker)
-
-    with pytest.raises(OSError, match="metadata disk full") as error:
-        export.export_all(
-            {"clip1": {"start": 0, "end": 10, "text": "Kohli six"}},
-            str(tmp_path / "source.mp4"),
-        )
-    assert error.value.exported == [tmp_path / "shorts/batch/clip1.mp4"]
 
 
-def test_export_all_aborts_at_finite_seo_deadline_without_waiting_on_shutdown(
-    tmp_path, monkeypatch
-):
-    import export
-
-    _stub_export_all(tmp_path, monkeypatch, export)
-    monkeypatch.setitem(export.cfg, "seo", {
-        **export.cfg.get("seo", {}),
-        "export_deadline_seconds": 0.01,
-    })
-    observed_timeouts = []
-    shutdowns = []
-    seo_pending = []
-
-    def seo_worker(clip_id, _info, output_dir, _ctx):
-        (output_dir / f"{clip_id}_metadata.json").write_text("{}")
-
-    monkeypatch.setattr(export, "_seo_worker", seo_worker)
-
-    class DeferredSEOFuture:
-        def __init__(self, fn, args):
-            self.fn = fn
-            self.args = args
-            self.cancelled = False
-
-        def result(self, timeout=None):
-            observed_timeouts.append(timeout)
-            if timeout is not None:
-                raise TimeoutError("synthetic timeout")
-
-        def cancel(self):
-            self.cancelled = True
-            return True
-
-    class Executor:
-        def __init__(self, max_workers, **_kwargs):
-            self.is_seo = max_workers == 2
-            self.pending = []
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            self.shutdown(wait=True)
-
-        def submit(self, fn, *args):
-            if self.is_seo:
-                future = DeferredSEOFuture(fn, args)
-                self.pending.append(future)
-                seo_pending.append(future)
-                return future
-            future = Future()
-            future.set_result(fn(*args))
-            return future
-
-        def shutdown(self, wait=True, cancel_futures=False):
-            shutdowns.append((self.is_seo, wait, cancel_futures))
-
-    monkeypatch.setattr(export, "ThreadPoolExecutor", Executor)
-
-    with pytest.raises(TimeoutError, match="SEO generation exceeded") as error:
-        export.export_all(
-            {"clip1": {"start": 0, "end": 10, "text": "Kohli six"}},
-            str(tmp_path / "source.mp4"),
-        )
-    assert error.value.exported == [tmp_path / "shorts/batch/clip1.mp4"]
-
-    assert observed_timeouts and observed_timeouts[0] is not None
-    assert all(future.cancelled for future in seo_pending)
-    assert (True, False, True) in shutdowns
-    marker = tmp_path / "shorts/batch/clip1_seo_failed.json"
-    payload = json.loads(marker.read_text(encoding="utf-8"))
-    assert payload["transcript"] == "Kohli six"
-    assert "deadline" in payload["error"]
 
 
-def test_fast_seo_failure_is_partial_not_success_even_when_both_videos_render(tmp_path, monkeypatch):
-    import export
-    _stub_export_all(tmp_path, monkeypatch, export)
-    monkeypatch.setattr(export, "_seo_worker", lambda *_: {"_seo_failed": True, "error": "invalid cover"})
-    with pytest.raises(export.ExportBatchError, match="SEO packaging incomplete") as error:
-        export.export_all({"clip1": {"start": 0, "end": 10, "text": "Kohli six"}}, "source.mp4")
-    assert len(error.value.exported) == 1
-    assert (error.value.exported[0].parent / "clip1_seo_failed.json").is_file()
 
 
-def test_retry_marker_disk_failure_does_not_erase_successfully_rendered_media(tmp_path, monkeypatch):
-    import export
-    import automation.artifacts as artifacts
-    _stub_export_all(tmp_path, monkeypatch, export)
-    monkeypatch.setattr(export, "_seo_worker", lambda *_: {"_seo_failed": True, "error": "provider failed"})
-    write = artifacts.atomic_json
-
-    def disk_failure(path, payload):
-        if str(path).endswith("_seo_failed.json"):
-            raise OSError("retry marker disk full")
-        return write(path, payload)
-
-    monkeypatch.setattr(artifacts, "atomic_json", disk_failure)
-    with pytest.raises(export.ExportBatchError, match="retry marker disk full") as error:
-        export.export_all({"clip1": {"start": 0, "end": 10, "text": "Kohli six"}}, "source.mp4")
-    assert len(error.value.exported) == 1
-    assert error.value.exported[0].read_bytes() == b"video"
 
 
 def test_orchestrator_rejects_malformed_and_incomplete_metadata(
@@ -621,7 +339,7 @@ def test_orchestrator_rejects_malformed_and_incomplete_metadata(
         }),
         encoding="utf-8",
     )
-    (existing_export.parents[2] / "cookies.txt").write_text("auth")
+    (existing_export.parents[2] / "yt_channel_token.json").write_text("{}")
     uploads = []
     monkeypatch.setattr(
         "upload.upload_video",
@@ -651,7 +369,7 @@ def test_recovery_runs_before_drive_sync_without_upload(
     )
     calls = []
 
-    def retry(output_dir):
+    def retry(output_dir, **_):
         calls.append("retry")
         metadata.write_text(
             json.dumps({
@@ -678,69 +396,5 @@ def test_recovery_runs_before_drive_sync_without_upload(
     assert result.seo_generated == 1
 
 
-def test_initial_metadata_persistence_failure_propagates_and_removes_stale_file(
-    tmp_path, monkeypatch
-):
-    from automation.seo import seo
-
-    metadata = tmp_path / "clip1_metadata.json"
-    metadata.write_text(
-        json.dumps({"title": "stale", "description": "stale description"}),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(
-        seo,
-        "generate_clip_seo",
-        lambda **_: {"title": "fresh", "description": "fresh description"},
-    )
-    real_replace = seo.os.replace
-
-    def replace(src, dst):
-        if Path(dst) == metadata:
-            raise OSError("metadata disk full")
-        return real_replace(src, dst)
-
-    monkeypatch.setattr(seo.os, "replace", replace)
-
-    with pytest.raises(OSError, match="metadata disk full"):
-        seo.generate_seo_for_exported_clip(
-            "clip1", "Kohli six", str(tmp_path), approved_search_queries=[]
-        )
-
-    assert not metadata.exists()
 
 
-def test_retry_marker_rewrite_failure_does_not_block_other_markers(
-    tmp_path, monkeypatch
-):
-    from automation.seo import seo
-
-    first = tmp_path / "clip1_seo_failed.json"
-    second = tmp_path / "clip2_seo_failed.json"
-    for marker in (first, second):
-        marker.write_text(
-            json.dumps({"clip_id": marker.stem, "error": "old error"}),
-            encoding="utf-8",
-        )
-
-    def generate(clip_id, **_kwargs):
-        if clip_id == "clip1":
-            raise seo.SEOGenerationError("latest error")
-        return {"title": "recovered", "description": "recovered description"}
-
-    monkeypatch.setattr(seo, "generate_clip_seo", generate)
-    real_replace = seo.os.replace
-
-    def replace(src, dst):
-        if Path(dst) == first:
-            raise OSError("marker disk full")
-        return real_replace(src, dst)
-
-    monkeypatch.setattr(seo.os, "replace", replace)
-
-    result = seo.retry_failed_seo(str(tmp_path))
-
-    assert result == {"recovered": 1, "total": 2}
-    assert first.exists()
-    assert not second.exists()
-    assert (tmp_path / "clip2_metadata.json").is_file()

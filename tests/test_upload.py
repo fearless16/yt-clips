@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 import json
+import upload
 from tests.youtube_fakes import add_video_status_api
 
 from upload import (
@@ -106,9 +107,30 @@ def test_upload_video_transient_error_returns_none(tmp_path):
          patch("upload.get_authenticated_service", return_value=mock_service), \
          patch("upload.MediaFileUpload"):
              
-        vid_id = upload_video(str(video_file), str(metadata_file), privacy="public")
-        
-        assert vid_id is None
+        # 5xx is ambiguous: the real reason is carried and the receipt kept.
+        with pytest.raises(upload.UploadRejected, match="unknown.*503") as exc:
+            upload_video(str(video_file), str(metadata_file), privacy="public")
+        assert exc.value.stop_batch is False
+        assert video_file.with_name("test_delivery.json").exists()
+
+
+def test_quota_refusal_stops_batch_and_clears_receipt(tmp_path):
+    video_file = tmp_path / "test.mp4"
+    video_file.write_bytes(b"dummy video")
+    metadata_file = tmp_path / "metadata.json"
+    metadata_file.write_text(json.dumps({"title": "Quota Test"}))
+    from googleapiclient.errors import HttpError
+    mock_resp = MagicMock()
+    mock_resp.status = 403
+    content = json.dumps({"error": {"errors": [{"reason": "quotaExceeded"}]}}).encode()
+    mock_service = MagicMock()
+    mock_service.videos().insert.return_value.execute.side_effect = HttpError(resp=mock_resp, content=content)
+    with patch("upload._validate_shorts_video", return_value=True),          patch("upload.get_authenticated_service", return_value=mock_service),          patch("upload.MediaFileUpload"):
+        with pytest.raises(upload.UploadRejected, match="quotaExceeded") as exc:
+            upload_video(str(video_file), str(metadata_file), privacy="public")
+    assert exc.value.stop_batch is True
+    # Definitive refusal: no video exists, so no receipt may hold the clip.
+    assert not video_file.with_name("test_delivery.json").exists()
 
 def test_upload_video_with_single_token(tmp_path):
     video_file = tmp_path / "test.mp4"

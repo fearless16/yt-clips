@@ -30,6 +30,17 @@ from ._cache import TRANSCRIPT_CACHE
 log = logging.getLogger("transcript")
 
 
+def _language_preference() -> list[str]:
+    """The stream's own language first: an English track on a Hindi stream is
+    an auto-translation or mis-tagged ASR, worse than the Hindi captions."""
+    try:
+        from utils.config import load_config
+        own = str(load_config()["transcription"].get("language") or "").strip()
+    except Exception:
+        own = ""
+    return list(dict.fromkeys(x for x in (own, "hi", "en", "en-US", "en-GB") if x))
+
+
 def _extract_video_id(url: str) -> str | None:
     """Extract the 11-char YouTube video ID from a URL.
 
@@ -130,7 +141,7 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
 
         caption_id = None
         lang_code = None
-        for pref_lang in ["en", "en-US", "en-GB", "hi"]:
+        for pref_lang in _language_preference():
             for item in items:
                 snippet = item["snippet"]
                 if snippet["language"] == pref_lang and snippet.get("trackKind") != "ASR" and snippet.get("status") == "serving":
@@ -141,7 +152,7 @@ def _fetch_via_youtube_data_api(video_id: str) -> dict | None:
                 break
 
         if not caption_id:
-            for pref_lang in ["en", "en-US", "en-GB", "hi"]:
+            for pref_lang in _language_preference():
                 for item in items:
                     snippet = item["snippet"]
                     if snippet["language"] == pref_lang and snippet.get("status") == "serving":
@@ -226,16 +237,16 @@ def _fetch_via_api(video_id: str) -> dict | None:
         api = YouTubeTranscriptApi(http_client=session)
         transcript_list = api.list(video_id)
 
-        # Try English first (manual > generated)
+        # The stream's own language first (manual > generated), then English.
         transcript = None
-        for lang in ["en", "en-US", "en-GB"]:
+        for lang in _language_preference():
             try:
-                transcript = transcript_list.find_transcript([lang])
+                transcript = transcript_list.find_manually_created_transcript([lang])
                 break
             except Exception:
                 continue
         if transcript is None:
-            for lang in ["en", "en-US", "en-GB"]:
+            for lang in _language_preference():
                 try:
                     transcript = transcript_list.find_generated_transcript([lang])
                     break

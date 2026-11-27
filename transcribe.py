@@ -38,16 +38,19 @@ def _log_vram(tag: str = ""):
 # ── whisper.cpp GPU path (ROCm > Vulkan > CPU) ─────────────────────────
 
 _WHISPER_CLI_CANDIDATES = [
+    # ROCm (HIP) first: v1.8.4+ with gfx120X support (Radeon AI PRO R9700).
+    ("rocm", Path(__file__).parent / "whisper_rocm" / "whisper-cli.exe"),
     # Vulkan — cross-vendor fallback, older v1.0 build
     ("vulkan", Path(__file__).parent / "whisper_vulkan" / "whisper-cli.exe"),
     ("vulkan", Path(__file__).parent / "whisper_vulkan" / "whisper-cli"),
-    # ROCm (HIP) — fastest for AMD GPUs, v1.8.4+ with gfx120X support
-    ("rocm", Path(__file__).parent / "whisper_rocm" / "whisper-cli.exe"),
 ]
 
-# Model preferences: ROCm prefers large-v3-turbo, Vulkan uses small
+# Measured 2026-11-27 on 5 min of real Hindi stream audio (R9700, beam 5):
+# vulkan+small 57 s, vulkan+turbo 40 s, rocm+turbo 41 s, rocm+turbo -p 2 24 s
+# (-p 4 also 24 s). small garbled names ("Rajat Patidar", "Asia Cup") that
+# turbo got right, and turbo's 4-layer decoder is faster, so turbo leads on both.
 _ROCM_MODEL_PREF = ["large-v3-turbo", "large-v3", "medium", "small"]
-_VULKAN_MODEL_PREF = ["small", "medium", "large-v3"]
+_VULKAN_MODEL_PREF = ["large-v3-turbo", "small", "medium", "large-v3"]
 
 
 def _find_whisper_cli() -> Optional[tuple]:

@@ -234,7 +234,7 @@ def test_seo_retry_retains_gameplay_attribution(tmp_path,monkeypatch):
     selected = select_gameplay(load_library(manifest),2,"moment")
     (tmp_path/"clip_gameplay.json").write_text(json.dumps({"selection":selected}))
     (tmp_path/"clip_seo_failed.json").write_text('{"transcript":"India cricket"}')
-    monkeypatch.setattr(seo,"generate_clip_seo",lambda **_: {"title":"India cricket","description":"Retained opinion","cover_text":"INDIA CRICKET"})
+    monkeypatch.setattr(seo,"build_metadata",lambda *a: {"title":"India cricket","description":"Retained opinion","cover_text":"INDIA CRICKET","seo_method":"llm"})
     assert seo.retry_failed_seo(str(tmp_path)) == {"recovered":1,"total":1}
     assert json.loads((tmp_path/"clip_metadata.json").read_text())["description"].endswith(credit_text(selected))
 

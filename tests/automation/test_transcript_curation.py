@@ -177,8 +177,7 @@ def test_real_hindi_cricket_proposals_are_not_lost_to_roman_only_gate(script):
     tokens = script.split()
     raw = {"start_cue_id": 0, "end_cue_id": 0, "opening_phrase": " ".join(tokens[:3]),
            "closing_phrase": " ".join(tokens[-3:]), "score": 80, "reason": "retained cricket argument"}
-    item = _proposal(raw, [{"start": 0, "end": 20, "text": script}], {0}, config(),
-                     source_context="India vs New Zealand cricket match")
+    item = _proposal(raw, [{"start": 0, "end": 20, "text": script}], {0}, config())
     assert item["text"] == script  # relevance normalization must not rewrite speech
 
 

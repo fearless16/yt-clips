@@ -3,6 +3,7 @@ cricket_context.py — Cricket player names, team names, venues, and corrections
 """
 import re
 from collections import defaultdict
+from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Set
 
 from utils.devanagari import to_roman
@@ -137,6 +138,41 @@ CRICKET_SPELLING_CORRECTIONS = {
     "t20": "T20",
     "odi": "ODI",
     "wct20": "T20 World Cup",
+
+    # Romanizer output for Whisper/YouTube Devanagari (utils.devanagari.to_roman
+    # keeps the inherent vowel: धोनी -> dhonee, विराट -> viraata). Measured on 3
+    # real streams 2026-11-27 (count in brackets); look-alikes that are common
+    # Hindi words (bolate=speaking, kauna=who, andara=inside, khaana=food) are
+    # deliberately absent. Ambiguous surnames (yaadava, patela) stay unresolved.
+    "dhonee": "MS Dhoni",                     # 108
+    "kohalee": "Kohli",                       # 31
+    "viraata kohalee": "Virat Kohli",
+    "viraata": "Virat Kohli",                 # 26
+    "rohita sharmaa": "Rohit Sharma",
+    "rohita": "Rohit Sharma",                 # 21
+    "raahula": "KL Rahul",                    # 23
+    "bumaraaha": "Jasprit Bumrah",            # 19
+    "jadejaa": "Ravindra Jadeja",             # 18
+    "haardika paandyaa": "Hardik Pandya",
+    "haardika": "Hardik",                     # 18
+    "paandyaa": "Pandya",
+    "saimasana": "Sanju Samson",              # 15
+    "abhisheka sharmaa": "Abhishek Sharma",
+    "abhisheka": "Abhishek Sharma",           # 8
+    "shamee": "Mohammed Shami",
+    "yuvaraaja": "Yuvraj Singh",
+    "kaiptana": "captain",                    # 38
+    "kaptaanee": "captain",
+    "siksa": "six",
+    "phora": "four",
+    "kaicha": "catch",
+    "ranon": "runs",
+    "baaundree": "boundary",
+    "senchuree": "century",
+    "shataka": "century",
+    "gendabaaja": "bowler",
+    "ballebaaja": "batsman",
+    "aaeepeeela": "IPL",
 }
 
 # Full phrases only: a city, surname, or guessed ASR name is not an entity.
@@ -224,6 +260,9 @@ def correct_cricket_spelling(
     """Resolve aliases against static seeds plus the verified runtime roster."""
     if not text:
         return text
+    if not player_names and not player_aliases:
+        corrections, pattern = _static_corrections()
+        return pattern.sub(lambda m: _substitute_alias(text, m, corrections), text)
     corrections = dict(CRICKET_SPELLING_CORRECTIONS)
     runtime_names = list(player_names or [])
     runtime = _runtime_player_corrections(runtime_names)
@@ -254,36 +293,52 @@ def correct_cricket_spelling(
         for alias, player in (player_aliases or {}).items()
         if len(str(alias).strip()) >= 4 and str(player).strip()
     })
+    corrections = _with_identities(corrections)
+    pattern = _alias_pattern(corrections)
+    return pattern.sub(lambda m: _substitute_alias(text, m, corrections), text)
+
+
+def _with_identities(corrections: Dict[str, str]) -> Dict[str, str]:
     # Identity entries make the longest canonical phrase win before a short
     # alias inside it ("Yuvraj Singh" must not become "Yuvraj Singh Singh").
     for canonical in CRICKET_SPELLING_CORRECTIONS.values():
         corrections.setdefault(canonical.lower(), canonical)
+    return corrections
+
+
+def _alias_pattern(corrections: Dict[str, str]) -> "re.Pattern":
     aliases = sorted(corrections, key=len, reverse=True)
-    pattern = re.compile(
+    return re.compile(
         r"(?<![A-Za-z0-9_\u0900-\u097f])(?:"
         + "|".join(re.escape(alias) for alias in aliases)
         + r")(?![A-Za-z0-9_\u0900-\u097f])",
         re.IGNORECASE,
     )
 
-    def _substitute(match: "re.Match") -> str:
-        alias = match.group(0)
-        if " " not in alias:
-            prefix = text[max(0, match.start() - 32):match.start()]
-            suffix = text[match.end():match.end() + 8]
-            preceded_by_titlecase = bool(
-                re.search(
-                    r"(?:^|[\s(\"'\u2018\u201c])[A-Z][a-z]{2,}\s$", prefix
-                )
-            )
-            followed_by_list_boundary = bool(
-                re.match(r"^\s*(?:[,.;)]|and\b|&|aur\b|or\b|ya\b|$)", suffix, re.I)
-            )
-            if preceded_by_titlecase and followed_by_list_boundary:
-                return alias
-        return corrections[alias.lower()]
 
-    return pattern.sub(_substitute, text)
+@lru_cache(maxsize=1)
+def _static_corrections():
+    """Seed-only corrections compile once; discovery calls this per window."""
+    corrections = _with_identities(dict(CRICKET_SPELLING_CORRECTIONS))
+    return corrections, _alias_pattern(corrections)
+
+
+def _substitute_alias(text: str, match: "re.Match", corrections: Dict[str, str]) -> str:
+    alias = match.group(0)
+    if " " not in alias:
+        prefix = text[max(0, match.start() - 32):match.start()]
+        suffix = text[match.end():match.end() + 8]
+        preceded_by_titlecase = bool(
+            re.search(
+                r"(?:^|[\s(\"'\u2018\u201c])[A-Z][a-z]{2,}\s$", prefix
+            )
+        )
+        followed_by_list_boundary = bool(
+            re.match(r"^\s*(?:[,.;)]|and\b|&|aur\b|or\b|ya\b|$)", suffix, re.I)
+        )
+        if preceded_by_titlecase and followed_by_list_boundary:
+            return alias
+    return corrections[alias.lower()]
 
 
 _STRONG_CRICKET_TERMS = {

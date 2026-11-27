@@ -1,5 +1,14 @@
 # Automation Module
 
+> **MANDATORY for every agent before touching automation, export, upload,
+> scheduler or their config:** read and follow
+> `.claude/skills/shorts-automation-guardrails/SKILL.md` (anti-pattern defence,
+> north-star metric, change protocol) and its
+> `references/cancer-register.md` (known blockers with file:line evidence).
+> Cutting work → `.claude/skills/shorts-cut-quality/SKILL.md`.
+> Publishing work → `.claude/skills/shorts-publish-path/SKILL.md`.
+> Never edit `face_os/` from automation work.
+
 `automation/orchestrator.py` runs ingest, transcript, cricket-only selection,
 export, SEO, upload, telemetry, and canonical DB persistence.
 

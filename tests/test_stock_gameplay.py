@@ -165,7 +165,7 @@ def test_enabled_stock_holds_changed_delivery_evidence(tmp_path, changed):
         upload._prepare_upload_metadata(meta, clip)
 
 
-def test_enabled_stock_can_enter_owner_review_without_automatic_approval(tmp_path):
+def test_enabled_stock_rights_are_machine_verified_then_owner_approved(tmp_path):
     from PIL import Image
     from automation.release_review import create_review, release_status, _artifacts, approve, review_path
     manifest, _ = stock_library(tmp_path)
@@ -179,17 +179,15 @@ def test_enabled_stock_can_enter_owner_review_without_automatic_approval(tmp_pat
     clip.with_name("clip_qc.json").write_text(json.dumps({"status": "PASS", "media_sha256": sha256(clip)}))
     clip.with_name("clip_gameplay.json").write_text(json.dumps({
         "selection": selected, "media_sha256": sha256(clip)}))
+    clip.with_name("clip_edit.json").write_text(json.dumps({
+        "source_path": str(source), "source_start": 0, "source_end": 15,
+        "completeness": {"status": "PASS", "method": "text_only", "reason": "synthetic"}}))
     draft = create_review(clip, source)
     assert draft["artifacts"] == _artifacts(clip, source)
     assert "gameplay_license_evidence" in draft["artifacts"]
-    assert draft["checks"]["gameplay_rights_and_attribution"]["status"] == "NOT CHECKED"
+    # Licence, manifest hash and on-description credit are verified, not hand-typed.
+    assert draft["checks"]["gameplay_rights_and_attribution"]["status"] == "PASS"
     assert release_status(clip)[0] == "REVIEW"
-    # Synthetic attestations test the approval route; never run against real media.
-    for check in draft["checks"].values():
-        check.update(status="PASS", evidence="Synthetic test evidence only", method="Synthetic test review")
-    draft["selection"].update(source_ranges=[[0, 15]], reason="Synthetic test moment",
-                              alternatives=["No other synthetic candidate"])
-    review_path(clip).write_text(json.dumps(draft), encoding="utf-8")
     approve(clip, "SYNTHETIC TEST REVIEWER")
     assert release_status(clip) == ("READY", [])
     clip.write_bytes(b"Changed export after approval")
@@ -340,7 +338,9 @@ def test_local_review_draft_can_be_created_but_not_released(tmp_path):
     draft = create_review(clip, source)
     assert "gameplay_license_evidence" in draft["artifacts"]
     assert "gameplay_publisher_permission" not in draft["artifacts"]
-    assert draft["checks"]["gameplay_rights_and_attribution"]["status"] == "NOT CHECKED"
+    # A review-only library can be drafted but its rights check FAILs for delivery.
+    check = draft["checks"]["gameplay_rights_and_attribution"]
+    assert check["status"] == "FAIL" and "draft rendering only" in check["evidence"]
     assert release_status(clip)[0] != "READY"
     with pytest.raises(ValueError, match="draft rendering only"):
         _artifacts(clip, source)

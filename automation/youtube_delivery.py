@@ -197,8 +197,9 @@ def load_receipt(video, artifacts, *, channel_id):
             raise ValueError("Invalid delivery state; reconcile before retry")
         validate_delivery_intent(payload.get("intent"))
         if payload["status"] != "THUMBNAIL_PENDING":
-            expected = "VERIFIED" if "cover" in artifacts else "DISABLED"
-            if not isinstance(payload.get("thumbnail"), dict) or payload["thumbnail"].get("status") != expected:
+            # A failed custom cover is recorded, never a publication blocker (C8).
+            expected = {"VERIFIED", "FAILED"} if "cover" in artifacts else {"DISABLED"}
+            if not isinstance(payload.get("thumbnail"), dict) or payload["thumbnail"].get("status") not in expected:
                 raise ValueError("Publication receipt is missing completed thumbnail evidence")
         if payload["status"] == "COMPLETE":
             publication = payload.get("publication")
@@ -400,11 +401,20 @@ def verify_thumbnail(youtube, video_id, cover, config):
 
 
 def finish_thumbnail(youtube, video_id, cover, config, *, media_factory):
+    """Processing must succeed; the custom cover is best-effort.
+
+    A cover failure returns status FAILED with the real error so publication
+    proceeds. Whether the Shorts feed even shows custom covers is unverified.
+    """
     wait_for_processing(youtube, video_id, config)
-    body = media_factory(str(cover), mimetype="image/jpeg")
     try:
-        accepted = validate_set_response(youtube.thumbnails().set(videoId=video_id, media_body=body).execute())
-    finally:
-        body.stream().close()
-    return {"status": "VERIFIED", "sha256": sha256(cover), "set_response": accepted,
-            "verification": verify_thumbnail(youtube, video_id, cover, config)}
+        body = media_factory(str(cover), mimetype="image/jpeg")
+        try:
+            accepted = validate_set_response(youtube.thumbnails().set(videoId=video_id, media_body=body).execute())
+        finally:
+            body.stream().close()
+        return {"status": "VERIFIED", "sha256": sha256(cover), "set_response": accepted,
+                "verification": verify_thumbnail(youtube, video_id, cover, config)}
+    except Exception as exc:  # noqa: BLE001 - any cover failure is non-fatal by design
+        return {"status": "FAILED", "sha256": sha256(cover) if Path(cover).is_file() else None,
+                "error": f"{type(exc).__name__}: {str(exc) or repr(exc)}"}

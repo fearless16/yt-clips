@@ -153,7 +153,7 @@ def _report_run(function):
         result.stage_results = [event for event in events if event["run_id"] == result.run_id]
         config = _cfg()
         editorial = config.get("clip_selection", {}).get("editorial", {})
-        if (editorial.get("enabled") and not options.arguments["learn_only"]
+        if (not options.arguments["learn_only"]
                 and not options.arguments["skip_highlight"] and not options.arguments["skip_export"]
                 and not result.failures):
             target = min(int(editorial.get("target_min", 2)),
@@ -163,9 +163,13 @@ def _report_run(function):
             if (options.arguments.get("composition") or config.get("export", {}).get("composition")) in GAMEPLAY_COMPOSITIONS:
                 from automation.cricket_gameplay import count_distinct_exports
                 count = count_distinct_exports(result.exported)
-            if count < target:
-                result.failures.append(
-                    f"editorial_target: {count} exports/distinct moments; target {target}-3 not met after bounded recovery")
+            # A shortfall is a quality signal, not a failed run: one good clip still ships.
+            # Zero publishable candidates is an honest empty run; drafts that all
+            # failed to export is a real failure.
+            if count == 0 and result.selected_clips:
+                result.failures.append(f"editorial_target: 0 of {result.selected_clips} drafts exported; target {target}")
+            elif count < target:
+                log.warning("editorial_target: %d/%d exports/distinct moments", count, target)
         status = "ok" if options.arguments["learn_only"] and not result.failures else _result_status(
             result, upload_requested=options.arguments["auto_upload"])
         metadata = {
@@ -479,10 +483,6 @@ def run(
                         ph.outcome("review", reason="no approved drafts")
                         return _abort_required_stage(result, start,
                                                      "stage3-5: editorial review required; no approved drafts")
-                    from automation.scoring.feature_extractor import FeatureExtractor
-                    from automation.scoring.scoring import ClipScorer
-                    _lock_scorer = ClipScorer(FeatureExtractor())
-                    _title = Path(video_path).stem
                     for rank_idx, h in enumerate(highlights, 1):
                         cid = f"{stem}/{h['id']}"
                         _emit_event(cid, EventType.candidate_created, {
@@ -490,26 +490,9 @@ def run(
                             "start": h.get("start"),
                             "end": h.get("end"),
                         })
-                        dims = h.get("dimension_scores", {})
-                        agent_scores = h.get("agent_scores", {})
-                        lock_score = _lock_scorer.score({
-                            "clip_id": h["id"],
-                            "duration_s": (
-                                float(h.get("end", 0) or 0)
-                                - float(h.get("start", 0) or 0)
-                            ),
-                            "transcript": h.get("text", ""),
-                            "title": _title,
-                        })
                         _emit_event(cid, EventType.candidate_scored, {
                             "score": h.get("score", 0.0),
-                            "final_score": h.get("final_score", h.get("score", 0.0)),
-                            "dimension_scores": dims,
-                            "agent_scores": agent_scores,
-                            "hook_score": h.get("hook_score"),
-                            "ai_score": h.get("ai_score"),
-                            "lock_score": lock_score["score"],
-                            "lock_features": lock_score["features"],
+                            "dimension_scores": h.get("dimension_scores", {}),
                         })
                         _emit_event(cid, EventType.candidate_ranked, {
                             "rank": rank_idx,
@@ -570,67 +553,15 @@ def run(
                                 "[shorts_intelligence] export shadow capture failed: %s",
                                 e,
                             )
-                    # Phase 3 — Hook audit: analyze first 3s of each exported clip
-                    if result.exported:
+                    # Remember exported moments so the next run of this match picks new ones.
+                    if result.exported and not skip_highlight:
                         try:
-                            with run_phase(log, "stage 6a Hook audit",
-                                           "hook_audit", run_id=rid) as audit_phase:
-                                from automation.clip_selection.hook_auditor import (
-                                    HookAuditor,
-                                )
-                                _auditor = HookAuditor()
-                                highlights_by_id = {
-                                    h["id"]: h for h in highlights + reserve_highlights
-                                }
-                                hook_audited = 0
-                                for clip_path in result.exported:
-                                    clip_id = clip_path.stem
-                                    source_start = highlights_by_id.get(
-                                        clip_id, {}
-                                    ).get("start", 0.0)
-                                    transcript_text = highlights_by_id.get(
-                                        clip_id, {}
-                                    ).get("text", "")
-                                    duration = (
-                                        highlights_by_id.get(clip_id, {}).get(
-                                            "end", 0.0
-                                        )
-                                        - source_start
-                                    )
-                                    if duration <= 0:
-                                        duration = 30.0
-                                    if not transcript_text:
-                                        try:
-                                            with open(
-                                                clip_path.with_name(
-                                                    f"{clip_path.stem}_metadata.json"
-                                                )
-                                            ) as f:
-                                                meta = json.load(f)
-                                            transcript_text = meta.get(
-                                                "description", ""
-                                            )
-                                        except Exception:
-                                            transcript_text = ""
-                                    hook_result = _auditor.analyze_clip_hook(
-                                        clip_path=str(clip_path),
-                                        transcript_text=transcript_text,
-                                        start_sec=source_start,
-                                        clip_duration=duration,
-                                    )
-                                    _emit_event(
-                                        f"{stem}/{clip_id}",
-                                        EventType.candidate_scored,
-                                        {
-                                            "hook_score": hook_result["hook_score"],
-                                            "hook_type": hook_result["hook_type"],
-                                            "swipe_risk": hook_result["swipe_risk"],
-                                        },
-                                    )
-                                    hook_audited += 1
-                                audit_phase.set(audited=hook_audited)
-                        except Exception as e:
-                            log.warning("[hook_audit] failed: %s", e)
+                            from automation.clip_selection.pipeline import record_exported_windows
+                            by_id = {h["id"]: h for h in highlights + reserve_highlights}
+                            record_exported_windows(diagnostics["dedupe_history"],
+                                                    [by_id[p.stem] for p in result.exported if p.stem in by_id])
+                        except (KeyError, OSError, NameError) as e:
+                            log.warning("[dedupe] could not record exported windows: %s", e)
                     # SEO is now handled per-clip inside export_all()
                     if not skip_seo and result.exported:
                         result.seo_generated = sum(read_metadata(p) is not None for p in result.exported)
@@ -722,7 +653,7 @@ def run(
 
         if cfg.get("delivery_qc", {}).get("enabled", False):
             from automation.delivery_qc import check_delivery
-            qc_failures = []
+            passed = []
             for clip in result.exported:
                 expected_duration = None
                 try:
@@ -732,22 +663,24 @@ def run(
                     pass
                 qc = check_delivery(clip, expected_duration)
                 if qc["status"] != "PASS":
-                    qc_failures.append(f"delivery_qc {clip.name}: {'; '.join(qc['errors'])}")
+                    # Quarantine this clip only; siblings continue (cancer register C5).
+                    result.failures.append(f"delivery_qc {clip.name}: {'; '.join(qc['errors'])}")
                     result.release_held += 1
-            if qc_failures:
-                return _abort_required_stage(result, start, "; ".join(qc_failures))
+                else:
+                    passed.append(clip)
+            result.exported = passed
 
-        # Recover once before covers, sync, scheduling or publication. A marker
-        # invalidates stale metadata even when --skip-seo prevents regeneration.
+        # Upgrade template packaging / legacy failure markers once, before covers,
+        # review and scheduling. A marker still invalidates metadata under --skip-seo.
         if result.exported:
             if not skip_seo:
                 from automation.seo.seo import retry_failed_seo
                 for directory in sorted({p.parent for p in result.exported}):
-                    if any(directory.glob("*_seo_failed.json")):
-                        try:
-                            retry_failed_seo(str(directory))
-                        except Exception as exc:
-                            result.failures.append(f"seo_retry: {exc}")
+                    try:
+                        # Templates written moments ago by this run would only repeat the outage.
+                        retry_failed_seo(str(directory), include_templates=skip_export)
+                    except Exception as exc:
+                        result.failures.append(f"seo_retry: {type(exc).__name__}: {exc}")
             result.seo_generated = sum(read_metadata(p) is not None for p in result.exported)
 
         # ── Stage 7b: Thumbnails ────────────────────────────────
@@ -771,15 +704,16 @@ def run(
         elif result.exported:
             log_skipped(log, "Thumbnails", "thumbnails", rid, "disabled in config")
 
-        # Prepare an honest review draft; never turn sampled checks into PASS.
-        if cfg.get("release_review", {}).get("required", False):
-            from automation.release_review import create_review, review_path
+        # Build/refresh machine-verified reviews; auto mode approves clean clips.
+        review_cfg = cfg.get("release_review", {})
+        if review_cfg.get("required", False):
+            from automation.release_review import prepare_review
             for clip in result.exported:
-                if not review_path(clip).exists() and read_metadata(clip) is not None:
+                if read_metadata(clip) is not None:
                     try:
-                        create_review(clip, Path(video_path))
+                        prepare_review(clip, Path(video_path), mode=review_cfg.get("mode", "manual"))
                     except (OSError, ValueError) as exc:
-                        log.warning("Review draft unavailable for %s: %s", clip.name, exc)
+                        log.warning("Review unavailable for %s: %s", clip.name, exc)
 
         # ── Stage 8a: Sync ──────────────────────────────────────
         do_sync = auto_sync and not skip_sync
@@ -797,7 +731,8 @@ def run(
             log_skipped(log, "Drive sync", "sync", rid, "sync not requested or explicitly skipped")
 
         # ── Stage 8b: Upload (auto when auth exists) ─────────────
-        has_auth = Path("cookies.txt").exists() or Path("yt_channel_token.json").exists()
+        # Upload authenticates with the OAuth token only; cookies.txt is for downloads.
+        has_auth = Path("yt_channel_token.json").exists()
         if result.exported and _should_upload(
             auto_upload=auto_upload,
             has_auth=has_auth,
@@ -841,7 +776,7 @@ def run(
                     )
                     slot_map: dict[str, datetime] = {}
                     if auto_schedule:
-                        from scheduler import assign_clips_to_slots, format_for_youtube
+                        from scheduler import assign_clips_to_slots, format_for_youtube, occupied_publish_times
                         from automation.youtube_delivery import receipt_path
                         # Existing deliveries already have an authorized slot.
                         # Do not feed them a newly jittered time on every retry;
@@ -869,6 +804,7 @@ def run(
                             interval_hours=interval,
                             clip_scores=clip_scores or None,
                             schedule_config=cfg.get("upload_schedule", {}),
+                            occupied=occupied_publish_times(paths.get("shorts", "shorts")),
                         ) if new_deliveries else []
                         slot_map = {stem: dt for stem, dt in assignments}
 
@@ -917,7 +853,7 @@ def run(
                                 privacy="scheduled" if auto_schedule else privacy, publish_at=publish_at,
                             )
                             if not isinstance(video_id, str) or not video_id.strip():
-                                raise RuntimeError("upload returned no video ID")
+                                raise RuntimeError("upload returned no video ID (see upload log for cause)")
                             result.uploaded_count += 1
                             _emit_event(
                                 f"{stem}/{clip_path.stem}",
@@ -949,6 +885,14 @@ def run(
                             result.failures.append(
                                 f"stage8b {clip_path.name}: {e}"
                             )
+                            if getattr(e, "stop_batch", False):
+                                # Quota/auth refusals repeat for every clip; stop calling the API.
+                                pending = eligible[eligible.index(clip_path) + 1:]
+                                if pending:
+                                    result.failures.append(
+                                        "stage8b: upload loop stopped; still pending: "
+                                        + ", ".join(p.name for p in pending))
+                                break
 
                     if result.uploaded_count:
                         _PROVIDER_HEALTH.record_success("youtube")

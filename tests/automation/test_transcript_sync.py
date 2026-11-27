@@ -41,7 +41,6 @@ def batch(tmp_path, monkeypatch):
         "super_resolution": False, "captions": {"enabled": True, "require_word_timing": True}})
     monkeypatch.setattr(export, "analyze_clip", lambda *a, **k: {
         "export_strategy": {}, "layout": {"layout_type": "solo"}})
-    monkeypatch.setattr(export, "_is_exportable_cricket_highlight", lambda *a: True)
     monkeypatch.setattr(export, "_get_best_encoder", lambda: "libx264")
     monkeypatch.setattr(export, "_validate_av_sync", lambda *a: True)
     captured = {}
@@ -103,14 +102,14 @@ def test_per_highlight_caption_opt_in_uses_same_asr_contract(batch, monkeypatch)
     asr.assert_called_once()
 
 
-def test_invalid_existing_confidence_is_held_not_retranscribed(batch, monkeypatch):
+def test_missing_confidence_is_flagged_not_held_or_retranscribed(batch, monkeypatch):
+    # Confidence is a caption-review flag (cancer register C2), never a cut-killer.
     path, _, run = batch
     path.write_text(json.dumps([{"start": 10.25, "end": 20.75, "words": [
         {"start": 10.25, "end": 20.75, "word": "corrected"}]}]))
     asr = Mock()
     monkeypatch.setattr("automation.speech_alignment.transcribe_range", asr)
-    with pytest.raises(RuntimeError, match="Missing or invalid ASR confidence"):
-        run()
+    assert len(run()) == 1
     asr.assert_not_called()
 
 
@@ -148,9 +147,19 @@ def test_only_selected_words_affect_gaps_and_confidence():
 
 
 @pytest.mark.parametrize("probability", [None, "unknown", math.nan, -0.1, 1.1])
-def test_invalid_confidence_is_explicit(probability):
-    assert "Missing or invalid ASR confidence" in alignment_issues(
-        [{"words": [word(10, 20, probability=probability)]}], 10, 20)
+def test_invalid_confidence_is_an_explicit_flag_not_a_hold(probability):
+    from automation.speech_alignment import alignment_flags
+    segments = [{"words": [word(10, 20, probability=probability)]}]
+    assert alignment_issues(segments, 10, 20) == []
+    assert any("confidence unavailable" in flag for flag in alignment_flags(segments, 10, 20))
+
+
+def test_reaction_pause_is_flagged_not_held():
+    from automation.speech_alignment import alignment_flags
+    segments = [{"words": [word(10, 11), word(15, 20)]},
+                {"start": 11, "end": 15, "text": "", "words": []}]  # crowd roar
+    assert alignment_issues(segments, 10, 20) == []
+    assert any("pause" in flag for flag in alignment_flags(segments, 10, 20))
 
 
 def test_overlapping_words_are_held_before_render():

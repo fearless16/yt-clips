@@ -97,19 +97,17 @@ def test_early_empty_run_has_one_structured_non_success_summary(runtime, monkeyp
     assert next(stage for stage in result.stage_results if stage["stage"] == "highlight")["status"] == "empty"
 
 
-def test_nested_hook_phase_does_not_steal_export_completion_counts(runtime, tmp_path, monkeypatch):
+def test_export_completion_counts_are_reported_by_the_export_phase(runtime, tmp_path, monkeypatch):
     orchestrator, _, _ = runtime
     batch = tmp_path / "shorts/batch"
     batch.mkdir(parents=True)
     clip = batch / "clip1.mp4"
     clip.write_bytes(b"fixture")
     monkeypatch.setattr("export.export_all", Mock(return_value=[clip]))
-    monkeypatch.setattr("automation.clip_selection.hook_auditor.HookAuditor.analyze_clip_hook",
-                        Mock(return_value={"hook_score": 50, "hook_type": "test", "swipe_risk": "low"}))
     result = run_local(orchestrator, skip_highlight=True)
     stages = {stage["stage"]: stage for stage in result.stage_results}
     assert stages["export"]["metadata"]["exported"] == 1
-    assert stages["hook_audit"]["metadata"]["audited"] == 1
+    assert "hook_audit" not in stages  # theatre scorer removed (A5)
 
 
 def test_partial_batch_keeps_successful_outputs_and_reports_non_success_phase(runtime, tmp_path, monkeypatch):
@@ -127,7 +125,7 @@ def test_partial_batch_keeps_successful_outputs_and_reports_non_success_phase(ru
     assert export_stage["metadata"]["exported"] == 1
 
 
-def test_editorial_target_shortfall_is_not_a_successful_job(runtime, tmp_path, monkeypatch):
+def test_editorial_target_shortfall_still_ships_the_good_clip(runtime, tmp_path, monkeypatch):
     orchestrator, config, _ = runtime
     config["clip_selection"] = {"max_selected": 3, "editorial": {"enabled": True, "target_min": 2}}
     clip = tmp_path / "shorts/batch/clip1.mp4"
@@ -142,8 +140,8 @@ def test_editorial_target_shortfall_is_not_a_successful_job(runtime, tmp_path, m
     monkeypatch.setattr("export.export_all", Mock(return_value=[clip]))
     result = run_local(orchestrator)
     assert result.exported == [clip]
-    assert any("target" in failure and "2" in failure for failure in result.failures)
-    assert orchestrator._result_status(result) == "partial"
+    # One good clip is a shortfall to log, not a failed run (cancer register C5).
+    assert not any("editorial_target" in failure for failure in result.failures)
 
 
 def test_failed_drive_pull_aborts_before_using_stale_local_source(runtime, monkeypatch):
@@ -230,15 +228,6 @@ def test_thumbnail_batch_respects_failed_metadata_and_existing_cover(tmp_path, m
     assert cover.read_bytes() == b"owner-selected cover"
 
 
-def test_public_seo_prompts_share_runtime_contract():
-    import prompts
-    from automation.seo import seo
-
-    assert seo._SYSTEM == prompts.SEO_SYSTEM
-    assert "cover_text" in prompts.SEO_USER_TEMPLATE
-    assert "2000-4500" not in prompts.SEO_USER_TEMPLATE
-    assert "algorithm" not in prompts.SEO_SYSTEM.lower()
-    assert "cover_text" in seo._CRICKET_ONLY_SALVAGE_TMPL
 
 
 def test_thumbnail_failure_reaches_pipeline_result(runtime, tmp_path, monkeypatch):
@@ -291,21 +280,8 @@ def test_cli_passes_explicit_resume_directory(monkeypatch):
     assert run.call_args.kwargs["existing_exports_dir"] == "shorts/batch"
 
 
-@pytest.mark.parametrize("text", ["four words are clutter", "", "GROUND\u202eDEKHO", ["wrong type"]])
-def test_invalid_cover_copy_cannot_pass_seo_quality(text):
-    from automation.seo import seo
-
-    assert not seo._validate_seo_quality({
-        "title": "Ground bhi dekho", "cover_text": text,
-        "description": "The speaker explains why ground size matters when comparing cricket scores. " * 3,
-    })
 
 
-def test_seo_does_not_force_emoji_into_deliberate_title():
-    from automation.seo import seo
-
-    for title in ("Ground bhi dekho", "Ground bhi dekho 🏏"):
-        assert seo._enforce_limits({"title": title})["title"] == title
 
 
 def test_missing_cover_copy_is_held_before_extracting_source(tmp_path):
@@ -335,7 +311,7 @@ def test_delivery_failure_stops_remote_side_effects(runtime, tmp_path, monkeypat
     monkeypatch.setattr("upload.upload_video", upload)
     result = run_local(orchestrator, skip_highlight=True, skip_export=True,
                        auto_sync=True, auto_upload=True)
-    assert result.exported == [clip]  # Keep failed work visible for diagnosis.
+    assert result.exported == []  # quarantined; the reason stays in failures
     assert any("decode failed" in reason for reason in result.failures)
     assert result.release_held == 1
     for call in (sync, folder_sync, upload):

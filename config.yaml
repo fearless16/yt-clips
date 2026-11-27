@@ -13,7 +13,12 @@ channel:
   id: "UCQtCMKPc41MHd7hujVuGm5g"        # your YouTube channel ID
   live_stream_url: "https://www.youtube.com/watch?v=qAA6KKwHLU8"              # static fallback (optional)
 release_review:
-  required: true                      # pilot: exact media/metadata/cover/source + owner review before publication
+  required: true                      # exact media/metadata/cover/source hashes bound before publication
+  # auto: clips whose machine checks all PASS are approved and scheduled
+  #       (owner can still reject: python -m automation.release_review reject CLIP --reason ...)
+  # manual: owner decides each clip: python -m automation.release_review review shorts/ --open
+  # Heuristic-fallback clips (LLM editor unavailable) always need the owner.
+  mode: auto
 delivery_qc:
   enabled: true                       # decode entire encoded file and measure actual audio
 # ─── Download ─────────────────────────────────────────────────────────────────
@@ -36,8 +41,10 @@ download:
   proxy: ""
 # ─── Transcription ────────────────────────────────────────────────────────────
 transcription:
-  alignment_model: "medium"             # shortlisted ranges only; benchmark Hindi names/numbers before release
-  alignment_fallback_model: "large-v3-turbo" # one explicit retry; never fabricate/drop bad word intervals
+  # Measured 2026-11-27, 30 s of real Hindi stream on CPU int8: medium 122 s, turbo 14.5 s.
+  # Real run: medium failed 2 of 3 ranges (bad word timestamp, missing anchor); turbo fixed all.
+  alignment_model: "large-v3-turbo"     # shortlisted ranges only
+  alignment_fallback_model: "medium"    # one explicit retry; never fabricate/drop bad word intervals
   alignment_context_seconds: 2.0        # preserve neighboring speech when checking cut boundaries
   model: "small"                        # tiny | base | small | medium | large-v3
   language: "hi"                        # Hindi commentary — use hi for better accuracy
@@ -48,29 +55,14 @@ transcription:
   vad_filter: true                      # Filter out non-speech for 2-3x speedup
 # ─── Highlight Detection ──────────────────────────────────────────────────────
 highlight:
-  # AI-powered highlight refinement
-  use_ai_refinement: true              # Use LLM to select viral-worthy clips
-  # Audio energy spike detection
-  audio_energy_threshold: 0.25         # ↓ from 0.3 — catch more excitement moments
-  # Minimum/maximum clip duration (seconds)
-  min_duration: 8                       # shortest useful complete thought
-  max_duration: 38                      # allow the winning 25-40s complete thoughts
-  # Short duration guard — interesting content must complete within the target.
-  # Channel data (200 shorts): <15s and 25-40s natural-pace complete thoughts win
-  # (median 325 views vs 168 for 40s+).
-  target_duration: 15                   # optimized for maximum views based on shorts DB
+  # Clip LENGTH bounds live in clip_selection.output_*_duration (one source, C11).
+  min_duration: 8                       # export sanity floor for an encoded file
+  target_duration: 15                   # speed-factor reference only; max_speedup 1.0 keeps natural pace
   max_speedup: 1.0                      # corrected pilot preserves natural speech
-  # Preferred duration range (scorer boosts clips in this range)
-  preferred_duration_min: 10            # shortest viral bucket
-  preferred_duration_max: 35            # aligned with the winning buckets
-  # Merge nearby highlights that are closer than this (seconds)
-  merge_gap: 0                           # never glue separate thoughts across silence
-  # How many highlights to extract at most
-  max_clips: 15                         # ↑ from 10 — more candidates = more content
-  # Words-per-minute threshold for "fast speech" detection
-  fast_speech_wpm: 140
-  # Silence threshold (seconds of silence to penalise a segment)
-  silence_penalty_seconds: 1.5
+  # Ranking prior (discovery score), never a hold. UNMEASURED (A7): channel data
+  # from ~200 Shorts hints <15s and 25-40s complete thoughts do best.
+  preferred_duration_min: 10
+  preferred_duration_max: 35
 
 # ─── Premium Mode ──────────────────────────────────────────────────────────────
 # Standard path = SCRFD-10G on DirectML GPU (utils/face_detect.py) + EMA crop.
@@ -205,8 +197,6 @@ youtube:
   contains_synthetic_media: false       # Default; per-clip metadata may override
   notify_subscribers: false              # Notify subs on publish
   upload_chunk_size_mb: 8               # Resumable chunk size (finite => real progress + resume)
-  upload_max_retries: 6                 # Max transient-error retries per upload
-  upload_deadline_seconds: 1800         # Hard wall-clock cap per upload (prevents hangs)
   thumbnail_processing_timeout_seconds: 180  # wait for succeeded before thumbnails.set
   thumbnail_verify_timeout_seconds: 90       # API + served 9:16 image propagation
   thumbnail_poll_interval_seconds: 3
@@ -276,33 +266,14 @@ testing:
 # ── SEO ────────────────────────────────────────────────────────────────────────
 # Clip-specific, source-grounded packaging; no paid keyword dependency.
 seo:
-  export_deadline_seconds: 300          # finite packaging wait; late workers cannot publish artifacts
-  format_repair_timeout_seconds: 60     # one title/cover-only JSON correction, no generic fallback
+  # One grounded LLM call per clip (+1 corrective retry), each with its own timeout.
+  # Style is repaired, never blocking; ungrounded names or a provider outage fall
+  # back to template packaging that needs owner review (release_review).
+  clip_timeout_seconds: 90              # per provider call; per-clip budget = 2x + 30s
   title_max_chars: 60                   # one honest premise, mobile-first
-  min_search_terms: 1                   # internal grounded research, not public keyword stuffing
-  max_search_terms: 12
-  min_primary_search_terms: 1
-  max_primary_search_terms: 2
-  min_promise_alignment_score: 0.50     # title must match clip speech + description opening
-  description_min_chars: 100            # short, useful explanation; no essay padding
   description_target_chars: 350         # editorial guideline, not a ranking claim
-  description_max_chars: 4800           # hard cap, safe margin below YouTube's 5000
-  min_tag_chars: 0                      # relevant tags only; never fill a quota
-  max_tag_chars: 500                    # YouTube API tag-field limit, including quote overhead
-  # Inject random hardcoded viral hooks/CTAs into descriptions. OFF by default:
-  # the product contract prefers per-clip LLM-generated hooks over generic copy.
-  # Sleep between SEO calls for each clip (seconds). Longer = less rate limiting.
-  inter_clip_sleep_s: 30
-  # Max hashtags for Shorts uploads — champions use 2-3, not 15.
-  max_hashtags: 3
-  vidiq:
-    enabled: false
-    required: false                      # no subscription; not part of active generation
-    endpoint: "https://mcp.vidiq.com/mcp"
-    timeout_seconds: 8
-    max_keyword_queries: 6               # aggregate grounded results until tag budget is filled
-    keyword_tool: "vidiq_keyword_research"
-    title_tool: "vidiq_generate_titles"
+  max_tags: 12
+  max_hashtags: 3                       # including #Shorts
 
 # ── AI SEO & Automation ────────────────────────────────────────────────────────
 ai:
@@ -357,16 +328,13 @@ thumbnail:
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 clip_selection:
-  enabled: true                        # Use 7-agent clip selector (false = old heuristic)
+  # Discovery ranks windows (audio spike, reaction, hook, payoff, cricket density);
+  # the editorial LLM picks and word-aligns. See automation/clip_selection/pipeline.py.
   output_min_duration: 10              # Exported clip floor in seconds (micro-clips below this are noise)
   output_max_duration: 38              # Exported clip ceiling in seconds (allowing 25-40s bucket)
-  use_llm_arbiter: true                # Run LLM Final Arbiter pass
-  min_quality: 38.0                    # Hard publishability floor after transcript-aware discovery
-  min_selected: 0                      # zero READY clips is valid; never backfill rejection
   max_selected: 2                      # default stock pair: two distinct moments, never forced approval
   alignment_max_boundary_shift: 3       # bounded word/phrase repair; changed cuts need fresh text review
   editorial:
-    enabled: true                      # original transcript -> shortlist -> word preflight -> final review
     target_min: 2                      # target, never forced approval
     shortlist_size: 6
     max_alignment_candidates: 8         # includes one bounded search for replacement moments
@@ -377,8 +345,6 @@ clip_selection:
     max_tokens: 32768                  # high thinking plus complete final JSON
     timeout_seconds: 300
   discovery_candidates: 60             # Deep scan across a long stream before final ranking
-  prefer_source_match: true             # For match streams, prioritize clips naming either advertised team
-  source_match_min_candidates: 3        # Fall back to all cricket clips if evidence is too sparse
   dedup_enabled: true                   # Reject windows already selected in prior runs
   dedup_overlap_threshold: 0.6         # Min window overlap ratio to reject a re-upload duplicate
                                        # (set dedup_enabled: false to force re-generate a match)

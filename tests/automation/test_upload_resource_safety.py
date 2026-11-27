@@ -45,13 +45,11 @@ def test_upload_closes_video_and_thumbnail_handles(tmp_path, monkeypatch, outcom
 
     monkeypatch.setattr(upload, "MediaFileUpload", media)
     try:
-        if outcome == "thumbnail-error":
-            with pytest.raises(upload.DeliveryIncompleteError) as exc:
+        if outcome in {"insert-error", "execute-error"}:
+            with pytest.raises(upload.UploadRejected, match="fixture"):
                 upload.upload_video(str(video), str(metadata), privacy="private")
-            assert exc.value.video_id == "fixture-id"
-        else:
-            result = upload.upload_video(str(video), str(metadata), privacy="private")
-            assert result == (None if outcome in {"insert-error", "execute-error"} else "fixture-id")
+        else:  # a failed cover is recorded; the video still completes (C8)
+            assert upload.upload_video(str(video), str(metadata), privacy="private") == "fixture-id"
         assert bodies and all(body.stream().closed for body in bodies)
         video.unlink()  # Windows must not retain an SDK-owned lock.
         cover.unlink()

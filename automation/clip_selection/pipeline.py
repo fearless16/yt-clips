@@ -1,17 +1,27 @@
-"""Pipeline integration — drop-in replacement for highlight.detect_highlights().
+"""Clip discovery: transcript + audio -> ranked complete-thought windows -> editor.
 
-Usage:
-    from automation.clip_selection.pipeline import detect_highlights
-    highlights = detect_highlights(transcript_path, video_path, highlights_path)
+Flow (one gate per predicate, cancer register C4):
+  1. Source gate, once: is this stream about cricket at all?
+  2. Window gate, once per window at birth: does the window's OWN speech talk
+     cricket? Downstream stages (editor ranking, export, SEO) never re-ask.
+  3. Rank windows with signals a viewer actually feels: loudness spike versus
+     the stream's own baseline, reaction language, a hook in the first seconds,
+     a payoff at the end, cricket density, and duration fit.
+  4. The editorial LLM (automation.editorial_planner.curate_clips) reads the
+     whole transcript and these ranked windows, picks complete thoughts, and
+     word-aligns them. If it is down, the top windows go to owner review.
+
+The ranking weights only order suggestions and the outage fallback; they never
+hold a clip. They are UNMEASURED priors (A7): calibrate against
+shorts_intelligence outcomes before trusting them further.
 """
+from __future__ import annotations
 
 import json
 import math
 import re
 import tempfile
-from collections import defaultdict
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import yaml
@@ -20,15 +30,13 @@ from utils.config import load_config
 from utils.logger import get_logger
 from shorts_intelligence.completeness import completeness_value, set_completeness
 
-from automation.clip_selection.selector import ClipSelector
-from automation.clip_selection.arbiter import fmt_ts
-from automation.clip_selection.topic_segmenter import TopicSegmenter
-from automation.clip_selection.cricket_heuristics import score_all_topics
-
-from prompts import MAX_CANDIDATES, MAX_SELECTED_CLIPS, MIN_QUALITY_THRESHOLD
-
 cfg = load_config()
 log = get_logger("clip_pipeline")
+
+
+def fmt_ts(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    return f"{int(seconds // 3600):02d}:{int(seconds % 3600 // 60):02d}:{int(seconds % 60):02d}"
 
 
 def _sentence_parts(text: str) -> list[str]:
@@ -250,54 +258,6 @@ def _prepare_complete_thoughts(segments: list[dict]) -> list[dict]:
     return [item for item in prepared if item["end"] > item["start"]]
 
 
-def _filter_cricket_candidates(candidates: list[dict], source_context: str) -> list[dict]:
-    """Remove setup, gaming, tech, and other non-cricket chatter."""
-    from automation.seo.cricket_context import is_cricket_content
-    return [
-        candidate for candidate in candidates
-        if is_cricket_content(str(candidate.get("text", "")), source_context)
-    ]
-
-
-def _filter_source_match_candidates(
-    candidates: list[dict],
-    source_title: str,
-    minimum_matches: int = 3,
-) -> list[dict]:
-    """Prefer the advertised match without turning a generic stream into a hard gate."""
-    from automation.seo.cricket_context import (
-        correct_cricket_spelling,
-        find_canonical_entities,
-    )
-
-    source_teams = set(find_canonical_entities(
-        correct_cricket_spelling(source_title)
-    ).get("teams", []))
-    if len(source_teams) < 2:
-        return candidates
-    candidates_with_teams = [
-        (
-            candidate,
-            set(find_canonical_entities(correct_cricket_spelling(
-                str(candidate.get("text", ""))
-            )).get("teams", [])),
-        )
-        for candidate in candidates
-    ]
-    required = max(1, int(minimum_matches))
-    source_only = [
-        candidate for candidate, teams in candidates_with_teams
-        if source_teams.intersection(teams) and not (teams - source_teams)
-    ]
-    if len(source_only) >= required:
-        return source_only
-    matched = [
-        candidate for candidate, teams in candidates_with_teams
-        if source_teams.intersection(teams)
-    ]
-    return matched if len(matched) >= required else candidates
-
-
 def _load_source_context(input_dir: str | Path) -> str:
     """Load title and match metadata used to disambiguate short utterances."""
     pieces = []
@@ -451,7 +411,6 @@ def _build_clip_yaml_entry(
     }
 
 
-# ── Copied from highlight.py for audio RMS extraction ──────────────────
 def _extract_audio_rms(video_path: str, chunk_seconds: float = 1.0) -> list[tuple[float, float]]:
     temp_dir = Path(cfg["paths"]["temp"])
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -501,50 +460,6 @@ def _read_audio_rms(video_path: str, pcm_path: str, chunk_seconds: float) -> lis
     return rms_values
 
 
-def _words_per_minute(text: str, duration_sec: float) -> float:
-    if duration_sec <= 0:
-        return 0.0
-    return (len(text.split()) / duration_sec) * 60.0
-
-
-def _silence_seconds(text: str, duration_sec: float) -> float:
-    if not text:
-        return max(0.0, duration_sec)
-    words = len(text.split())
-    estimated_speech = words * 0.35
-    return max(0.0, duration_sec - estimated_speech)
-
-
-def _get_video_duration(video_path: str) -> float:
-    import subprocess
-    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-           "-of", "default=noprint_wrappers=1:nokey=1", video_path]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    try:
-        return float(result.stdout.strip())
-    except ValueError:
-        return 0.0
-
-
-def _merge_windows(windows: list[dict], gap: float) -> list[dict]:
-    if not windows:
-        return []
-    merged = [dict(windows[0])]
-    for w in windows[1:]:
-        prev = merged[-1]
-        if w["start"] - prev["end"] < gap:
-            prev["end"] = max(prev["end"], w["end"])
-            prev["score"] = max(prev["score"], w["score"])
-            # Merge text from both windows (longer text wins)
-            curr_text = w.get("text", "")
-            prev_text = prev.get("text", "")
-            if len(curr_text) > len(prev_text):
-                prev["text"] = curr_text
-        else:
-            merged.append(dict(w))
-    return merged
-
-
 _LIVESTREAM_FILLER_PATTERNS = (
     "like the video", "like the stream", "like karate", "laaika karate",
     "subscribe", "sabsakraaiba", "do subscribe", "channel ko",
@@ -561,107 +476,6 @@ def _is_livestream_filler(text: str) -> bool:
     """Identify greetings, chat replies, and channel CTA speech."""
     normalized = re.sub(r"\s+", " ", str(text or "").casefold()).strip()
     return any(pattern in normalized for pattern in _LIVESTREAM_FILLER_PATTERNS)
-
-
-def _has_dense_cricket_evidence(text: str) -> bool:
-    """Require local domain coverage, including discussion rather than just play.
-
-    Count non-overlapping phrase tokens so player/team names and Test-match
-    jokes are not invisible. Keep the same minimum hits and density; generic
-    transfer/team chatter and a lone name in a long tangent remain insufficient.
-    """
-    from automation.seo.cricket_context import (
-        correct_cricket_spelling, find_canonical_entities,
-    )
-    from utils.devanagari import to_roman
-
-    canonical = correct_cricket_spelling(to_roman(str(text or ""))).casefold()
-    words = re.findall(r"\b\w+\b", canonical)
-    entities = find_canonical_entities(canonical)
-    phrases = {name.casefold() for names in entities.values() for name in names}
-    phrases.add("test match")
-    phrase_pattern = "|".join(re.escape(phrase) for phrase in sorted(phrases, key=len, reverse=True))
-    signals = re.findall(
-        r"\b(?:" + phrase_pattern + r"|cricket|ipl|match|test|t20|odi|wicket|runs?|score|over|ball|"
-        r"batting|bowling|innings?|partnership|four|six|boundary|century|"
-        r"batsman|batter|bowler|pakistan|england|india|australia|"
-        r"sri\s+lanka|south\s+africa|new\s+zealand)\b",
-        canonical,
-    )
-    covered_tokens = sum(len(signal.split()) for signal in signals)
-    return len(signals) >= 2 and covered_tokens / max(len(words), 1) >= 0.07
-
-
-def _build_livestream_windows(
-    thoughts: list[dict],
-    min_duration: float,
-    max_duration: float,
-    max_gap: float = 1.5,
-) -> list[dict]:
-    """Join adjacent transcript thoughts into complete Shorts-sized moments.
-
-    Livestream speech rarely puts setup and payoff in one caption sentence.
-    Generate bounded forward windows from every clean thought, stopping at
-    silence or stream-management filler. Cricket must be evidenced by the
-    resulting script itself; the source title cannot rescue generic chatter.
-    """
-    from automation.seo.cricket_context import is_cricket_content
-
-    minimum = max(0.0, float(min_duration))
-    maximum = max(minimum, float(max_duration))
-    ordered = sorted(thoughts, key=lambda item: float(item.get("start", 0)))
-    windows: list[dict] = []
-    seen: set[tuple[float, float]] = set()
-
-    for start_index, first in enumerate(ordered):
-        if _is_livestream_filler(first.get("text", "")):
-            continue
-        start = float(first.get("start", 0))
-        parts: list[str] = []
-        members: list[dict] = []
-        member_scores: list[float] = []
-        previous_end = start
-
-        for thought in ordered[start_index:]:
-            thought_start = float(thought.get("start", 0))
-            thought_end = float(thought.get("end", 0))
-            if thought_end <= thought_start:
-                continue
-            if parts and thought_start - previous_end > max_gap:
-                break
-            if _is_livestream_filler(thought.get("text", "")):
-                break
-            if thought_end - start > maximum:
-                break
-
-            parts.append(str(thought.get("text", "")).strip())
-            members.append(thought)
-            member_scores.append(float(thought.get("score", 0) or 0))
-            previous_end = thought_end
-            duration = thought_end - start
-            if duration < minimum:
-                continue
-
-            text = " ".join(part for part in parts if part).strip()
-            if not is_cricket_content(text) or not _has_dense_cricket_evidence(text):
-                continue
-            identity = (start, thought_end)
-            if identity in seen:
-                continue
-            seen.add(identity)
-            windows.append({
-                "start": start,
-                "end": thought_end,
-                "text": text,
-                "score": round(max(member_scores, default=0.0), 4),
-                "source_cue_ids": sorted({cue_id for member in members for cue_id in member.get("source_cue_ids", [])}),
-                "words": [word for member in members for word in member.get("words", [])],
-                "boundary_method": "source_words" if all(member.get("boundary_method") == "source_words" for member in members)
-                                   else "estimated_cue_fraction",
-                "complete_thought": None,
-            })
-
-    return windows
 
 
 def _select_diverse_windows(
@@ -713,468 +527,365 @@ def _select_diverse_windows(
     return sorted(selected, key=lambda item: (-item.get("score", 0), item["start"], item["end"]))
 
 
-# ── Heuristic pre-filter (same as highlight.py) ─────────────────────────
+# ── Cricket label (a ranking input, not a gate) ──────────────────────────────
+# Owner policy 2026-11-27: a cricket stream's Shorts may be non-cricket banter or
+# a live moment. The only cricket gate is the source gate in detect_highlights;
+# a window's own cricket talk is labelled and ranked, never required.
 
-def _score_segment(
-    seg: dict, rms_map: dict, avg_rms: float, max_rms: float, h_cfg: dict
-) -> float:
-    start = seg["start"]
-    end = seg["end"]
-    text = seg.get("text", "")
-    duration = max(end - start, 0.1)
-    score = 0.0
+def is_cricket_window(text: str) -> bool:
+    """True when the window talks cricket in its OWN words, densely enough that
+    a lone name inside a long tangent does not count."""
+    return _has_dense_cricket_evidence(text)
 
-    buckets = [rms_map.get(int(t), 0.0) for t in range(int(start), int(end) + 1)]
-    seg_rms = sum(buckets) / len(buckets) if buckets else 0.0
-    if avg_rms > 0:
-        score += (seg_rms / avg_rms) * 3.0
-    if max_rms > 0:
-        peak_buckets = sum(1 for b in buckets if b > max_rms * 0.8)
-        if peak_buckets > 0:
-            score += peak_buckets * 0.5
 
-    wpm = _words_per_minute(text, duration)
-    if wpm >= h_cfg["fast_speech_wpm"]:
-        score += 1.5
-    elif wpm >= h_cfg["fast_speech_wpm"] * 0.8:
-        score += 0.5
+# ── Ranking signals ──────────────────────────────────────────────────────────
 
-    silence = _silence_seconds(text, duration)
-    silence_ratio = silence / duration if duration > 0 else 0
-    if silence > h_cfg["silence_penalty_seconds"]:
-        score -= 0.3 * (silence / duration)
-    if silence_ratio > 0.6:
-        score -= 1.5
-    if len(text.split()) < 5:
-        score -= 0.5
+# Lexicons carry BOTH casual Hinglish and the romanizer's spelling of Whisper/
+# YouTube Devanagari (to_roman keeps the inherent vowel: क्या -> kyaa, यार -> yaara).
+# Before 2026-11-27 only casual spellings were listed and the signal matched ~0
+# words on 3 real streams. Words too common to signal anything (gaya, kya, no,
+# what) only count inside phrases.
+_REACTION_WORDS = frozenset({
+    "oh", "wow", "whoa", "insane", "crazy", "unbelievable", "incredible", "amazing", "huge", "massive",
+    "brilliant", "superb", "wicket", "viketa", "six", "siksa", "sixer", "four", "phora", "boundary", "out",
+    "aauta", "catch", "kaicha", "bowled", "bolda", "arre", "arey", "oho", "abe", "baap", "baapa", "pagal",
+    "paagala", "gajab", "gajba", "khatarnak", "khataranaaka", "chhakka", "chhakkaa", "chauka", "chaukaa",
+    "shandar", "shaanadaara", "zabardast", "jbaradasta", "bawaal", "bavaala", "khatam", "khatma", "kamaal",
+    "kamaala", "wah", "waah", "vaaha", "teri", "teree", "nikal", "nikala", "aagaya",
+})
+_REACTION_PHRASES = (
+    "kya baat", "kyaa baata", "oh ho", "are yaar", "are yaara", "arre yaar", "kya shot", "kyaa shota",
+    "arre arre", "are are", "are bhai", "are bhaaee", "arre bhai", "yeh kya", "ye kya", "ye kyaa",
+    "yaha kyaa", "oh my god", "what a", "kya cheez", "kyaa cheeja", "baap re", "baapa re", "nahi yaar",
+    "naheen yaara", "gajab ka", "gajba kaa", "chhakka maar", "gaya gaya", "gayaa gayaa", "out ho gaya",
+    "aauta ho gayaa", "ud gaya", "uda diya", "udaa diyaa", "maar diya", "maara diyaa",
+)
+_LEAD_IN = re.compile(
+    r"^\W*(so|toh|to|haan|ha|acha|achha|accha|achchhaa|okay|ok|oke|guys|dekho|matlab|matalaba|basically|"
+    r"besikalee|um+|uh+|chalo|aur|aura|and|actually)\b", re.IGNORECASE)
+# No "?": to_roman writes "?" for characters it cannot map (measured 3-6% of openings).
+_STRONG_OPEN = re.compile(
+    r"!|\d|\b(what a|kya baat|kyaa baata|arre|arey|oho|wow|out|aauta|six|siksa|wicket|viketa|"
+    r"chhakka|chhakkaa|chauka|chaukaa)\b", re.IGNORECASE)
 
-    hook_buckets = [rms_map.get(int(t), 0.0) for t in range(int(start), min(int(start) + 3, int(end) + 1))]
-    if hook_buckets and max_rms > 0:
-        hook_energy = sum(hook_buckets) / len(hook_buckets)
-        if hook_energy > avg_rms * 1.2:
-            score += 1.0
 
-    import re
-    reaction_words = {
-        "oh", "wow", "wait", "what", "no", "yes", "whoa",
-        "insane", "crazy", "bro", "dude", "holy", "damn",
-        "unbelievable", "incredible", "amazing", "clutch", "huge",
-        "perfect", "beautiful", "massive", "destroyed", "killed",
-        "wicket", "six", "four", "boundary", "out", "catch",
-        "shot", "brilliant", "superb", "fantastic",
-        "arre", "kya", "bhai", "yaar", "baap", "pagal", "gajab",
-        "khatarnak", "chhakka", "chauka", "maar", "maro", "gaya",
-        "jeet", "shandar", "dhamaakedaar", "zabardast", "sixer",
-        "dekho", "khatam", "bawaal", "machaa", "haan", "nahi",
-        "oho", "accha", "abe", "teri", "re", "arey",
-        "chhod", "dekh", "jaa", "nikal", "aagaya",
+def _energy_z(rms_list: list[tuple[float, float]]) -> dict[int, float]:
+    """Per-second loudness as a robust z-score against this stream's own baseline."""
+    if not rms_list:
+        return {}
+    sums: dict[int, list[float]] = {}
+    for t, v in rms_list:
+        sums.setdefault(int(t), []).append(float(v))
+    seconds = {k: sum(v) / len(v) for k, v in sums.items()}
+    values = np.array(list(seconds.values()), dtype=float)
+    median = float(np.median(values))
+    mad = float(np.median(np.abs(values - median))) * 1.4826 or float(np.std(values)) or 1.0
+    return {k: (v - median) / mad for k, v in seconds.items()}
+
+
+def _z_in(zmap: dict[int, float], start: float, end: float) -> list[float]:
+    return [zmap.get(t, 0.0) for t in range(int(start), int(math.ceil(end)) + 1)]
+
+
+def _unit(value: float, full: float) -> float:
+    return max(0.0, min(1.0, value / full)) if full > 0 else 0.0
+
+
+def _reaction_hits(text: str) -> int:
+    low = text.casefold()
+    words = re.findall(r"\b\w+\b", low)
+    return sum(1 for w in words if w in _REACTION_WORDS) + 2 * sum(1 for p in _REACTION_PHRASES if p in low)
+
+
+def _cricket_signals(text: str) -> tuple[int, float]:
+    """(number of cricket terms/known names, share of tokens they cover)."""
+    found, covered, tokens = _cricket_counts(text)
+    return found, covered / max(tokens, 1)
+
+
+def _cricket_counts(text: str) -> tuple[int, int, int]:
+    """(cricket terms/names found, tokens they cover, tokens). Additive across
+    adjacent thoughts, so a window sums its members instead of re-scanning."""
+    from automation.seo.cricket_context import correct_cricket_spelling, find_canonical_entities
+    from utils.devanagari import to_roman
+
+    canonical = correct_cricket_spelling(to_roman(str(text or ""))).casefold()
+    words = re.findall(r"\b\w+\b", canonical)
+    names = {n.casefold() for names in find_canonical_entities(canonical).values() for n in names}
+    names.add("test match")
+    alternation = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    pattern = (r"\b(?:" + alternation + r"|cricket|ipl|match|test|t20|odi|wicket|runs?|score|over|ball|"
+               r"batting|bowling|innings?|partnership|four|six|boundary|century|fifty|batsman|batter|"
+               r"bowler|catch|drs|lbw|chhakka|chauka|pakistan|england|india|australia|sri\s+lanka|"
+               r"south\s+africa|new\s+zealand)\b")
+    found = re.findall(pattern, canonical)
+    return len(found), sum(len(s.split()) for s in found), len(words)
+
+
+def _dense(found: int, ratio: float) -> bool:
+    return found >= 2 and ratio >= 0.07
+
+
+def _has_dense_cricket_evidence(text: str) -> bool:
+    return _dense(*_cricket_signals(text))
+
+
+def _duration_fit(duration: float, low: float, high: float) -> float:
+    if low <= duration <= high:
+        return 1.0
+    gap = (low - duration) if duration < low else (duration - high)
+    return max(0.0, 1.0 - gap / 10.0)
+
+
+def score_window(window: dict, zmap: dict[int, float], source_entities: set[str],
+                 preferred: tuple[float, float]) -> dict:
+    """Return the ranking breakdown for one window; ``final_score`` is 0..100."""
+    start, end = float(window["start"]), float(window["end"])
+    text = str(window.get("text", ""))
+    words = text.split()
+    opening = " ".join(words[:8])
+    closing = " ".join(words[-10:])
+    body_z = sorted(_z_in(zmap, start, end), reverse=True)
+    signals = {
+        "energy_peak": _unit(sum(body_z[:2]) / max(1, len(body_z[:2])), 4.0),
+        "hook": max(_unit(max(_z_in(zmap, start, start + 3), default=0.0), 3.0),
+                    0.7 if _STRONG_OPEN.search(opening) or _reaction_hits(opening) else 0.0),
+        "payoff": max(_unit(max(_z_in(zmap, end - 3, end), default=0.0), 3.0),
+                      0.6 if _reaction_hits(closing) else 0.0),
+        "reaction": _unit(_reaction_hits(text), 6.0),
+        "cricket_density": _unit(window["cricket_density"] if "cricket_density" in window
+                                 else _cricket_signals(text)[1], 0.15),
+        "source_match": 1.0 if source_entities and any(e in text.casefold() for e in source_entities) else 0.0,
+        "duration_fit": _duration_fit(end - start, *preferred),
+        "lead_in_penalty": 1.0 if _LEAD_IN.match(opening) else 0.0,
     }
-    words_lower = set(re.findall(r'\b\w+\b', text.lower()))
-    score += len(words_lower & reaction_words) * 0.6
-
-    text_lower = text.lower()
-    reaction_phrases = [
-        "kya baat", "oh ho", "are yaar", "kya shot", "maine kya",
-        "haan haan", "arre arre", "are bhai", "kya hua", "yeh kya",
-        "oh my god", "oh god", "what a", "kya cheez", "baap re",
-        "nahi yaar", "haan bhai", "oho ho", "gajab ka", "chhakka maar",
-        "dhamaakedaar shot", "what a shot", "what a six", "what a catch",
-    ]
-    score += sum(2 for p in reaction_phrases if p in text_lower)
-
-    words_list = re.findall(r'\b\w+\b', text_lower)
-    for w in set(words_list):
-        if words_list.count(w) >= 3 and len(w) > 1:
-            score += 1.5
-            break
-
-    if max_rms > 0:
-        segment_peaks = [rms_map.get(int(t), 0.0) for t in range(int(start), int(end) + 1)]
-        spike_count = sum(1 for v in segment_peaks if v > max_rms * 0.85)
-        if spike_count >= 2:
-            score += spike_count * 0.8
-
-    score += (text.count("!") + text.count("?")) * 0.3
-    return score
+    weights = {"energy_peak": 25, "hook": 15, "payoff": 10, "reaction": 20,
+               "cricket_density": 15, "source_match": 5, "duration_fit": 10, "lead_in_penalty": -10}
+    score = sum(weights[k] * v for k, v in signals.items())
+    return {"score": round(score, 2), "final_score": round(score, 2),
+            "dimension_scores": {k: round(v, 3) for k, v in signals.items()}}
 
 
-# ── Main detection API ───────────────────────────────────────────────────
+# ── Window construction ──────────────────────────────────────────────────────
 
-def detect_highlights(
-    transcript_path: str | None = None,
-    video_path: str | None = None,
-    output_path: str | None = None,
-    match_key: str | None = None,
-    diagnostics: dict | None = None,
-) -> list[dict]:
-    """Replace ``highlight.detect_highlights()`` with 7-agent clip selection.
+def _build_livestream_windows(thoughts: list[dict], min_duration: float, max_duration: float,
+                              max_gap: float = 1.5) -> list[dict]:
+    """Forward windows of adjacent complete thoughts: cricket, banter or a live moment.
 
-    Same signature, same YAML output format — drop-in replacement.
-
-    Args:
-        transcript_path: Path to transcript JSON (defaults to config paths).
-        video_path: Path to source video (defaults to config paths).
-        output_path: Path to write highlights YAML.
-        match_key: Explicit dedup-history namespace (e.g. the YouTube video ID
-            derived from the run URL). When provided it wins over the
-            ``video_metadata.json`` lookup, so flows that never write metadata
-            (``--skip-download``, drive sync) still get per-match isolation
-            instead of collapsing onto the constant ``video`` stem.
+    Livestream speech rarely puts setup and payoff in one caption sentence, so
+    every clean thought seeds windows that grow until silence, stream filler
+    or the duration ceiling. Cricket talk is labelled for ranking, not required.
     """
-    h_cfg = cfg["highlight"]
+    minimum = max(0.0, float(min_duration))
+    maximum = max(minimum, float(max_duration))
+    ordered = sorted(thoughts, key=lambda item: float(item.get("start", 0)))
+    counts = [_cricket_counts(t.get("text", "")) for t in ordered]
+    windows, seen = [], set()
+    for index, first in enumerate(ordered):
+        if _is_livestream_filler(first.get("text", "")):
+            continue
+        start = float(first.get("start", 0))
+        members, previous_end, found, covered, tokens = [], start, 0, 0, 0
+        for offset, thought in enumerate(ordered[index:]):
+            t_start, t_end = float(thought.get("start", 0)), float(thought.get("end", 0))
+            if t_end <= t_start:
+                continue
+            if members and t_start - previous_end > max_gap:
+                break
+            if _is_livestream_filler(thought.get("text", "")) or t_end - start > maximum:
+                break
+            members.append(thought)
+            previous_end = t_end
+            f, c, n = counts[index + offset]
+            found, covered, tokens = found + f, covered + c, tokens + n
+            if t_end - start < minimum or (start, t_end) in seen:
+                continue
+            text = " ".join(str(m.get("text", "")).strip() for m in members).strip()
+            if not text:
+                continue
+            seen.add((start, t_end))
+            density = covered / max(tokens, 1)
+            windows.append({
+                "start": start, "end": t_end, "text": text,
+                "cricket": _dense(found, density), "cricket_density": density,
+                "source_cue_ids": sorted({c for m in members for c in m.get("source_cue_ids", [])}),
+                "words": [w for m in members for w in m.get("words", [])],
+                "boundary_method": ("source_words" if all(m.get("boundary_method") == "source_words"
+                                                          for m in members) else "estimated_cue_fraction"),
+                "complete_thought": None,
+            })
+    return windows
+
+
+# ── Main entry point ─────────────────────────────────────────────────────────
+
+def _durations() -> tuple[float, float, tuple[float, float]]:
+    """Single source of truth for clip length (C11): clip_selection.output_*."""
+    selection = cfg.get("clip_selection", {})
+    low = float(selection.get("output_min_duration", 10))
+    high = float(selection.get("output_max_duration", 38))
+    h_cfg = cfg.get("highlight", {})
+    preferred = (float(h_cfg.get("preferred_duration_min", low)), float(h_cfg.get("preferred_duration_max", high)))
+    return low, high, preferred
+
+
+def dedupe_history_path(match_key: str | None, output_path: str) -> str:
+    key = match_key or _match_key(cfg["paths"]["input"], output_path)
+    return str(Path(cfg["paths"]["highlights"]) / f"{key}.dedupe_history.yaml")
+
+
+def record_exported_windows(history_path: str, windows: list[dict]) -> None:
+    """Remember exported moments so a re-run of the same match picks new ones."""
+    from automation.clip_selection.dedupe import append_windows
+    clean = [{"start": float(w["start"]), "end": float(w["end"])} for w in windows
+             if w.get("start") is not None and w.get("end") is not None]
+    if clean:
+        append_windows(history_path, clean)
+
+
+def _load_segments(transcript_path: Path) -> list[dict]:
+    import copy
+    with open(transcript_path, encoding="utf-8") as f:
+        data = json.load(f)
+    segments = copy.deepcopy(data if isinstance(data, list) else data.get("segments", []))
+    for cue_id, segment in enumerate(segments):
+        segment["source_cue_ids"] = [cue_id]
+    return segments
+
+
+def detect_highlights(transcript_path: str | None = None, video_path: str | None = None,
+                      output_path: str | None = None, match_key: str | None = None,
+                      diagnostics: dict | None = None) -> list[dict]:
+    """Discover, rank and curate clips; write the highlights YAML export reads."""
+    import copy
+
+    from utils.devanagari import to_roman
+    from automation.seo.cricket_context import find_canonical_entities, is_cricket_content
+    from automation.clip_selection.content_type import classify_content_type
+    from automation.clip_selection.dedupe import load_previous_windows, overlaps_any_previous
+
     paths = cfg["paths"]
-    dl_cfg = cfg["download"]
-
     if video_path is None:
-        video_path = str(Path(paths["input"]) / dl_cfg["output_filename"])
-    if transcript_path is None:
-        stem = Path(video_path).stem
-        transcript_path = str(Path(paths["transcripts"]) / f"{stem}.json")
-    if output_path is None:
-        stem = Path(video_path).stem
-        output_path = str(Path(paths["highlights"]) / f"{stem}.yaml")
-
+        video_path = str(Path(paths["input"]) / cfg["download"]["output_filename"])
+    stem = Path(video_path).stem
+    transcript_path = transcript_path or str(Path(paths["transcripts"]) / f"{stem}.json")
+    output_path = output_path or str(Path(paths["highlights"]) / f"{stem}.yaml")
     t_path = Path(transcript_path)
     if not t_path.exists():
         raise FileNotFoundError(f"Transcript not found: {t_path}")
 
-    with open(t_path, encoding="utf-8") as f:
-        data = json.load(f)
-    segments = data if isinstance(data, list) else data.get("segments", [])
-    import copy
-    segments = copy.deepcopy(segments)
-    for cue_id, segment in enumerate(segments):
-        segment["source_cue_ids"] = [cue_id]
-    raw_segments = copy.deepcopy(segments)
-    # Whisper emits Devanagari for language=hi, but every downstream signal
-    # (keyword lists, classifiers, SEO grounding) operates on Roman-Hinglish.
-    # Transliterate once here so selection sees what the audience speaks.
-    from utils.devanagari import to_roman
+    raw_segments = _load_segments(t_path)
+    segments = copy.deepcopy(raw_segments)
+    # Whisper emits Devanagari for language=hi; ranking and gates read Roman Hinglish.
     for seg in segments:
         seg["text"] = to_roman(seg.get("text", ""))
         for word in seg.get("words", []) or []:
             word["word"] = to_roman(word.get("word", ""))
-    segments = _split_segments_on_pauses(segments)
-    segments = _prepare_complete_thoughts(segments)
+    segments = _prepare_complete_thoughts(_split_segments_on_pauses(segments))
     source_context = _load_source_context(paths["input"])
     source_title = _load_source_title(paths["input"])
-    stream_context = " ".join([source_context] + [
-        str(segment.get("text", "")) for segment in segments
-    ])
-    from automation.seo.cricket_context import is_cricket_content
-    if not is_cricket_content(stream_context):
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics["dedupe_history"] = history_path = dedupe_history_path(match_key, output_path)
+
+    # The ONE cricket gate (once per source). Windows inside a cricket stream may
+    # be banter or a live moment; their own cricket talk is only a ranking input.
+    if not is_cricket_content(" ".join([source_context, *(s.get("text", "") for s in segments)])):
         _write_empty_highlights(output_path)
-        if diagnostics is not None:
-            diagnostics.update(status="NON_CRICKET_SOURCE", candidates=0, hard_rejected=0)
-        log.warning("Cricket-only gate rejected non-cricket source; wrote empty highlights")
+        diagnostics.update(status="NON_CRICKET_SOURCE", candidates=0, hard_rejected=0)
+        log.warning("Source is not cricket; wrote empty highlights")
         return []
-    # Keep generic setup/payoff sentences until window construction. A phrase
-    # such as "this changes everything" is weak alone but essential beside a
-    # concrete wicket or scoreline. Each completed window must independently
-    # pass the cricket gate in _build_livestream_windows().
-    log.info("Transcript: %d speech units; semantic completeness unverified", len(segments))
-    log.debug("Discovery transcript path: %s", t_path)
 
-    # ── Audio RMS extraction ───────────────────────────────────────────────
-    rms_list = _extract_audio_rms(video_path)
-    _rms_sums = defaultdict(float)
-    _rms_counts = defaultdict(int)
-    for t, v in rms_list:
-        key = int(t)
-        _rms_sums[key] += v
-        _rms_counts[key] += 1
-    rms_map = {k: _rms_sums[k] / _rms_counts[k] for k in _rms_sums}
-
-    if rms_list:
-        all_rms = [v for _, v in rms_list]
-        avg_rms = sum(all_rms) / len(all_rms)
-        max_rms = max(all_rms)
-        std_rms = float(np.std(all_rms))
-    else:
-        avg_rms = 1.0
-        max_rms = 1.0
-
-    log.debug("Audio RMS - avg: %.4f | max: %.4f", avg_rms, max_rms)
-
-    # ── Topic segmentation + cricket heuristics ───────────────────────────
-    topics = []
-    topic_heuristics = {}
-    try:
-        segmenter = TopicSegmenter()
-        topics = segmenter.segment(segments)
-        heuristic_scores = score_all_topics(topics)
-        for t, hs in zip(topics, heuristic_scores):
-            t.update(hs)
-            cand_key = f"{t['start']:.1f}-{t['end']:.1f}"
-            topic_heuristics[cand_key] = hs
-        log.info("Topic segmentation: %d topics found", len(topics))
-    except Exception as e:
-        log.warning("Topic segmentation failed: %s — continuing without", e)
-
-    # ── Heuristic pre-filter (same as highlight.py) ────────────────────────
-    scored = []
-    for seg in segments:
-        s = _score_segment(seg, rms_map, avg_rms, max_rms, h_cfg)
-        scored.append({
-            **seg,
-            "start": seg["start"],
-            "end": seg["end"],
-            "text": seg.get("text", ""),
-            "score": round(s, 4),
-        })
-
-    all_scores = [s["score"] for s in scored]
-    max_score = max(all_scores) if all_scores else 0.0
-    min_score = min(all_scores) if all_scores else 0.0
-    windows = _build_livestream_windows(
-        scored,
-        min_duration=max(
-            float(h_cfg["min_duration"]),
-            float(cfg.get("clip_selection", {}).get("output_min_duration", 0) or 0),
-        ),
-        max_duration=float(h_cfg["max_duration"]),
-    )
-    selection_cfg = cfg.get("clip_selection", {})
-    discovery_limit = int(selection_cfg.get("discovery_candidates", 60))
-    merged = _select_diverse_windows(windows, discovery_limit)
-    log.info(
-        "Livestream discovery: score range %.2f -> %.2f | %d coherent windows | "
-        "%d diverse candidates",
-        min_score, max_score, len(windows), len(merged),
-    )
-
-    # Stamp every candidate with its content angle so the LLM arbiter can
-    # weigh it and shorts_intelligence can learn which angles win.
-    from automation.clip_selection.content_type import classify_content_type
-    for w in merged:
-        w["content_type"] = classify_content_type(str(w.get("text", "")))
-
-    merged.sort(key=lambda w: w["score"], reverse=True)
-    if selection_cfg.get("prefer_source_match", True):
-        source_matches = _filter_source_match_candidates(
-            merged,
-            source_title,
-            minimum_matches=1,
-        )
-        source_windows = {
-            (candidate.get("start"), candidate.get("end"))
-            for candidate in source_matches
-        }
-        for candidate in merged:
-            candidate["source_match"] = (
-                candidate.get("start"), candidate.get("end")
-            ) in source_windows
-        log.info(
-            "Source-match preference: %d/%d candidates match %s",
-            sum(1 for candidate in merged if candidate.get("source_match")),
-            len(merged), source_title,
-        )
-
-    # ── 7-Agent scoring ────────────────────────────────────────────────────
-    log.info("Running 7-agent clip selection on %d candidates...", len(merged))
-
-    selector = ClipSelector(
-        use_llm_arbiter=cfg.get("clip_selection", {}).get("use_llm_arbiter", True),
-    )
-
-    # Load match context
-    match_context = {}
-    match_file = Path(paths["input"]) / "match_context.json"
-    if match_file.exists():
-        try:
-            with open(match_file) as f:
-                match_context = json.load(f)
-        except Exception:
-            pass
-
-    context_for_agents = {
-        "rms_map": rms_map,
-        "avg_rms": avg_rms,
-        "max_rms": max_rms,
-        "transcript_segments": segments,
-        "match_context": match_context,
-        "topics": topics,
-        "topic_heuristics": topic_heuristics,
-        "source_title": source_title,
-    }
-
-    # Cross-run dedup: reject windows overlapping previously selected clips
-    # (same match re-processed → same highlight windows get re-selected).
-    # History is a sidecar file so it survives yaml overwrites every run.
-    from automation.clip_selection.dedupe import load_previous_windows
-    dedup_cfg = cfg.get("clip_selection", {})
-    if match_key:
-        key = match_key
-    else:
-        key = _match_key(paths["input"], output_path)
-    history_path = str(Path(paths["highlights"]) / f"{key}.dedupe_history.yaml")
-    previous_windows = []
-    if dedup_cfg.get("dedup_enabled", True):
-        previous_windows = load_previous_windows(history_path)
-    if previous_windows:
-        context_for_agents["previous_windows"] = previous_windows
-        context_for_agents["dedup_overlap_threshold"] = dedup_cfg.get("dedup_overlap_threshold", 0.6)
-        log.info("Cross-run dedup: %d previously selected windows loaded from %s",
-                 len(previous_windows), history_path)
-
-    # Score all candidates through 7 agents
-    scored_candidates = selector.score_candidates(merged, context_for_agents)
-
-    # Sentence grouping is not semantic proof. Do not grant the learner's
-    # complete-thought gate just because a heuristic constructed a window.
-    for candidate in scored_candidates:
+    selection = cfg.get("clip_selection", {})
+    low, high, preferred = _durations()
+    zmap = _energy_z(_extract_audio_rms(video_path))
+    windows = _build_livestream_windows(segments, low, high)
+    previous = load_previous_windows(history_path) if selection.get("dedup_enabled", True) else []
+    threshold = float(selection.get("dedup_overlap_threshold", 0.6))
+    fresh = [w for w in windows if not overlaps_any_previous(w["start"], w["end"], previous, threshold)]
+    entities = {n.casefold() for names in find_canonical_entities(f"{source_title} {source_context}").values()
+                for n in names}
+    for window in fresh:
+        window.update(score_window(window, zmap, entities, preferred))
+        window["content_type"] = classify_content_type(window["text"])
+    candidates = _select_diverse_windows(fresh, int(selection.get("discovery_candidates", 60)))
+    for candidate in candidates:
+        # Sentence grouping is not semantic proof of a complete thought.
         set_completeness(candidate, "UNVERIFIED")
-        candidate.setdefault("boundary_method", "heuristic_sentence_grouping")
-    try:
-        from shorts_intelligence.bridge import apply_selection_policy
+    _apply_policy(candidates)
+    candidates.sort(key=lambda c: c.get("final_score", 0), reverse=True)
+    log.info("Discovery: %d windows, %d new after dedupe (%d previous), %d ranked candidates",
+             len(windows), len(fresh), len(previous), len(candidates))
 
-        matched = apply_selection_policy(cfg, scored_candidates)
-        if matched:
-            mode = "shadow" if cfg.get("shorts_intelligence", {}).get("shadow_mode", True) else "active"
-            log.info("Shorts Intelligence %s policy matched %d candidates", mode, matched)
-    except Exception as exc:
-        log.warning("Shorts Intelligence policy unavailable: %s", exc)
-
-    # Keep source-grounded moments visible to the arbiter without excluding
-    # stronger cricket discussion that genuinely occurred in the livestream.
-    scored_candidates.sort(
-        key=lambda candidate: (
-            candidate.get("final_score", 0)
-            + (4.0 if candidate.get("source_match") else 0.0)
-        ),
-        reverse=True,
-    )
-
-    # Filter and select top clips
-    min_quality = cfg.get("clip_selection", {}).get("min_quality", 20.0)
-    max_selected = cfg.get("clip_selection", {}).get("max_selected", MAX_SELECTED_CLIPS)
-    min_selected = cfg.get("clip_selection", {}).get("min_selected", 0)
-    editorial_enabled = selection_cfg.get("editorial", {}).get("enabled", False)
-    if editorial_enabled:
-        from automation.editorial_planner import curate_clips
-        top = curate_clips(raw_segments, scored_candidates, video_path, cfg, context_for_agents,
-                           Path(output_path).with_suffix(".curation.json"))
-    else:
-        top = selector.select(scored_candidates, context_for_agents,
-                              max_selected=max_selected, min_selected=min_selected,
-                              min_quality=min_quality)
-
-    # Semantic eligibility precedes learning. Text review is not audio/visual
-    # certification: these remain drafts behind the separate release gate.
-    top = [candidate for candidate in top if completeness_value(candidate) is True]
-    try:
-        from shorts_intelligence.bridge import apply_selection_policy
-        apply_selection_policy(cfg, top)
-    except Exception as exc:
-        log.warning("Shorts Intelligence post-review policy unavailable: %s", exc)
-    summary = context_for_agents.get("selection_summary", {})
-    if diagnostics is not None:
-        diagnostics.update(summary)
+    from automation.editorial_planner import curate_clips
+    context = {"source_title": source_title, "previous_windows": previous,
+               "dedup_overlap_threshold": threshold}
+    top = curate_clips(raw_segments, candidates, video_path, cfg, context,
+                       Path(output_path).with_suffix(".curation.json"))
+    top = [c for c in top if completeness_value(c) is True]
+    _apply_policy(top)
+    summary = context.get("selection_summary", {})
+    diagnostics.update(summary)
 
     if cfg.get("release_review", {}).get("required", False):
         from automation.editorial_evidence import source_identity, write_discovery_evidence
-        write_discovery_evidence(output_path, source_identity(video_path), transcript_path,
-                                 raw_segments, scored_candidates, top,
-                                 context_for_agents.get("editorial_decision"),
-                                 selection_summary=summary)
+        write_discovery_evidence(output_path, source_identity(video_path), transcript_path, raw_segments,
+                                 candidates, top, context.get("editorial_decision"), selection_summary=summary)
+    return _write_highlights(output_path, sorted(top, key=lambda w: w["start"]),
+                             context.get("editorial_reserves", []), video_path, diagnostics)
 
-    top.sort(key=lambda w: w["start"])
 
-    target_duration = float(h_cfg.get("target_duration", 22.0))
-    max_speedup = float(h_cfg.get("max_speedup", 1.6))
-    sel_cfg = cfg.get("clip_selection", {})
-    output_min = float(sel_cfg.get("output_min_duration", 0) or 0)
-    output_max_raw = float(sel_cfg.get("output_max_duration", 0) or 0)
-    output_max: float | None = output_max_raw if output_max_raw > 0 else None
+def _apply_policy(candidates: list[dict]) -> None:
+    try:
+        from shorts_intelligence.bridge import apply_selection_policy
+        apply_selection_policy(cfg, candidates)
+    except Exception as exc:
+        log.warning("Shorts Intelligence policy unavailable: %s", exc)
 
-    # ── Build YAML output ─────────────────────────────────────────────────
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    yaml_data = {}
-    highlights = []
 
-    reserves = context_for_agents.get("editorial_reserves", [])
+def _write_highlights(output_path: str, top: list[dict], reserves: list[dict], video_path: str,
+                      diagnostics: dict) -> list[dict]:
+    from automation.speech_alignment import _fingerprint
+
+    h_cfg = cfg.get("highlight", {})
+    low, high, _ = _durations()
+    identity = _fingerprint(video_path) if top or reserves else None
+    yaml_data, highlights = {}, []
     for i, w in enumerate(top + reserves, start=1):
-        is_reserve = i > len(top)
-        key = f"reserve{i-len(top)}" if is_reserve else f"clip{i}"
-        if editorial_enabled:
-            window_text = w["text"]  # exact retained words, never intersecting cue spillover
-        else:
-            window_text_parts = [
-                seg.get("text", "") for seg in segments
-                if seg["end"] > w["start"] and seg["start"] < w["end"]
-            ]
-            window_text = " ".join(window_text_parts).strip() or "Cricket Highlights"
-
-        yaml_data[key] = _build_clip_yaml_entry(
-            start=w["start"],
-            end=w["end"],
-            score=w.get("final_score", w.get("score", 0)),
-            text=window_text,
-            target_duration=target_duration,
-            max_speedup=max_speedup,
-            output_min=output_min,
-            output_max=output_max,
-        )
-        yaml_data[key]["selection_reason"] = w.get("ai_reason", "")
-        yaml_data[key]["semantic_review"] = w.get("semantic_review", "NOT CHECKED")
-        yaml_data[key]["boundary_method"] = w.get("boundary_method", "unknown")
-        yaml_data[key]["source_cue_ids"] = w.get("source_cue_ids", [])
-        yaml_data[key]["complete_thought"] = completeness_value(w)
-        yaml_data[key]["completeness"] = w.get("completeness")
-        if editorial_enabled:
-            from automation.speech_alignment import _fingerprint
-            yaml_data[key].update(speech_segments=w["speech_segments"], role="reserve" if is_reserve else "primary",
-                                 source_identity=_fingerprint(video_path))
-
-        if "agent_scores" in w:
-            yaml_data[key]["agent_scores"] = {
-                name: {"score": data["score"], "reasoning": data.get("reasoning", "")}
-                for name, data in w["agent_scores"].items()
-            }
-        if "final_score" in w:
-            yaml_data[key]["final_score"] = w["final_score"]
-        if "hook_score" in w:
-            yaml_data[key]["hook_score"] = w["hook_score"]
-
+        reserve = i > len(top)
+        key = f"reserve{i - len(top)}" if reserve else f"clip{i}"
+        entry = _build_clip_yaml_entry(start=w["start"], end=w["end"], score=w.get("final_score", w.get("score", 0)),
+                                       text=w["text"], target_duration=float(h_cfg.get("target_duration", high)),
+                                       max_speedup=float(h_cfg.get("max_speedup", 1.0)),
+                                       output_min=low, output_max=high)
+        entry.update(selection_reason=w.get("ai_reason", ""), semantic_review=w.get("semantic_review", "NOT CHECKED"),
+                     boundary_method=w.get("boundary_method", "unknown"), source_cue_ids=w.get("source_cue_ids", []),
+                     complete_thought=completeness_value(w), completeness=w.get("completeness"),
+                     speech_segments=w["speech_segments"], role="reserve" if reserve else "primary",
+                     source_identity=identity, final_score=w.get("final_score"),
+                     dimension_scores=w.get("dimension_scores", {}))
+        yaml_data[key] = entry
         highlight = {
-            "id": key,
-            "start": w["start"],
-            "end": w["end"],
-            "start_ts": fmt_ts(w["start"]),
-            "end_ts": fmt_ts(w["end"]),
-            "score": w.get("final_score", w.get("score", 0)),
-            "speed_factor": yaml_data[key]["speed_factor"],
-            "text": window_text,
-            "content_type": w.get("content_type"),
-            "complete_thought": completeness_value(w),
-            "completeness": w.get("completeness"),
+            "id": key, "start": w["start"], "end": w["end"], "start_ts": fmt_ts(w["start"]),
+            "end_ts": fmt_ts(w["end"]), "score": w.get("final_score", w.get("score", 0)),
+            "speed_factor": entry["speed_factor"], "text": w["text"], "content_type": w.get("content_type"),
+            "complete_thought": completeness_value(w), "completeness": w.get("completeness"),
             "semantic_review": w.get("semantic_review", "NOT CHECKED"),
-            "agent_scores": w.get("agent_scores", {}),
-            "hook_score": w.get("hook_score"),
+            "dimension_scores": w.get("dimension_scores", {}),
             "intelligence_adjustment": w.get("intelligence_adjustment", 0.0),
-            "intelligence_shadow_adjustment": w.get(
-                "intelligence_shadow_adjustment", 0.0
-            ),
+            "intelligence_shadow_adjustment": w.get("intelligence_shadow_adjustment", 0.0),
             "intelligence_segments": w.get("intelligence_segments", []),
         }
-        if not is_reserve:
-            highlights.append(highlight)
-        elif diagnostics is not None:
+        if reserve:
             diagnostics.setdefault("reserves", []).append(highlight)
-
-        log.info("  %s: %s -> %s (score=%.1f, speed=%.2fx)", key, fmt_ts(w["start"]),
-                 fmt_ts(w["end"]), w.get("final_score", 0),
-                 yaml_data[key]["speed_factor"])
-
-    # Always commit the current selection atomically. An empty mapping clears
-    # stale highlights so the export phase cannot re-export a previous run.
-    tmp_output = Path(output_path).with_suffix(".tmp")
-    with open(tmp_output, "w", encoding="utf-8") as f:
+        else:
+            highlights.append(highlight)
+        log.info("  %s: %s -> %s (score=%.1f)", key, fmt_ts(w["start"]), fmt_ts(w["end"]),
+                 w.get("final_score") or 0)
+    # Always commit atomically; an empty mapping clears stale highlights.
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(output_path).with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         yaml.dump(yaml_data, f, default_flow_style=False, allow_unicode=True)
-    tmp_output.replace(output_path)
-    if top:
-        log.info("Highlights saved -> %s (%d clips)", output_path, len(highlights))
-    else:
-        log.warning("No clips selected — wrote empty highlights mapping to %s", output_path)
-
+    tmp.replace(output_path)
+    log.info("Highlights saved -> %s (%d clips, %d reserves)", output_path, len(highlights), len(reserves))
     return highlights

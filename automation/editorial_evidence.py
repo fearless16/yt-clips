@@ -76,7 +76,7 @@ def write_discovery_evidence(output_path: str, source: dict, transcript_path: st
             for item in rejected:
                 if not isinstance(item, dict):
                     continue
-                from automation.clip_selection.arbiter import _coerce_candidate_index
+                from automation.editorial_planner import _coerce_candidate_index
                 index = _coerce_candidate_index(item.get("candidate_id"), len(considered))
                 if index >= 0:
                     editorial_rejections[tuple(considered[index])] = item.get("reason", "")

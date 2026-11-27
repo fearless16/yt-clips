@@ -42,11 +42,14 @@ def test_upload_respects_notify_subscribers_config(monkeypatch, tmp_path):
     vid_path = tmp_path / "dummy.mp4"
     vid_path.write_text("dummy")
     
-    upload.upload_video(
-        video_path=str(vid_path),
-        metadata_path=str(meta_path),
-        privacy="private"
-    )
+    try:
+        upload.upload_video(
+            video_path=str(vid_path),
+            metadata_path=str(meta_path),
+            privacy="private"
+        )
+    except upload.UploadRejected:
+        pass  # the mock insert returns no ID; only the request kwargs matter here
         
     assert mock_youtube.videos.return_value.insert.called
     kwargs = mock_youtube.videos.return_value.insert.call_args[1]

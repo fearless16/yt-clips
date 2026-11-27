@@ -1,3 +1,4 @@
+import re
 """Failure-first delivery checks: real image bytes, fake API and CDN only."""
 import io
 import json
@@ -92,7 +93,8 @@ def receipt(delivery):
 
 
 @pytest.mark.parametrize("bad_cover", ["missing", "empty", "corrupt", "landscape", "wrong-format"])
-def test_cover_is_required_and_decoded_before_auth(delivery, bad_cover):
+def test_bad_cover_never_blocks_the_video(delivery, bad_cover):
+    # Cancer register C8: the custom cover is best-effort.
     cover = delivery[2]
     if bad_cover == "missing":
         cover.unlink()
@@ -104,8 +106,10 @@ def test_cover_is_required_and_decoded_before_auth(delivery, bad_cover):
         cover.write_bytes(artwork((640, 360)))
     else:
         Image.new("RGB", (360, 640)).save(cover, format="PNG")
-    assert run_upload(delivery) is None
-    delivery[4].assert_not_called()
+    assert run_upload(delivery) == VIDEO_ID
+    delivery[3].thumbnails().set.assert_not_called()
+    proof = receipt(delivery)
+    assert proof["status"] == "COMPLETE" and proof["thumbnail"]["status"] == "DISABLED"
 
 
 def test_waits_for_processing_then_checks_served_pixels(delivery):
@@ -133,15 +137,18 @@ def test_processing_failure_is_incomplete_and_never_sets_cover(delivery, status)
     assert proof["video_id"] == VIDEO_ID and proof["status"] != "COMPLETE"
 
 
-def test_thumbnail_error_resumes_same_video_without_insert(delivery):
+def cover_failed(delivery, match):
+    proof = receipt(delivery)
+    assert proof["status"] == "COMPLETE"
+    assert proof["thumbnail"]["status"] == "FAILED"
+    assert re.search(match, proof["thumbnail"]["error"])
+
+
+def test_thumbnail_error_is_recorded_and_video_still_publishes(delivery):
     delivery[3].thumbnails().set.side_effect = RuntimeError("fixture rejected thumbnail")
-    with pytest.raises(RuntimeError, match="thumbnail") as error:
-        run_upload(delivery)
-    assert error.value.video_id == VIDEO_ID
-    assert receipt(delivery)["status"] == "THUMBNAIL_PENDING"
-    delivery[3].thumbnails().set.side_effect = lambda **_kw: Mock(execute=Mock(return_value={
-        "items": [{"shortsAspectRatio": {"url": THUMB_URL}}]}))
     assert run_upload(delivery) == VIDEO_ID
+    cover_failed(delivery, "fixture rejected thumbnail")
+    assert run_upload(delivery) == VIDEO_ID  # idempotent, no second insert
     assert delivery[3].videos().insert.call_count == 1
 
 
@@ -149,21 +156,20 @@ def test_same_cdn_url_with_wrong_pixels_is_not_verified(delivery):
     bad = io.BytesIO()
     Image.new("RGB", (360, 640), "lime").save(bad, format="JPEG")
     delivery[5].iter_content.side_effect = lambda **_kw: iter([bad.getvalue()])
-    with pytest.raises(RuntimeError, match="(?i)verif|match"):
-        run_upload(delivery)
-    assert receipt(delivery)["status"] == "THUMBNAIL_PENDING"
+    assert run_upload(delivery) == VIDEO_ID
+    cover_failed(delivery, "(?i)verif|match")
 
 
 def test_malformed_set_response_cannot_claim_success(delivery):
     delivery[3].thumbnails().set.side_effect = lambda **_kw: Mock(execute=Mock(return_value={"items": []}))
-    with pytest.raises(RuntimeError, match="(?i)thumbnail"):
-        run_upload(delivery)
-    assert receipt(delivery)["status"] == "THUMBNAIL_PENDING"
+    assert run_upload(delivery) == VIDEO_ID
+    cover_failed(delivery, "(?i)thumbnail")
 
 
 def test_insert_timeout_blocks_blind_video_replay(delivery):
     delivery[3].videos().insert.return_value.execute.side_effect = TimeoutError("outcome unknown")
-    run_upload(delivery)
+    with pytest.raises(upload.UploadRejected, match="TimeoutError"):
+        run_upload(delivery)
     with pytest.raises(RuntimeError, match="(?i)unknown|reconcil"):
         run_upload(delivery)
     assert delivery[3].videos().insert.call_count == 1
@@ -221,8 +227,7 @@ def test_no_upload_if_receipt_cannot_be_persisted(delivery, monkeypatch):
 def test_saved_video_id_survives_thumbnail_failure_without_metadata_mutation(delivery):
     original = delivery[1].read_bytes()
     delivery[3].thumbnails().set.side_effect = RuntimeError("rejected")
-    with pytest.raises(RuntimeError):
-        run_upload(delivery)
+    assert run_upload(delivery) == VIDEO_ID
     assert receipt(delivery)["video_id"] == VIDEO_ID
     assert receipt(delivery)["artifacts"]["metadata"]["sha256"]
     assert delivery[1].read_bytes() == original
@@ -255,9 +260,8 @@ def test_missing_custom_shorts_readback_is_not_success(delivery):
         return original(**kwargs)
 
     delivery[3].videos().list.side_effect = missing
-    with pytest.raises(RuntimeError, match="not visible"):
-        run_upload(delivery)
-    assert receipt(delivery)["status"] != "COMPLETE"
+    assert run_upload(delivery) == VIDEO_ID
+    cover_failed(delivery, "not visible")
 
 
 @pytest.mark.parametrize("url", ["http://i.ytimg.com/a.jpg", "https://attacker.test/a.jpg",

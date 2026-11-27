@@ -271,14 +271,13 @@ def test_gameplay_review_cannot_reuse_portrait_checks_or_ignore_withdrawal(tmp_p
 
 
 def test_generated_metadata_includes_gameplay_credit_before_review(monkeypatch, tmp_path):
-    import export
     from automation.cricket_gameplay import load_library, select_gameplay, credit_text
     manifest, _ = library(tmp_path)
     selected = select_gameplay(load_library(manifest), 3, "moment")
     (tmp_path/"clip1_gameplay.json").write_text(json.dumps({"selection": selected}))
     metadata = {"title": "Rohit batting opinion", "description": "Original source-grounded opinion."}
-    monkeypatch.setattr("automation.seo.seo.generate_seo_for_exported_clip", lambda **k: dict(metadata))
-    result = export._seo_worker("clip1", {}, tmp_path, {})
+    from automation.seo.seo import write_metadata
+    result = write_metadata(tmp_path, "clip1", metadata)
     assert result["description"].endswith(credit_text(selected))
     assert json.loads((tmp_path/"clip1_metadata.json").read_text())["description"] == result["description"]
 

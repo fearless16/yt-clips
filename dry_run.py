@@ -60,8 +60,6 @@ REQUIRED_CONFIG_KEYS = [
     ("premium", "yolo_batch_size"),
     ("premium", "identity_refs"),
     ("youtube", "upload_chunk_size_mb"),
-    ("youtube", "upload_max_retries"),
-    ("youtube", "upload_deadline_seconds"),
 ]
 
 EXPECTED_PHASE_STAGES = [
@@ -342,6 +340,11 @@ def _run_in_sandbox(function, args, kwargs, sandbox: Path, keep: bool):
                                       ("_PROVIDER_HEALTH", ProviderHealth())):
                 saved.append((module, attr, getattr(module, attr)))
                 setattr(module, attr, replacement)
+    # Provider token buckets/cooldowns are class-level: each sandboxed run starts fresh.
+    from utils.ai_client import AIClient
+    for attr in ("_provider_token_buckets", "_provider_cooldown_until"):
+        saved.append((AIClient, attr, getattr(AIClient, attr)))
+        setattr(AIClient, attr, {})
     previous_modules = set(sys.modules)
     cache = dict(utils_config._config_cache)
     utils_config._config_cache.clear()
@@ -484,6 +487,13 @@ def _api_intercept_context(video_path: str):
                             "complete_thought": True, "reason": "Retained setup and cricket payoff"}
                            for c in payload["candidates"]]
                 response = {"selected": choices[:3], "reserves": choices[3:6], "rejected": []}
+            elif "clip_transcript" in payload:
+                # Per-clip packaging: answer only with words the clip actually said.
+                words = payload["clip_transcript"].split()
+                response = {"title": " ".join(words[:7]), "cover_text": " ".join(words[:2]),
+                            "description": payload["clip_transcript"][:240] + " Independent live commentary reaction.",
+                            "tags": [" ".join(words[:2]), "cricket reaction", "hindi cricket commentary"],
+                            "hashtags": ["#Cricket"]}
             else:
                 raise RuntimeError("Missing dry-run structured provider fixture")
             # A completed final object must follow an initially truncated
@@ -1199,6 +1209,12 @@ def dry_run(url: str,
         result.failures.append("acceptance: selected/exported count mismatch")
     if not skip_export and not skip_seo and result.seo_generated != len(result.exported):
         result.failures.append("acceptance: exported/valid metadata count mismatch")
+    if not skip_export and not skip_seo:
+        from automation.artifacts import read_metadata as _read_meta
+        templated = [Path(c).stem for c in result.exported
+                     if (_read_meta(Path(c)) or {}).get("seo_method") != "llm"]
+        if templated:
+            result.failures.append(f"acceptance: SEO fell back to template for {templated}")
 
     # Check actual artifacts too: a successful stage log or counter is not a
     # cover. Metadata failures are reported separately, not double-counted here.
@@ -1268,7 +1284,7 @@ def dry_run(url: str,
     validation["editorial_high_requests"] = sum(r["reasoning_effort"] == "high" and
         r["extra_body"] == {"thinking": {"type": "enabled"}} for r in sdk_calls)
     validation["boundary_review_requests"] = sum(r.get("stage") == "boundary_review" for r in sdk_calls)
-    if not skip_export and not skip_highlight and cfg.get("clip_selection", {}).get("editorial", {}).get("enabled"):
+    if not skip_export and not skip_highlight:  # editorial curation is the only selection path
         if cfg["export"].get("composition") == "portrait-caption-v1" and portrait_exports != len(result.exported):
             result.failures.append("acceptance: fixture exports did not use full-width face-safe portrait layout")
         if cfg["export"].get("composition") == "cricket-gameplay-stadium-v1" and stadium_exports != len(result.exported):

@@ -45,25 +45,6 @@ def _new_export_batch_id() -> str:
     return f"{time.strftime('%Y-%m-%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
 
-def _is_exportable_cricket_highlight(text: str, source_context: str) -> bool:
-    """Defense-in-depth gate for stale/manual highlight YAML files."""
-    from automation.seo.cricket_context import is_cricket_content
-    return is_cricket_content(text, source_context)
-
-
-def _load_export_cricket_context() -> str:
-    """Load source metadata used to disambiguate short cricket reactions."""
-    pieces = []
-    input_dir = Path(cfg.get("paths", {}).get("input", "input"))
-    for filename in ("video_metadata.json", "match_context.json"):
-        path = input_dir / filename
-        try:
-            pieces.append(json.dumps(json.loads(path.read_text(encoding="utf-8")), ensure_ascii=False))
-        except (OSError, json.JSONDecodeError, TypeError):
-            continue
-    return " ".join(pieces)
-
-
 # ── Hook Overlay (First 2s Retention) ─────────────────────────────────────────
 _HOOK_TEXT_MAP = {
     "wicket": "🎯 WICKET!",
@@ -1627,53 +1608,17 @@ def _export_insta_worker(clip_id, info, clip_dir, out_dir, seo_context):
         return None
 
 
-def _seo_worker(clip_id: str, info: dict, output_dir: Path, ctx: dict):
-    """Generate metadata; a failed return is not a completed SEO artifact."""
-    control = ctx.get("_seo_control")
-    if control is not None:
-        # Providers may outlive Future.result(timeout). Give them private work
-        # space, not permission to mutate the outgoing batch after its deadline.
-        import tempfile
-        from automation.artifacts import atomic_json
-        with tempfile.TemporaryDirectory(prefix=f".seo-{clip_id}-", dir=output_dir) as scratch:
-            staging = Path(scratch)
-            gameplay = output_dir / f"{clip_id}_gameplay.json"
-            if gameplay.exists():
-                shutil.copyfile(gameplay, staging / gameplay.name)
-            worker_context = {key: value for key, value in ctx.items() if key != "_seo_control"}
-            worker_context["_seo_staged"] = True
-            result = _seo_worker(clip_id, info, staging, worker_context)
-            with control["lock"]:
-                if control["cancelled"].is_set():
-                    log.warning("Late SEO result discarded, batch unchanged: %s", clip_id)
-                    return {"_seo_failed": True, "error": "SEO result arrived after batch deadline; not published"}
-                for suffix in ("_metadata.json", "_seo_failed.json"):
-                    artifact = staging / f"{clip_id}{suffix}"
-                    if artifact.exists():
-                        payload = json.loads(artifact.read_text(encoding="utf-8"))
-                        atomic_json(output_dir / artifact.name, payload)
-                if result and not result.get("_seo_failed"):
-                    (output_dir / f"{clip_id}_seo_failed.json").unlink(missing_ok=True)
-                    log.info("SEO done: %s", clip_id)
-            return result
-    from automation.seo.seo import generate_seo_for_exported_clip
-    result = generate_seo_for_exported_clip(
-        clip_id=clip_id, transcript=info.get("text", ""), output_dir=str(output_dir),
-        video_title=ctx.get("video_title", ""), video_description=ctx.get("video_description", ""),
-        scorecard=ctx.get("scorecard", ""), live_stream_url=ctx.get("live_stream_url", ""),
-    )
-    if not result or result.get("_seo_failed"):
-        log.error("SEO failed for %s: %s", clip_id, (result or {}).get("error", "empty result"))
-        return result
-    gameplay = output_dir / f"{clip_id}_gameplay.json"
-    if gameplay.exists():
-        from automation.artifacts import atomic_json
-        from automation.cricket_gameplay import append_gameplay_credit
-        result = append_gameplay_credit(result, gameplay)
-        atomic_json(output_dir / f"{clip_id}_metadata.json", result)
-    if not ctx.get("_seo_staged"):
-        log.info("SEO done: %s", clip_id)
-    return result
+def _seo_worker(clip_id: str, info: dict, ctx: dict) -> dict:
+    """Build metadata only; the export thread decides whether to persist it."""
+    from automation.seo.seo import build_metadata
+    return build_metadata(clip_id, info.get("text", ""), ctx.get("video_title", ""),
+                          ctx.get("video_description", ""))
+
+
+def _seo_budget_seconds() -> float:
+    """Per-clip ceiling: two bounded provider calls plus slack (never batch-wide)."""
+    per_call = float(cfg.get("seo", {}).get("clip_timeout_seconds", 90))
+    return 2 * max(10.0, per_call) + 30.0
 
 
 class ExportBatchError(RuntimeError):
@@ -1687,10 +1632,6 @@ class ExportBatchError(RuntimeError):
 
 class ExportMetadataError(ExportBatchError, OSError):
     """Keep OSError compatibility and current media after persistence fails."""
-
-
-class ExportDeadlineError(ExportMetadataError, TimeoutError):
-    """Keep TimeoutError compatibility without losing completed media."""
 
 
 def export_all(
@@ -1751,7 +1692,6 @@ def export_all(
             candidate = Path(cfg["paths"]["transcripts"]) / "video.json"
         transcript_path = str(candidate) if candidate.exists() else None
     transcript_segments = _load_transcript_segments(transcript_path)
-    source_cricket_context = _load_export_cricket_context()
 
     log.debug("Export batch starting")
     out_dir = Path(cfg["paths"]["shorts"]) / _new_export_batch_id()
@@ -1894,9 +1834,6 @@ def export_all(
                 if seg["end"] > start and seg["start"] < end
             ]
             clip_text = " ".join(seg.get("text", "") for seg in clip_segments)
-        if not _is_exportable_cricket_highlight(clip_text, source_cricket_context):
-            log.warning("[%s] Cricket-only export gate rejected non-cricket clip", clip_id)
-            continue
         clip_duration = end - start
         try:
             from automation.clip_selection.hook_auditor import analyze_clip_hook
@@ -2096,8 +2033,6 @@ def export_all(
     # Export clips in parallel. As each clip finishes, its SEO is submitted
     # to a separate thread pool immediately — no waiting for all exports.
     # SEO uses OpenCode Go models only (qwen3.7-max, mimo-v2.5-pro, deepseek-v4-pro).
-    import threading
-    seo_control = {"lock": threading.Lock(), "cancelled": threading.Event()}
     seo_futures = []
     insta_executor = _make_insta_executor() if generate_seo else None
     insta_futures = []
@@ -2124,10 +2059,8 @@ def export_all(
                     log.info("[%d/%d] Exported: %s", idx, total, clip_id)
                     # Fire SEO immediately — runs parallel to remaining exports
                     if seo_executor and seo_context:
-                        seo_fut = seo_executor.submit(
-                            _seo_worker, clip_id, info, out_dir, {**seo_context, "_seo_control": seo_control}
-                        )
-                        seo_futures.append((seo_fut, clip_id, info))
+                        seo_fut = seo_executor.submit(_seo_worker, clip_id, info, seo_context)
+                        seo_futures.append((seo_fut, clip_id, info, time.monotonic()))
                     if insta_executor is not None:
                         insta_futures.append(insta_executor.submit(
                             _insta_worker, clip_id, info,
@@ -2140,57 +2073,35 @@ def export_all(
                 log.error("[%s] Export error: %s", failed_id, e)
                 export_errors.append(f"{failed_id}: {e}")
 
-    # Wait for any remaining SEO tasks to finish
-    try:
-        if seo_futures:
-            deadline = float(cfg.get("seo", {}).get("export_deadline_seconds", 300.0))
-            if not math.isfinite(deadline) or deadline <= 0:
-                raise ValueError("SEO export deadline must be finite and positive")
-            seo_deadline_at = time.monotonic() + deadline
-            log.info("Waiting for %d remaining SEO tasks...", len(seo_futures))
-            seo_errors = []
-            for fut, clip_id, _info in seo_futures:
-                remaining = max(0.0, seo_deadline_at - time.monotonic())
-                try:
-                    outcome = fut.result(timeout=remaining)
-                    if isinstance(outcome, dict) and outcome.get("_seo_failed"):
-                        seo_errors.append(f"{clip_id}: {outcome.get('error', 'SEO failed')}")
-                except TimeoutError as exc:
-                    raise TimeoutError(f"SEO generation exceeded the {deadline}s export deadline") from exc
-            if seo_errors:
-                raise ValueError("SEO packaging incomplete: " + "; ".join(seo_errors))
-    except Exception as exc:
-        from automation.artifacts import atomic_json
-        from automation.artifacts import read_metadata
-        failures = [*export_errors, str(exc)]
-        with seo_control["lock"]:
-            seo_control["cancelled"].set()
-            # A deadline needs resumable per-clip evidence immediately, not
-            # minutes later when an abandoned provider finally returns.
-            for _future, clip_id, info in seo_futures:
-                clip = out_dir / f"{clip_id}.mp4"
-                marker = out_dir / f"{clip_id}_seo_failed.json"
-                try:
-                    if read_metadata(clip) is None and not marker.exists():
-                        atomic_json(marker, {"clip_id": clip_id, "transcript": info.get("text", ""),
-                            "video_title": (seo_context or {}).get("video_title", ""),
-                            "video_description": (seo_context or {}).get("video_description", ""),
-                            "live_stream_url": (seo_context or {}).get("live_stream_url", ""),
-                            "error": str(exc)})
-                except OSError as marker_error:
-                    failures.append(f"{clip_id}: could not persist SEO retry evidence: {marker_error}")
+    # Packaging is per clip: a slow or failed provider call degrades only that
+    # clip to template packaging (owner review), never its siblings (C4/A2).
+    if seo_futures:
+        from automation.seo.seo import template_metadata, write_metadata
+        budget = _seo_budget_seconds()
+        log.info("Waiting for %d SEO tasks (per-clip budget %.0fs)...", len(seo_futures), budget)
         try:
-            atomic_json(out_dir / "batch_failures.json", {"status": "PARTIAL", "errors": failures,
-                "exported": [str(path) for path in exported_clips]})
-        except OSError:
-            log.error("Could not persist batch failure report", exc_info=True)
-        error_type = ExportDeadlineError if isinstance(exc, TimeoutError) else ExportMetadataError if isinstance(exc, OSError) else ExportBatchError
-        raise error_type(failures, exported_clips) from exc
-    finally:
-        for fut, _clip_id, _info in seo_futures:
-            fut.cancel()
-        if seo_executor is not None:
+            for fut, clip_id, info, submitted in seo_futures:
+                try:
+                    meta = fut.result(timeout=max(1.0, submitted + budget - time.monotonic()))
+                except Exception as exc:  # timeout or worker crash: this clip only
+                    fut.cancel()
+                    reason = f"{type(exc).__name__}: {str(exc) or 'packaging exceeded per-clip budget'}"
+                    log.warning("[%s] SEO degraded to template: %s", clip_id, reason)
+                    meta = template_metadata(info.get("text", ""), seo_context.get("video_title", ""),
+                                             seo_context.get("video_description", ""))
+                    meta.update(seo_method="template", seo_error=reason, metadata_valid=True,
+                                seo_inputs={"transcript": info.get("text", ""),
+                                            "video_title": seo_context.get("video_title", ""),
+                                            "video_description": seo_context.get("video_description", "")})
+                try:
+                    write_metadata(out_dir, clip_id, meta)
+                    log.info("SEO done (%s): %s", meta.get("seo_method"), clip_id)
+                except (OSError, ValueError) as exc:
+                    export_errors.append(f"{clip_id}: could not write metadata: {exc}")
+        finally:
             seo_executor.shutdown(wait=False, cancel_futures=True)
+    elif seo_executor is not None:
+        seo_executor.shutdown(wait=False)
 
     if insta_futures:
         log.info("📲 Waiting for %d Instagram tasks...", len(insta_futures))

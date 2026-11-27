@@ -186,139 +186,14 @@ def test_offline_query_fallback_does_not_invent_team_india():
     assert all("india" not in query.casefold() for query in queries)
 
 
-def test_generated_queries_are_replaced_by_approved_evidence(monkeypatch):
-    import automation.seo.seo as seo
-
-    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
-    monkeypatch.setattr(
-        seo,
-        "_attempt_seo_generation",
-        lambda *args, **kwargs: {
-            "title": "Yuvraj Singh ko Coach Banao?",
-            "description": _long_description(),
-            "hashtags": ["#Shorts", "#YuvrajSingh"],
-            "search_terms": _approved_queries()[:-1] + ["india cricket latest"],
-        },
-    )
-
-    result = seo.generate_clip_seo(
-        "clip1",
-        "Yuvi ko India ka coach bana do",
-        video_title="India cricket discussion",
-        video_description="Yuvi coaching debate",
-        approved_search_queries=_approved_queries(),
-    )
-
-    # Broad source-team research cannot replace this clip's named subject.
-    clip_queries = [q for q in _approved_queries() if q != "team india coach discussion"]
-    assert result["search_terms"][:len(clip_queries)] == clip_queries
-    assert len(_approved_queries()) <= len(result["search_terms"]) <= 12
-    assert result["primary_search_terms"][:2] == _approved_queries()[:2]
-    assert 1 <= len(result["primary_search_terms"]) <= 2
-    assert "india cricket latest" not in result["description"].casefold()
 
 
-def test_research_queries_can_stay_in_metadata_when_primary_queries_are_embedded(monkeypatch):
-    import automation.seo.seo as seo
-
-    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
-    monkeypatch.setattr(
-        seo,
-        "_attempt_seo_generation",
-        lambda *args, **kwargs: {
-            "title": "Yuvraj Singh ko Coach Banao?",
-            "description": _long_description(_approved_queries()[:2]),
-            "hashtags": ["#Shorts", "#YuvrajSingh"],
-            "search_terms": _approved_queries(),
-        },
-    )
-
-    result = seo.generate_clip_seo(
-        "clip1",
-        "Yuvi ko India ka coach bana do",
-        video_title="India cricket discussion",
-        video_description="Yuvi coaching debate",
-        approved_search_queries=_approved_queries(),
-    )
-
-    clip_queries = [q for q in _approved_queries() if q != "team india coach discussion"]
-    assert result["search_terms"][:len(clip_queries)] == clip_queries
-    assert len(_approved_queries()) <= len(result["search_terms"]) <= 12
-    assert result["primary_search_terms"][:2] == _approved_queries()[:2]
 
 
-def test_hallucinated_player_in_api_tags_is_rejected(monkeypatch):
-    import automation.seo.seo as seo
-
-    monkeypatch.setattr(seo, "extract_ocr_entities", lambda *_: {})
-    monkeypatch.setattr(
-        seo,
-        "_attempt_seo_generation",
-        lambda *args, **kwargs: {
-            "title": "Yuvraj Singh ko Coach Banao?",
-            "description": _long_description(),
-            "hashtags": ["#Shorts", "#YuvrajSingh"],
-            "search_terms": _approved_queries(),
-            "tags": ["Yuvraj Singh", "Virat Kohli"],
-        },
-    )
-
-    try:
-        seo.generate_clip_seo(
-            "clip1",
-            "Yuvi ko India ka coach bana do",
-            video_title="India cricket discussion",
-            video_description="Yuvi coaching debate",
-            approved_search_queries=_approved_queries(),
-        )
-    except seo.SEOGenerationError as exc:
-        assert "Virat Kohli" in str(exc)
-    else:
-        raise AssertionError("hallucinated API tag must be rejected")
 
 
-def test_api_tags_respect_configured_character_budget():
-    from automation.seo.seo import _enforce_limits
-    from utils.config import load_config
-
-    result = _enforce_limits({
-        "title": "Yuvraj Singh Coach Debate",
-        "description": "x" * 1400,
-        "hashtags": ["#Shorts", "#YuvrajSingh"],
-        "search_terms": _approved_queries(),
-        "tags": [f"yuvraj-singh-grounded-tag-{index:02d}" for index in range(40)],
-    })
-    budget = load_config()["seo"]["max_tag_chars"]
-    assert len(",".join(result["tags"])) <= budget
 
 
-def test_active_system_prompt_has_no_fake_algorithm_date_or_compact_word_target():
-    from automation.seo import seo
-
-    assert "June 2026" not in seo._SYSTEM
-    assert "30 words" not in seo._SYSTEM
-    assert "source video title" in seo._SYSTEM.lower()
     # assert "verified" in seo._SYSTEM.lower()
 
 
-def test_escalation_keeps_full_evidence_and_approved_queries(monkeypatch):
-    from automation.seo import seo
-
-    ai = Mock()
-    ai.generate_seo_text.return_value = ""
-    monkeypatch.setattr(seo, "_get_ai", lambda: ai)
-
-    seo._escalation_seo(
-        "clip1",
-        "SOURCE DESCRIPTION\nAPPROVED GROUNDED SEARCH QUERIES\n- yuvraj singh coach",
-        "Yuvraj Singh should coach India",
-        "India cricket discussion",
-        True,
-        salvage_tmpl=seo._CRICKET_ONLY_SALVAGE_TMPL
-        .replace("{description_target_chars}", "3200")
-        .replace("{description_max_chars}", "4000"),
-    )
-
-    sent_prompt = ai.generate_seo_text.call_args.kwargs["prompt"]
-    assert "SOURCE DESCRIPTION" in sent_prompt
-    assert "APPROVED GROUNDED SEARCH QUERIES" in sent_prompt

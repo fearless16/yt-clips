@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from automation.clip_selection import arbiter, pipeline
+from automation.clip_selection import pipeline
 
 
 def words():
@@ -76,48 +76,14 @@ def candidate(start, score=60, text="India win the cricket match!"):
     return {"start": start, "end": start+10, "text": text, "final_score": score, "agent_scores": {}}
 
 
-def run_arbiter(monkeypatch, candidates, selected, context=None):
-    ai = Mock()
-    ai.generate_json.return_value = json.dumps({"selected": [
-        {"complete_thought": True, **selection} for selection in selected]})
-    monkeypatch.setattr(arbiter, "_get_ai", lambda: ai)
-    context = context if context is not None else {"transcript_segments": []}
-    result = arbiter.llm_arbiter_refine(candidates, context, max_selected=1)
-    return result, ai.generate_json.call_args.args[0], context
 
 
-def test_arbiter_compares_late_candidate_outside_old_top_k(monkeypatch):
-    candidates = [candidate(i*100, 80-i) for i in range(12)]
-    result, _, context = run_arbiter(monkeypatch, candidates,
-        [{"candidate_id": 12, "score": 90, "reason": "strongest payoff"}])
-    assert result[0]["start"] == 1100
-    assert context["editorial_decision"]["not_considered_count"] == 0
 
 
-def test_every_candidate_gets_local_before_after_context(monkeypatch):
-    transcript = [{"start": i*10, "end": i*10+9, "text": f"context-{i}"} for i in range(106)]
-    _, prompt, _ = run_arbiter(monkeypatch, [candidate(1000)], [],
-        {"transcript_segments": transcript})
-    assert "context-99" in prompt
-    assert "context-101" in prompt
-    assert "context-0 " not in prompt
 
 
-def test_truncated_script_cannot_be_selected_as_complete(monkeypatch):
-    result, _, context = run_arbiter(monkeypatch, [candidate(0, text="India " * 1000)],
-        [{"candidate_id": 1, "score": 90, "reason": "looks complete"}])
-    assert result == []
-    assert context["editorial_decision"]["status"] == "REVIEW"
 
 
-def test_final_selection_cannot_repeat_overlapping_moment(monkeypatch):
-    ai = Mock()
-    ai.generate_json.return_value = json.dumps({"selected": [
-        {"candidate_id": 1, "score": 90, "complete_thought": True, "reason": "payoff"},
-        {"candidate_id": 2, "score": 80, "complete_thought": True, "reason": "same payoff"}]})
-    monkeypatch.setattr(arbiter, "_get_ai", lambda: ai)
-    result = arbiter.llm_arbiter_refine([candidate(0), candidate(1)], {}, max_selected=2)
-    assert len(result) == 1
 
 
 @pytest.mark.parametrize("failure", ["extract", "read", "success"])
@@ -183,21 +149,8 @@ def test_actual_word_overlap_is_never_hidden_by_midpoint_cut():
             {"start": 0, "end": 4, "text": "India! win!", "words": evidence}])
 
 
-def test_non_llm_selection_also_deduplicates_overlapping_events():
-    from automation.clip_selection.selector import ClipSelector
-    result = ClipSelector(use_llm_arbiter=False).select([
-        {**candidate(0), "complete_thought": True},
-        {**candidate(1), "complete_thought": True}], {}, max_selected=2)
-    assert len(result) == 1
 
 
-@pytest.mark.parametrize("limit", [0, -1])
-def test_selector_zero_or_negative_release_limit_never_calls_ai(monkeypatch, limit):
-    from automation.clip_selection.selector import ClipSelector
-    ai = Mock(side_effect=AssertionError("AI not needed"))
-    monkeypatch.setattr("automation.clip_selection.selector.llm_arbiter_refine", ai)
-    assert ClipSelector().select([candidate(0), candidate(20)], {}, max_selected=limit) == []
-    ai.assert_not_called()
 
 
 def test_evidence_retains_boundary_identity_and_ai_rejection(tmp_path):
@@ -221,69 +174,9 @@ def test_words_outside_parent_cue_are_not_clamped_into_clipped_speech():
             "start": 2, "end": 5, "text": "India win", "words": words()}])
 
 
-def test_real_discovery_preserves_original_script_and_provenance(tmp_path, monkeypatch):
-    """Exercise normalization -> windows -> evidence -> YAML without external APIs."""
-    import yaml
-    from automation.clip_selection.selector import ClipSelector
-    import automation.editorial_evidence as evidence
-    monkeypatch.setitem(pipeline.cfg["clip_selection"], "editorial", {"enabled": False})
-
-    transcript = tmp_path / "speech.json"
-    original = [{"start": 0, "end": 15, "text": "इंडिया क्रिकेट मैच में छह रन बनाता है।", "words": [
-        {"start": i*1.8, "end": i*1.8+1.5, "word": text, "probability": .99}
-        for i, text in enumerate("इंडिया क्रिकेट मैच में छह रन बनाता है।".split())]}]
-    transcript.write_text(json.dumps(original, ensure_ascii=False), encoding="utf-8")
-    monkeypatch.setattr(pipeline, "_extract_audio_rms", lambda _: [])
-    monkeypatch.setattr(pipeline.TopicSegmenter, "segment", lambda *args: [])
-    monkeypatch.setattr(pipeline, "_load_source_context", lambda _: "India cricket match")
-    monkeypatch.setattr(pipeline, "_load_source_title", lambda _: "India cricket")
-    monkeypatch.setattr("shorts_intelligence.bridge.apply_selection_policy", lambda *args: 0)
-    monkeypatch.setattr(ClipSelector, "score_candidates", lambda self, candidates, context: [
-        {**c, "final_score": 80} for c in candidates])
-    def select_reviewed(self, candidates, *args, **kwargs):
-        from shorts_intelligence.completeness import set_completeness
-        set_completeness(candidates[0], "PASS", reason="retained setup and payoff", method="text_only")
-        candidates[0]["semantic_review"] = "text_only"
-        return candidates[:1]
-    monkeypatch.setattr(ClipSelector, "select", select_reviewed)
-    monkeypatch.setattr(evidence, "source_identity", lambda _: {"duration": 15})
-    monkeypatch.setitem(pipeline.cfg, "release_review", {"required": True})
-    output = tmp_path / "highlights.yaml"
-    result = pipeline.detect_highlights(str(transcript), "source.mp4", str(output), match_key="test")
-    assert result
-    payload = yaml.safe_load(output.read_text(encoding="utf-8"))["clip1"]
-    assert payload["source_cue_ids"] == [0]
-    assert payload["boundary_method"] == "source_words"
-    assert payload["complete_thought"] is True
-    assert payload["completeness"]["method"] == "text_only"
-    # Original text must remain available to compare against selection-normalized script.
-    stored = json.loads(output.with_suffix(".editorial.json").read_text(encoding="utf-8"))
-    assert stored["candidates"][0]["source_script"] == original[0]["text"]
-    assert json.loads(transcript.read_text(encoding="utf-8")) == original
 
 
-@pytest.mark.parametrize("selection", [
-    {"candidate_id": 1, "score": 80},
-    {"candidate_id": 1, "score": 80, "reason": {"invented": "object"}},
-    {"candidate_id": 1, "score": True, "reason": "not a numeric score"},
-])
-def test_unusable_selection_cannot_become_text_reviewed(monkeypatch, selection):
-    result, _, context = run_arbiter(monkeypatch, [candidate(0)], [selection])
-    assert result == []
-    assert context["editorial_decision"]["status"] == "REVIEW"
 
 
-def test_omitted_alternative_is_disclosed_not_claimed_reviewed(monkeypatch):
-    _, _, context = run_arbiter(monkeypatch, [candidate(0), candidate(30)],
-        [{"candidate_id": 1, "score": 80, "reason": "complete payoff"}])
-    assert context["editorial_decision"]["unexplained_candidate_ids"] == [2]
-    assert context["editorial_decision"]["status"] == "REVIEW"
 
 
-def test_comparison_has_explicit_cost_bound_and_discloses_omissions(monkeypatch):
-    proposals = [candidate(i*20) for i in range(100)]
-    _, _, context = run_arbiter(monkeypatch, proposals, [])
-    decision = context["editorial_decision"]
-    assert len(decision["considered_windows"]) <= 60
-    assert decision["not_considered_count"] == 40
-    assert decision["status"] == "REVIEW"

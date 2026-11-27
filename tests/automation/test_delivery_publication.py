@@ -63,16 +63,18 @@ def future_slot(days=2):
 
 
 @pytest.mark.parametrize("privacy", ["public", "unlisted", "scheduled"])
-def test_incomplete_cover_cannot_publish_or_schedule(publication, privacy):
+def test_failed_cover_is_recorded_and_never_blocks_publication(publication, privacy):
+    # Cancer register C8: staging stays private-first; the cover is best-effort.
     d, remote = publication
     d[3].thumbnails().set.side_effect = RuntimeError("fixture thumbnail rejection")
-    with pytest.raises(upload.DeliveryIncompleteError):
-        upload_as(publication, privacy, future_slot() if privacy == "scheduled" else None)
+    assert upload_as(publication, privacy, future_slot() if privacy == "scheduled" else None) == VIDEO_ID
     inserted = d[3].videos().insert.call_args.kwargs["body"]["status"]
     assert inserted["privacyStatus"] == "private"
     assert "publishAt" not in inserted
-    d[3].videos().update.assert_not_called()
-    assert remote["status"]["privacyStatus"] == "private"
+    proof = receipt(d)
+    assert proof["status"] == "COMPLETE"
+    assert proof["thumbnail"]["status"] == "FAILED"
+    assert remote["status"]["privacyStatus"] == ("private" if privacy == "scheduled" else privacy)
 
 
 @pytest.mark.parametrize("privacy", ["public", "unlisted"])
@@ -114,7 +116,7 @@ def test_changed_intent_is_rejected_before_auth_or_mutation(publication, monkeyp
     d, _ = publication
     slot = future_slot()
     if pending:
-        d[3].thumbnails().set.side_effect = RuntimeError("fixture pending")
+        monkeypatch.setattr(upload, "finish_thumbnail", Mock(side_effect=RuntimeError("fixture processing pending")))
         with pytest.raises(upload.DeliveryIncompleteError):
             upload_as(publication, "scheduled", slot)
     else:

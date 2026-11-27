@@ -195,11 +195,35 @@ def generate_schedule(
     return slots
 
 
+def occupied_publish_times(root) -> List[datetime]:
+    """Future publish times already reserved by delivery receipts under root.
+
+    Slot assignment must respect them, or two runs on one day stack Shorts
+    minutes apart (cancer register C7).
+    """
+    import json
+    from pathlib import Path
+    times: List[datetime] = []
+    now = _now_ist()
+    for receipt in Path(root).rglob("*_delivery.json"):
+        try:
+            intent = json.loads(receipt.read_text(encoding="utf-8")).get("intent") or {}
+            when = intent.get("publish_at")
+            if when:
+                parsed = _as_ist(datetime.fromisoformat(str(when).replace("Z", "+00:00")))
+                if parsed > now:
+                    times.append(parsed)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return sorted(times)
+
+
 def assign_clips_to_slots(
     clips: List[str],
     interval_hours: int = 1,
     clip_scores: Optional[Dict[str, float]] = None,
     schedule_config: Optional[Dict] = None,
+    occupied: Optional[List[datetime]] = None,
 ) -> List[Tuple[str, datetime]]:
     """Map clips → jittered slots, putting the best clip(s) in prime time.
 
@@ -212,8 +236,11 @@ def assign_clips_to_slots(
         List of (clip_identifier, scheduled_datetime) sorted chronologically.
     """
     schedule_config = schedule_config or {}
+    occupied = [_as_ist(t) for t in (occupied or [])]
+    spacing = timedelta(hours=interval_hours)
+    # Over-generate, then drop slots that collide with already-reserved times.
     slots = generate_schedule(
-        len(clips),
+        len(clips) + 2 * len(occupied),
         interval_hours,
         day_start_hour=int(schedule_config.get("day_start_hour", DAY_START_HOUR)),
         day_end_hour=int(schedule_config.get("day_end_hour", DAY_END_HOUR)),
@@ -222,6 +249,10 @@ def assign_clips_to_slots(
             schedule_config.get("spread_across_window", True)
         ),
     )
+
+    if occupied:
+        slots = [slot for slot in slots
+                 if all(abs(slot - taken) >= spacing for taken in occupied)][:len(clips)]
 
     # Rank slots best → worst
     ranked: List[Tuple[Tuple[int, int], int, datetime]] = []

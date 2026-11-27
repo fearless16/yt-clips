@@ -28,26 +28,46 @@ def _fingerprint(video_path):
 
 
 def _anchor_key(text):
-    return "".join(c for c in unicodedata.normalize("NFKC", str(text)).casefold()
-                   if c.isalnum() or unicodedata.category(c).startswith("M"))
+    """Script-neutral key: Devanagari is romanised so caption Hinglish and
+    Whisper Devanagari compare on the same alphabet."""
+    from utils.devanagari import to_roman
+    text = to_roman(unicodedata.normalize("NFKC", str(text)))
+    return "".join(c for c in text.casefold() if c.isalnum())
+
+
+# Below this similarity a phrase is not the quoted speech; above it, a
+# different transliteration of the same words (e.g. "bhai"/"bhaai").
+ANCHOR_MIN_SIMILARITY = 0.8
+ANCHOR_TIE_MARGIN = 0.03
 
 
 def _anchor_span(words, phrase, *, closing=False):
+    """Best unique fuzzy match of a quoted phrase against word-timed ASR."""
+    from difflib import SequenceMatcher
     key = _anchor_key(phrase)
     if not key:
         raise ValueError("Missing source phrase anchor")
-    matches = []
+    keys = [_anchor_key(w.get("word", "")) for w in words]
+    scored = []
     for i in range(len(words)):
+        if not keys[i]:
+            continue
         joined = ""
         for j in range(i, len(words)):
-            joined += _anchor_key(words[j].get("word", ""))
-            if joined == key:
-                matches.append((i, j))
-            if len(joined) >= len(key):
+            joined += keys[j]
+            if len(joined) >= len(key) * 0.6:
+                ratio = 1.0 if joined == key else SequenceMatcher(None, joined, key, autojunk=False).ratio()
+                scored.append((ratio, i, j))
+            if len(joined) >= len(key) * 1.4:
                 break
-    if len(matches) != 1:
+    if not scored:
         raise ValueError("Missing or ambiguous source phrase anchor: " + str(phrase))
-    return matches[0][1 if closing else 0]
+    best = max(scored)
+    rivals = [s for s in scored if s[0] >= best[0] - ANCHOR_TIE_MARGIN
+              and (s[2] < best[1] or s[1] > best[2])]  # non-overlapping competitor
+    if best[0] < ANCHOR_MIN_SIMILARITY or rivals:
+        raise ValueError("Missing or ambiguous source phrase anchor: " + str(phrase))
+    return best[2] if closing else best[1]
 
 
 def align_candidate(video_path: str, candidate: dict, config: dict, cache_dir, *,
@@ -183,6 +203,7 @@ def words_in_range(segments: list[dict], start: float, end: float) -> list[dict]
     if not all(math.isfinite(t) for t in (start, end)) or start < 0 or end <= start:
         raise ValueError("Invalid speech source range")
     words = []
+    wordless_overlap = False
     for segment in segments:
         if not isinstance(segment, dict):
             raise ValueError("Invalid speech segment")
@@ -194,8 +215,14 @@ def words_in_range(segments: list[dict], start: float, end: float) -> list[dict]
                 raise ValueError("Missing word timestamps") from None
             if not all(math.isfinite(t) for t in (segment_start, segment_end)) or segment_end <= segment_start:
                 raise ValueError("Invalid segment timestamp")
+            # Whisper emits wordless segments over crowd noise or music. They
+            # hold no speech to cut through, so they are not a defect unless the
+            # range has no word timing at all (cue-only input, not alignment).
             if segment_end > start and segment_start < end:
-                raise ValueError("Missing word timestamps inside selected range")
+                if any(c.isalnum() for c in str(segment.get("text", ""))):
+                    # Text without word timing is untimed speech: captions would drop it.
+                    raise ValueError("Missing word timestamps inside selected range")
+                wordless_overlap = True
             continue
         if not isinstance(raw_words, list):
             raise ValueError("Invalid word timestamps")
@@ -218,6 +245,8 @@ def words_in_range(segments: list[dict], start: float, end: float) -> list[dict]
             if word_start < start - 0.02 or word_end > end + 0.02:
                 raise ValueError("Cut straddles a spoken word; adjust source boundary")
             words.append({**word, "start": max(start, word_start), "end": min(end, word_end)})
+    if not words and wordless_overlap:
+        raise ValueError("Missing word timestamps inside selected range")
     words.sort(key=lambda word: (word["start"], word["end"]))
     for previous, current in zip(words, words[1:]):
         if current["start"] < previous["end"] - 0.02:
@@ -226,7 +255,10 @@ def words_in_range(segments: list[dict], start: float, end: float) -> list[dict]
 
 
 def alignment_issues(segments: list[dict], start: float, end: float) -> list[str]:
-    """Conservative pilot checks; a flagged gap is uncertainty, not proven silence."""
+    """Hard cut-integrity defects only: invalid/straddled/overlapping words,
+    no speech, or dead air at the hook/payoff. Pauses inside the clip and ASR
+    confidence are review flags (alignment_flags), never cut-killers: a wicket
+    roar or stunned silence is often the best beat of the clip."""
     try:
         words = words_in_range(segments, start, end)
     except (TypeError, ValueError) as exc:
@@ -234,21 +266,58 @@ def alignment_issues(segments: list[dict], start: float, end: float) -> list[str
     if not words:
         return ["No word-timed speech"]
     issues = []
-    if words[0]["start"] - start > 1.5:
-        issues.append("Unverified opening speech gap exceeds 1.5s")
-    if end - words[-1]["end"] > 1.5:
-        issues.append("Unverified ending speech gap exceeds 1.5s")
-    if any(current["start"] - previous["end"] > 2 for previous, current in zip(words, words[1:])):
-        issues.append("Unverified internal speech gap exceeds 2s")
-    try:
-        probabilities = [float(word["probability"]) for word in words]
-    except (KeyError, TypeError, ValueError):
-        return issues + ["Missing or invalid ASR confidence"]
-    if not all(math.isfinite(p) and 0 <= p <= 1 for p in probabilities):
-        issues.append("Missing or invalid ASR confidence")
-    elif sum(probabilities) / len(probabilities) < 0.75 or sum(p < 0.5 for p in probabilities) / len(probabilities) > 0.15:
-        issues.append("Low-confidence ASR requires correction/alignment review")
+    if words[0]["start"] - start > EDGE_GAP_SECONDS:
+        issues.append(f"Dead air at opening exceeds {EDGE_GAP_SECONDS}s")
+    if end - words[-1]["end"] > EDGE_GAP_SECONDS:
+        issues.append(f"Dead air at ending exceeds {EDGE_GAP_SECONDS}s")
+    probabilities = _probabilities(words)
+    if probabilities and sum(probabilities) / len(probabilities) < MIN_MEAN_PROBABILITY:
+        issues.append(f"ASR mean confidence below {MIN_MEAN_PROBABILITY}: speech unintelligible to ASR")
     return issues
+
+
+# Edge dead air ruins the hook; interior pauses do not. The confidence floor
+# only rejects ASR output that is effectively noise. Both are unmeasured on
+# real Hinglish sources (cancer register C2): measure before tightening.
+EDGE_GAP_SECONDS = 1.5
+MIN_MEAN_PROBABILITY = 0.4
+FLAG_GAP_SECONDS = 2.0
+FLAG_MEAN_PROBABILITY = 0.75
+
+
+def _probabilities(words):
+    values = []
+    for word in words:
+        try:
+            p = float(word["probability"])
+        except (KeyError, TypeError, ValueError):
+            return []
+        if not (math.isfinite(p) and 0 <= p <= 1):
+            return []
+        values.append(p)
+    return values
+
+
+def alignment_flags(segments: list[dict], start: float, end: float) -> list[str]:
+    """Advisory caption/pacing notes shown to the reviewer. Never a hold."""
+    try:
+        words = words_in_range(segments, start, end)
+    except (TypeError, ValueError):
+        return []
+    flags = []
+    gaps = [round(c["start"] - p["end"], 2) for p, c in zip(words, words[1:])
+            if c["start"] - p["end"] > FLAG_GAP_SECONDS]
+    if gaps:
+        flags.append(f"{len(gaps)} pause(s) over {FLAG_GAP_SECONDS}s (longest {max(gaps)}s): reaction beat or trim")
+    probabilities = _probabilities(words)
+    if not probabilities:
+        flags.append("ASR confidence unavailable: check caption words")
+    else:
+        mean = sum(probabilities) / len(probabilities)
+        low = [w["word"].strip() for w in words if float(w["probability"]) < 0.5]
+        if mean < FLAG_MEAN_PROBABILITY or len(low) / len(words) > 0.15:
+            flags.append(f"Low ASR confidence (mean {mean:.2f}); check captions: {' '.join(low[:12])}")
+    return flags
 
 
 def transcribe_range(video_path: str, start: float, end: float, *, model_name="medium",

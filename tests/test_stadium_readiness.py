@@ -227,7 +227,6 @@ def test_coverage_hold_preserves_sibling_and_reviewed_reserve_recovery(tmp_path,
     monkeypatch.setattr(export, "_get_best_encoder", lambda: "libx264")
     monkeypatch.setattr(export, "_caption_options", lambda *_: ({}, False, False))
     monkeypatch.setattr(export, "_validate_av_sync", lambda *_: True)
-    monkeypatch.setattr(export, "_is_exportable_cricket_highlight", lambda *_: True)
     highlights = {
         "too_long": {"start": 0, "end": 10, "text": "India cricket"},
         "sibling": {"start": 20, "end": 22, "text": "India cricket"},

@@ -31,11 +31,16 @@ def test_cue_only_transcript_is_not_word_alignment():
         word_timed_cues([{"start": 10, "end": 12, "text": "Kohli did not agree"}], 10, 12)
 
 
-def test_asr_gaps_and_low_confidence_are_held_not_silently_accepted():
-    issues = alignment_issues([{"words": [{"start": 110, "end": 111, "probability": 0.4}]}], 80, 124)
+def test_edge_dead_air_is_held_and_low_confidence_is_flagged():
+    from automation.speech_alignment import alignment_flags
+    segments = [{"words": [{"start": 110, "end": 111, "word": "x", "probability": 0.45}]}]
+    issues = alignment_issues(segments, 80, 124)
     assert any("opening" in issue for issue in issues)
     assert any("ending" in issue for issue in issues)
-    assert any("Low-confidence" in issue for issue in issues)
+    assert any("Low ASR confidence" in flag for flag in alignment_flags(segments, 110, 111))
+    # Effectively-noise ASR is still a hard hold.
+    assert any("confidence" in issue for issue in alignment_issues(
+        [{"words": [{"start": 10, "end": 11, "word": "x", "probability": 0.1}]}], 10, 11))
 
 
 def test_edit_map_preserves_fractional_times_and_speed():

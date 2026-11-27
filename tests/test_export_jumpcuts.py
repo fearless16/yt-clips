@@ -21,7 +21,6 @@ def test_export_keeps_rendered_timeline_and_precise_boundaries(monkeypatch, tmp_
     monkeypatch.setattr(export, "_get_best_encoder", lambda: "libx264")
     monkeypatch.setattr(export, "analyze_clip", lambda *_args, **_kwargs: {
         "export_strategy": {"should_drop": False}, "layout": {"layout_type": "solo"}})
-    monkeypatch.setattr(export, "_is_exportable_cricket_highlight", lambda *_: True)
     monkeypatch.setitem(export.cfg, "paths", {**export.cfg["paths"], "shorts": str(tmp_path / "shorts")})
     monkeypatch.setitem(export.cfg["export"], "captions", {"enabled": False, "require_word_timing": False})
     monkeypatch.setitem(export.cfg["export"], "super_resolution", False)

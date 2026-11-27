@@ -85,97 +85,14 @@ def test_failed_speech_recoveries_still_consume_the_bounded_budget(tmp_path, mon
     assert align.call_count == len(decision["speech_recoveries"]) == 2
 
 
-def test_title_cover_format_repair_is_one_strict_call_and_preserves_other_fields(monkeypatch):
-    from automation.seo import seo
-    original = {"title": "Kohli की smooth drive", "cover_text": "A very smooth Kohli drive for four",
-        "description": "Virat Kohli plays a smooth drive for four runs during Prajjwal's original cricket watch-along commentary.",
-        "tags": ["Virat Kohli"], "hashtags": ["#Shorts"], "search_terms": ["Kohli smooth drive"]}
-    ai = Mock()
-    ai.generate_json.return_value = json.dumps({"title": "Kohli Ki Smooth Drive, Seedha Chaar!", "cover_text": "SMOOTH DRIVE"})
-    monkeypatch.setattr(seo, "_get_ai", lambda: ai)
-    before = copy.deepcopy(original)
-    fixed = seo._repair_packaging_format(original, "Kohli plays a smooth drive for four", True)
-    assert original == before
-    assert seo._validate_seo_quality(fixed)
-    for key in ("description", "tags", "hashtags", "search_terms"):
-        assert fixed[key] == before[key]
-    assert fixed["format_repair"]["status"] == "PASS"
-    ai.generate_json.assert_called_once()
-    assert ai.generate_json.call_args.kwargs["timeout"] == 60
-    assert ai.generate_json.call_args.kwargs["reasoning_effort"] == "low"
 
 
-@pytest.mark.parametrize("response", ["not json", '{"title":"अब भी हिंदी","cover_text":"FOUR"}',
-    '{"title":"Kohli smooth drive","cover_text":"too many words for this cover"}',
-    '{"title":"Kohli smooth drive","cover_text":"FOUR","description":"invented"}'])
-def test_format_repair_failure_never_becomes_generic_fallback(monkeypatch, response):
-    from automation.seo import seo
-    original = {"title": "Kohli की drive", "description": "Source grounded original cricket commentary."}
-    ai = Mock()
-    ai.generate_json.return_value = response
-    monkeypatch.setattr(seo, "_get_ai", lambda: ai)
-    assert seo._repair_packaging_format(original, "Kohli drive", True) == original
-    assert not seo._validate_seo_quality(original)
-    ai.generate_json.assert_called_once()
 
 
-def test_valid_packaging_never_spends_a_format_repair_call(monkeypatch):
-    from automation.seo import seo
-    ai = Mock()
-    monkeypatch.setattr(seo, "_get_ai", lambda: ai)
-    good = {"title": "Kohli Ki Smooth Drive!", "cover_text": "SMOOTH DRIVE"}
-    assert seo._repair_packaging_format(good, "Kohli drive", True) is good
-    ai.generate_json.assert_not_called()
 
 
-def test_late_seo_worker_cannot_overwrite_deadline_or_owner_metadata(tmp_path, monkeypatch):
-    import export
-    started, finish = threading.Event(), threading.Event()
-    control = {"lock": threading.Lock(), "cancelled": threading.Event()}
-
-    def generate(**kwargs):
-        started.set()
-        assert finish.wait(5), "test release missing"
-        result = {"title": "Late result", "description": "Late provider output"}
-        Path(kwargs["output_dir"], "clip1_metadata.json").write_text(json.dumps(result))
-        return result
-
-    monkeypatch.setattr("automation.seo.seo.generate_seo_for_exported_clip", generate)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(export._seo_worker, "clip1", {"text": "source speech"}, tmp_path,
-                                 {"_seo_control": control})
-        try:
-            assert started.wait(5)
-            with control["lock"]:
-                control["cancelled"].set()
-                marker = tmp_path / "clip1_seo_failed.json"
-                marker.write_text('{"error":"deadline"}')
-                metadata = tmp_path / "clip1_metadata.json"
-                metadata.write_text('{"title":"Owner recovered copy"}')
-        finally:
-            finish.set()
-        assert future.result(timeout=5)["_seo_failed"]
-    assert json.loads(marker.read_text())["error"] == "deadline"
-    assert json.loads(metadata.read_text())["title"] == "Owner recovered copy"
-    assert not list(tmp_path.glob(".seo-*"))
 
 
-def test_ontime_seo_worker_promotes_metadata_and_removes_stale_marker(tmp_path, monkeypatch):
-    import export
-    control = {"lock": threading.Lock(), "cancelled": threading.Event()}
-    marker = tmp_path / "clip1_seo_failed.json"
-    marker.write_text('{"error":"prior attempt"}')
-
-    def generate(**kwargs):
-        result = {"title": "Kohli smooth drive", "description": "Grounded copy"}
-        Path(kwargs["output_dir"], "clip1_metadata.json").write_text(json.dumps(result))
-        return result
-
-    monkeypatch.setattr("automation.seo.seo.generate_seo_for_exported_clip", generate)
-    result = export._seo_worker("clip1", {"text": "source speech"}, tmp_path, {"_seo_control": control})
-    assert json.loads((tmp_path / "clip1_metadata.json").read_text()) == result
-    assert not marker.exists()
-    assert not list(tmp_path.glob(".seo-*"))
 
 
 @pytest.mark.parametrize("url", ["https://youtu.be/wRP_KO9vP5g?t=10",

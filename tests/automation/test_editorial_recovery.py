@@ -205,7 +205,6 @@ def test_successful_exports_survive_a_sibling_failure(tmp_path, monkeypatch):
         "captions": {"enabled": False, "require_word_timing": False}, "max_workers": 1})
     monkeypatch.setattr(export, "analyze_clip", lambda *a, **k: {"export_strategy": {}})
     monkeypatch.setattr(export, "_get_best_encoder", lambda: "libx264")
-    monkeypatch.setattr(export, "_is_exportable_cricket_highlight", lambda *a: True)
     monkeypatch.setattr(export, "_validate_av_sync", lambda *a: True)
 
     def render(source, start, end, output, *args, **kwargs):
@@ -261,7 +260,6 @@ def test_reviewed_reserve_fills_failed_export_without_rerendering_success(tmp_pa
         "composition": "portrait-caption-v1", "captions": {"enabled": False, "require_word_timing": False}})
     monkeypatch.setattr(export, "analyze_clip", lambda *a, **k: {"export_strategy": {}})
     monkeypatch.setattr(export, "_get_best_encoder", lambda: "libx264")
-    monkeypatch.setattr(export, "_is_exportable_cricket_highlight", lambda *a: True)
     monkeypatch.setattr(export, "_validate_av_sync", lambda *a: True)
     calls = []
 

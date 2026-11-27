@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 
 from automation.memory.event_models import EventType, ClipEvent
 from automation.memory.decision_store import DecisionStore
-from automation.scoring.scoring import ClipScorer
 
 
 class TestOrchestratorInit:
@@ -20,9 +19,8 @@ class TestOrchestratorInit:
 
     def test_initializes_with_custom_components(self):
         store = DecisionStore()
-        scorer = ClipScorer()
-        from automation.scoring.ranker import ClipRanker
-        ranker = ClipRanker(scorer)
+        scorer = MagicMock()
+        ranker = MagicMock()
         from automation.orchestrator import Orchestrator
         orch = Orchestrator(
             decision_store=store, clip_scorer=scorer, clip_ranker=ranker,
@@ -106,7 +104,7 @@ class TestOrchestratorEmitEvent:
 
 class TestOrchestratorRunStage:
     def test_score_stage_uses_clip_scorer(self):
-        scorer = MagicMock(spec=ClipScorer)
+        scorer = MagicMock()
         scorer.score.return_value = {
             "clip_id": "clip-abc", "score": 0.75,
             "features": {}, "breakdown": {},

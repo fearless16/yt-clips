@@ -30,9 +30,12 @@ def test_cricket_discussion_and_comedy_reach_discovery(text):
     "I went shopping and watched a movie " * 20 + "Hardik Pandya",
     "I went shopping and watched a movie " * 20 + "Hardik Pandya Punjab Kings",
 ])
-def test_unrelated_chatter_is_not_rescued_by_discovery(text):
-    assert pipeline._build_livestream_windows([
-        {"start": 0, "end": 18, "text": to_roman(text)}], 10, 38) == []
+def test_unrelated_chatter_is_never_labelled_cricket(text):
+    """Chatter may still be a window (owner policy: banter qualifies), but a lone
+    name in a long tangent must not earn the cricket ranking signal."""
+    [window] = pipeline._build_livestream_windows([
+        {"start": 0, "end": 18, "text": to_roman(text)}], 10, 38)
+    assert window["cricket"] is False
 
 
 def test_phrase_aliases_are_script_consistent_and_do_not_guess_caption_names():

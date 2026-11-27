@@ -23,7 +23,7 @@ from utils.config import load_config
 from utils.logger import get_logger
 from automation.youtube_delivery import (
     DeliveryIncompleteError, artifact_hashes, delivery_lock, finish_thumbnail,
-    load_receipt, save_receipt, thumbnail_path, validate_thumbnail, RECEIPT_VERSION,
+    load_receipt, receipt_path, save_receipt, thumbnail_path, validate_thumbnail, RECEIPT_VERSION,
     delivery_intent, finish_publication, read_publication_status,
     require_private_staging, require_future_schedule, wait_for_processing,
 )
@@ -314,6 +314,40 @@ def get_authenticated_service(token_index=0):
     return build("youtube", "v3", http=auth_http)
 
 
+class UploadRejected(RuntimeError):
+    """Definitive refusal, carrying the real reason (never a bare None).
+
+    stop_batch=True means every further upload this run will fail the same
+    way (quota, upload limit, auth), so callers must stop calling the API.
+    """
+
+    def __init__(self, reason: str, *, stop_batch: bool = False):
+        super().__init__(reason)
+        self.stop_batch = stop_batch
+
+
+_STOP_BATCH_REASONS = frozenset({
+    "quotaExceeded", "dailyLimitExceeded", "uploadLimitExceeded", "rateLimitExceeded",
+    "userRateLimitExceeded", "forbidden", "insufficientPermissions", "youtubeSignupRequired",
+    "authError", "unauthorized",
+})
+
+
+def _http_error(exc) -> tuple[Optional[int], str]:
+    """(HTTP status, API reason) for googleapiclient HttpError, else (None, "")."""
+    resp = getattr(exc, "resp", None)
+    status = getattr(resp, "status", None)
+    if status is None:
+        return None, ""
+    reason = ""
+    try:
+        content = exc.content.decode("utf-8") if isinstance(exc.content, bytes) else str(exc.content)
+        reason = json.loads(content)["error"]["errors"][0]["reason"]
+    except (AttributeError, ValueError, KeyError, IndexError, TypeError):
+        reason = str(getattr(exc, "reason", "") or "")
+    return int(status), reason
+
+
 def upload_video(
     video_path: str,
     metadata_path: str,
@@ -326,8 +360,7 @@ def upload_video(
     incomplete cover raises DeliveryIncompleteError carrying its video_id.
     """
     if not Path(video_path).is_file():
-        log.error("Video file not found: %s", video_path)
-        return None
+        raise UploadRejected(f"Video file not found: {video_path}")
     with delivery_lock(Path(video_path)):
         return _upload_video(video_path, metadata_path, privacy, publish_at)
 
@@ -382,37 +415,35 @@ def _upload_video(video_path, metadata_path, privacy, publish_at):
     # ─── Pre-flight Checks ───────────────────────────────────────────────────
     v_path = Path(video_path)
     m_path = Path(metadata_path)
-    if not v_path.exists():
-        log.error(f"Video file not found: {video_path}")
-        return None
     if not m_path.exists():
-        log.error(f"Metadata file not found: {metadata_path}")
-        return None
+        raise UploadRejected(f"Metadata file not found: {metadata_path}")
     cover = thumbnail_path(v_path) if cfg.get("thumbnail", {}).get("enabled", True) else None
-    try:
-        if cover is not None:
+    if cover is not None:
+        try:
             validate_thumbnail(cover)
+        except (OSError, ValueError) as exc:
+            # The cover is best-effort; it never blocks the video (C8).
+            log.warning("Custom cover unusable for %s, uploading without it: %s", v_path.name, exc)
+            cover = None
+    try:
         with m_path.open("r", encoding="utf-8") as handle:
             meta = json.load(handle)
         if not isinstance(meta, dict):
             raise ValueError("Metadata must be a JSON object")
         title, clean_desc, all_tags = _prepare_upload_metadata(meta, v_path)
     except (OSError, ValueError) as exc:
-        log.error("Delivery preflight failed before authentication: %s", exc)
-        return None
+        raise UploadRejected(f"Delivery preflight failed: {exc}") from exc
     if cfg.get("release_review", {}).get("required", False):
         from automation.release_review import require_ready
         # Approval binds the canonical metadata file, not an arbitrary override.
         if m_path.resolve() != v_path.with_name(f"{v_path.stem}_metadata.json").resolve():
-            log.error("Release held: metadata path differs from reviewed package")
-            return None
+            raise UploadRejected("Release held: metadata path differs from reviewed package")
         try:
             require_ready(v_path)
         except ValueError as exc:
-            log.error("%s", exc)
-            return None
+            raise UploadRejected(str(exc)) from exc
     if not _validate_shorts_video(v_path):
-        return None
+        raise UploadRejected("Not Shorts-eligible (orientation/duration/probe); see log")
 
     artifacts = artifact_hashes(v_path, m_path, cover)
     channel_id = cfg.get("youtube", {}).get("channel_id")
@@ -431,15 +462,14 @@ def _upload_video(video_path, metadata_path, privacy, publish_at):
     except (ValueError, TypeError) as exc:
         if receipt is not None:
             raise DeliveryIncompleteError(receipt["video_id"], str(exc)) from exc
-        log.error("Delivery intent preflight failed: %s", exc)
-        return None
+        raise UploadRejected(f"Delivery intent preflight failed: {exc}") from exc
     if receipt is not None and receipt.get("status") == "COMPLETE":
         return receipt["video_id"]
 
     youtube = get_authenticated_service()
     if not youtube:
-        log.error("[EXIT] upload_video failed: no YouTube service (check yt_channel_token.json)")
-        return None
+        raise UploadRejected("No YouTube service: token missing/invalid (yt_channel_token.json)",
+                             stop_batch=True)
     if receipt is not None:
         log.info("Resuming %s for existing video %s; no video insert", receipt["status"], receipt["video_id"])
         return _complete_delivery(youtube, v_path, m_path, cover, artifacts, receipt)
@@ -500,8 +530,20 @@ def _upload_video(video_path, metadata_path, privacy, publish_at):
     except DeliveryIncompleteError:
         raise
     except Exception as e:
-        log.error("❌ Error uploading %s: %s", video_path, e)
-        return None
+        status, reason = _http_error(e)
+        detail = f"{type(e).__name__}: {str(e) or repr(e)}"
+        if status is not None and 400 <= status < 500 and receipt and receipt.get("video_id") is None:
+            # A 4xx on insert is a definitive refusal: no video exists, so the
+            # pre-insert receipt must not hold this clip forever.
+            try:
+                receipt_path(v_path).unlink(missing_ok=True)
+            except OSError as unlink_error:
+                log.error("Could not clear refused-insert receipt: %s", unlink_error)
+            stop = reason in _STOP_BATCH_REASONS or status in (401, 403, 429)
+            raise UploadRejected(f"YouTube refused insert ({status} {reason}): {detail}",
+                                 stop_batch=stop) from e
+        # Timeouts/5xx are ambiguous: keep VIDEO_UPLOAD_UNKNOWN, never re-insert blindly.
+        raise UploadRejected(f"Insert outcome unknown, receipt kept for reconciliation: {detail}") from e
     finally:
         media_body.stream().close()
 

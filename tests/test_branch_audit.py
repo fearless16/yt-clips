@@ -68,7 +68,8 @@ def test_upload_never_drops_or_rewrites_gameplay_credit_before_auth(tmp_path, mo
     auth = Mock(return_value=None)
     monkeypatch.setattr(upload, "get_authenticated_service", auth)
     before = metadata.read_bytes()
-    assert upload.upload_video(str(video), str(metadata), privacy="private") is None
+    with pytest.raises(upload.UploadRejected, match="attribution"):
+        upload.upload_video(str(video), str(metadata), privacy="private")
     auth.assert_not_called()
     assert metadata.read_bytes() == before
 
@@ -92,7 +93,6 @@ def _mock_export(tmp_path, monkeypatch):
     monkeypatch.setattr(export, "_get_best_encoder", lambda: "libx264")
     monkeypatch.setattr(export, "_caption_options", lambda *_: ({}, False, False))
     monkeypatch.setattr(export, "_validate_av_sync", lambda *_: True)
-    monkeypatch.setattr(export, "_is_exportable_cricket_highlight", lambda *_: True)
     rendered = []
 
     def render(source, start, end, output, *args, **kwargs):
