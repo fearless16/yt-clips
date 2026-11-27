@@ -98,6 +98,19 @@ Review: no code changed. Rehaul on 2026-11-27: see **Fix log** at the end. Statu
 | Feed-distribution signals (swipe-away, APV) | UNVERIFIED (no official doc) | — |
 | Safe zones on 1080×1920 | ANECDOTAL (no official spec) | third-party tools |
 
+## C-UPLOAD-READBACK (FIXED 2026-11-27, found in job ff59721c)
+`automation/youtube_delivery.py` `finish_publication` read the status once, immediately after
+`videos.update`, and raised "Publication readback does not yet match the authorized intent".
+On the real run Iv07M7UbJwg, both videos (SuVwNwAbfko, HSpXuZw81NQ) were actually processed and private,
+with the correct publishAt and thumbnails VERIFIED. Minutes later the readback matched. This was
+eventual consistency, not a real failure, but it reported 0 uploaded and left the receipts in PUBLICATION_UNKNOWN.
+Both receipts were reconciled to COMPLETE by hand from the live readback.
+Fix (branch fix/upload-readback-poll): readback now polls `PUBLICATION_READBACK_ATTEMPTS=5` times,
+`PUBLICATION_READBACK_DELAY_S=3.0` apart, before it raises. The update is still sent exactly once, and
+the error now names the observed privacy and publishAt. These are not gates (A1): the same predicate
+is retried, not added. The 3 s delay is a guess (A7) based on one observation that "minutes later it
+matched"; widen it if the raise recurs. Regression: tests/automation/test_publication_readback_lag.py.
+
 ## Open questions / traps (ask the user, do not chase)
 1. Is the owner willing to review clips manually at all? If not, C1 must become an auto tier and not just a faster form.
 2. Is the stock-gameplay composition a deliberate brand choice, or an experiment? (C6)
