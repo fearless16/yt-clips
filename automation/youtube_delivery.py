@@ -237,6 +237,10 @@ def _one_video(response, video_id):
     return items[0]
 
 
+PUBLICATION_READBACK_ATTEMPTS = 5
+PUBLICATION_READBACK_DELAY_S = 3.0
+
+
 def read_publication_status(youtube, video_id, channel_id):
     item = _one_video(youtube.videos().list(part="status,snippet", id=video_id).execute(), video_id)
     if channel_id and item.get("snippet", {}).get("channelId") != channel_id:
@@ -285,10 +289,17 @@ def finish_publication(youtube, video, receipt):
     response = youtube.videos().update(part="status", body={"id": video_id, "status": status}).execute()
     if not isinstance(response, dict) or response.get("id") != video_id:
         raise ValueError("Publication update returned a missing/mismatched video ID; reconcile by readback")
-    observed = read_publication_status(youtube, video_id, receipt["channel_id"])
-    if not publication_matches(observed, intent, allow_elapsed=True):
-        raise ValueError("Publication readback does not yet match the authorized intent")
-    return {"status": "VERIFIED", "readback": observed}
+    # videos.list is eventually consistent: an immediate readback after a
+    # successful update can still show the pre-update status (job ff59721c).
+    for attempt in range(PUBLICATION_READBACK_ATTEMPTS):
+        if attempt:
+            time.sleep(PUBLICATION_READBACK_DELAY_S)
+        observed = read_publication_status(youtube, video_id, receipt["channel_id"])
+        if publication_matches(observed, intent, allow_elapsed=True):
+            return {"status": "VERIFIED", "readback": observed}
+    raise ValueError("Publication readback does not yet match the authorized intent "
+                     f"after {PUBLICATION_READBACK_ATTEMPTS} reads: "
+                     f"privacy={observed.get('privacyStatus')!r} publishAt={observed.get('publishAt')!r}")
 
 
 def wait_for_processing(youtube, video_id, config):
