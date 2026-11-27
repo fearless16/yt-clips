@@ -10,7 +10,6 @@ yt-dlp>=2024.1.0
 # aria2c recommended for faster downloads (install separately)
 
 # ── Transcription ─────────────────────────────────────────────────────────────
-faster-whisper>=1.0.0
 youtube-transcript-api>=0.6.0
 
 # ── Google Drive Sync ─────────────────────────────────────────────────────────

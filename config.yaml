@@ -41,18 +41,18 @@ download:
   proxy: ""
 # ─── Transcription ────────────────────────────────────────────────────────────
 transcription:
-  # Measured 2026-11-27, 30 s of real Hindi stream on CPU int8: medium 122 s, turbo 14.5 s.
-  # Real run: medium failed 2 of 3 ranges (bad word timestamp, missing anchor); turbo fixed all.
+  # whisper.cpp (ROCm, then Vulkan, on the AMD GPU) is the only ASR engine. Models are ggml
+  # files in models/ (never auto-downloaded). Measured 2026-11-27 on real Hindi stream audio
+  # (R9700): large-v3-turbo beat small on accuracy (names) and speed; -p 2 took 5 min of
+  # audio from 41 s to 24 s.
+  model: "large-v3-turbo"               # full-source transcript (fallback when no captions)
+  language: "hi"                        # Hindi commentary
+  beam_size: 5                          # measured setting; passed to whisper-cli -bs
+  threads: 8                            # whisper-cli -t
+  processors: 2                         # whisper-cli -p (full-source runs only; alignment uses 1)
   alignment_model: "large-v3-turbo"     # shortlisted ranges only
-  alignment_fallback_model: "medium"    # one explicit retry; never fabricate/drop bad word intervals
+  alignment_fallback_model: "small"     # one explicit retry on a different model; never fabricate/drop bad word intervals
   alignment_context_seconds: 2.0        # preserve neighboring speech when checking cut boundaries
-  model: "small"                        # tiny | base | small | medium | large-v3
-  language: "hi"                        # Hindi commentary — use hi for better accuracy
-  device: "auto"             # auto-detects CUDA/ROCm/CPU; falls back gracefully
-  compute_type: "auto"       # auto: float16 on GPU, int8 on CPU
-  batch_size: 24                        # Parallel segments; T4 handles 24 fine with small model
-  beam_size: 3                          # ↓ from 5 — 40% faster, negligible quality loss for clips
-  vad_filter: true                      # Filter out non-speech for 2-3x speedup
 # ─── Highlight Detection ──────────────────────────────────────────────────────
 highlight:
   # Clip LENGTH bounds live in clip_selection.output_*_duration (one source, C11).

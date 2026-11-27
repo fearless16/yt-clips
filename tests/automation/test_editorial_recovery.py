@@ -63,7 +63,7 @@ def test_invalid_asr_retries_without_fabricating_word_intervals(tmp_path, monkey
     for path in tmp_path.glob("speech-*.json"):
         identity = json.loads(path.read_text(encoding="utf-8"))["identity"]
         assert identity["version"] == 2
-        assert identity["decoding"] == {"chunk_length": 8, "condition_on_previous_text": False}
+        assert identity["decoding"] == {"engine": "whisper.cpp", "max_context": 0, "word_segments": "ml1-sow"}
 
 
 def test_bad_timestamps_and_low_confidence_cannot_be_repaired_by_discarding_words(tmp_path, monkeypatch):

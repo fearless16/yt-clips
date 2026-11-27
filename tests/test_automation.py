@@ -408,21 +408,15 @@ class TestUploadColabGuard:
         assert _is_colab() is False
 
 
-# ─── transcribe.py — Config & VRAM logging ──────────────────────────────────────
+# ─── transcribe.py — whisper.cpp config ────────────────────────────────────────
 
 class TestTranscribeConfig:
-    def test_config_has_gpu_params(self):
+    def test_config_wires_whisper_cpp_params(self):
         from utils.config import load_config
-        cfg = load_config()
-        t = cfg.get("transcription", {})
-        assert t.get("batch_size", 0) >= 4
+        t = load_config().get("transcription", {})
         assert t.get("beam_size", 0) >= 3
-        assert t.get("vad_filter") is True
-        assert t.get("device") in ("cuda", "cpu", "auto")
-
-    def test_vram_logging_does_not_crash(self):
-        from transcribe import _log_vram
-        _log_vram("test")
+        assert t.get("processors", 0) >= 1
+        assert t.get("threads", 0) >= 1
 
 
 # ─── orchestrator.py — Exit logging format ──────────────────────────────────────

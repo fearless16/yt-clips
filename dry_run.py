@@ -4,7 +4,7 @@ dry_run.py — Execute pipeline with real code, only API calls stubbed.
 Calls automation/orchestrator.run() directly — every internal function,
 import path, data-flow branch, and observability layer runs for real.
 Only external APIs (YouTube Data API, yt-dlp, ffmpeg/ffprobe, Google
-Drive, AI providers, PIL, faster-whisper, HTTP trend fetches, etc.)
+Drive, AI providers, PIL, whisper.cpp, HTTP trend fetches, etc.)
 are intercepted at the boundary and return plausible fake data.
 
 This catches bugs in function signatures, import paths, config keys,
@@ -330,9 +330,6 @@ def _run_in_sandbox(function, args, kwargs, sandbox: Path, keep: bool):
             if hasattr(module, attr):
                 saved.append((module, attr, getattr(module, attr)))
                 setattr(module, attr, None)
-        if name == "automation.speech_alignment":
-            saved.append((module, "_MODELS", module._MODELS))
-            module._MODELS = {}
         if name == "automation.orchestrator":
             from automation.memory.decision_store import DecisionStore
             from automation.providers.provider_health import ProviderHealth
@@ -369,8 +366,6 @@ def _run_in_sandbox(function, args, kwargs, sandbox: Path, keep: bool):
             for attr in ("_ai_instance", "_ai"):
                 if hasattr(module, attr):
                     setattr(module, attr, None)
-            if name == "automation.speech_alignment":
-                module._MODELS = {}  # newly imported models were created under ASR stubs
         utils_config._config_cache.clear()
         utils_config._config_cache.update(cache)
 
@@ -754,51 +749,27 @@ def _api_intercept_context(video_path: str):
             }
         return svc
 
-    # ── 4. faster-whisper ─────────────────────────────────────────────────
+    # ── 4. whisper.cpp ─────────────────────────────────────────────────────
 
-    class _FakeWhisperInfo:
-        duration = 180.0
-        language = "en"
-        duration_after_vad = None
-        @property
-        def language(self):
-            return "en"
-
-    class _FakeWhisperModel:
-        def __init__(self, *args, **kwargs):
-            log.debug("  [FAKE faster-whisper] WhisperModel.__init__ (skipping GPU)")
-            self.model_name = args[0] if args else "fixture"
-        def transcribe(self, audio, *args, **kwargs):
-            log.debug("  [FAKE faster-whisper] model.transcribe(audio=%s)", str(audio)[:60])
-            from types import SimpleNamespace
-            offset, end = _audio_ranges.get(str(audio), (0, 180))
-            output = []
-            for cue in _FAKE_SEGMENTS:
-                if cue["start"] < offset or cue["end"] > end:
-                    continue
-                tokens = cue["text"].split()
-                if cue["start"] == 5:
-                    # Caption/ASR wording mismatch must use a word-ID edit,
-                    # not nearest-time approval or a hidden phrase substitution.
-                    tokens[0] = "Aaj"
-                step = (cue["end"]-cue["start"]-.2)/len(tokens)
-                word_list = [SimpleNamespace(start=cue["start"]-offset+.1+i*step,
-                    end=cue["start"]-offset+.1+(i+1)*step, word=token, probability=.99)
-                    for i, token in enumerate(tokens)]
-                if self.model_name == "medium" and word_list:
-                    # Exercise the real zero-duration ASR regression and retry.
-                    word_list[0].end = word_list[0].start
-                output.append(SimpleNamespace(start=cue["start"]-offset,
-                    end=cue["end"]-offset, text=cue["text"], words=word_list))
-            return iter(output), _FakeWhisperInfo()
-
-    class _FakeBatchedPipeline:
-        def __init__(self, model=None, *args, **kwargs):
-            self._model = model
-        def transcribe(self, audio, *args, **kwargs):
-            seg = MagicMock()
-            seg.start = 0.0; seg.end = 5.0; seg.text = "Kohli hit a six"; seg.words = []
-            return iter([seg]), _FakeWhisperInfo()
+    def _fake_run_whisper_cli(wav, *, model_name="large-v3-turbo", language="hi", **kwargs):
+        """Stands in for utils.whisper_cpp.run_whisper_cli (no GPU, no whisper-cli)."""
+        log.debug("  [FAKE whisper.cpp] run_whisper_cli(wav=%s, model=%s)", str(wav)[:60], model_name)
+        offset, end = _audio_ranges.get(str(wav), (0, 180))
+        segments = []
+        for cue in _FAKE_SEGMENTS:
+            if cue["start"] < offset or cue["end"] > end:
+                continue
+            tokens = cue["text"].split()
+            if cue["start"] == 5:
+                # Caption/ASR wording mismatch must use a word-ID edit,
+                # not nearest-time approval or a hidden phrase substitution.
+                tokens[0] = "Aaj"
+            step = (cue["end"]-cue["start"]-.2)/len(tokens)
+            words = [{"start": cue["start"]-offset+.1+i*step, "end": cue["start"]-offset+.1+(i+1)*step,
+                      "word": token, "probability": .99} for i, token in enumerate(tokens)]
+            segments.append({"start": cue["start"]-offset, "end": cue["end"]-offset,
+                             "text": cue["text"], "words": words})
+        return {"segments": segments, "language": "en", "backend": "rocm", "model": f"ggml-{model_name}.bin"}
 
     # ── 5. youtube-transcript-api ──────────────────────────────────────────
 
@@ -1031,9 +1002,8 @@ def _api_intercept_context(video_path: str):
         patch("googleapiclient.discovery.build", _fake_google_build),
         # upload caches a from-import: warm processes need its binding patched too.
         patch("upload.build", _fake_google_build),
-        # faster-whisper (module-level mock)
-        patch("faster_whisper.WhisperModel", _FakeWhisperModel),
-        patch("faster_whisper.BatchedInferencePipeline", _FakeBatchedPipeline),
+        # whisper.cpp (the only ASR engine)
+        patch("utils.whisper_cpp.run_whisper_cli", _fake_run_whisper_cli),
         # youtube-transcript-api
         patch("youtube_transcript_api.YouTubeTranscriptApi", _FakeYouTubeTranscriptApi),
         # PIL
@@ -1396,7 +1366,7 @@ def list_external_calls():
         ("subprocess.Popen (yt-dlp via download.py)", "video download"),
         ("googleapiclient.discovery.build", "YouTube Data API + Drive API"),
         ("utils.ai_client.AIClient.*", "all AI providers (OpenCode, Groq, etc.)"),
-        ("faster_whisper.WhisperModel", "local GPU transcription"),
+        ("utils.whisper_cpp.run_whisper_cli", "local GPU transcription (whisper.cpp)"),
         ("youtube_transcript_api.YouTubeTranscriptApi", "YouTube transcript fetch"),
         ("PIL.Image / ImageDraw / ImageFont", "thumbnail compositing"),
         ("requests.Session", "HTTP trends (cricbuzz, google trends, etc.)"),

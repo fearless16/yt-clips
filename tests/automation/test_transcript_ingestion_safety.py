@@ -78,27 +78,36 @@ def test_dry_run_transcript_api_uses_upstream_duration_contract(tmp_path, monkey
     assert all(s["end"] > s["start"] for s in result["segments"])
 
 
-@pytest.mark.parametrize("outcome", [True, False, "raise"])
-def test_whisper_cli_scratch_is_unique_and_cleaned_on_all_exits(tmp_path, monkeypatch, outcome):
+@pytest.mark.parametrize("outcome", ["ok", "raise"])
+def test_whisper_scratch_is_unique_and_cleaned_on_all_exits(tmp_path, monkeypatch, outcome):
     import transcribe
+    from utils import whisper_cpp
 
-    raw = tmp_path / "whisper_vulkan_out.json"
+    raw = tmp_path / "whisper_rocm_out.json"
     raw.write_text("preserved raw transcript evidence")
     owned = []
 
-    def cli(video_path, output_path, config, scratch):
-        owned.append(scratch)
-        (scratch / "whisper_input.wav").write_bytes(b"partial audio")
-        (scratch / "whisper_vulkan_out.json").write_text("new raw output")
-        if outcome == "raise":
-            raise RuntimeError("fixture")
-        return outcome
+    def extract(video, wav):
+        owned.append(Path(wav).parent)
+        Path(wav).write_bytes(b"partial audio")
 
-    monkeypatch.setattr(transcribe, "_transcribe_whisper_cli", cli)
+    def run(wav, **kwargs):
+        (kwargs["scratch"] / "whisper_rocm_new.json").write_text("new raw output")
+        if outcome == "raise":
+            raise whisper_cpp.WhisperCppError("fixture")
+        return {"segments": [{"start": 0, "end": 1, "text": "x", "words": []}],
+                "language": "hi", "backend": "rocm", "model": "m"}
+
+    monkeypatch.setattr(transcribe, "_extract_audio", extract)
+    monkeypatch.setattr(whisper_cpp, "run_whisper_cli", run)
+    monkeypatch.setattr(transcribe, "correct_segments_with_llm", lambda x: x)
+    monkeypatch.setattr(transcribe, "cfg", {"paths": {"temp": str(tmp_path)}, "transcription": {"model": "small"}})
+    out = tmp_path / "out" / "t.json"
     if outcome == "raise":
-        with pytest.raises(RuntimeError):
-            transcribe._transcribe_vulkan("source", "output", {"paths": {"temp": str(tmp_path)}})
+        with pytest.raises(whisper_cpp.WhisperCppError):
+            transcribe.transcribe("source", str(out))
     else:
-        assert transcribe._transcribe_vulkan("source", "output", {"paths": {"temp": str(tmp_path)}}) is outcome
+        transcribe.transcribe("source", str(out))
+        assert out.exists()
     assert owned and not owned[0].exists()
     assert raw.read_text() == "preserved raw transcript evidence"

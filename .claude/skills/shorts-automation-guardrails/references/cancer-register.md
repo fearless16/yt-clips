@@ -236,6 +236,29 @@ Review: no code changed. Rehaul on 2026-11-27: see **Fix log** at the end. Statu
   11-minute alignment. Next step is a bake-off on the same 5 min (YouTube captions as the
   reference); it needs API keys from the owner.
 
+### whisper.cpp is the only ASR engine (2026-11-27, branch feat/whisper-cpp-only)
+- **Why:** CTranslate2 has no AMD GPU path on Windows, so faster-whisper ran only on CPU. Now
+  removed from code, requirements and config (guard: `tests/test_no_faster_whisper.py`).
+  `face_os/colab_*.py` still `pip install faster-whisper` in Colab text; face_os is fenced, not touched.
+- **Alignment on GPU (reverses the "stays on CPU" decision above):** 5 real ranges of 10-12 s
+  (3 streams), ROCm turbo: 2.7-7.5 s each, 0 zero-length and 0 overlapping words (was CPU turbo
+  about 14.5 s per 30 s, medium about 122 s and failed 2 of 3 ranges). Fallback model is now
+  `small` (only other ggml on disk): zero-length words in 2 of 5 ranges, so it is a weak retry.
+- **Trap fixed:** the old whisper.cpp path treated each sub-word token as a word (Devanagari split
+  into byte pieces with empty text). Words now come from `-ml 1 -sow` (one segment per whole word).
+- **Padding artifact:** whisper.cpp pads to a 30 s window and emitted words at/after the audio end
+  (zero-length at the clip end, last word stretched to the window end, e.g. 88.0 s for a 72 s
+  context). They lie outside the audio, so `parse_words` drops them and clamps the last end.
+  Nothing inside the audio is repaired.
+- **Behaviour changes:** no automatic model download (error names the file and URL); a failed
+  `transcribe()` now raises the real reason instead of silently switching engine; no per-word
+  `--dtw` (t_dtw stayed -1 in a measured run, so not assumed).
+- **Open (A7):** whisper.cpp heuristic word times can clump words at one instant (60 s full-source run:
+  2 of 107 words zero-length, "के सामने" at 7.68 s; alignment ranges with turbo: 0 of 233 words). Alignment's
+  hold/retry policy applies; rate on more sources unmeasured. Segment grouping thresholds (`GROUP_MAX_GAP_SECONDS` 0.5, `GROUP_MAX_WORDS` 25)
+  are presentation-only and unmeasured. Full-source `transcribe()` on whisper.cpp with `-ml 1 -sow`
+  was not run end to end on a long stream in this change.
+
 ### Still open
 - Real SEO quality is unmeasured. Run once against DeepSeek on real exports and read the titles. Check whether `find_canonical_entities` misses names in context (e.g. "Arre Kohli ne"). Grounding now also accepts any spoken name part.
 - Discovery cost: about 90–120 s CPU per source. The correction regex is now cached. The remaining cost is `find_canonical_entities` per growing window. Caching per thought would fix it. Not chased (trap).

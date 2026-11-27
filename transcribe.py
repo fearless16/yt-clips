@@ -1,475 +1,69 @@
 """
-transcribe.py — Phase 2: Speech-to-Text with GPU-optimized faster-whisper.
-Vulkan GPU path for AMD GPUs via whisper.cpp (whisper-cli.exe).
+transcribe.py — Phase 2: speech-to-text with whisper.cpp (AMD GPU via ROCm/Vulkan).
+
+whisper.cpp is the only ASR engine (see utils/whisper_cpp.py). A failure raises with
+the real reason; callers (automation/transcript.py) log it and report the transcript
+as unavailable. There is no CPU/CUDA fallback engine.
 """
 
 import json
-import os
 import subprocess
-import sys
-import time
 import tempfile
+import time
 from pathlib import Path
-from typing import Optional
 
+from utils import whisper_cpp
 from utils.config import load_config
 from utils.logger import get_logger
+from utils.whisper_cpp import decode_output as decode_whisper_output  # noqa: F401  (public name kept)
 
 cfg = load_config()
 log = get_logger("transcribe", cfg["logging"]["log_file"], cfg["logging"]["level"])
 
 
-def _log_vram(tag: str = ""):
-    try:
-        import subprocess
-        r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0:
-            parts = r.stdout.strip().split(", ")
-            if len(parts) == 2:
-                used, total = int(parts[0]), int(parts[1])
-                log.info("VRAM [%s] %d / %d MB (%.0f%%)", tag, used, total, used / total * 100)
-    except Exception:
-        pass
-
-
-# ── whisper.cpp GPU path (ROCm > Vulkan > CPU) ─────────────────────────
-
-_WHISPER_CLI_CANDIDATES = [
-    # ROCm (HIP) first: v1.8.4+ with gfx120X support (Radeon AI PRO R9700).
-    ("rocm", Path(__file__).parent / "whisper_rocm" / "whisper-cli.exe"),
-    # Vulkan — cross-vendor fallback, older v1.0 build
-    ("vulkan", Path(__file__).parent / "whisper_vulkan" / "whisper-cli.exe"),
-    ("vulkan", Path(__file__).parent / "whisper_vulkan" / "whisper-cli"),
-]
-
-# Measured 2026-11-27 on 5 min of real Hindi stream audio (R9700, beam 5):
-# vulkan+small 57 s, vulkan+turbo 40 s, rocm+turbo 41 s, rocm+turbo -p 2 24 s
-# (-p 4 also 24 s). small garbled names ("Rajat Patidar", "Asia Cup") that
-# turbo got right, and turbo's 4-layer decoder is faster, so turbo leads on both.
-_ROCM_MODEL_PREF = ["large-v3-turbo", "large-v3", "medium", "small"]
-_VULKAN_MODEL_PREF = ["large-v3-turbo", "small", "medium", "large-v3"]
-
-
-def _find_whisper_cli() -> Optional[tuple]:
-    """Locate best whisper-cli binary. Returns (backend, path) or None."""
-    for backend, p in _WHISPER_CLI_CANDIDATES:
-        if p.exists():
-            return (backend, p)
-    return None
-
-
-def _whisper_cli_version(cli: Path) -> str:
-    try:
-        r = subprocess.run([str(cli), "--version"], capture_output=True, text=True, timeout=5)
-        return (r.stdout + r.stderr).strip()[:100]
-    except Exception:
-        return "unknown"
-
-
-def decode_whisper_output(raw: bytes) -> tuple[dict, list[str]]:
-    """Decode whisper-cli's JSON output without ever producing mojibake.
-
-    whisper.cpp's Windows builds can truncate a multibyte character mid-sequence
-    (token crossing an internal write boundary), so strict UTF-8 may fail on an
-    otherwise-valid document. Single-byte fallbacks (cp1252/latin-1) "succeed"
-    on any byte stream and silently destroy Devanagari — they are never used.
-    """
-    warnings: list[str] = []
-    try:
-        return json.loads(raw.decode("utf-8")), warnings
-    except UnicodeDecodeError as exc:
-        warnings.append(
-            "whisper JSON had invalid UTF-8 at byte %d (%s) — recovered with "
-            "errors='ignore'; a few truncated characters were dropped" % (exc.start, exc.reason)
-        )
-    text = raw.decode("utf-8", errors="ignore")
-    return json.loads(text), warnings
-
-
-def _transcribe_vulkan(video_path: str, output_path: str, cfg: dict) -> bool:
-    """Own all whisper.cpp intermediates; preserve raw outputs from previous runs."""
-    scratch = Path(cfg.get("paths", {}).get("temp", "temp"))
-    scratch.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="whisper-cli-", dir=scratch) as directory:
-        return _transcribe_whisper_cli(video_path, output_path, cfg, Path(directory))
-
-
-def _transcribe_whisper_cli(video_path: str, output_path: str, cfg: dict, scratch: Path) -> bool:
-    """Transcribe using whisper.cpp GPU (ROCm or Vulkan). Returns True on success."""
-    result = _find_whisper_cli()
-    if not result:
-        return False
-    backend, cli = result
-
-    t_cfg = cfg["transcription"]
-    language = t_cfg.get("language", "hi")
-
-    # Select best model for this backend
-    if backend == "rocm":
-        pref = _ROCM_MODEL_PREF
-    else:
-        pref = _VULKAN_MODEL_PREF
-
-    # Map faster-whisper model names to ggml model file names
-    model_map = {
-        "tiny": "ggml-tiny.bin", "base": "ggml-base.bin",
-        "small": "ggml-small.bin", "medium": "ggml-medium.bin",
-        "large-v3": "ggml-large-v3.bin", "large-v3-turbo": "ggml-large-v3-turbo.bin",
-    }
-
-    # Try preferred models in order
-    model_path = None
-    ggml_name = None
-    for m in pref:
-        candidate = Path(__file__).parent / "models" / model_map.get(m, f"ggml-{m}.bin")
-        if candidate.exists():
-            model_path = candidate
-            ggml_name = model_map.get(m, f"ggml-{m}.bin")
-            break
-
-    if not model_path:
-        # Try config model or fallback
-        model_name = t_cfg.get("model", "small")
-        ggml_name = model_map.get(model_name, f"ggml-{model_name}.bin")
-        model_path = Path(__file__).parent / "models" / ggml_name
-
-    if not model_path.exists():
-        log.warning("whisper model not found: %s — downloading", model_path)
-        try:
-            model_path.parent.mkdir(parents=True, exist_ok=True)
-            url = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{ggml_name}"
-            log.info("Downloading %s ...", ggml_name)
-            subprocess.run(
-                ["curl", "-L", "-o", str(model_path), url],
-                timeout=1200, check=True,
-            )
-            log.info("Downloaded %s (%.0f MB)", ggml_name, model_path.stat().st_size / 1e6)
-        except Exception as e:
-            log.error("Failed to download model %s: %s", ggml_name, e)
-            return False
-
-    # Extract audio to WAV for whisper-cli
-    video = str(Path(video_path))
-    audio_wav = scratch / "whisper_input.wav"
-    audio_wav.parent.mkdir(parents=True, exist_ok=True)
-
-    log.info("Extracting audio for whisper.cpp %s...", backend.upper())
+def _extract_audio(video_path: str, wav_path) -> None:
+    """16 kHz mono PCM for whisper-cli."""
     try:
         subprocess.run(
-            ["ffmpeg", "-hide_banner", "-y", "-i", video,
-             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-             str(audio_wav)],
-            timeout=120, check=True, capture_output=True,
+            ["ffmpeg", "-nostdin", "-hide_banner", "-v", "error", "-y", "-i", str(video_path),
+             "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", str(wav_path)],
+            timeout=600, check=True, capture_output=True,
         )
-    except Exception as e:
-        log.error("Audio extraction failed: %s", e)
-        return False
-
-    # Build command — backend-specific flags
-    out_dir = scratch
-    out_base = str(out_dir / f"whisper_{backend}_out")
-
-    # The output base is unique to this invocation; no old raw JSON is deleted
-    # or eligible for parsing when the CLI fails to produce fresh output.
-
-    cmd = [
-        str(cli),
-        "-m", str(model_path),
-        "-f", str(audio_wav),
-        "-l", language or "hi",
-        "-ojf",
-        "-of", out_base,
-        "--no-prints",
-        "-t", "8",
-    ]
-
-    # ROCm: use 2 GPU processors for parallel streams
-    if backend == "rocm":
-        cmd.extend(["-p", "2"])
-
-    log.info("Transcribing with whisper.cpp %s GPU: model=%s language=%s", backend, ggml_name, language)
-    log.info("CMD: %s", " ".join(cmd))
-    t0 = time.monotonic()
-
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-    except subprocess.TimeoutExpired:
-        log.error("whisper-cli timed out after 3600s")
-        return False
-    except Exception as e:
-        log.error("whisper-cli failed: %s", e)
-        return False
-
-    if proc.returncode != 0:
-        log.error("whisper-cli exited %s", proc.returncode)
-        if proc.stderr:
-            log.error("whisper-cli stderr: %s", proc.stderr[-500:])
-        return False
-
-    duration_s = time.monotonic() - t0
-    log.info("whisper.cpp %s completed in %.1fs", backend.upper(), duration_s)
-
-    # Parse JSON output
-    json_path = Path(out_base + ".json")
-    if not json_path.exists():
-        log.error("whisper-cli JSON output not found at %s", json_path)
-        if proc.stderr:
-            log.error("whisper-cli stderr: %s", proc.stderr[-500:])
-        return False
-
-    try:
-        with open(json_path, "rb") as f:
-            raw = f.read()
-        data, decode_warnings = decode_whisper_output(raw)
-        for warning in decode_warnings:
-            log.warning(warning)
-    except Exception as e:
-        log.error("Failed to parse whisper JSON: %s", e)
-        return False
-
-    # Convert to pipeline segment format
-    results = []
-    for seg in data.get("transcription", []):
-        offsets = seg.get("offsets", {})
-        start_ms = offsets.get("from", 0)
-        end_ms = offsets.get("to", 0)
-        text = seg.get("text", "").strip()
-        if not text:
-            continue
-
-        words_data = []
-        for tok in seg.get("tokens", []):
-            tok_text = tok.get("text", "").strip()
-            if not tok_text or tok_text.startswith("[_"):
-                continue
-            tok_offsets = tok.get("offsets", {})
-            words_data.append({
-                "start": tok_offsets.get("from", 0) / 1000.0,
-                "end": tok_offsets.get("to", 0) / 1000.0,
-                "word": tok_text,
-            })
-
-        results.append({
-            "start": start_ms / 1000.0,
-            "end": end_ms / 1000.0,
-            "text": text,
-            "words": words_data,
-        })
-
-    detected_lang = data.get("result", {}).get("language", language or "unknown")
-
-    # Post-processing
-    from utils.transcript_postproc import correct_segments
-    results, n_corr = correct_segments(results)
-    if n_corr:
-        log.info("Cricket spelling correction: %d substitutions", n_corr)
-
-    results = correct_segments_with_llm(results)
-
-    # Save
-    out = Path(output_path)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump({
-            "segments": results,
-            "source": f"whisper-{backend}",
-            "language": detected_lang,
-        }, f, indent=2, ensure_ascii=False)
-
-    # Cleanup temp audio
-    try:
-        audio_wav.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-    audio_info = data.get("systeminfo", "")
-    log.info("Vulkan GPU transcription complete: %d segments, source=whisper-vulkan (%s)",
-             len(results), audio_info[:80])
-    return True
+    except subprocess.CalledProcessError as exc:
+        raise whisper_cpp.WhisperCppError(
+            "audio extraction failed (ffmpeg exit %s): %s"
+            % (exc.returncode, (exc.stderr or b"")[-300:].decode("utf-8", "replace"))) from exc
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise whisper_cpp.WhisperCppError("audio extraction failed: %r" % exc) from exc
 
 
 def transcribe(video_path: str, output_path: str):
-    """
-    Transcribe audio from video.
-    Priority: whisper.cpp ROCm (AMD HIP) → whisper.cpp Vulkan → faster-whisper CUDA → faster-whisper CPU.
-    """
-    # Try GPU path first (ROCm > Vulkan)
-    gpu = _find_whisper_cli()
-    if gpu:
-        backend, cli = gpu
-        log.info("whisper.cpp %s CLI found at %s — attempting GPU transcription", backend, cli)
-        try:
-            if _transcribe_vulkan(video_path, output_path, cfg):
-                return
-            log.warning("%s path failed — falling back to faster-whisper", backend)
-        except Exception as e:
-            log.warning("%s transcription error (%s) — falling back to faster-whisper", backend, e)
+    """Transcribe a video's audio with whisper.cpp and write the pipeline transcript JSON.
 
-    # Fallback: faster-whisper (NVIDIA CUDA or CPU)
-    from faster_whisper import WhisperModel
-
+    Raises whisper_cpp.WhisperCppError (with the real reason) on any failure; nothing is
+    written then. All intermediates live in a unique scratch folder removed on every exit.
+    """
     t_cfg = cfg["transcription"]
-    video = str(Path(video_path))
+    scratch_root = Path(cfg.get("paths", {}).get("temp", "temp"))
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    language = t_cfg.get("language") or "hi"
 
-    _log_vram("start")
+    with tempfile.TemporaryDirectory(prefix="whisper-cli-", dir=scratch_root) as directory:
+        scratch = Path(directory)
+        wav = scratch / "whisper_input.wav"
+        log.info("Extracting audio for whisper.cpp: %s", video_path)
+        _extract_audio(video_path, wav)
+        t0 = time.monotonic()
+        result = whisper_cpp.run_whisper_cli(
+            wav, model_name=t_cfg.get("model", "large-v3-turbo"), language=language, scratch=scratch,
+            beam_size=t_cfg.get("beam_size", 5), threads=t_cfg.get("threads", 8),
+            processors=t_cfg.get("processors", 1),
+        )
+    log.info("whisper.cpp %s (%s) finished in %.1fs: %d segments",
+             result["backend"].upper(), result["model"], time.monotonic() - t0, len(result["segments"]))
 
-    target_device = t_cfg.get("device", "cpu")
-    compute_type = t_cfg.get("compute_type", "int8")
-    batch_size = t_cfg.get("batch_size", 16)
-    beam_size = t_cfg.get("beam_size", 5)
-    vad_filter = t_cfg.get("vad_filter", True)
-
-    # Normalize "auto" → cuda ONLY on NVIDIA GPUs (faster-whisper/CTranslate2
-    # only supports NVIDIA CUDA, NOT AMD ROCm on Windows). AMD GPUs fall back
-    # to CPU int8 automatically.
-    if target_device == "auto":
-        try:
-            import torch
-            if torch.cuda.is_available():
-                # Double-check it's actually NVIDIA (not AMD ROCm misreported)
-                gpu_name = torch.cuda.get_device_name(0).lower()
-                if "nvidia" in gpu_name or "geforce" in gpu_name or "rtx" in gpu_name or "tesla" in gpu_name or "titan" in gpu_name:
-                    target_device = "cuda"
-                    log.info("NVIDIA GPU detected: %s — using CUDA", torch.cuda.get_device_name(0))
-                else:
-                    target_device = "cpu"
-                    log.warning("Non-NVIDIA GPU detected (%s) — CTranslate2 only supports NVIDIA CUDA. Using CPU.",
-                                torch.cuda.get_device_name(0))
-            else:
-                target_device = "cpu"
-        except Exception:
-            target_device = "cpu"
-
-    # Warn if user explicitly set "cuda" but no NVIDIA GPU is available
-    if target_device == "cuda":
-        try:
-            import torch
-            if not torch.cuda.is_available():
-                log.warning("CUDA requested but not available — falling back to CPU")
-                target_device = "cpu"
-        except Exception:
-            log.warning("CUDA requested but torch not available — falling back to CPU")
-            target_device = "cpu"
-
-    # Normalize "auto" compute_type → float16 on GPU, int8 on CPU
-    if compute_type == "auto":
-        compute_type = "float16" if target_device == "cuda" else "int8"
-
-    devices_to_try = []
-    if target_device == "cuda":
-        devices_to_try = [("cuda", compute_type), ("cpu", "int8")]
-    else:
-        devices_to_try = [(target_device, compute_type)]
-
-    model = None
-    used_device = None
-    for device, comp in devices_to_try:
-        try:
-            log.info("Loading Whisper: model=%s device=%s compute=%s batch_size=%d",
-                     t_cfg["model"], device, comp, batch_size)
-            model = WhisperModel(
-                t_cfg["model"], device=device, compute_type=comp,
-                cpu_threads=0, num_workers=1,
-            )
-            used_device = device
-            log.info("Transcription engine ready: %s / %s", device.upper(), comp)
-            break
-        except Exception as e:
-            log.warning("Device %s failed: %s", device.upper(), e)
-
-    if not model:
-        log.error("[EXIT] transcribe: all GPU/CPU Whisper devices failed for model=%s", t_cfg["model"])
-        log.error("[EXIT] Falling back to CPU/int8 — this will be very slow")
-        model = WhisperModel(t_cfg["model"], device="cpu", compute_type="int8")
-        used_device = "cpu"
-
-    _log_vram("model_loaded")
-
-    language = t_cfg.get("language") or None
-    log.info("Transcribing: %s language=%s batch_size=%d beam_size=%d vad=%s",
-             video, language or "auto", batch_size, beam_size, vad_filter)
-
-    transcribe_kwargs = dict(
-        language=language,
-        beam_size=beam_size,
-        word_timestamps=True,
-        vad_filter=vad_filter,
-        vad_parameters=dict(min_silence_duration_ms=500, threshold=0.5),
-    )
-
-    # Wire the (previously dead) batch_size config: faster-whisper's
-    # WhisperModel.transcribe has no batch_size; batching requires the
-    # BatchedInferencePipeline. Use it on GPU for higher utilization, with a
-    # safe fallback to sequential decoding if it's unavailable or errors.
-    engine = model
-    if batch_size and batch_size > 1 and used_device == "cuda":
-        try:
-            from faster_whisper import BatchedInferencePipeline
-            engine = BatchedInferencePipeline(model=model)
-            transcribe_kwargs["batch_size"] = batch_size
-            log.info("Using BatchedInferencePipeline (batch_size=%d) for GPU throughput", batch_size)
-        except Exception as e:
-            log.warning("Batched pipeline unavailable (%s) — using sequential decode", e)
-            engine = model
-
-    try:
-        segments, info = engine.transcribe(video, **transcribe_kwargs)
-    except Exception as e:
-        if engine is model:
-            raise
-        # Batched engine failed (unsupported kwargs, decode error, etc.) —
-        # fall back once to sequential decoding on the base model.
-        log.warning("Batched transcribe failed (%s) — falling back to sequential", e)
-        transcribe_kwargs.pop("batch_size", None)
-        segments, info = model.transcribe(video, **transcribe_kwargs)
-
-    _log_vram("transcribing")
-
-    dur = info.duration
-    log.info("Audio: language=%s duration=%.1fs", info.language, dur)
-
-    results = []
-    last_log = time.monotonic()
-    last_pct = -10.0
-    pct_step = float(t_cfg.get("progress_percent_step", 10))
-    interval = float(t_cfg.get("progress_interval_seconds", 15))
-    prog_start = time.monotonic()
-
-    for segment in segments:
-        if dur:
-            pct = segment.end / dur * 100
-        else:
-            pct = 0.0
-        now = time.monotonic()
-        if pct >= last_pct + pct_step or now - last_log >= interval:
-            elapsed = now - prog_start
-            eta = ""
-            if pct > 1:
-                eta_s = (elapsed / pct) * (100 - pct)
-                eta = ", ETA %.0fs" % eta_s
-            log.info("Progress: %.1f%% (%ds/%ds)%s", pct, int(segment.end), int(dur), eta)
-            last_pct = pct
-            last_log = now
-
-        words_data = []
-        if getattr(segment, "words", None):
-            for w in segment.words:
-                words_data.append({"start": w.start, "end": w.end, "word": w.word})
-
-        results.append({
-            "start": segment.start,
-            "end": segment.end,
-            "text": segment.text.strip(),
-            "words": words_data,
-        })
-
-    _log_vram("done")
-
-    # Post-processing: centralized, guarded cricket spelling correction
-    # (shared with the remote transcript fetcher so ALL sources are corrected).
+    results = result["segments"]
+    # Centralized, guarded cricket spelling correction (shared with the remote fetcher).
     from utils.transcript_postproc import correct_segments
     results, n_corr = correct_segments(results)
     if n_corr:
@@ -483,8 +77,8 @@ def transcribe(video_path: str, output_path: str):
     with open(out, "w", encoding="utf-8") as f:
         json.dump({
             "segments": results,
-            "source": "whisper",
-            "language": info.language or "unknown",
+            "source": f"whisper-{result['backend']}",
+            "language": result["language"],
         }, f, indent=2, ensure_ascii=False)
 
     log.info("Transcription complete: %d segments -> %s", len(results), output_path)

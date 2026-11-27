@@ -167,33 +167,65 @@ def test_overlapping_words_are_held_before_render():
         [{"words": [word(10, 12), word(11, 13)]}], 10, 13))
 
 
+def _stub_whisper_cpp(monkeypatch, alignment, segments):
+    from utils import whisper_cpp
+    seen = {}
+
+    def run(wav, **kwargs):
+        seen.update(kwargs, wav=wav)
+        return {"segments": segments, "language": "hi", "backend": "rocm", "model": "ggml-x.bin"}
+
+    monkeypatch.setattr(whisper_cpp, "run_whisper_cli", run)
+    ffmpeg = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+    monkeypatch.setattr(alignment.subprocess, "run", ffmpeg)
+    return seen, ffmpeg
+
+
 @pytest.mark.parametrize("start", [0.5, 10.25])
 def test_asr_adds_context_and_offsets_words_from_context_start(tmp_path, monkeypatch, start):
     import automation.speech_alignment as alignment
     import numpy as np
     context_start = max(0, start - 2)
-    local_word = SimpleNamespace(start=np.float64(start-context_start-0.1), end=np.float64(start-context_start+0.3),
-                                 word="crossing", probability=np.float64(0.99))
-    local_segment = SimpleNamespace(start=local_word.start, end=local_word.end,
-                                    text="crossing", words=[local_word])
-    model = Mock()
-    model.transcribe.return_value = (iter([local_segment]), None)
-    monkeypatch.setitem(alignment._MODELS, "fixture", model)
-    monkeypatch.setitem(sys.modules, "faster_whisper", SimpleNamespace(WhisperModel=Mock()))
-    ffmpeg = Mock(return_value=subprocess.CompletedProcess([], 0, "", ""))
-    monkeypatch.setattr(alignment.subprocess, "run", ffmpeg)
+    local_word = {"start": np.float64(start-context_start-0.1), "end": np.float64(start-context_start+0.3),
+                  "word": "crossing", "probability": np.float64(0.99)}
+    local_segment = {"start": local_word["start"], "end": local_word["end"],
+                     "text": "crossing", "words": [local_word]}
+    seen, ffmpeg = _stub_whisper_cpp(monkeypatch, alignment, [local_segment])
     segments = transcribe_range("source.mp4", start, start+10, model_name="fixture", temp_dir=tmp_path)
     cmd = ffmpeg.call_args.args[0]
     assert float(cmd[cmd.index("-ss")+1]) == context_start
     assert float(cmd[cmd.index("-t")+1]) == start+12-context_start
     assert segments[0]["words"][0]["start"] == pytest.approx(start-0.1)
     assert segments[0]["requested_range"] == [start, start+10]
-    assert model.transcribe.call_args.kwargs["chunk_length"] == 8
-    assert model.transcribe.call_args.kwargs["condition_on_previous_text"] is False
-    assert model.transcribe.call_args.kwargs["vad_filter"] is False
+    assert seen["model_name"] == "fixture" and seen["language"] == "hi"
+    assert seen["max_context"] == 0  # independent windows: no previous-text conditioning
     assert type(segments[0]["start"]) is float
     assert all(type(segments[0]["words"][0][key]) is float for key in ("start", "end", "probability"))
     assert any("straddles" in issue for issue in alignment_issues(segments, start, start+10))
+
+
+def test_asr_without_word_timestamps_holds_for_review(tmp_path, monkeypatch):
+    import automation.speech_alignment as alignment
+    _stub_whisper_cpp(monkeypatch, alignment, [{"start": 0, "end": 1, "text": "crowd", "words": []}])
+    with pytest.raises(ValueError, match="no word timestamps"):
+        transcribe_range("source.mp4", 5, 15, temp_dir=tmp_path)
+
+
+def test_asr_never_drops_a_word_that_lacks_confidence(tmp_path, monkeypatch):
+    import automation.speech_alignment as alignment
+    words = [{"start": 1.0, "end": 1.4, "word": "a", "probability": 0.9},
+             {"start": 1.4, "end": 1.8, "word": "b"}]
+    _stub_whisper_cpp(monkeypatch, alignment, [{"start": 1.0, "end": 1.8, "text": "a b", "words": words}])
+    segments = transcribe_range("source.mp4", 5, 15, temp_dir=tmp_path)
+    assert [w["word"] for w in segments[0]["words"]] == ["a", "b"]
+    assert "probability" not in segments[0]["words"][1]  # flagged later as 'confidence unavailable'
+
+
+def test_asr_engine_is_whisper_cpp_and_cache_identity_says_so():
+    """Old faster-whisper cache files must never be reused for whisper.cpp timings."""
+    import automation.speech_alignment as alignment
+    assert alignment.ASR_DECODING["engine"] == "whisper.cpp"
+    assert not hasattr(alignment, "_MODELS")
 
 
 def test_required_caption_preparation_rejects_empty_evidence(tmp_path):

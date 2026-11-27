@@ -73,68 +73,76 @@ def test_correct_segments_with_llm_failure_recovery():
         corrected = correct_segments_with_llm(mock_segments)
         assert corrected[0]["text"] == "coaly hit a six"
 
-def test_cricket_terms_substitution(tmp_path):
-    output_file = tmp_path / "transcript.json"
-    
-    mock_segment = MagicMock()
-    mock_segment.start = 0.0
-    mock_segment.end = 2.0
-    mock_segment.text = "coaly and bumra and sky did well"
-    mock_segment.words = []
-    
-    mock_info = MagicMock()
-    mock_info.duration = 2.0
-    mock_info.language = "en"
-    
-    with patch("faster_whisper.WhisperModel") as MockWhisperModel, \
-         patch("transcribe.correct_segments_with_llm", side_effect=lambda x: x):
-        
-        instance = MockWhisperModel.return_value
-        instance.transcribe.return_value = ([mock_segment], mock_info)
-        
-        transcribe("mock_video.mp4", str(output_file))
-        
-        assert output_file.exists()
-        with open(output_file, "r") as f:
-            data = json.load(f)
-            
-        # NOTE: "sky" is intentionally NOT uppercased anymore — it's an ordinary
-        # English word (false-positive guard). Player-nickname disambiguation is
-        # delegated to the context-aware LLM correction pass.
-        assert data["segments"][0]["text"] == "Kohli and Bumrah and sky did well"
-        assert data["source"] == "whisper"
+def _fake_asr(monkeypatch, segments=None, backend="rocm", language="hi", error=None):
+    """Stub the audio extract and whisper.cpp run; the real CLI never starts in unit tests."""
+    import transcribe
+    from utils import whisper_cpp
+    seen = {}
 
-def test_fetch_unified_path_fallback(tmp_path):
+    def run(wav, **kwargs):
+        seen.update(kwargs, wav=wav)
+        if error:
+            raise error
+        return {"segments": segments or [], "language": language, "backend": backend, "model": "ggml-x.bin"}
+
+    monkeypatch.setattr(whisper_cpp, "run_whisper_cli", run)
+    monkeypatch.setattr(transcribe, "_extract_audio", lambda video, wav: Path(wav).write_bytes(b"wav"))
+    monkeypatch.setattr(transcribe, "correct_segments_with_llm", lambda x: x)
+    return seen
+
+
+def test_cricket_terms_substitution(tmp_path, monkeypatch):
+    output_file = tmp_path / "transcript.json"
+    _fake_asr(monkeypatch, [{"start": 0.0, "end": 2.0, "text": "coaly and bumra and sky did well", "words": []}])
+
+    transcribe("mock_video.mp4", str(output_file))
+
+    data = json.loads(output_file.read_text(encoding="utf-8"))
+    # "sky" is intentionally NOT uppercased: ordinary English word (false-positive guard).
+    assert data["segments"][0]["text"] == "Kohli and Bumrah and sky did well"
+    assert data["source"] == "whisper-rocm"
+    assert data["language"] == "hi"
+
+
+def test_transcribe_passes_configured_model_language_and_beam(tmp_path, monkeypatch):
+    import transcribe as module
+    seen = _fake_asr(monkeypatch, [{"start": 0, "end": 1, "text": "x", "words": []}])
+    monkeypatch.setattr(module, "cfg", {"paths": {"temp": str(tmp_path)},
+                                        "transcription": {"model": "large-v3-turbo", "language": "hi",
+                                                          "beam_size": 3, "processors": 2}})
+    module.transcribe("v.mp4", str(tmp_path / "t.json"))
+    assert (seen["model_name"], seen["language"], seen["beam_size"], seen["processors"]) == ("large-v3-turbo", "hi", 3, 2)
+
+
+def test_transcribe_failure_raises_real_reason_and_writes_nothing(tmp_path, monkeypatch):
+    from utils.whisper_cpp import WhisperCppError
+    out = tmp_path / "t.json"
+    _fake_asr(monkeypatch, error=WhisperCppError("whisper-cli exited 3: HIP error: out of memory"))
+    with pytest.raises(WhisperCppError, match="out of memory"):
+        transcribe("v.mp4", str(out))
+    assert not out.exists()
+
+
+def test_transcribe_never_imports_faster_whisper(tmp_path, monkeypatch):
+    import sys
+    _fake_asr(monkeypatch, [{"start": 0, "end": 1, "text": "x", "words": []}])
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)  # any import now raises ImportError
+    transcribe("v.mp4", str(tmp_path / "t.json"))
+
+
+def test_fetch_unified_path_fallback(tmp_path, monkeypatch):
     video_path = tmp_path / "test_video.mp4"
     video_path.write_bytes(b"dummy video content")
-    
     output_path = tmp_path / "fetched_transcript.json"
 
     from automation.transcript import TRANSCRIPT_CACHE
     TRANSCRIPT_CACHE.clear()
+    _fake_asr(monkeypatch, [{"start": 1.0, "end": 3.0, "text": "local transcription text", "words": []}], language="en")
 
-    with patch("automation.transcript._fetch_via_youtube_data_api", return_value=None), \
-         patch("automation.transcript._fetch_via_api", return_value=None), \
-         patch("automation.transcript._fetch_via_ytdlp", return_value=None), \
-         patch("faster_whisper.WhisperModel") as MockWhisperModel, \
-         patch("transcribe.correct_segments_with_llm", side_effect=lambda x: x):
-             
-        mock_segment = MagicMock()
-        mock_segment.start = 1.0
-        mock_segment.end = 3.0
-        mock_segment.text = "local transcription text"
-        mock_segment.words = []
-        
-        mock_info = MagicMock()
-        mock_info.duration = 3.0
-        mock_info.language = "en"
-        
-        instance = MockWhisperModel.return_value
-        instance.transcribe.return_value = ([mock_segment], mock_info)
-        
-        url = "https://www.youtube.com/watch?v=12345678901"
-        res = fetch(url, output_path=str(output_path), video_path=str(video_path))
-        
-        assert res["source"] == "local_whisper"
-        assert res["segments"][0]["text"] == "local transcription text"
-        assert output_path.exists()
+    with patch("automation.transcript._fetch_via_youtube_data_api", return_value=None),          patch("automation.transcript._fetch_via_api", return_value=None),          patch("automation.transcript._fetch_via_ytdlp", return_value=None):
+        res = fetch("https://www.youtube.com/watch?v=12345678901",
+                    output_path=str(output_path), video_path=str(video_path))
+
+    assert res["source"] == "local_whisper"
+    assert res["segments"][0]["text"] == "local transcription text"
+    assert output_path.exists()

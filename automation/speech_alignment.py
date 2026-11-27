@@ -11,11 +11,14 @@ import re
 import unicodedata
 from pathlib import Path
 
-_LOCK = threading.Lock()
-_MODELS = {}
-# Short, independent decoding windows reduced degenerate/zero-length words in
-# the recorded fast-Hindi failure. These are decoding options, not timing repair.
-ASR_DECODING = {"chunk_length": 8, "condition_on_previous_text": False}
+from utils import whisper_cpp
+
+_LOCK = threading.Lock()  # one GPU: serialize whisper-cli runs
+# whisper.cpp is the only engine. max_context=0 decodes each range independently (no
+# previous-text conditioning), which reduced degenerate/zero-length words in the recorded
+# fast-Hindi failure. These are decoding options, not timing repair. The dict feeds the
+# cache identity, so timings from any other engine/option set are never reused.
+ASR_DECODING = {"engine": "whisper.cpp", "max_context": 0, "word_segments": "ml1-sow"}
 
 
 def _fingerprint(video_path):
@@ -333,25 +336,25 @@ def transcribe_range(video_path: str, start: float, end: float, *, model_name="m
                         "-vn", "-ac", "1", "-ar", "16000", str(audio)],
                        capture_output=True, check=True, timeout=180)
         with _LOCK:
-            from faster_whisper import WhisperModel
-            if model_name not in _MODELS:
-                _MODELS[model_name] = WhisperModel(model_name, device="cpu", compute_type="int8")
-            segments, _ = _MODELS[model_name].transcribe(
-                str(audio), language=language or None, word_timestamps=True,
-                # Retain surrounding speech to expose boundary-crossing words.
-                # VAD can drop quiet Hindi speech; do not discard it here.
-                vad_filter=False, beam_size=5, **ASR_DECODING,
-            )
-            result = []
-            for segment in segments:
-                words = [{"start": float(context_start + word.start), "end": float(context_start + word.end),
-                          "word": word.word, "probability": float(word.probability)}
-                         for word in (segment.words or [])]
-                result.append({"start": float(context_start + segment.start), "end": float(context_start + segment.end),
-                                "text": segment.text, "words": words,
-                                "requested_range": [start, end],
-                                "requested_context_range": [context_start, context_end],
-                               "timing_method": "local_asr_word_estimates"})
+            asr = whisper_cpp.run_whisper_cli(
+                audio, model_name=model_name, language=language or "hi", scratch=Path(folder),
+                beam_size=5, max_context=ASR_DECODING["max_context"], timeout=180)
+        # Retain surrounding speech to expose boundary-crossing words; no VAD.
+        result = []
+        for segment in asr["segments"]:
+            words = []
+            for word in segment.get("words") or []:
+                item = {"start": float(context_start + word["start"]), "end": float(context_start + word["end"]),
+                        "word": word["word"]}
+                if "probability" in word:  # absent stays absent: alignment_flags reports it
+                    item["probability"] = float(word["probability"])
+                words.append(item)
+            result.append({"start": float(context_start + segment["start"]),
+                           "end": float(context_start + segment["end"]),
+                           "text": segment["text"], "words": words,
+                           "requested_range": [start, end],
+                           "requested_context_range": [context_start, context_end],
+                           "timing_method": "local_asr_word_estimates"})
     if not any(segment["words"] for segment in result):
         raise ValueError("Local ASR produced no word timestamps; hold for review")
     return result

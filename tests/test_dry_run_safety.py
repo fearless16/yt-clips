@@ -177,7 +177,7 @@ def test_sandbox_log_handles_close_without_closing_live_logs(tmp_path, monkeypat
             handler.close()
 
 
-def test_first_import_dry_run_cannot_leave_fake_asr_models_in_live_cache():
+def test_first_import_dry_run_cannot_leave_fake_asr_in_live_module():
     """A fresh worker differs from pytest, which imports alignment at collection."""
     import subprocess
     import sys
@@ -185,8 +185,8 @@ def test_first_import_dry_run_cannot_leave_fake_asr_models_in_live_cache():
 import dry_run
 result = dry_run.dry_run('https://youtu.be/test', skip_download=True, skip_transcribe=True)
 assert not result['failures'], result['failures']
-from automation import speech_alignment
-assert not speech_alignment._MODELS, 'fake Whisper instances escaped sandbox isolation'
+from utils import whisper_cpp
+assert whisper_cpp.run_whisper_cli.__module__ == 'utils.whisper_cpp', 'fake whisper.cpp escaped sandbox isolation'
 """
     result = subprocess.run([sys.executable, "-c", program], capture_output=True,
                             text=True, encoding="utf-8", errors="replace", timeout=90)

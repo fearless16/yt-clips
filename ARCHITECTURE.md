@@ -102,7 +102,7 @@ record is emitted on success **and** failure, all correlated by a per-run
 |------|-----------|--------|-------|
 | 0 | `transcript_fetch` | `automation/transcript.py` | YouTube transcript API → yt-dlp VTT; skips Whisper if segments found |
 | 1 | `download` (`drive_pull`) | `download.py` / `sync.py` | yt-dlp + aria2c; or pull inputs from Google Drive |
-| 2 | `transcribe` | `transcribe.py` | faster-whisper (Hindi/English), batched on GPU |
+| 2 | `transcribe` | `transcribe.py` | whisper.cpp (ROCm/Vulkan GPU, `utils/whisper_cpp.py`); the only ASR engine, also used for clip word alignment |
 | 3 | `highlight` | `highlight.py` | audio RMS + transcript scoring + LLM refinement |
 | 4 | `export` | `export.py` + crop planner | 9:16 crop + encode |
 | 4.5 | `enhancement` | `ref_grade.py` / `face_mapper.py` | optional color grade / face-region grade |
